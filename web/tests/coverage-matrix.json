@@ -1425,7 +1425,11 @@
         "src/components/__tests__/SettingsView.session.test.tsx",
         "src/lib/sessionRowTag.test.ts"
       ],
-      "components": ["web/src/components/WorkspaceSidebar.tsx", "web/src/components/SettingsView.tsx"]
+      "components": [
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/SettingsView.tsx",
+        "web/src/lib/sessionRowTag.ts"
+      ]
     },
     {
       "id": "sidebar.sort-pure",

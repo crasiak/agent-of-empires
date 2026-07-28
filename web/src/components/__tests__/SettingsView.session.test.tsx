@@ -65,6 +65,7 @@ const SESSION_SCHEMA = [
         { value: "auto", label: "Auto" },
         { value: "profile", label: "Profile" },
         { value: "sandbox", label: "Sandbox" },
+        { value: "agent", label: "Agent" },
         { value: "branch", label: "Branch" },
       ],
     },
@@ -213,6 +214,7 @@ describe("Session tab auto-stop idle field", () => {
       Array.from(select.options).some((option) => option.value === "sandbox"),
     ) as HTMLSelectElement | undefined;
     expect(rowTagSelect).toBeTruthy();
+    expect(Array.from(rowTagSelect!.options).some((option) => option.value === "agent")).toBe(true);
     fireEvent.change(rowTagSelect!, { target: { value: "none" } });
 
     await waitFor(() =>

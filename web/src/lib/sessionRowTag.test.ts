@@ -61,6 +61,7 @@ describe("parseSessionRowTagMode", () => {
     expect(parseSessionRowTagMode({ session: { row_tag: "auto" } })).toBe("auto");
     expect(parseSessionRowTagMode({ session: { row_tag: "profile" } })).toBe("profile");
     expect(parseSessionRowTagMode({ session: { row_tag: "sandbox" } })).toBe("sandbox");
+    expect(parseSessionRowTagMode({ session: { row_tag: "agent" } })).toBe("agent");
     expect(parseSessionRowTagMode({ session: { row_tag: "branch" } })).toBe("branch");
     expect(parseSessionRowTagMode({ session: { row_tag: "bogus" } })).toBe("branch");
     expect(parseSessionRowTagMode(null)).toBe("branch");
@@ -95,6 +96,24 @@ describe("computeSessionRowTag", () => {
     expect(computeSessionRowTag(ws, "profile")?.content).toBe("fb");
     expect(computeSessionRowTag(ws, "auto")?.content).toBe("fb");
     expect(computeSessionRowTag(ws, "sandbox")?.content).toBe("sb");
+  });
+
+  it("prefers the structured agent and falls back to the terminal tool", () => {
+    const structured = workspace({}, [session({ tool: "claude", acp_agent: "custom-codex-agent" })]);
+    const terminal = workspace({}, [session({ tool: "pi" })]);
+    const blankStructuredAgent = workspace({}, [session({ tool: "codex", acp_agent: "   " })]);
+
+    expect(computeSessionRowTag(structured, "agent")).toEqual({
+      content: "custom-codex",
+      title: "custom-codex-agent",
+      kind: "agent",
+    });
+    expect(computeSessionRowTag(terminal, "agent")).toEqual({
+      content: "pi",
+      title: "pi",
+      kind: "agent",
+    });
+    expect(computeSessionRowTag(blankStructuredAgent, "agent")?.content).toBe("codex");
   });
 
   it("returns no tag for none, host sandbox mode, or mixed multi-repo branches", () => {

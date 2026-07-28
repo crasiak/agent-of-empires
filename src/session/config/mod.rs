@@ -1331,13 +1331,13 @@ pub struct SessionConfig {
     pub restart_wake_message: String,
 
     /// What to show next to each session title: Branch (default), Auto
-    /// (profile in all-profiles view), None, Profile (always), or Sandbox
-    /// (sb on sandboxed rows).
+    /// (profile in all-profiles view), None, Profile (always), Sandbox
+    /// (sb on sandboxed rows), or Agent.
     #[serde(default)]
     #[setting(
         label = "Row Tag",
         widget = "select",
-        options = "none:None,auto:Auto,profile:Profile,sandbox:Sandbox,branch:Branch"
+        options = "none:None,auto:Auto,profile:Profile,sandbox:Sandbox,agent:Agent,branch:Branch"
     )]
     pub row_tag: RowTagMode,
 
@@ -1706,7 +1706,7 @@ pub enum AttachMode {
 ///
 /// Defaults to `Branch` to preserve worktree branch visibility. Users can pick
 /// `None` to hide the suffix, `Auto` for profile tags in all-profiles view,
-/// `Profile`, or `Sandbox`.
+/// `Profile`, `Sandbox`, or `Agent`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RowTagMode {
@@ -1719,6 +1719,8 @@ pub enum RowTagMode {
     Profile,
     /// Render `sb` on sandboxed sessions, nothing on host sessions.
     Sandbox,
+    /// Render the structured agent identity, falling back to the terminal tool.
+    Agent,
     /// Render the worktree or workspace branch name, compacted into the row tag.
     #[default]
     Branch,

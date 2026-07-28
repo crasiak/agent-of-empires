@@ -2,7 +2,7 @@ import { createContext, useContext } from "react";
 
 import type { Workspace, WorkspaceRepoSummary } from "./types";
 
-export type SessionRowTagMode = "none" | "auto" | "profile" | "sandbox" | "branch";
+export type SessionRowTagMode = "none" | "auto" | "profile" | "sandbox" | "agent" | "branch";
 
 export interface SessionRowTag {
   content: string;
@@ -12,6 +12,7 @@ export interface SessionRowTag {
 
 const DEFAULT_ROW_TAG_MODE: SessionRowTagMode = "branch";
 const PROFILE_TAG_WIDTH = 4;
+const AGENT_TAG_WIDTH = 12;
 const BRANCH_TAG_WIDTH = 12;
 
 export const SessionRowTagContext = createContext<SessionRowTagMode>(DEFAULT_ROW_TAG_MODE);
@@ -25,6 +26,7 @@ export function parseSessionRowTagMode(settings: Record<string, unknown> | null 
     case "auto":
     case "profile":
     case "sandbox":
+    case "agent":
     case "branch":
       return raw;
     default:
@@ -50,6 +52,15 @@ export function computeSessionRowTag(workspace: Workspace, mode: SessionRowTagMo
     }
     case "sandbox":
       return primary.is_sandboxed ? { content: "sb", title: "Sandboxed", kind: mode } : null;
+    case "agent": {
+      const agent = primary.acp_agent?.trim() || primary.tool.trim();
+      if (!agent) return null;
+      return {
+        content: Array.from(agent).slice(0, AGENT_TAG_WIDTH).join(""),
+        title: agent,
+        kind: mode,
+      };
+    }
     case "branch":
       return branchRowTag(workspace);
   }

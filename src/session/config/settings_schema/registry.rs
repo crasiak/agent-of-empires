@@ -134,7 +134,10 @@ mod tests {
         match &d.widget {
             WidgetKind::Select { options } => {
                 let values: Vec<_> = options.iter().map(|o| o.value.as_str()).collect();
-                assert_eq!(values, ["none", "auto", "profile", "sandbox", "branch"]);
+                assert_eq!(
+                    values,
+                    ["none", "auto", "profile", "sandbox", "agent", "branch"]
+                );
             }
             other => panic!("expected select, got {other:?}"),
         }

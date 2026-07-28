@@ -589,6 +589,7 @@ pub(crate) struct RowTag {
 }
 
 const BRANCH_TAG_WIDTH: usize = 12;
+const AGENT_TAG_WIDTH: usize = 12;
 
 impl RowTag {
     /// The bracketed tag, right-padded to `max_width` terminal cells. Padding
@@ -654,7 +655,26 @@ pub(crate) fn compute_row_tag(
                 None
             }
         }
+        RowTagMode::Agent => agent_row_tag(inst),
         RowTagMode::Branch => branch_row_tag(inst),
+    }
+}
+
+fn agent_row_tag(inst: &crate::session::Instance) -> Option<RowTag> {
+    let agent = inst
+        .agent_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&inst.tool)
+        .trim();
+    let content: String = agent.chars().take(AGENT_TAG_WIDTH).collect();
+    if content.is_empty() {
+        None
+    } else {
+        Some(RowTag {
+            content,
+            max_width: AGENT_TAG_WIDTH,
+        })
     }
 }
 

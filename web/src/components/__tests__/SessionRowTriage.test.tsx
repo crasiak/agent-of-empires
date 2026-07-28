@@ -296,6 +296,20 @@ describe("SessionRow row tags", () => {
     expect(screen.getByTestId("sidebar-session-row-tag").textContent).toBe("[sb]");
   });
 
+  it("renders the resolved agent identity in agent mode", () => {
+    const ws = workspace("w-agent", [session({ tool: "claude", acp_agent: "codex" })]);
+
+    render(
+      <Wrap rowTagMode="agent">
+        <Row ws={ws} />
+      </Wrap>,
+    );
+
+    const tag = screen.getByTestId("sidebar-session-row-tag");
+    expect(tag.textContent).toBe("[codex]");
+    expect(tag.getAttribute("title")).toBe("codex");
+  });
+
   it("renders multi-repo workspace branch tags without removing repo chips", () => {
     const ws = workspace("w-workspace", [
       session({

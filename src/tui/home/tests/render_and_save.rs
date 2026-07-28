@@ -183,6 +183,38 @@ fn test_row_tag_profile_renders_in_filtered_view() {
 /// when the title differs from the branch, with no raw hardcoded branch suffix.
 #[test]
 #[serial]
+fn test_row_tag_agent_prefers_structured_agent_and_truncates() {
+    let mut inst = Instance::new("my-session", "/tmp/a");
+    inst.tool = "claude".to_string();
+    inst.agent_name = Some("custom-codex-agent".to_string());
+
+    let text = rendered_single_session_text(inst, crate::session::config::RowTagMode::Agent);
+    assert!(
+        text.contains("[custom-codex]"),
+        "Agent mode should prefer and compact agent_name: {text:?}"
+    );
+    assert!(
+        !text.contains("[claude"),
+        "Agent mode should not fall back while agent_name is present: {text:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn test_row_tag_agent_falls_back_to_terminal_tool() {
+    let mut inst = Instance::new("my-session", "/tmp/a");
+    inst.tool = "pi".to_string();
+    inst.agent_name = Some("   ".to_string());
+
+    let text = rendered_single_session_text(inst, crate::session::config::RowTagMode::Agent);
+    assert!(
+        text.contains("[pi          ]"),
+        "Agent mode should render the terminal tool: {text:?}"
+    );
+}
+
+#[test]
+#[serial]
 fn test_row_tag_branch_renders_when_branch_differs_from_title() {
     let mut inst = Instance::new("my-session", "/tmp/a");
     inst.worktree_info = Some(crate::session::WorktreeInfo {
