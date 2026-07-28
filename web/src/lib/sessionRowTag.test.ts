@@ -98,14 +98,15 @@ describe("computeSessionRowTag", () => {
     expect(computeSessionRowTag(ws, "sandbox")?.content).toBe("sb");
   });
 
-  it("prefers the structured agent and falls back to the terminal tool", () => {
-    const structured = workspace({}, [session({ tool: "claude", acp_agent: "custom-codex-agent" })]);
+  it("prefers the structured agent and maps known agents to two-letter codes", () => {
+    const structured = workspace({}, [session({ tool: "claude", acp_agent: "codex" })]);
     const terminal = workspace({}, [session({ tool: "pi" })]);
-    const blankStructuredAgent = workspace({}, [session({ tool: "codex", acp_agent: "   " })]);
+    const blankStructuredAgent = workspace({}, [session({ tool: "gemini", acp_agent: "   " })]);
+    const claude = workspace({}, [session({ tool: "claude" })]);
 
     expect(computeSessionRowTag(structured, "agent")).toEqual({
-      content: "custom-codex",
-      title: "custom-codex-agent",
+      content: "cx",
+      title: "codex",
       kind: "agent",
     });
     expect(computeSessionRowTag(terminal, "agent")).toEqual({
@@ -113,7 +114,8 @@ describe("computeSessionRowTag", () => {
       title: "pi",
       kind: "agent",
     });
-    expect(computeSessionRowTag(blankStructuredAgent, "agent")?.content).toBe("codex");
+    expect(computeSessionRowTag(blankStructuredAgent, "agent")?.content).toBe("gm");
+    expect(computeSessionRowTag(claude, "agent")?.content).toBe("cc");
   });
 
   it("returns no tag for none, host sandbox mode, or mixed multi-repo branches", () => {

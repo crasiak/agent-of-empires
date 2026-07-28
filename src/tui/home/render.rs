@@ -589,7 +589,7 @@ pub(crate) struct RowTag {
 }
 
 const BRANCH_TAG_WIDTH: usize = 12;
-const AGENT_TAG_WIDTH: usize = 12;
+const AGENT_TAG_WIDTH: usize = 2;
 
 impl RowTag {
     /// The bracketed tag, right-padded to `max_width` terminal cells. Padding
@@ -667,7 +667,10 @@ fn agent_row_tag(inst: &crate::session::Instance) -> Option<RowTag> {
         .filter(|name| !name.trim().is_empty())
         .unwrap_or(&inst.tool)
         .trim();
-    let content: String = agent.chars().take(AGENT_TAG_WIDTH).collect();
+    let content = known_agent_code(agent)
+        .or_else(|| known_agent_code(&inst.tool))
+        .map(str::to_owned)
+        .unwrap_or_else(|| agent.to_lowercase().chars().take(AGENT_TAG_WIDTH).collect());
     if content.is_empty() {
         None
     } else {
@@ -676,6 +679,25 @@ fn agent_row_tag(inst: &crate::session::Instance) -> Option<RowTag> {
             max_width: AGENT_TAG_WIDTH,
         })
     }
+}
+
+fn known_agent_code(agent: &str) -> Option<&'static str> {
+    agent
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .find_map(|token| {
+            if token.eq_ignore_ascii_case("codex") {
+                Some("cx")
+            } else if token.eq_ignore_ascii_case("claude") {
+                Some("cc")
+            } else if token.eq_ignore_ascii_case("pi") {
+                Some("pi")
+            } else if token.eq_ignore_ascii_case("gemini") {
+                Some("gm")
+            } else {
+                None
+            }
+        })
 }
 
 fn branch_row_tag(inst: &crate::session::Instance) -> Option<RowTag> {
@@ -1888,32 +1910,51 @@ impl HomeView {
             icon_style = icon_style.add_modifier(ratatui::style::Modifier::BOLD);
             text_style = text_style.add_modifier(ratatui::style::Modifier::BOLD);
         }
+        let row_tag = if let Item::Session { id, .. } = item {
+            self.get_instance(id).and_then(|inst| {
+                compute_row_tag(inst, self.row_tag_mode, self.active_profile.is_none())
+            })
+        } else {
+            None
+        };
         line_spans.push(Span::styled(format!("{} ", icon), icon_style));
+        if self.row_tag_mode == RowTagMode::Agent {
+            if let Some(tag) = row_tag.as_ref() {
+                let tag_style = Style::default().fg(theme.dimmed);
+                line_spans.push(Span::styled(
+                    format!("{} ", tag.rendered()),
+                    if is_selected {
+                        selected_row_style(tag_style, theme)
+                    } else {
+                        tag_style
+                    },
+                ));
+            }
+        }
         line_spans.push(Span::styled(text.into_owned(), text_style));
 
         if let Item::Session { id, .. } = item {
             if let Some(inst) = self.get_instance(id) {
-                // Config-driven suffix next to the session title. This owns
-                // the branch/profile/sandbox slot, so `None` means no suffix.
-                // Counted into `used_width` below so the activity column still
-                // right-aligns past the tag.
-                if let Some(tag) =
-                    compute_row_tag(inst, self.row_tag_mode, self.active_profile.is_none())
-                {
-                    let tag_style =
-                        Style::default().fg(if self.row_tag_mode == RowTagMode::Branch {
-                            theme.branch
-                        } else {
-                            theme.dimmed
-                        });
-                    line_spans.push(Span::styled(
-                        format!("  {}", tag.rendered()),
-                        if is_selected {
-                            selected_row_style(tag_style, theme)
-                        } else {
-                            tag_style
-                        },
-                    ));
+                // Non-agent row tags remain suffixes. Agent tags render before
+                // the title above so the two-letter provider code is easy to
+                // scan as a stable left-hand column.
+                if self.row_tag_mode != RowTagMode::Agent {
+                    if let Some(tag) = row_tag.as_ref() {
+                        let tag_style =
+                            Style::default().fg(if self.row_tag_mode == RowTagMode::Branch {
+                                theme.branch
+                            } else {
+                                theme.dimmed
+                            });
+                        line_spans.push(Span::styled(
+                            format!("  {}", tag.rendered()),
+                            if is_selected {
+                                selected_row_style(tag_style, theme)
+                            } else {
+                                tag_style
+                            },
+                        ));
+                    }
                 }
 
                 // Right edge of the row: optional terminal-mode badge, and

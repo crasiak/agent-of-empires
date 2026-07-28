@@ -306,7 +306,7 @@ describe("SessionRow row tags", () => {
     );
 
     const tag = screen.getByTestId("sidebar-session-row-tag");
-    expect(tag.textContent).toBe("[codex]");
+    expect(tag.textContent).toBe("[cx]");
     expect(tag.getAttribute("title")).toBe("codex");
   });
 

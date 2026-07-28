@@ -12,7 +12,7 @@ export interface SessionRowTag {
 
 const DEFAULT_ROW_TAG_MODE: SessionRowTagMode = "branch";
 const PROFILE_TAG_WIDTH = 4;
-const AGENT_TAG_WIDTH = 12;
+const AGENT_TAG_WIDTH = 2;
 const BRANCH_TAG_WIDTH = 12;
 
 export const SessionRowTagContext = createContext<SessionRowTagMode>(DEFAULT_ROW_TAG_MODE);
@@ -56,7 +56,10 @@ export function computeSessionRowTag(workspace: Workspace, mode: SessionRowTagMo
       const agent = primary.acp_agent?.trim() || primary.tool.trim();
       if (!agent) return null;
       return {
-        content: Array.from(agent).slice(0, AGENT_TAG_WIDTH).join(""),
+        content:
+          knownAgentCode(agent) ??
+          knownAgentCode(primary.tool) ??
+          Array.from(agent.toLocaleLowerCase()).slice(0, AGENT_TAG_WIDTH).join(""),
         title: agent,
         kind: mode,
       };
@@ -64,6 +67,23 @@ export function computeSessionRowTag(workspace: Workspace, mode: SessionRowTagMo
     case "branch":
       return branchRowTag(workspace);
   }
+}
+
+function knownAgentCode(agent: string): string | null {
+  const tokens = agent.split(/[^a-z0-9]+/i).filter(Boolean);
+  for (const token of tokens) {
+    switch (token.toLocaleLowerCase()) {
+      case "codex":
+        return "cx";
+      case "claude":
+        return "cc";
+      case "pi":
+        return "pi";
+      case "gemini":
+        return "gm";
+    }
+  }
+  return null;
 }
 
 function profileShortCode(profile: string): string {
