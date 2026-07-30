@@ -31,6 +31,16 @@ fn wants_text_selection_tracks_copy_friendly_surfaces() {
     assert!(!env.view.wants_text_selection());
 }
 
+#[test]
+#[serial]
+fn send_message_dialog_suspends_mouse_capture() {
+    let mut env = create_test_env_empty();
+    env.view.send_message_dialog =
+        Some(crate::tui::dialogs::SendMessageDialog::new("test-session"));
+
+    assert!(env.view.wants_text_selection());
+}
+
 // -- apply_one_status_update -------------------------------------------------
 //
 // These guard the bug discovered in #872: the polling loop runs

@@ -327,6 +327,23 @@ fn skip_predraw_cursor_hide(live_send_active: bool, has_overlay: bool) -> bool {
     live_send_active && !has_overlay
 }
 
+fn apply_mouse_capture_transition<W: std::io::Write>(
+    mouse_captured: &mut bool,
+    desired: bool,
+    writer: &mut W,
+) -> Result<()> {
+    if desired == *mouse_captured {
+        return Ok(());
+    }
+    if desired {
+        crossterm::execute!(writer, EnableMouseCapture)?;
+    } else {
+        crossterm::execute!(writer, DisableMouseCapture)?;
+    }
+    *mouse_captured = desired;
+    Ok(())
+}
+
 impl App {
     /// Is this key event a candidate for paste-burst accumulation?
     /// Printable ASCII Char or Enter, with no modifiers (or shift only).
@@ -548,16 +565,7 @@ impl App {
         // Mosh, matching the startup gate in `tui::run`.
         let desired =
             self.mouse_capture_allowed && !self.mosh_active && !self.home.wants_text_selection();
-        if desired == self.mouse_captured {
-            return Ok(());
-        }
-        if desired {
-            crossterm::execute!(terminal.backend_mut(), EnableMouseCapture)?;
-        } else {
-            crossterm::execute!(terminal.backend_mut(), DisableMouseCapture)?;
-        }
-        self.mouse_captured = desired;
-        Ok(())
+        apply_mouse_capture_transition(&mut self.mouse_captured, desired, terminal.backend_mut())
     }
 
     /// Write OSC 0 when the dashboard selection (or its title) changes.
@@ -1691,6 +1699,11 @@ impl App {
                                 continue;
                             }
                             self.home.handle_paste(&text);
+                            // A paste can open the send-message textarea when
+                            // no dialog is already active. Apply its mouse-
+                            // capture policy before drawing so fragmented SGR
+                            // mouse reports cannot enter the new composer.
+                            self.sync_mouse_capture(terminal)?;
 
                             self.draw(terminal)?;
 
@@ -4514,6 +4527,27 @@ mod tests {
             theme_apply_needed(("empire", false), ("empire", true)),
             "a different palette mode must re-apply even with the same name"
         );
+    }
+
+    #[test]
+    fn mouse_capture_transition_emits_disable_and_restore() {
+        let mut mouse_captured = true;
+        let mut output = Vec::new();
+
+        apply_mouse_capture_transition(&mut mouse_captured, false, &mut output).unwrap();
+        assert!(
+            !mouse_captured,
+            "suspending capture must update the tracked live state"
+        );
+        assert!(!output.is_empty(), "suspending capture must emit escapes");
+
+        output.clear();
+        apply_mouse_capture_transition(&mut mouse_captured, true, &mut output).unwrap();
+        assert!(
+            mouse_captured,
+            "restoring capture must update the tracked live state"
+        );
+        assert!(!output.is_empty(), "restoring capture must emit escapes");
     }
 
     /// The pre-draw `cursor::Hide` is skipped only in the one state that
