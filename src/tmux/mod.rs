@@ -281,6 +281,7 @@ pub const TOOL_PREFIX: &str = if cfg!(debug_assertions) {
 /// Pre-fetched pane metadata from a single `tmux list-panes -a` call.
 #[derive(Debug, Clone)]
 pub struct PaneMetadata {
+    pub launch_report: Option<crate::session::launch_identity::LaunchReport>,
     pub pane_dead: bool,
     pub pane_current_command: Option<String>,
     pub pane_start_command_is_protected: bool,
@@ -1350,6 +1351,7 @@ pub fn batch_pane_metadata() -> anyhow::Result<HashMap<String, PaneMetadata>> {
         // fields after it ride [`TAIL_SEP`], because a start command or a
         // title may carry a pipe of its own.
         concat!(
+            "#{pane_id}|#{@aoe_launch_identity}|",
             "#{session_name}|#{pane_index}|#{pane_dead}|#{window_width}|#{window_height}",
             "|#{pane_current_command}",
             "|#{pane_start_command}|#{pane_pid}\x1f#{window_activity}\x1f#{pane_title}"
@@ -1501,6 +1503,17 @@ fn parse_pane_metadata(output: &str) -> HashMap<String, PaneMetadata> {
     let mut map = HashMap::new();
 
     for line in output.lines() {
+        let (line, launch_report) = if line.starts_with('%') {
+            let mut fields = line.splitn(3, '|');
+            let pane_id = fields.next().unwrap_or("");
+            let encoded = fields.next().unwrap_or("");
+            (
+                fields.next().unwrap_or(""),
+                crate::session::launch_identity::LaunchReport::decode(encoded, pane_id),
+            )
+        } else {
+            (line, None)
+        };
         // The two trailing fields ride their own separator (see TAIL_SEP), so
         // the pipe-separated head parses exactly as it did before them; a line
         // with no tail is all head. Accept tmux 3.4's octal rendering as well
@@ -1557,6 +1570,7 @@ fn parse_pane_metadata(output: &str) -> HashMap<String, PaneMetadata> {
         map.insert(
             session_name.to_string(),
             PaneMetadata {
+                launch_report,
                 pane_dead: pane_dead == "1",
                 pane_pid,
                 pane_current_command: if pane_current_command.is_empty() {
@@ -1625,6 +1639,7 @@ pub fn test_inject_pane_window_size_at(name: &str, size: (u16, u16), taken_at: I
         map.insert(
             name.to_string(),
             PaneMetadata {
+                launch_report: None,
                 pane_dead: false,
                 pane_current_command: None,
                 pane_start_command_is_protected: false,
@@ -3707,6 +3722,7 @@ mod tests {
                     (
                         n.to_string(),
                         PaneMetadata {
+                            launch_report: None,
                             pane_dead: false,
                             pane_current_command: None,
                             pane_start_command_is_protected: false,
@@ -3778,6 +3794,7 @@ mod tests {
 
     fn dead_pane_meta(dead: bool) -> PaneMetadata {
         PaneMetadata {
+            launch_report: None,
             pane_dead: dead,
             pane_current_command: None,
             pane_start_command_is_protected: false,
@@ -4275,6 +4292,38 @@ mod tests {
         assert!(!tmux_no_server_running(
             b"error connecting to /tmp/no server running.sock (Permission denied)"
         ));
+    }
+
+    #[test]
+    fn launch_report_metadata_rejects_another_pane_and_malformed_reports() {
+        use crate::session::launch_identity::{
+            LaunchAccount, LaunchIdentity, LaunchReport, Launcher,
+        };
+        let report = LaunchReport {
+            instance_id: "1234567890abcdef".into(),
+            pane_id: "%9".into(),
+            identity: LaunchIdentity {
+                agent: "codex".into(),
+                account: LaunchAccount::Personal,
+                launcher: Launcher::Headroom,
+                profile: "personal | alias".into(),
+            },
+        };
+        let encoded = report.encode().unwrap();
+        for (pane, value, expected) in [
+            ("%9", encoded.as_str(), true),
+            ("%10", encoded.as_str(), false),
+            ("%9", "broken", false),
+            ("%9", "", false),
+        ] {
+            let name = format!("{SESSION_PREFIX}identity_12345678");
+            let output = format!("{pane}|{value}|{name}|0|0|80|24|codex|codex|42\x1f123\x1ftitle");
+            let map = parse_pane_metadata(&output);
+            let metadata = map.get(&name).unwrap();
+            assert_eq!(metadata.launch_report.is_some(), expected);
+            assert_eq!(metadata.pane_pid, Some(42));
+            assert_eq!(metadata.pane_title.as_deref(), Some("title"));
+        }
     }
 
     #[test]

@@ -76,6 +76,8 @@ pub(crate) enum IdleIntent {
 /// `Keep`, `Option::None`, `bool::false`, and `String::new`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct StatusUpdate {
+    /// An observed identity (including unknown), guarded by the launch generation.
+    pub launch_identity: Option<(u64, Option<crate::session::launch_identity::LaunchIdentity>)>,
     pub id: String,
     pub status: Status,
     pub last_error: Option<String>,
@@ -287,6 +289,7 @@ fn project_status_updates(
                     if let Some(&running) = container_states.get(&sandbox.container_name) {
                         if !running {
                             return Some(StatusUpdate {
+                                launch_identity: None,
                                 id: inst.id,
                                 status: Status::Error,
                                 last_error: Some("Container is not running".to_string()),
@@ -326,6 +329,7 @@ fn project_status_updates(
             }
 
             Some(StatusUpdate {
+                launch_identity: Some((inst.lifecycle_generation, inst.launch_identity)),
                 id: inst.id,
                 status: inst.status,
                 last_error: inst.last_error,
@@ -402,6 +406,7 @@ mod tests {
         // correctly.
         let ts = Utc::now();
         let update = StatusUpdate {
+            launch_identity: None,
             id: "abc".into(),
             status: Status::Idle,
             last_error: None,

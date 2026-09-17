@@ -662,23 +662,34 @@ pub(crate) fn compute_row_tag(
 
 fn agent_row_tag(inst: &crate::session::Instance) -> Option<RowTag> {
     let agent = inst
-        .agent_name
-        .as_deref()
-        .filter(|name| !name.trim().is_empty())
+        .current_launch_identity()
+        .map(|identity| identity.agent.as_str())
+        .or(inst
+            .agent_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty()))
         .unwrap_or(&inst.tool)
         .trim();
-    let content = known_agent_code(agent)
+    let code = known_agent_code(agent)
         .or_else(|| known_agent_code(&inst.tool))
         .map(str::to_owned)
         .unwrap_or_else(|| agent.to_lowercase().chars().take(AGENT_TAG_WIDTH).collect());
-    if content.is_empty() {
-        None
-    } else {
-        Some(RowTag {
-            content,
-            max_width: AGENT_TAG_WIDTH,
-        })
+    if code.is_empty() {
+        return None;
     }
+    let content = if matches!(code.as_str(), "cc" | "cx") {
+        let (account, launcher) = inst
+            .current_launch_identity()
+            .map(|identity| identity.codes())
+            .unwrap_or(("?", "?"));
+        format!("{code}:{account}:{launcher}")
+    } else {
+        code
+    };
+    Some(RowTag {
+        max_width: content.chars().count(),
+        content,
+    })
 }
 
 fn known_agent_code(agent: &str) -> Option<&'static str> {
@@ -1919,7 +1930,11 @@ impl HomeView {
         };
         line_spans.push(Span::styled(format!("{} ", icon), icon_style));
         if self.row_tag_mode == RowTagMode::Agent {
-            if let Some(tag) = row_tag.as_ref() {
+            let prefix_width: usize = line_spans.iter().map(Span::width).sum();
+            if let Some(tag) = row_tag
+                .as_ref()
+                .filter(|tag| prefix_width + tag.max_width + 3 + 4 <= list_width as usize)
+            {
                 let tag_style = Style::default().fg(theme.dimmed);
                 line_spans.push(Span::styled(
                     format!("{} ", tag.rendered()),
@@ -1935,9 +1950,7 @@ impl HomeView {
 
         if let Item::Session { id, .. } = item {
             if let Some(inst) = self.get_instance(id) {
-                // Non-agent row tags remain suffixes. Agent tags render before
-                // the title above so the two-letter provider code is easy to
-                // scan as a stable left-hand column.
+                // Agent tags precede the title; other tags remain suffixes.
                 if self.row_tag_mode != RowTagMode::Agent {
                     if let Some(tag) = row_tag.as_ref() {
                         let tag_style =
@@ -5312,6 +5325,39 @@ mod tests {
         // unconditional render path.
         // prefix(20) + slot(6) + badge(12) + margin(1) = 39 > 35.
         assert_eq!(activity_column_padding(20, 35, 12), None);
+    }
+
+    #[test]
+    fn launch_identity_badges_cover_accounts_and_launchers_without_guessing() {
+        use crate::session::launch_identity::{LaunchAccount, LaunchIdentity, Launcher};
+        let mut instance = crate::session::Instance::new("test", "/tmp");
+        instance.command = "codex-ledger-work-isolated".into();
+        assert_eq!(agent_row_tag(&instance).unwrap().rendered(), "[cc:?:?]");
+        for (agent, code) in [("claude", "cc"), ("codex", "cx")] {
+            for (account, account_code) in
+                [(LaunchAccount::Personal, "p"), (LaunchAccount::Work, "w")]
+            {
+                for (launcher, launcher_code) in [
+                    (Launcher::Direct, "d"),
+                    (Launcher::Headroom, "h"),
+                    (Launcher::Ledger, "l"),
+                    (Launcher::LedgerHeadroom, "lh"),
+                ] {
+                    instance.launch_identity = Some(LaunchIdentity {
+                        agent: agent.into(),
+                        account,
+                        launcher,
+                        profile: "alias".into(),
+                    });
+                    assert_eq!(
+                        agent_row_tag(&instance).unwrap().rendered(),
+                        format!("[{code}:{account_code}:{launcher_code}]")
+                    );
+                    assert!(compute_row_tag(&instance, RowTagMode::None, false).is_none());
+                    assert!(compute_row_tag(&instance, RowTagMode::Auto, false).is_none());
+                }
+            }
+        }
     }
 
     #[test]

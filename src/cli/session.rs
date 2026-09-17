@@ -10,8 +10,66 @@ use crate::session::{
     Instance, LifecycleOperation, ResumeIntent, StartOutcome, Storage,
 };
 
+#[derive(Args)]
+pub struct ReportLaunchArgs {
+    #[arg(long, value_parser = ["claude", "codex"])]
+    agent: String,
+    #[arg(long, value_enum)]
+    account: crate::session::launch_identity::LaunchAccount,
+    #[arg(long, value_enum)]
+    launcher: crate::session::launch_identity::Launcher,
+    /// Resolved launcher profile, independent of the AOE profile
+    #[arg(long, default_value = "")]
+    launch_profile: String,
+}
+
+fn report_launch(args: ReportLaunchArgs) -> Result<()> {
+    use crate::session::launch_identity::{LaunchIdentity, LaunchReport};
+    let pane_id =
+        std::env::var("TMUX_PANE").context("report-launch must run inside the agent pane")?;
+    let instance_id = std::env::var("AOE_INSTANCE_ID").context("AOE_INSTANCE_ID is missing")?;
+    let tmux = std::env::var("TMUX").context("TMUX is missing")?;
+    let (socket, _) = tmux
+        .rsplit_once(',')
+        .and_then(|(rest, _)| rest.rsplit_once(','))
+        .context("invalid TMUX socket information")?;
+    anyhow::ensure!(!socket.is_empty(), "TMUX socket is empty");
+    let report = LaunchReport {
+        instance_id,
+        pane_id,
+        identity: LaunchIdentity {
+            agent: args.agent,
+            account: args.account,
+            launcher: args.launcher,
+            profile: args.launch_profile,
+        },
+    };
+    let encoded = report.encode()?;
+    let output = crate::tmux::tmux_command()
+        .args([
+            "-S",
+            socket,
+            "set-option",
+            "-p",
+            "-t",
+            &report.pane_id,
+            "@aoe_launch_identity",
+            &encoded,
+        ])
+        .output()
+        .context("publishing launch identity")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "tmux rejected the launch report: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
+}
+
 #[derive(Subcommand)]
 pub enum SessionCommands {
+    /// Report resolved launch identity from inside the agent pane
+    ReportLaunch(ReportLaunchArgs),
     /// Start a session's tmux process
     Start(SessionIdArgs),
 
@@ -365,6 +423,7 @@ struct SessionDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_session_id: Option<String>,
     profile: String,
+    launch_identity: Option<crate::session::launch_identity::LaunchIdentity>,
 }
 
 fn session_details(inst: &Instance, profile: &str) -> SessionDetails {
@@ -384,12 +443,14 @@ fn session_details(inst: &Instance, profile: &str) -> SessionDetails {
         agent_session_id: inst.agent_session_id.clone(),
         parent_session_id: inst.parent_session_id.clone(),
         profile: profile.to_string(),
+        launch_identity: inst.current_launch_identity().cloned(),
     }
 }
 
 #[tracing::instrument(target = "cli.session", skip_all, fields(profile = %profile))]
 pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
     match command {
+        SessionCommands::ReportLaunch(args) => report_launch(args),
         SessionCommands::Start(args) => start_session(profile, args).await,
         SessionCommands::Stop(args) => stop_session(profile, args).await,
         SessionCommands::Restart(args) => restart_session_dispatch(profile, args).await,
@@ -1572,7 +1633,13 @@ async fn show_session(profile: &str, args: ShowArgs) -> Result<()> {
     // Refresh status from tmux so the output reflects current state
     // rather than the stale persisted value.
     crate::tmux::refresh_session_cache();
-    inst.update_status_once(None, None);
+    if let Ok(metadata) = crate::tmux::batch_pane_metadata() {
+        let derived = inst.tmux_session()?.name().to_string();
+        let name = crate::tmux::resolve_agent_session_name_in(&metadata, &inst.id, &derived);
+        inst.update_status_once(metadata.get(&name), Some(&name));
+    } else {
+        inst.update_status_once(None, None);
+    }
     let contended = crate::session::Instance::contended_capture_cwds(&instances);
     inst.self_heal_session_id(profile, &contended);
 
@@ -1585,6 +1652,12 @@ async fn show_session(profile: &str, args: ShowArgs) -> Result<()> {
         println!("  Group:   {}", inst.group_path);
         println!("  Tool:    {}", inst.tool);
         println!("  Command: {}", inst.command);
+        println!(
+            "  Launch:  {}",
+            inst.current_launch_identity()
+                .map(|identity| identity.description())
+                .unwrap_or_else(|| "unknown".into())
+        );
         println!("  Status:  {:?}", inst.status);
         // Only for a session that is not live: an archived or trashed row is
         // otherwise indistinguishable here from a stopped one, and `status`

@@ -130,7 +130,7 @@ Notification = "waiting"
 | `prevent_sleep_when_active` | `false` | When enabled, the `aoe serve` daemon holds an OS assertion that prevents user-idle system sleep (the display still sleeps) while any session is active, releasing it once every session has been idle past `prevent_sleep_idle_grace_minutes`. Opt-in, daemon only: a TUI-only user without a running `aoe serve` gets no inhibition. Global toggle, not profile-overridable, since it drives a single process-wide assertion. Backed by `caffeinate -i` on macOS and `systemd-inhibit --what=idle:sleep` on Linux; hosts without those tools (or without logind) warn once and no-op. See #2733. |
 | `prevent_sleep_idle_grace_minutes` | `15` | Minutes a session must stay idle before the sleep-inhibit assertion may be released. Only consulted when `prevent_sleep_when_active` is on. Range `0` to `240`; `0` releases as soon as every session leaves an active status. The grace period only begins once a session goes `Idle`, so a session that never reaches `Idle` keeps holding the assertion: `Waiting` on an unanswered prompt, or `Creating` on a container, worktree, or submodule setup that never returns, can hold sleep indefinitely. A `Starting` session is bounded by a short (~3s) launch guard and then re-resolves. |
 | `session_id_poller_max_threads` | `50` | Ceiling on concurrent session-id poller threads in one `aoe` process (the daemon, each TUI). Each poller keeps one session's agent session id refreshed for native resume; once more live sessions exist than the ceiling, the overflow's ids stop refreshing until another session stops, and the process retries those sessions on a 5 s to 60 s backoff instead of every status tick. Raise it for a fleet that keeps more than 50 sessions live at once. `0` keeps the default. Global, not profile-overridable; applied at process start, so a change takes effect on the next `aoe serve` or TUI start. |
-| `row_tag` | `"branch"` | Controls the compact metadata shown next to each session title: `none` shows nothing; `auto` shows the profile code only in all-profiles view; `profile` always shows the profile code; `sandbox` shows `sb` on sandboxed sessions; `agent` shows a two-letter agent code (`cx` Codex, `cc` Claude, `pi` Pi, `gm` Gemini); `branch` shows a compact worktree or workspace branch tag. |
+| `row_tag` | `"branch"` | Controls the compact metadata shown next to each session title: `none` shows nothing; `auto` shows the profile code only in all-profiles view; `profile` always shows the profile code; `sandbox` shows `sb` on sandboxed sessions; `agent` shows [launch identity](#launch-identity-badges) for Claude/Codex and agent codes for other tools (`pi` Pi, `gm` Gemini); `branch` shows a compact worktree or workspace branch tag. |
 | `yolo_mode_default` | `false` | Enable YOLO mode by default for new sessions (skip permission prompts). Works with or without sandbox. In tmux mode this passes `--dangerously-skip-permissions` to the agent CLI; in structured view it maps to ACP `bypassPermissions` (see [Structured view: Permission modes and YOLO](../structured-view/controls.md#permission-modes-and-yolo) for the adapter caveat). |
 | `pre_trust_agent_folders` | `false` | Pre-trust each host session's worktree in the agent's own config so it does not open on a folder-trust prompt. Applies to Claude Code (`projects.<path>.hasTrustDialogAccepted` in `.claude.json`), Codex (`projects.<path>.trust_level`), and Gemini (a per-path entry in `trustedFolders.json`); other agents have no such prompt and are untouched. Config-location overrides (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_TRUSTED_FOLDERS_PATH`) are honored. An `agent_config_dir` entry for the session's agent wins over them. Sandboxed sessions pre-trust their container workspace regardless of this setting, because that config is staged per session; this setting covers host sessions, where the record is written to your real agent config and outlives the session. `.mcp.json` servers still ask per server and the session's permission mode is unchanged, but trust is also what activates the repo's own `.claude/settings.json`: an untrusted workspace drops its `permissions.allow` rules. And since the prompt is what holds a session before startup, pre-trusting lets that file's hooks run with nobody having looked at the repo first. Enable it only for directories you would have trusted by hand. |
 | `agent_status_hooks` | `true` | Install status-detection hooks into the agent's config file; see [Adding a New Agent](../development/adding-agents.md#hook-format-reference) for the per-agent file and payload. Config-dir overrides are honored. When disabled, status detection reads the pane alone, but any authoritative identity hooks declared for native resume remain installed. A hook write is evidence rather than the last word: pane state and terminal title are weighed against it by declared priority. |
@@ -150,6 +150,41 @@ Notification = "waiting"
 | `acp.acp_defaults` | `{}` | Per-agent defaults for structured view startup (under the `[acp]` section, not `[session]`). `model` is forwarded when the worker starts; `effort` (thinking) and `mode` are applied through the agent's ACP config options (`thought_level`, `mode`) when advertised, and skipped with a warning otherwise. `effort_by_model` (a `{model = effort}` map) overrides `effort` for the resolved model. A `model` is a default: a model chosen at creation (CLI flag, web/plugin `model_id`) wins over it. Set `pin_model = true` alongside `model` to make it a pin instead: every structured view session of that agent under the profile launches on the pinned model, `sessions.create` refuses a request naming another model (error `kind = "model_pinned"`), and the model picker in the web dashboard collapses to the pin. The entry is keyed by the agent the session spawns as: a custom agent mapped to a base agent through `session.agent_detect_as` reads the base agent's entry. The pin governs creation and respawn; effort still follows the request or `effort_by_model`. Editable per agent from the web dashboard (Structured view tab, Structured View Defaults). Example: `[acp.acp_defaults.opencode] model = "openai/gpt-5.5" effort = "high" mode = "plan"`. |
 | `agents.<name>.status_map` | `{}` | Trusted global/profile-only hook event to AoE status mappings. Valid statuses are `running`, `waiting`, `idle`, and `error`. Entries apply by event name to built-in hook defaults, so duplicate event names with different matchers all receive the same status; new event names are added to the installed hooks when the agent format supports event keys. Existing hook files update on the next hook install, usually a new or restarted session. Agent processes with installed status hooks receive `AOE_PROFILE`, so hook scripts can query the resolved map with `aoe -p "$AOE_PROFILE" profile show --status-map <agent> --json`. |
 | `agents.<name>.status_rules` | `[]` | Trusted global/profile-only declarative pane status rules (`[[agents.<name>.status_rules]]` array of tables). Each rule has `status` (`running`, `waiting`, `idle`, or `error`) and exactly one of `contains` (case-insensitive substring) or `regex` (Rust regex, matched as written; use `(?i)` for case-insensitive). Rules are evaluated in order against the ANSI-stripped pane snapshot; first match wins, no match reports `idle`. Rules take precedence over `agent_detect_as`, over a built-in detector of the same name, and over a status hook the agent writes. Invalid rules are skipped with a warning in the debug log. Takes effect on the next config resolve (TUI or daemon start). |
+
+### Launch identity badges
+
+With `session.row_tag = "agent"`, Claude/Codex rows show
+`[agent:account:launcher]`. Agent codes are `cc` and `cx`; account codes are
+`p` (personal) and `w` (work, including company). Launcher codes are `d`
+(direct/simple wrapper), `h` (Headroom), `l` (Ledger only), and `lh`
+(Ledger + Headroom). Unknown fields use `?`. Very narrow rows omit the badge
+to leave room for the title.
+
+A launcher reports its resolved identity from inside the AOE agent pane:
+
+```sh
+aoe session report-launch --agent codex --account work \
+  --launcher ledger-headroom --launch-profile work
+```
+
+Publish only after resolving the actual account and launch stack. The command
+accepts a launcher's assertion; it does not verify provider credentials or
+infer identity from command filenames. A wrapper that delegates account or
+transport selection to another launcher must report from that downstream
+launcher after resolution. Use `unknown` for an unresolved dimension.
+
+Reports are attached to the reporting tmux pane, not to an AOE profile or
+launch default. Profile moves and config edits preserve a running pane's
+identity. Relaunch creates a new pane whose badge stays unknown until its
+launcher reports; legacy and structured sessions also remain unknown. Dead
+or stopped panes do not display a current launch identity. Reports are runtime
+metadata and are not saved in `sessions.json`.
+
+The preview information header and `aoe session show` expose the reported
+launcher profile. `aoe session show --json` includes the full `launch_identity`
+object; the separate `command` field describes the configured launch command.
+Container launchers need access to the host tmux socket and reporting binary;
+without that connection their identity remains unknown.
 
 ## Status Hooks
 

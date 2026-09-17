@@ -71,6 +71,7 @@ fn apply_status_update_propagates_idle_entered_at_into_live_instance() {
     // instance, otherwise nothing downstream sees it.
     let now = chrono::Utc::now();
     env.view.apply_one_status_update(StatusUpdate {
+        launch_identity: None,
         id: id.clone(),
         status: Status::Idle,
         last_error: None,
@@ -256,6 +257,7 @@ fn apply_status_update_preserves_idle_entered_at_on_keep() {
     // Then apply a `Keep` update, mirroring an `attached_status_hooks`
     // snapshot from a watcher clone that never polled.
     env.view.apply_one_status_update(StatusUpdate {
+        launch_identity: None,
         id: id.clone(),
         status: Status::Idle,
         last_error: None,
@@ -293,6 +295,7 @@ fn apply_status_update_persists_genuine_transition_to_disk() {
 
     let now = chrono::Utc::now();
     env.view.apply_one_status_update(StatusUpdate {
+        launch_identity: None,
         id: id.clone(),
         status: Status::Running,
         last_error: None,
@@ -328,6 +331,7 @@ fn apply_status_update_clears_idle_entered_at_on_idle_to_running() {
     // Seed: session is Idle with a freshness timestamp set.
     let stop_time = chrono::Utc::now() - chrono::Duration::seconds(60);
     env.view.apply_one_status_update(StatusUpdate {
+        launch_identity: None,
         id: id.clone(),
         status: Status::Idle,
         last_error: None,
@@ -347,6 +351,7 @@ fn apply_status_update_clears_idle_entered_at_on_idle_to_running() {
     // path has to honor that, otherwise a Running session would still
     // claim a freshness age.
     env.view.apply_one_status_update(StatusUpdate {
+        launch_identity: None,
         id: id.clone(),
         status: Status::Running,
         last_error: None,
@@ -446,6 +451,7 @@ fn apply_status_update_skips_terminal_states() {
     let stale_ts = chrono::Utc::now() - chrono::Duration::seconds(10);
 
     env.view.apply_one_status_update(StatusUpdate {
+        launch_identity: None,
         id: id.clone(),
         status: Status::Idle,
         last_error: None,
@@ -522,6 +528,7 @@ fn apply_status_update_runs_status_hook_on_transition() {
     take_recorded_launches();
 
     env.view.apply_one_status_update(StatusUpdate {
+        launch_identity: None,
         id: id.clone(),
         status: Status::Waiting,
         last_error: None,
@@ -587,6 +594,7 @@ fn apply_status_update_does_not_run_status_hook_for_same_status() {
     take_recorded_launches();
 
     env.view.apply_one_status_update(StatusUpdate {
+        launch_identity: None,
         id,
         status: Status::Idle,
         last_error: None,
@@ -621,6 +629,7 @@ fn apply_status_updates_without_hooks_does_not_run_status_hook() {
 
     env.view
         .apply_status_updates_without_hooks(vec![StatusUpdate {
+            launch_identity: None,
             id: id.clone(),
             status: Status::Waiting,
             last_error: None,
@@ -2191,4 +2200,38 @@ fn toggle_archive_at_cursor_noop_with_no_selection() {
     let mut env = create_test_env_empty();
     env.view.selected_session = None;
     env.view.toggle_archive_at_cursor().unwrap();
+}
+
+#[test]
+#[serial]
+fn launch_identity_status_updates_reject_stale_launches() {
+    use crate::session::launch_identity::{LaunchAccount, LaunchIdentity, Launcher};
+    use crate::tui::status_poller::StatusUpdate;
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances.keys().next().unwrap().clone();
+    env.view
+        .mutate_instance(&id, |instance| instance.lifecycle_generation = 2);
+    let identity = LaunchIdentity {
+        agent: "codex".into(),
+        account: LaunchAccount::Work,
+        launcher: Launcher::LedgerHeadroom,
+        profile: "resolved".into(),
+    };
+    for (generation, value, expected) in [
+        (2, Some(identity.clone()), Some(identity.clone())),
+        (1, None, Some(identity.clone())),
+        (2, None, None),
+    ] {
+        env.view
+            .apply_status_updates_without_hooks(vec![StatusUpdate {
+                id: id.clone(),
+                status: Status::Idle,
+                launch_identity: Some((generation, value)),
+                ..Default::default()
+            }]);
+        assert_eq!(
+            env.view.get_instance(&id).unwrap().launch_identity,
+            expected
+        );
+    }
 }

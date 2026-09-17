@@ -105,6 +105,7 @@ impl Instance {
             // even on a path that returned before reaching the pane.
             self.detection.pending = None;
         }
+        self.observe_launch_identity(metadata);
         let baseline = self.live_status_baseline;
         self.update_status_with_metadata_inner(metadata, resolved_name);
         if single_poll {
@@ -258,6 +259,7 @@ impl Instance {
 
         match session.existence() {
             tmux::SessionExistence::Absent => {
+                self.launch_identity = None;
                 tracing::trace!(target: "session.store",
                     "status '{}': session.existence()=Absent (tmux name={}), setting Error",
                     self.title,
@@ -323,6 +325,9 @@ impl Instance {
             .map(|m| m.pane_dead)
             .unwrap_or_else(|| session.is_pane_dead());
 
+        if is_dead {
+            self.launch_identity = None;
+        }
         let pane_cmd = metadata
             .and_then(|m| m.pane_current_command.clone())
             .or_else(|| tmux::utils::pane_current_command(session.name()));
@@ -1409,6 +1414,7 @@ Esc to cancel \u{b7} Tab to amend \u{b7} ctrl+e to explain\n\
     /// spawns tmux behind the test.
     fn agent_pane_metadata(command: &str, window_activity: Option<i64>) -> tmux::PaneMetadata {
         tmux::PaneMetadata {
+            launch_report: None,
             pane_dead: false,
             pane_current_command: Some(command.to_string()),
             pane_start_command_is_protected: false,

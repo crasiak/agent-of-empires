@@ -25,6 +25,7 @@ impl Instance {
         }
         self.sandbox_info = src.sandbox_info.clone();
         self.capture_started_at = src.capture_started_at;
+        self.launch_identity = src.launch_identity.clone();
     }
 
     /// Same fields as `merge_post_start`. Resume-probe failure markers are
@@ -102,6 +103,7 @@ impl Instance {
                 self.lifecycle_generation,
             );
         if self.lifecycle_generation <= previous.lifecycle_generation || purge_in_flight {
+            self.launch_identity = previous.launch_identity.clone();
             self.status = previous.status;
             self.idle_entered_at = previous.idle_entered_at;
         }

@@ -928,6 +928,7 @@ mod tests {
             let metadata = std::collections::HashMap::from([(
                 session_name.clone(),
                 crate::tmux::PaneMetadata {
+                    launch_report: None,
                     pane_dead: false,
                     pane_current_command: Some("claude".to_string()),
                     pane_start_command_is_protected: false,

@@ -194,6 +194,8 @@ pub struct Instance {
     pub extra_args: String,
     #[serde(default)]
     pub tool: String,
+    #[serde(skip)]
+    pub launch_identity: Option<crate::session::launch_identity::LaunchIdentity>,
     /// Built-in agent name used for status detection, resolved at build time from
     /// config's agent_detect_as map. Avoids loading config during the polling hot path.
     #[serde(default, skip_serializing_if = "String::is_empty")]

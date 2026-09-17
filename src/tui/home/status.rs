@@ -391,6 +391,7 @@ impl HomeView {
         }
         self.apply_status_update(
             StatusUpdate {
+                launch_identity: None,
                 id: update.id,
                 status: update.status,
                 last_error: update.last_error,
@@ -562,6 +563,13 @@ impl HomeView {
         let new_pane_dead = update.pane_dead;
 
         if should_update {
+            if let Some((generation, identity)) = update.launch_identity {
+                self.mutate_instance(&update.id, |inst| {
+                    if generation == inst.lifecycle_generation {
+                        inst.launch_identity = identity;
+                    }
+                });
+            }
             use crate::tui::status_poller::IdleIntent;
 
             let new_status = update.status;

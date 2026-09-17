@@ -306,6 +306,7 @@ impl Instance {
                 metadata.launch_id.clone(),
             ));
         }
+        self.launch_identity = None;
         self.capture_started_at = Some(SystemTime::now());
         session.create_with_size_env_and_container_env(
             &self.project_path,

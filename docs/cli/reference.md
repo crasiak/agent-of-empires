@@ -17,6 +17,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe status`↴](#aoe-status)
 * [`aoe killall`↴](#aoe-killall)
 * [`aoe session`↴](#aoe-session)
+* [`aoe session report-launch`↴](#aoe-session-report-launch)
 * [`aoe session start`↴](#aoe-session-start)
 * [`aoe session stop`↴](#aoe-session-stop)
 * [`aoe session restart`↴](#aoe-session-restart)
@@ -387,6 +388,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 
 ###### **Subcommands:**
 
+* `report-launch` — Report resolved launch identity from inside the agent pane
 * `start` — Start a session's tmux process
 * `stop` — Stop session process
 * `restart` — Restart session (or all sessions with `--all`)
@@ -410,6 +412,32 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `import` — Import existing Claude Code sessions from disk. Scans the given path(s) (default: current directory) for Claude Code conversations whose working directory is at or under a path, and creates an AoE session for each: a terminal/tmux session that resumes the conversation with `claude --resume <id>` (default), or a structured-view session with `--structured`
 * `list-trash` — List the sessions currently in the trash
 * `empty-trash` — Permanently purge every trashed session in the profile (irreversible)
+
+
+
+## `aoe session report-launch`
+
+Report resolved launch identity from inside the agent pane
+
+**Usage:** `aoe session report-launch [OPTIONS] --agent <AGENT> --account <ACCOUNT> --launcher <LAUNCHER>`
+
+###### **Options:**
+
+* `--agent <AGENT>`
+
+  Possible values: `claude`, `codex`
+
+* `--account <ACCOUNT>`
+
+  Possible values: `personal`, `work`, `unknown`
+
+* `--launcher <LAUNCHER>`
+
+  Possible values: `direct`, `headroom`, `ledger`, `ledger-headroom`, `unknown`
+
+* `--launch-profile <LAUNCH_PROFILE>` — Resolved launcher profile, independent of the AOE profile
+
+  Default value: ``
 
 
 

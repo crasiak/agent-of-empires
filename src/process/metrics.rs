@@ -455,6 +455,7 @@ mod tests {
 
     fn pane(pid: Option<u32>, dead: bool) -> crate::tmux::PaneMetadata {
         crate::tmux::PaneMetadata {
+            launch_report: None,
             pane_dead: dead,
             pane_current_command: None,
             pane_start_command_is_protected: false,

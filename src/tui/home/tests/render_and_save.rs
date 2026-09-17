@@ -179,8 +179,6 @@ fn test_row_tag_profile_renders_in_filtered_view() {
     assert!(seen > 0);
 }
 
-/// `RowTagMode::Branch` owns the branch suffix. It renders a compact tag even
-/// when the title differs from the branch, with no raw hardcoded branch suffix.
 #[test]
 #[serial]
 fn test_row_tag_agent_prefers_structured_agent_code() {
@@ -190,7 +188,7 @@ fn test_row_tag_agent_prefers_structured_agent_code() {
 
     let text = rendered_single_session_text(inst, crate::session::config::RowTagMode::Agent);
     assert!(
-        text.contains("[cx] my-session"),
+        text.contains("[cx:?:?] my-session"),
         "Agent mode should render a compact badge immediately left of the title: {text:?}"
     );
     assert!(
@@ -214,7 +212,14 @@ fn test_row_tag_agent_maps_known_terminal_tools() {
 
         let text = rendered_single_session_text(inst, crate::session::config::RowTagMode::Agent);
         assert!(
-            text.contains(&format!("[{code}]")),
+            text.contains(&format!(
+                "[{code}{}]",
+                if matches!(code, "cc" | "cx") {
+                    ":?:?"
+                } else {
+                    ""
+                }
+            )),
             "Agent mode should render [{code}] for {tool}: {text:?}"
         );
     }
@@ -1176,4 +1181,45 @@ fn test_session_context_menu_new_session_prefills_from_session() {
         .expect("NewFromSelection should open the new-session dialog");
     assert_eq!(dialog.path_value(), "/tmp/work");
     assert_eq!(dialog.group_value(), "work");
+}
+
+#[test]
+#[serial]
+fn launch_identity_badge_leaves_title_room_in_narrow_rows() {
+    use crate::session::launch_identity::{LaunchAccount, LaunchIdentity, Launcher};
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances.keys().next().unwrap().clone();
+    env.view.mutate_instance(&id, |instance| {
+        instance.title = "short".into();
+        instance.launch_identity = Some(LaunchIdentity {
+            agent: "codex".into(),
+            account: LaunchAccount::Work,
+            launcher: Launcher::LedgerHeadroom,
+            profile: "work".into(),
+        });
+    });
+    env.view.row_tag_mode = crate::session::config::RowTagMode::Agent;
+    env.view.flat_items = env.view.build_flat_items();
+    let item = env
+        .view
+        .flat_items
+        .iter()
+        .find(|item| matches!(item, Item::Session { .. }))
+        .unwrap();
+    for (width, badge_visible) in [(12, false), (24, true)] {
+        let line = env.view.render_item_line(
+            item,
+            false,
+            false,
+            &crate::tui::styles::Theme::default(),
+            width,
+        );
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text.contains("[cx:w:lh]"), badge_visible, "{text}");
+        assert!(text.contains("short"), "{text}");
+    }
 }

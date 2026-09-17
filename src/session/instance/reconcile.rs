@@ -45,6 +45,7 @@ impl Instance {
         // before its consumers read).
         let disk_has_newer_lifecycle = disk.lifecycle_generation > self.lifecycle_generation;
         if !disk_has_newer_lifecycle {
+            disk.launch_identity = self.launch_identity.take();
             disk.last_error_check = self.last_error_check;
             disk.last_error = self.last_error.take();
         }
@@ -201,7 +202,8 @@ mod tests {
 
     #[test]
     #[serial]
-    fn reconcile_from_disk_preserves_publisher_launch_proof() {
+    fn reconcile_from_disk_preserves_launch_identity_until_new_generation() {
+        use crate::session::launch_identity::{LaunchAccount, LaunchIdentity, Launcher};
         let temp = tempdir().unwrap();
         let _home_guard = crate::session::test_support::isolate_home(temp.path());
         let storage =
@@ -219,10 +221,24 @@ mod tests {
             })
             .unwrap();
         inst.identity_publisher_launched = true;
-
+        let identity = LaunchIdentity {
+            agent: "codex".into(),
+            account: LaunchAccount::Work,
+            launcher: Launcher::LedgerHeadroom,
+            profile: "resolved".into(),
+        };
+        inst.launch_identity = Some(identity.clone());
         inst.reconcile_from_disk();
-
         assert!(inst.identity_publisher_launched);
+        assert_eq!(inst.launch_identity, Some(identity));
+        storage
+            .update(|instances, _| {
+                instances[0].lifecycle_generation += 1;
+                Ok(())
+            })
+            .unwrap();
+        inst.reconcile_from_disk();
+        assert!(inst.launch_identity.is_none());
     }
 
     #[test]

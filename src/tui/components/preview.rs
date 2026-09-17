@@ -49,7 +49,7 @@ impl<'a> CachedPreview<'a> {
 /// taller pane than the visible output area, the top of its output gets
 /// clipped on every frame and the user sees content shifted up.
 pub fn agent_info_height(instance: &Instance) -> u16 {
-    let base: u16 = 3; // profile+tool / path / status
+    let base: u16 = 3 + u16::from(instance.current_launch_identity().is_some());
     let sandbox_lines: u16 = if instance.is_sandboxed() { 1 } else { 0 };
     if let Some(wt) = instance.worktree_info.as_ref() {
         // blank + header + branch + main (+ optional base)
@@ -328,6 +328,12 @@ impl Preview {
             Style::default().fg(theme.accent),
         ));
         info_lines.push(Line::from(profile_tool_spans));
+        if let Some(identity) = instance.current_launch_identity() {
+            info_lines.push(Line::from(vec![
+                Span::styled("Launch:  ", Style::default().fg(theme.dimmed)),
+                Span::styled(identity.description(), Style::default().fg(theme.text)),
+            ]));
+        }
 
         info_lines.extend([
             Line::from(vec![

@@ -20,6 +20,7 @@ impl Instance {
             command: String::new(),
             extra_args: String::new(),
             tool: "claude".to_string(),
+            launch_identity: None,
             detect_as: String::new(),
             yolo_mode: false,
             status: Status::Idle,

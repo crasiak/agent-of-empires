@@ -150,6 +150,7 @@ fn snapshot(sessions: &[AttachedStatusHookSession]) -> Vec<StatusUpdate> {
     sessions
         .iter()
         .map(|session| StatusUpdate {
+            launch_identity: None,
             id: session.instance.id.clone(),
             status: session.instance.status,
             last_error: session.instance.last_error.clone(),
@@ -214,6 +215,7 @@ mod tests {
         apply_updates(
             &mut sessions,
             vec![StatusUpdate {
+                launch_identity: None,
                 id: id.clone(),
                 status: Status::Waiting,
                 last_error: None,
@@ -262,6 +264,7 @@ mod tests {
         apply_updates(
             &mut sessions,
             vec![StatusUpdate {
+                launch_identity: None,
                 id: id.clone(),
                 status: Status::Idle,
                 last_error: None,
@@ -282,6 +285,7 @@ mod tests {
         apply_updates(
             &mut sessions,
             vec![StatusUpdate {
+                launch_identity: None,
                 id: id.clone(),
                 status: Status::Running,
                 last_error: None,

@@ -21,6 +21,7 @@ pub mod fork;
 mod groups;
 pub mod idle_reap;
 mod instance;
+pub mod launch_identity;
 pub mod mcp;
 mod move_journal;
 pub mod poller;
