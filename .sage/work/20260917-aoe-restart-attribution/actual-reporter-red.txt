@@ -1,0 +1,11 @@
+=== RUN   TestActualAOEReportCancellation
+=== RUN   TestActualAOEReportCancellation/false
+    aoe_launch_report_test.go:217: report exceeded bounds
+=== RUN   TestActualAOEReportCancellation/true
+    aoe_launch_report_test.go:221: open /var/folders/77/rmyw4q_j5tzdpcrg4v1_4mrh0000gn/T/TestActualAOEReportCancellationtrue1133284129/001/pids: no such file or directory
+--- FAIL: TestActualAOEReportCancellation (4.51s)
+    --- FAIL: TestActualAOEReportCancellation/false (3.00s)
+    --- FAIL: TestActualAOEReportCancellation/true (1.50s)
+FAIL
+FAIL	github.com/jws/ledger/cmd/ledger	5.244s
+FAIL

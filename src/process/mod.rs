@@ -132,6 +132,95 @@ pub fn run_with_timeout_process_group(
     )
 }
 
+/// Capture a small stdout reply without files or reader threads. The private
+/// process group is killed and its leader reaped on timeout, overflow, or error.
+/// Stdin and stderr are discarded; descendants holding stdout share the deadline.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn run_with_bounded_stdout(
+    cmd: &mut Command,
+    timeout: Duration,
+    max_bytes: usize,
+) -> std::io::Result<Option<Output>> {
+    struct Cleanup(Child, bool);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            if self.1 {
+                platform::kill_process_group(&self.0);
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    platform::configure_process_group(cmd);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = Cleanup(cmd.spawn()?, true);
+    let mut pipe = child
+        .0
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("missing stdout"))?;
+    unix::set_nonblocking(&pipe)?;
+    let deadline = Instant::now() + timeout;
+    let mut bytes = Vec::with_capacity(max_bytes.min(4096));
+    let mut buffer = [0_u8; 4096];
+    let mut eof = false;
+    let mut status = None;
+    loop {
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        let mut blocked = eof;
+        if !eof {
+            let limit = buffer
+                .len()
+                .min(max_bytes.saturating_sub(bytes.len()).saturating_add(1));
+            match pipe.read(&mut buffer[..limit]) {
+                Ok(0) => eof = true,
+                Ok(n) => {
+                    if n > max_bytes.saturating_sub(bytes.len()) {
+                        return Ok(None);
+                    }
+                    bytes.extend_from_slice(&buffer[..n]);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => blocked = true,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        if status.is_none() {
+            status = child.0.try_wait()?;
+        }
+        if let Some(status) = status.filter(|_| eof) {
+            child.1 = false;
+            return Ok(Some(Output {
+                status,
+                stdout: bytes,
+                stderr: Vec::new(),
+            }));
+        }
+        if blocked {
+            std::thread::sleep(
+                WAIT_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn run_with_bounded_stdout(
+    _: &mut Command,
+    _: Duration,
+    _: usize,
+) -> std::io::Result<Option<Output>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "bounded process groups are unavailable",
+    ))
+}
+
 fn run_with_timeout_inner(
     cmd: &mut Command,
     timeout: Duration,

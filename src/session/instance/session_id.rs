@@ -2373,11 +2373,39 @@ process.stdout.write(JSON.stringify({ rootOnly, defaultMode }));
             .unwrap()
             .contains(newer_id));
 
+        let mut prepared = prepared;
+        prepared
+            .launch_env
+            .pane
+            .push(crate::tmux::PaneEnvMutation::set(
+                crate::session::ledger_restart::INTENT_ENV.into(),
+                "restart_prime_refresh".into(),
+            ));
         let prepared = restarted
             .refresh_prepared_prime_launch_after_pane_stop(prepared)
             .unwrap();
         assert_eq!(restarted.agent_session_id.as_deref(), Some(newer_id));
         assert!(prepared.command.as_deref().unwrap().contains(newer_id));
+        let ledger_restart_env = prepared
+            .launch_env
+            .pane
+            .iter()
+            .filter(|mutation| match mutation {
+                crate::tmux::PaneEnvMutation::Set { key, .. }
+                | crate::tmux::PaneEnvMutation::Unset { key } => {
+                    key == crate::session::ledger_restart::INTENT_ENV
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            ledger_restart_env.as_slice(),
+            [
+                crate::tmux::PaneEnvMutation::Unset { key: unset },
+                crate::tmux::PaneEnvMutation::Set { key: set, value }
+            ] if unset == crate::session::ledger_restart::INTENT_ENV
+                && set == crate::session::ledger_restart::INTENT_ENV
+                && value == "restart_prime_refresh"
+        ));
         let _ = restarted.persist_session_id(
             &profile,
             prepared.expected_prior_sid.as_deref(),

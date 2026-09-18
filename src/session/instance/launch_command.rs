@@ -369,7 +369,11 @@ impl Instance {
         let expected_prior_sid = self.agent_session_id.clone();
         let expected_prior_intent = self.resume_intent.clone();
         let expected_prior_omp_generation = self.omp_capture_generation.clone();
-        let (command, is_existing, omp_capture_plan, launch_env) = self.build_launch_command()?;
+        let (command, is_existing, omp_capture_plan, mut launch_env) =
+            self.build_launch_command()?;
+        launch_env.pane.push(tmux::PaneEnvMutation::unset(
+            crate::session::ledger_restart::INTENT_ENV.into(),
+        ));
         Ok(PreparedLaunch {
             command,
             is_existing,
@@ -387,6 +391,18 @@ impl Instance {
         mut prepared: PreparedLaunch,
     ) -> Result<PreparedLaunch> {
         if self.absorb_published_prime_session() {
+            let ledger_restart_env = prepared
+                .launch_env
+                .pane
+                .iter()
+                .filter(|mutation| match mutation {
+                    tmux::PaneEnvMutation::Set { key, .. }
+                    | tmux::PaneEnvMutation::Unset { key } => {
+                        key == crate::session::ledger_restart::INTENT_ENV
+                    }
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             // Refresh launch data without changing the durable CAS baseline.
             (
                 prepared.command,
@@ -394,8 +410,29 @@ impl Instance {
                 prepared.omp_capture_plan,
                 prepared.launch_env,
             ) = self.build_launch_command()?;
+            prepared.launch_env.pane.extend(ledger_restart_env);
         }
         Ok(prepared)
+    }
+
+    pub(super) fn record_restart_before_teardown(
+        &self,
+        prepared: &mut PreparedLaunch,
+        prior: Option<&str>,
+    ) {
+        let resume = if prepared.is_existing {
+            self.agent_session_id.as_deref()
+        } else {
+            None
+        };
+        if let Some(intent) =
+            crate::session::ledger_restart::record_before_teardown(self, prior, resume)
+        {
+            prepared.launch_env.pane.push(tmux::PaneEnvMutation::set(
+                crate::session::ledger_restart::INTENT_ENV.into(),
+                intent,
+            ));
+        }
     }
 
     /// Construct the command only after hook execution has completed. Keeping
@@ -856,6 +893,18 @@ mod tests {
     use super::*;
 
     use crate::session::test_support::EnvGuard;
+
+    #[test]
+    fn ordinary_prepared_launch_clears_inherited_restart_intent() {
+        let mut instance = Instance::new("ledger intent", "/tmp/aoe-ledger-intent");
+        instance.tool = "codex".into();
+        instance.command = "ledger run codex --profile work-headroom".into();
+        let prepared = instance.prepare_launch_command().unwrap();
+        assert!(matches!(prepared.launch_env.pane.last(),
+            Some(tmux::PaneEnvMutation::Unset { key })
+                if key == crate::session::ledger_restart::INTENT_ENV));
+        assert!(!prepared.is_existing);
+    }
 
     #[test]
     fn test_all_agents_have_yolo_support() {

@@ -1,0 +1,117 @@
+   Compiling lzma-sys v0.1.20
+   Compiling agent-of-empires v1.16.0 (/Users/jws/code/agent-of-empires-worktrees/feature--ledger-restart-attribution)
+   Compiling aoe-plugin-api v0.1.0 (/Users/jws/code/agent-of-empires-worktrees/feature--ledger-restart-attribution/aoe-plugin-api)
+   Compiling xz2 v0.1.7
+   Compiling aoe-settings-derive v0.1.0 (/Users/jws/code/agent-of-empires-worktrees/feature--ledger-restart-attribution/aoe-settings-derive)
+error[E0425]: cannot find type `LedgerLaunchReport` in this scope
+  --> src/session/ledger_restart.rs:8:34
+   |
+ 8 |     fn prior() -> (LaunchReport, LedgerLaunchReport) {
+   |                                  ^^^^^^^^^^^^^^^^^^
+   |
+  ::: src/session/launch_identity.rs:37:1
+   |
+37 | pub struct LaunchReport {
+   | ----------------------- similarly named struct `LaunchReport` defined here
+   |
+help: a struct with a similar name exists
+   |
+ 8 -     fn prior() -> (LaunchReport, LedgerLaunchReport) {
+ 8 +     fn prior() -> (LaunchReport, LaunchReport) {
+   |
+
+error[E0422]: cannot find struct, variant or union type `LedgerLaunchReport` in this scope
+  --> src/session/ledger_restart.rs:13:12
+   |
+13 |         }, LedgerLaunchReport { instance_id: "1234567890abcdef".into(), pane_id: "%17".into(),
+   |            ^^^^^^^^^^^^^^^^^^
+   |
+  ::: src/session/launch_identity.rs:37:1
+   |
+37 | pub struct LaunchReport {
+   | ----------------------- similarly named struct `LaunchReport` defined here
+   |
+help: a struct with a similar name exists
+   |
+13 -         }, LedgerLaunchReport { instance_id: "1234567890abcdef".into(), pane_id: "%17".into(),
+13 +         }, LaunchReport { instance_id: "1234567890abcdef".into(), pane_id: "%17".into(),
+   |
+
+warning: unused import: `super::*`
+ --> src/session/ledger_restart.rs:5:9
+  |
+5 |     use super::*;
+  |         ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0425]: cannot find function `decode_prior` in this scope
+  --> src/session/ledger_restart.rs:24:17
+   |
+24 |         assert!(decode_prior(&line, &launch.instance_id).is_some());
+   |                 ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `decode_prior` in this scope
+  --> src/session/ledger_restart.rs:25:17
+   |
+25 |         assert!(decode_prior(&line, "another-instance").is_none());
+   |                 ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `decode_prior` in this scope
+  --> src/session/ledger_restart.rs:26:17
+   |
+26 |         assert!(decode_prior(&format!("%18|{legacy}|{encoded}"), &launch.instance_id).is_none());
+   |                 ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `decode_prior` in this scope
+  --> src/session/ledger_restart.rs:27:17
+   |
+27 |         assert!(decode_prior(&format!("%17|{legacy}|"), &launch.instance_id).is_none());
+   |                 ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `decode_prior` in this scope
+  --> src/session/ledger_restart.rs:30:17
+   |
+30 |         assert!(decode_prior(&"x".repeat(4097), &launch.instance_id).is_none());
+   |                 ^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `record_arguments` in this scope
+  --> src/session/ledger_restart.rs:36:20
+   |
+36 |         let args = record_arguments(&launch, &ledger, Some("prior-native"), Some("desired-native")).unwrap();
+   |                    ^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `record_arguments` in this scope
+  --> src/session/ledger_restart.rs:38:21
+   |
+38 |         let fresh = record_arguments(&launch, &ledger, None, None).unwrap();
+   |                     ^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `record_arguments` in this scope
+  --> src/session/ledger_restart.rs:41:17
+   |
+41 |         assert!(record_arguments(&launch, &ledger, None, Some("bad;target")).is_none());
+   |                 ^^^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `decode_intent` in this scope
+  --> src/session/ledger_restart.rs:42:20
+   |
+42 |         assert_eq!(decode_intent(br#"{"intent_id":"restart_abc"}"#).as_deref(), Some("restart_abc"));
+   |                    ^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `decode_intent` in this scope
+  --> src/session/ledger_restart.rs:43:17
+   |
+43 |         assert!(decode_intent(br#"{"intent_id":"bad/path"}"#).is_none());
+   |                 ^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `decode_intent` in this scope
+  --> src/session/ledger_restart.rs:44:17
+   |
+44 |         assert!(decode_intent(br#"{"intent_id":"restart_abc","body":"secret"}"#).is_none());
+   |                 ^^^^^^^^^^^^^ not found in this scope
+
+Some errors have detailed explanations: E0422, E0425.
+For more information about an error, try `rustc --explain E0422`.
+warning: `agent-of-empires` (lib test) generated 1 warning
+error: could not compile `agent-of-empires` (lib test) due to 13 previous errors; 1 warning emitted

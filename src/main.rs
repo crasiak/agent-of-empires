@@ -55,6 +55,21 @@ fn serve_unavailable_error(cli: &Cli) -> Option<clap::Error> {
     })
 }
 
+fn take_launch_report(command: &mut Option<Commands>) -> Option<cli::session::SessionCommands> {
+    use cli::session::SessionCommands;
+    if matches!(
+        command.as_ref(),
+        Some(Commands::Session {
+            command: SessionCommands::ReportLaunch(_) | SessionCommands::ReportLedgerLaunch(_)
+        })
+    ) {
+        if let Some(Commands::Session { command }) = command.take() {
+            return Some(command);
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Hidden internal helper for the VT live-preview path (`[tmux] vt_live`,
@@ -105,7 +120,7 @@ async fn main() -> Result<()> {
     // unknown subcommand falls through to the augmented tree, which grafts
     // active plugins' commands (loading the registry); there a grafted plugin
     // command is dispatched to the plugin handler, and core wins name conflicts.
-    let cli = match Cli::try_parse() {
+    let mut cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(_) => {
             let matches = cli::graft::augmented_command().get_matches();
@@ -115,6 +130,12 @@ async fn main() -> Result<()> {
             }
         }
     };
+
+    // Pane reports use only validated argv and the caller's exact tmux socket.
+    // They must not migrate stores, flush telemetry, or initialize app state.
+    if let Some(command) = take_launch_report(&mut cli.command) {
+        return cli::session::run("", command).await;
+    }
 
     // With the `aoe.web` plugin disabled, a fresh `aoe serve` start is treated
     // as an unrecognized subcommand. Done here, before any logging/app-dir side
@@ -489,4 +510,43 @@ async fn run(
     };
 
     result
+}
+
+#[cfg(test)]
+mod launch_report_startup_tests {
+    use super::*;
+
+    #[test]
+    fn only_validated_reporting_commands_bypass_application_startup() {
+        for argv in [
+            vec![
+                "aoe",
+                "session",
+                "report-ledger-launch",
+                "--run-id",
+                "run-test",
+            ],
+            vec![
+                "aoe",
+                "session",
+                "report-launch",
+                "--agent",
+                "codex",
+                "--account",
+                "work",
+                "--launcher",
+                "ledger-headroom",
+                "--launch-profile",
+                "p",
+            ],
+        ] {
+            let mut cli = Cli::try_parse_from(argv).unwrap();
+            assert!(take_launch_report(&mut cli.command).is_some());
+            assert!(cli.command.is_none());
+        }
+        let mut normal = Cli::try_parse_from(["aoe", "session", "start", "fixture"]).unwrap();
+        assert!(take_launch_report(&mut normal.command).is_none());
+        assert!(normal.command.is_some());
+        assert!(Cli::try_parse_from(["aoe", "session", "report-ledger-launch"]).is_err());
+    }
 }

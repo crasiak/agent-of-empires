@@ -1,0 +1,99 @@
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `agent-of-empires` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.90s
+     Running unittests src/lib.rs (target/aarch64-apple-darwin/debug/deps/agent_of_empires-8e0efb6d6646cdb8)
+
+running 87 tests
+test process::tests::boot_id_is_stable_within_a_boot ... ok
+test process::tests::processes_matching_detects_live_process_by_cmdline ... ok
+test process::tests::processes_matching_empty_input_is_empty ... ok
+test process::tests::reset_ignored_signals_before_exec_clears_sig_ign_on_sigint_and_sigquit ... ok
+test process::tests::reset_signals_on_exec_stops_child_from_inheriting_sig_ign ... ok
+test process::tests::restore_signals_on_drop_runs_even_when_the_scope_panics ... ok
+test process::tests::run_with_timeout_captures_output_for_fast_child ... ok
+test process::tests::run_with_timeout_does_not_wait_for_descendant_output_writer ... ok
+test process::tests::run_with_timeout_kills_child_that_outlives_deadline ... ok
+test process::tests::run_with_timeout_process_group_kills_descendants ... ok
+test process::tests::test_collect_descendants_from_map_branching ... ok
+test process::tests::test_collect_descendants_from_map_empty ... ok
+test process::tests::test_collect_descendants_from_map_multiple_children ... ok
+test process::tests::test_collect_descendants_from_map_nested ... ok
+test process::tests::test_collect_descendants_from_map_single_child ... ok
+test process::tests::test_collect_descendants_unrelated_processes ... ok
+test process::tests::wait_with_timeout_kills_child_that_outlives_deadline ... ok
+test process::tests::wait_with_timeout_returns_status_for_fast_child ... ok
+test session::instance::launch_command::tests::environment_defines_path_only_for_the_assigning_form ... ok
+test session::instance::launch_command::tests::fork_command_appends_opencode_flags ... ok
+test session::instance::launch_command::tests::fork_command_inserts_codex_subcommand_after_binary ... ok
+test session::instance::launch_command::tests::fork_flags_empty_for_unsupported_agent ... ok
+test session::instance::launch_command::tests::fork_flags_for_codex_and_opencode ... ok
+test session::instance::launch_command::tests::fork_flags_reject_invalid_ids ... ok
+test session::instance::launch_command::tests::ordinary_prepared_launch_clears_inherited_restart_intent ... ok
+test session::instance::launch_command::tests::pi_alias_with_non_pi_command_does_not_get_extension ... ok
+test session::instance::launch_command::tests::pi_option_terminator_disables_extension_injection ... ok
+test session::instance::launch_command::tests::resume_command_uses_validated_executable_anchor ... ok
+test session::instance::launch_command::tests::sandboxed_pi_launch_line_carries_the_sidecar_env ... ok
+test session::instance::launch_command::tests::sandboxed_pi_publishes_without_a_command_line_extension ... ok
+test session::instance::launch_command::tests::test_all_agents_have_yolo_support ... ok
+test session::instance::launch_command::tests::test_build_claude_resume_flags_existing ... ok
+test session::instance::launch_command::tests::test_build_claude_session_id_flags_new ... ok
+test session::instance::launch_command::tests::test_build_host_command_antigravity_forces_color ... ok
+test session::instance::launch_command::tests::test_build_host_command_basic ... ok
+test session::instance::launch_command::tests::test_build_host_command_codex_forces_color ... ok
+test session::instance::launch_command::tests::test_build_host_command_color_env_is_limited_to_color_sensitive_agents ... ok
+test session::instance::launch_command::tests::test_build_host_command_custom_override_skips_subcommand ... ok
+test session::instance::launch_command::tests::test_build_host_command_kiro_uses_chat_subcommand ... ok
+test session::instance::launch_command::tests::test_build_host_command_kiro_yolo_after_chat ... ok
+test session::instance::launch_command::tests::test_build_host_command_with_resume ... ok
+test session::instance::launch_command::tests::test_build_host_command_with_yolo ... ok
+test session::instance::launch_command::tests::test_build_host_custom_command_antigravity_forces_color ... ok
+test session::instance::launch_command::tests::test_build_opencode_resume_flags ... ok
+test session::instance::launch_command::tests::test_build_pi_resume_flags ... ok
+test session::instance::launch_command::tests::test_build_resume_flags_for_resume_only_agents ... ok
+test session::instance::launch_command::tests::test_build_resume_flags_rejects_invalid_id ... ok
+test session::instance::launch_command::tests::test_build_unknown_tool_resume_flags ... ok
+test session::instance::launch_command::tests::test_expects_shell ... ok
+test session::instance::launch_command::tests::test_get_tool_command_codex ... ok
+test session::instance::launch_command::tests::test_get_tool_command_custom_command ... ok
+test session::instance::launch_command::tests::test_get_tool_command_default_claude ... ok
+test session::instance::launch_command::tests::test_get_tool_command_gemini ... ok
+test session::instance::launch_command::tests::test_get_tool_command_opencode ... ok
+test session::instance::launch_command::tests::test_get_tool_command_unknown_tool ... ok
+test session::instance::launch_command::tests::test_has_command_override_extra_args_only ... ok
+test session::instance::launch_command::tests::test_has_custom_command_empty ... ok
+test session::instance::launch_command::tests::test_has_custom_command_override ... ok
+test session::instance::launch_command::tests::test_has_custom_command_same_as_agent_binary ... ok
+test session::instance::launch_command::tests::test_has_custom_command_unknown_tool ... ok
+test session::instance::launch_command::tests::test_selected_agent_args_combines_command_and_extra ... ok
+test session::instance::launch_command::tests::test_wrap_command_fish_skips_login ... ok
+test session::instance::launch_command::tests::test_wrap_command_nu_skips_login ... ok
+test session::instance::launch_command::tests::test_wrap_command_posix_shell_uses_login ... ok
+test session::instance::launch_command::tests::test_wrap_command_reasserts_working_dir_after_login_shell ... ok
+test session::instance::launch_command::tests::test_wrap_command_uses_stdin_script ... ok
+test session::instance::launch_command::tests::test_yolo_envvar_command_is_quoted ... ok
+test session::instance::launch_command::tests::test_yolo_envvar_survives_suspend_wrapper ... ok
+test session::instance::launch_command::tests::test_yolo_mode_helper ... ok
+test session::instance::launch_command::tests::test_yolo_mode_without_sandbox ... ok
+test session::instance::launch_command::tests::verified_direct_pi_alias_emits_the_extension_it_marks_as_launched ... ok
+test session::instance::resume::tests::allow_policy_still_attempts_resume_when_auto_resume_on_restart_is_false ... ok
+test session::instance::resume::tests::auto_resume_on_restart_false_skips_stored_sid_and_launches_fresh ... ok
+test session::instance::resume::tests::fallback_does_not_launch_fresh_when_command_would_live_without_stale_sid ... ok
+test session::instance::resume::tests::fallback_marks_resume_failed_and_preserves_sid_when_pane_dies ... ok
+test session::instance::resume::tests::launch_sid_outcome_carries_emitted_sid ... ok
+test session::instance::resume::tests::pinned_fresh_probe_uses_resolved_alias_capability ... ok
+test session::instance::resume::tests::restart_outcome_for_acp_session_is_fresh ... ok
+test session::instance::resume::tests::resume_and_capture_capabilities_control_each_path ... ok
+test session::instance::resume::tests::resume_failed_fires_when_pane_dies_inside_post_shell_grace_window ... ok
+test session::instance::resume::tests::resume_probe_failure_marks_before_cleanup ... ok
+test session::instance::resume::tests::stale_probe_failed_sid_is_not_retried_on_next_attempt ... ok
+test session::instance::resume::tests::start_with_resume_fallback_uses_launch_sid_for_probe_decision ... ok
+test session::instance::start::tests::start_with_size_opts_rejects_tampered_instance_id ... ok
+test session::instance::start::tests::start_with_size_opts_returns_skipped_for_structured ... ok
+test session::launch_identity::tests::launch_identity_follows_runtime_changes_not_profile_or_command_edits ... ok
+test session::launch_identity::tests::reports_require_explicit_identity_and_the_original_pane ... ok
+
+test result: ok. 87 passed; 0 failed; 0 ignored; 0 measured; 6803 filtered out; finished in 15.84s
+

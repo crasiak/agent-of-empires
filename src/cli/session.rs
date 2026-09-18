@@ -23,6 +23,70 @@ pub struct ReportLaunchArgs {
     launch_profile: String,
 }
 
+#[derive(Args)]
+pub struct ReportLedgerLaunchArgs {
+    #[arg(long)]
+    run_id: String,
+    #[arg(long)]
+    restart_intent: Option<String>,
+    // The calling Ledger supervisor owns this process group's deadline.
+    #[arg(long, hide = true)]
+    supervised_exec: bool,
+}
+
+fn report_ledger_launch(args: ReportLedgerLaunchArgs) -> Result<()> {
+    let pane_id =
+        std::env::var("TMUX_PANE").context("report-ledger-launch requires an agent pane")?;
+    let instance_id = std::env::var("AOE_INSTANCE_ID").context("AOE_INSTANCE_ID is missing")?;
+    let tmux = std::env::var("TMUX").context("TMUX is missing")?;
+    let (socket, _) = tmux
+        .rsplit_once(',')
+        .and_then(|(rest, _)| rest.rsplit_once(','))
+        .context("invalid TMUX socket information")?;
+    anyhow::ensure!(!socket.is_empty(), "TMUX socket is empty");
+    let report = crate::session::ledger_restart::LedgerLaunchReport {
+        instance_id,
+        pane_id,
+        run_id: args.run_id,
+        restart_intent: args.restart_intent,
+    };
+    let encoded = report.encode()?;
+    let mut command = std::process::Command::new("tmux");
+    command.args([
+        "-S",
+        socket,
+        "set-option",
+        "-p",
+        "-t",
+        &report.pane_id,
+        "@aoe_ledger_launch",
+        &encoded,
+    ]);
+    if args.supervised_exec {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // Retain the outer supervisor's process group: there is no nested
+            // helper to orphan if that supervisor reaches its deadline.
+            return Err(command.exec()).context("publishing supervised Ledger launch attribution");
+        }
+        #[cfg(not(unix))]
+        anyhow::bail!("supervised report exec is unavailable on this platform");
+    }
+    let output = crate::process::run_with_bounded_stdout(
+        &mut command,
+        std::time::Duration::from_millis(500),
+        4096,
+    )
+    .context("publishing Ledger launch attribution")?
+    .context("Ledger launch attribution helper exceeded its bounds")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "tmux rejected Ledger launch attribution"
+    );
+    Ok(())
+}
+
 fn report_launch(args: ReportLaunchArgs) -> Result<()> {
     use crate::session::launch_identity::{LaunchIdentity, LaunchReport};
     let pane_id =
@@ -45,7 +109,7 @@ fn report_launch(args: ReportLaunchArgs) -> Result<()> {
         },
     };
     let encoded = report.encode()?;
-    let output = crate::tmux::tmux_command()
+    let output = std::process::Command::new("tmux")
         .args([
             "-S",
             socket,
@@ -70,6 +134,8 @@ fn report_launch(args: ReportLaunchArgs) -> Result<()> {
 pub enum SessionCommands {
     /// Report resolved launch identity from inside the agent pane
     ReportLaunch(ReportLaunchArgs),
+    /// Report optional Ledger run attribution from inside the agent pane
+    ReportLedgerLaunch(ReportLedgerLaunchArgs),
     /// Start a session's tmux process
     Start(SessionIdArgs),
 
@@ -451,6 +517,7 @@ fn session_details(inst: &Instance, profile: &str) -> SessionDetails {
 pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
     match command {
         SessionCommands::ReportLaunch(args) => report_launch(args),
+        SessionCommands::ReportLedgerLaunch(args) => report_ledger_launch(args),
         SessionCommands::Start(args) => start_session(profile, args).await,
         SessionCommands::Stop(args) => stop_session(profile, args).await,
         SessionCommands::Restart(args) => restart_session_dispatch(profile, args).await,

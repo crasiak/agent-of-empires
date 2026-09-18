@@ -249,6 +249,7 @@ impl Instance {
         let hook_result = self.run_pre_launch_hooks(skip_on_launch, &profile);
         let (_title_lock, _lifecycle_lock) =
             self.reacquire_launch_locks_after_hooks(&storage, hook_result)?;
+        let prior_native_id = self.agent_session_id.clone();
         let skipped_failed_resume_sid = self.apply_resume_policy(resume_policy);
         self.apply_fresh_launch_intent();
 
@@ -261,6 +262,7 @@ impl Instance {
         };
         let result = (|| {
             if restart {
+                self.record_restart_before_teardown(&mut prepared, prior_native_id.as_deref());
                 self.kill_clean_locked()?;
                 prepared = self.refresh_prepared_prime_launch_after_pane_stop(prepared)?;
             }
@@ -446,6 +448,7 @@ impl Instance {
                 self.id,
             );
         }
+        crate::session::ledger_restart::seal_before_failed_resume_cleanup(self);
         self.kill_clean_locked()
             .with_context(|| format!("kill_clean before resume fallback for {}", self.id))?;
         self.status = Status::Error;

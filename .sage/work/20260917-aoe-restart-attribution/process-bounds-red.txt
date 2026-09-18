@@ -1,0 +1,27 @@
+   Compiling agent-of-empires v1.16.0 (/Users/jws/code/agent-of-empires-worktrees/feature--ledger-restart-attribution)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `agent-of-empires` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 45s
+     Running unittests src/lib.rs (target/aarch64-apple-darwin/debug/deps/agent_of_empires-8e0efb6d6646cdb8)
+
+running 1 test
+test session::ledger_restart::process_tests::helper_kills_descendants_on_inherited_pipe_timeout_and_live_overflow ... FAILED
+
+failures:
+
+---- session::ledger_restart::process_tests::helper_kills_descendants_on_inherited_pipe_timeout_and_live_overflow stdout ----
+
+thread 'session::ledger_restart::process_tests::helper_kills_descendants_on_inherited_pipe_timeout_and_live_overflow' (33942680) panicked at src/session/ledger_restart.rs:359:13:
+helper left descendant running
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    session::ledger_restart::process_tests::helper_kills_descendants_on_inherited_pipe_timeout_and_live_overflow
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6888 filtered out; finished in 2.07s
+
+error: test failed, to rerun pass `--lib`

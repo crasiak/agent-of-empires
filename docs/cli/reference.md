@@ -18,6 +18,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe killall`↴](#aoe-killall)
 * [`aoe session`↴](#aoe-session)
 * [`aoe session report-launch`↴](#aoe-session-report-launch)
+* [`aoe session report-ledger-launch`↴](#aoe-session-report-ledger-launch)
 * [`aoe session start`↴](#aoe-session-start)
 * [`aoe session stop`↴](#aoe-session-stop)
 * [`aoe session restart`↴](#aoe-session-restart)
@@ -389,6 +390,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 ###### **Subcommands:**
 
 * `report-launch` — Report resolved launch identity from inside the agent pane
+* `report-ledger-launch` — Report optional Ledger run attribution from inside the agent pane
 * `start` — Start a session's tmux process
 * `stop` — Stop session process
 * `restart` — Restart session (or all sessions with `--all`)
@@ -438,6 +440,19 @@ Report resolved launch identity from inside the agent pane
 * `--launch-profile <LAUNCH_PROFILE>` — Resolved launcher profile, independent of the AOE profile
 
   Default value: ``
+
+
+
+## `aoe session report-ledger-launch`
+
+Report optional Ledger run attribution from inside the agent pane
+
+**Usage:** `aoe session report-ledger-launch [OPTIONS] --run-id <RUN_ID>`
+
+###### **Options:**
+
+* `--run-id <RUN_ID>`
+* `--restart-intent <RESTART_INTENT>`
 
 
 

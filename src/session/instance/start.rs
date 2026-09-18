@@ -187,9 +187,10 @@ impl Instance {
         let hook_result = self.run_pre_launch_hooks(skip_on_launch, &profile);
         let (_title_lock, _lifecycle_lock) =
             self.reacquire_launch_locks_after_hooks(&storage, hook_result)?;
+        let prior_native_id = self.agent_session_id.clone();
         self.apply_fresh_launch_intent();
 
-        let prepared = match self.prepare_launch_command() {
+        let mut prepared = match self.prepare_launch_command() {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.fail_reserved_launch(&storage, &error, false);
@@ -198,6 +199,7 @@ impl Instance {
         };
         let result = (|| {
             if corpse_pane {
+                self.record_restart_before_teardown(&mut prepared, prior_native_id.as_deref());
                 self.kill_clean_locked()?;
             }
             let outcome = self.spawn_prepared_launch(size, &profile, prepared)?;

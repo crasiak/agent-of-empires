@@ -20,3 +20,14 @@ fn signal_process_group(child: &Child, signal: nix::sys::signal::Signal) {
     };
     let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), signal);
 }
+
+/// Pipe reads must never outlive the supervisor's deadline.
+pub(super) fn set_nonblocking(pipe: &std::process::ChildStdout) -> std::io::Result<()> {
+    use nix::fcntl::{fcntl, FcntlArg, OFlag};
+    let flags = fcntl(pipe, FcntlArg::F_GETFL)?;
+    fcntl(
+        pipe,
+        FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
+    )?;
+    Ok(())
+}

@@ -1,0 +1,5 @@
+# github.com/jws/ledger/cmd/ledger [github.com/jws/ledger/cmd/ledger.test]
+cmd/ledger/aoe_launch_report_test.go:111:10: undefined: sendAOELaunchReportWithLedger
+cmd/ledger/aoe_launch_report_test.go:116:10: undefined: sendAOELaunchReportWithLedger
+FAIL	github.com/jws/ledger/cmd/ledger [build failed]
+FAIL

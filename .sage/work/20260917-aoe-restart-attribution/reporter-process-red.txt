@@ -1,0 +1,5 @@
+--- FAIL: TestAOELaunchReportTimeoutKillsReporterDescendant (2.01s)
+    aoe_launch_report_test.go:177: reporter timeout left descendant running
+FAIL
+FAIL	github.com/jws/ledger/cmd/ledger	2.769s
+FAIL
