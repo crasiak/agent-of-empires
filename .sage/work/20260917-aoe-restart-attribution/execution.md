@@ -1,6 +1,6 @@
 ---
-status: in-progress
-phase: verification
+status: completed
+phase: release-qualified
 ---
 # Execution evidence
 
@@ -35,14 +35,14 @@ Before managed restart/corpse teardown, record the prior run, prior native ident
 
 Full output is in `process-bounds-green.txt` and `related-tests.txt`. Existing resume-failure and preserved-SID behavior passed with fake Claude fixtures on the test-only tmux socket. Ordinary launch environment clearing also passed. No real provider executable was run.
 
-## Remaining verification
+## Verification closure
 
-Formatting and diff checks pass. CLI documentation was regenerated with xtask using the native web feature and unchanged web assets; the supervised flag is hidden. Production clippy with `-- -D warnings` passes. Parent owns activation; full serial suite result remains pending below.
+Formatting and diff checks pass. CLI documentation was regenerated with xtask using the native web feature and unchanged web assets; the supervised flag is hidden. Production clippy with `-- -D warnings` passes. Parent owns activation. The full serial suite and final release artifact passed; see final qualification below.
 
 
 ## Outer Ledger reporter cancellation review
 
-Independent review found that the existing Go reporter timeout killed only the immediate AOE process. A new fake reporter regression first failed with `reporter timeout left descendant running` (2.01s). The Go producer now assigns its metadata helper a private process group, kills the group in `Cmd.Cancel`, and sets `WaitDelay=100ms`. The focused Go report suite passed:
+Independent review found that the existing Go reporter timeout killed only the immediate AOE process. A new fake reporter regression first failed with `reporter timeout left descendant running` (2.01s). The Go producer now assigns its metadata helper a private process group, kills the group in `Cmd.Cancel`, and sets `WaitDelay=100 ms`. The focused Go report suite passed:
 
     ok  github.com/jws/ledger/cmd/ledger  3.369s
 
@@ -78,10 +78,49 @@ Actual native binary gate (`LEDGER_TEST_AOE_EXECUTABLE=<worktree>/target/aarch64
     PASS
     ok  github.com/jws/ledger/cmd/ledger  2.414s
 
-Both modes leave no fake tmux/helper descendant and create no app runtime directory. One first post-rebuild standalone attempt hit its outer3s fixture deadline; direct isolated retries measured0.52s and the complete gate then passed. Cold execution/load is a hypothesis, not established cause. OS spawn/startup latency can still make metadata unavailable; callbacks remain best-effort and do not authorize native behavior changes.
+Both modes leave no fake tmux/helper descendant and create no app runtime directory. One first post-rebuild standalone attempt hit its outer 3s fixture deadline; direct isolated retries measured 0.52s and the complete gate then passed. Cold execution/load is a hypothesis, not established cause. OS spawn/startup latency can still make metadata unavailable; callbacks remain best-effort and do not authorize native behavior changes.
 
 Production `cargo clippy --offline --target aarch64-apple-darwin --features web --no-default-features -- -D warnings`:
 
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 53.87s
 
-`cargo fmt --all -- --check` and `git diff --check` pass. The broader clippy invocation with tests enabled reported one existing `items_after_test_module` warning in unchanged `src/process/macos.rs`; production strict lint is clean. Raw evidence is in `actual-reporter-green.txt`, `startup-test.txt`, and `clippy-production.txt`. Parent committed the shared Go reporter in9b85c7a7. Full serial suite is still running; source commit/build preparation is not a claim that the unfinished full run passed. Release artifact will be built from this clean source revision and deployment remains with parent.
+`cargo fmt --all -- --check` and `git diff --check` pass. The broader clippy invocation with tests enabled reported one existing `items_after_test_module` warning in unchanged `src/process/macos.rs`; production strict lint is clean. Raw evidence is in `actual-reporter-green.txt`, `startup-test.txt`, and `clippy-production.txt`. Parent committed the shared Go reporter in 9b85c7a7. Full serial suite is still running; source commit/build preparation is not a claim that the unfinished full run passed. Release artifact will be built from this clean source revision and deployment remains with parent.
+
+
+## Final release qualification
+
+Source commit: `8529aefba662ab2508f045bb698fb0947f9de0b9`. This descends directly from deployed baseline `71f3812950ba`, confirmed by read-only binary inspection of `/Users/jws/.local/bin/aoe` before installation. Prior installed SHA256: `e02359a5181a92e7b0f9625caebe5bd7835639fd32d01707c05723e499409e09`.
+
+The full serial suite completed successfully:
+
+    test result: ok. 6888 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 296.58s
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+    test result: ok. 289 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 88.06s
+    test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+Total: 7,179 passed, 0 failed, 8 ignored. Summary is in `full-suite-summary.txt`; the complete raw log remains `/tmp/aoe-restart-full-serial.txt`.
+
+Release command: `AOE_WEB_DIST=<unchanged baseline>/web/dist CARGO_BUILD_JOBS=1 SHELL=/bin/zsh cargo +stable-aarch64-apple-darwin build --release --offline --target aarch64-apple-darwin --features web --no-default-features`.
+
+    Finished `release` profile [optimized] target(s) in 21m 05s
+
+The selected web/no-default feature set matches the tests. The default `default-plugins` marker is empty and unreferenced in production Rust/build code at this revision, so omitting that marker introduces no additional behavior delta. Full release LTO and `codegen-units = 1` were retained. Vendored OpenSSL and final LTO were monitored through process CPU/object-file progress; no build restart or optimization downgrade occurred. Source stayed clean until the final executable finished.
+
+Artifact: `/Users/jws/code/agent-of-empires-worktrees/feature--ledger-restart-attribution/target/aarch64-apple-darwin/release/aoe`.
+
+- SHA256: `ffefbad8efdf6805ddc7286360284baf09b13a6a17255031dced6f6d6fb4980a`
+- Architecture: Mach-O 64-bit arm64, independently checked with `file` and `lipo -archs`.
+- Mode 0755; size 55,633,024 bytes; CLI version `aoe 1.16.0`.
+- Embedded build identity: `1.16.0+g8529aefba662`, no dirty suffix.
+- Toolchain: native rustc 1.97.1 (8bab26f4f, 2026-07-14), LLVM 22.1.6.
+
+Actual final release AOE-to-fake-tmux callback gate:
+
+    --- PASS: TestActualAOEReportCancellation (2.02s)
+        --- PASS: TestActualAOEReportCancellation/false (0.52s)
+        --- PASS: TestActualAOEReportCancellation/true (1.50s)
+    PASS
+    ok  github.com/jws/ledger/cmd/ledger  2.442s
+
+Both standalone and outer-supervised modes removed fake tmux and its child and created no runtime app directory. Metadata, raw gate output, toolchain and full build log are committed alongside this record. Parent received the verified artifact and checksum and owns installation/rollback. This worker did not change installed AOE or restart dashboard/TUI/native sessions, did not fetch/rebase upstream, and did not push or remove stashes. Parent separately reported a successful whole-chain fake tmux→installed Ledger→AOE metadata→restart intent attachment smoke. Existing running AOE processes keep their loaded code until normally replaced; this source qualification does not claim retroactive instrumentation.

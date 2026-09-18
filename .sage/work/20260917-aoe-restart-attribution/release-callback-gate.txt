@@ -1,0 +1,8 @@
+=== RUN   TestActualAOEReportCancellation
+=== RUN   TestActualAOEReportCancellation/false
+=== RUN   TestActualAOEReportCancellation/true
+--- PASS: TestActualAOEReportCancellation (2.02s)
+    --- PASS: TestActualAOEReportCancellation/false (0.52s)
+    --- PASS: TestActualAOEReportCancellation/true (1.50s)
+PASS
+ok  	github.com/jws/ledger/cmd/ledger	2.442s

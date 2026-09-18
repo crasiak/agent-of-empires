@@ -1,5 +1,9 @@
 # Decisions
 
+## 2026-09-17: Clean release artifact qualifies source 8529aefb
+
+The final serial web suite passed 7,179 tests with 8 intentional ignores; strict production clippy, formatting and real release AOE-to-fake-tmux cancellation checks passed. Build the full optimized ARM/web artifact with one compiler job from clean 8529aefb, retaining LTO and the tested feature set. The installed binary was confirmed as source 71f38129, the exact feature baseline. Hand the verified checksum/path to parent for reversible installation, preserving attached TUI and live agents. This later documentation-only commit does not change the qualified source or artifact build identity. No upstream rebase, provider calls or installed mutation by this worker.
+
 ## 2026-09-17: Reporting bypasses general application startup
 
 Actual binary verification showed the old reporting path could spend its whole deadline on unrelated CLI prework before reaching tmux. Parent approved dispatching only validated report-launch/report-ledger-launch commands immediately after clap parsing, before telemetry, migrations or application setup. Construct their structured tmux command directly with the caller’s explicit socket. Other session commands keep normal startup. The actual gate must verify no application runtime directory is created. The parallel full suite exposed an unrelated global PATH race; isolate it and rerun the final full suite serially.

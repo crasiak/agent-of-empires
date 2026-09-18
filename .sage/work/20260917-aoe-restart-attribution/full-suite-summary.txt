@@ -1,0 +1,14 @@
+Command: AOE_WEB_DIST=<unchanged baseline>/web/dist CARGO_BUILD_JOBS=1 SHELL=/bin/zsh cargo +stable-aarch64-apple-darwin test --offline --target aarch64-apple-darwin --features web --no-default-features -- --test-threads=1
+Full raw log: /tmp/aoe-restart-full-serial.txt
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 54.30s
+     Running unittests src/lib.rs (target/aarch64-apple-darwin/debug/deps/agent_of_empires-8e0efb6d6646cdb8)
+test result: ok. 6888 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 296.58s
+     Running unittests src/main.rs (target/aarch64-apple-darwin/debug/deps/aoe-6568e7667d3133e5)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/branch_exists_spawn_failure.rs (target/aarch64-apple-darwin/debug/deps/branch_exists_spawn_failure-f92f8824f5d22f74)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+     Running tests/integration/main.rs (target/aarch64-apple-darwin/debug/deps/integration-1930f4979fe5042a)
+test result: ok. 289 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 88.06s
+   Doc-tests agent_of_empires
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s

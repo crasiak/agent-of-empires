@@ -1,0 +1,17 @@
+{
+  "source_commit": "8529aefba662ab2508f045bb698fb0947f9de0b9",
+  "path": "/Users/jws/code/agent-of-empires-worktrees/feature--ledger-restart-attribution/target/aarch64-apple-darwin/release/aoe",
+  "sha256": "ffefbad8efdf6805ddc7286360284baf09b13a6a17255031dced6f6d6fb4980a",
+  "size_bytes": 55633024,
+  "mode": "0o755",
+  "version": "aoe 1.16.0",
+  "embedded_build_ids": [
+    "1.16.0+g8529aefba662"
+  ],
+  "architecture": "arm64",
+  "toolchain": "rustc 1.97.1 (8bab26f4f 2026-07-14), LLVM22.1.6",
+  "features": [
+    "web"
+  ],
+  "default_features": false
+}
