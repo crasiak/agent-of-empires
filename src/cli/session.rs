@@ -199,8 +199,8 @@ pub enum SessionCommands {
     /// Clear the favorite flag on a session.
     Unfavorite(SessionIdArgs),
 
-    /// Set (or clear) a per-session color label, rendered as a colored dot in
-    /// the web sidebar for at-a-glance status signaling. Intended for a
+    /// Set (or clear) a per-session color, rendered as a whole-row highlight in
+    /// the web sidebar for at-a-glance signaling. Intended for a
     /// running agent to flag its own state, e.g.
     /// `aoe session color $(aoe session current -q) red`. Colors: `red`
     /// (needs attention), `amber` (working), `green` (done); `none` clears it.

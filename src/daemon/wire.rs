@@ -234,7 +234,7 @@ pub struct SessionResponse {
     #[serde(default)]
     pub favorited: bool,
     /// Per-session color label (`red` / `amber` / `green`), or omitted when
-    /// unset. Rendered as a colored status dot in the web sidebar; set via the
+    /// unset. Rendered as a whole-row highlight in the web sidebar; set via the
     /// sidebar context menu or `aoe session color`. See #2383.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,

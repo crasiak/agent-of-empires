@@ -524,12 +524,12 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch_override: Option<String>,
 
-    /// Per-session color label for at-a-glance status signaling in the web
-    /// sidebar (a colored dot next to the title). Purely a decoration: it does
-    /// not re-rank the session. Settable from the web context menu and from the
+    /// Per-session highlight for at-a-glance signaling in the web sidebar. It
+    /// tints the whole row and adds a solid color cue without re-ranking the
+    /// session. Settable from the web context menu and from the
     /// CLI (`aoe session color <id> <color>`) so a running agent can flag its
     /// own state (red = needs attention, amber = working, green = done) without
-    /// the user opening the session. `None` clears the dot. Constrained to the
+    /// the user opening the session. `None` clears the highlight. Constrained to the
     /// [`SESSION_COLORS`] palette by [`is_valid_session_color`]. Additive:
     /// absent in older `sessions.json` rows, so no migration is needed. See
     /// #2383.

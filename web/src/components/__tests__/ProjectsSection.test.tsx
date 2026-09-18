@@ -38,6 +38,7 @@ function renderSection(props: Partial<Parameters<typeof ProjectsSection>[0]> = {
     onAddProject: vi.fn(),
     onEditProject: vi.fn(),
     onRemoveProject: vi.fn(),
+    onUpdateAppearance: vi.fn(),
   };
   render(
     <ProjectsSection projects={[emptyProject("/work/alpha")]} query="" offline={false} {...handlers} {...props} />,
@@ -94,6 +95,24 @@ describe("ProjectsSection", () => {
     expect(h.onRemoveProject).toHaveBeenCalledWith(expect.objectContaining({ repoPath: "/work/alpha" }));
   });
 
+  it("sets and clears a whole-row highlight from the context menu", () => {
+    const h = renderSection();
+    const row = screen.getByTestId("sidebar-project-row");
+
+    fireEvent.contextMenu(row);
+    fireEvent.click(screen.getByTestId("sidebar-project-color-violet"));
+    expect(h.onUpdateAppearance).toHaveBeenCalledWith("/work/alpha", { color: "violet" });
+
+    fireEvent.contextMenu(row);
+    fireEvent.click(screen.getByTestId("sidebar-project-color-clear"));
+    expect(h.onUpdateAppearance).toHaveBeenCalledWith("/work/alpha", { color: null });
+  });
+
+  it("tints the whole row when a project has a highlight", () => {
+    renderSection({ projects: [emptyProject("/work/alpha", { color: "sky" })] });
+    expect(screen.getByTestId("sidebar-project-row").style.backgroundColor).toContain("color-mix");
+  });
+
   it("caps the context menu with the dynamic viewport so its tail scrolls on iOS (#2870)", () => {
     renderSection();
     fireEvent.contextMenu(screen.getByTestId("sidebar-project-row"));
@@ -135,6 +154,7 @@ describe("ProjectsSection", () => {
         onAddProject={vi.fn()}
         onEditProject={vi.fn()}
         onRemoveProject={vi.fn()}
+        onUpdateAppearance={vi.fn()}
       />,
     );
     expect(container.querySelector("[data-testid='sidebar-projects-section']")).toBeNull();

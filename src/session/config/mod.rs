@@ -1447,9 +1447,9 @@ pub struct SessionConfig {
     )]
     pub unread_indicator: bool,
 
-    /// Show per-session color labels: the colored dot on sidebar rows and the
-    /// `Color` section in the session context menu. Web dashboard only; the TUI
-    /// does not render session colors. Turning this off hides them without
+    /// Show per-session highlights: a tinted sidebar row with a solid color cue
+    /// and the `Highlight row` section in its context menu. Web dashboard only;
+    /// the TUI does not render session colors. Turning this off hides them without
     /// forbidding anything, `aoe session color` and the REST endpoint keep
     /// working and stored values are preserved, so flipping back reveals them
     /// again.
@@ -1460,7 +1460,7 @@ pub struct SessionConfig {
     /// advertise semantics the web cannot honor.
     #[serde(default = "default_true")]
     #[setting(
-        label = "Session Color Labels",
+        label = "Session Row Highlights",
         widget = "toggle",
         category = "Interaction",
         global_only

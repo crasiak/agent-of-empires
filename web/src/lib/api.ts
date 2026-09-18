@@ -2427,9 +2427,9 @@ export async function setSessionPin(id: string, pinned: boolean): Promise<Sessio
   }
 }
 
-/** Set (or clear, with `null`) a session's color label. Rendered as a colored
- *  status dot in the sidebar; the palette is `red` / `amber` / `green`. Also
- *  settable from the CLI via `aoe session color`. See #2383. */
+/** Set (or clear, with `null`) a session's whole-row sidebar highlight. The
+ *  palette is `red` / `amber` / `green`; the CLI exposes the same setting via
+ *  `aoe session color`. */
 export async function setSessionColor(id: string, color: string | null): Promise<SessionResponse | null> {
   try {
     const res = await fetch(`/api/sessions/${id}/color`, {

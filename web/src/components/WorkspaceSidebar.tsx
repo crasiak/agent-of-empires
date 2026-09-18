@@ -10,6 +10,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type CSSProperties,
   type MutableRefObject,
 } from "react";
 import { createPortal } from "react-dom";
@@ -189,19 +190,27 @@ export interface RowBulkApi {
 const CTX_ITEM =
   "w-full text-left px-3 py-2 md:py-2 max-md:py-3 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors flex items-center gap-2";
 
-/** MVP per-session color palette (#2383). Mirrors the Rust `SESSION_COLORS`
- *  list; each entry maps a palette key to its display label and the Tailwind
- *  class for its status dot. Kept small and status-oriented on purpose. */
-const SESSION_COLOR_OPTIONS: { key: string; label: string; dotClass: string }[] = [
-  { key: "red", label: "Red · needs attention", dotClass: "bg-red-500" },
-  { key: "amber", label: "Amber · working", dotClass: "bg-amber-400" },
-  { key: "green", label: "Green · done", dotClass: "bg-green-500" },
+/** MVP per-session highlight palette (#2383). Mirrors the Rust
+ *  `SESSION_COLORS` list. Theme tokens keep the row tint legible in custom
+ *  light and dark themes while the solid dot remains an accessible cue. */
+const SESSION_COLOR_OPTIONS: { key: string; label: string; dotClass: string; token: string }[] = [
+  { key: "red", label: "Red · needs attention", dotClass: "bg-red-500", token: "--color-status-error" },
+  { key: "amber", label: "Amber · working", dotClass: "bg-amber-400", token: "--color-status-waiting" },
+  { key: "green", label: "Green · done", dotClass: "bg-green-500", token: "--color-status-running" },
 ];
 
 /** Tailwind dot class for a stored color key, or null when unset / unknown. */
 function sessionColorDotClass(color: string | null | undefined): string | null {
   if (!color) return null;
   return SESSION_COLOR_OPTIONS.find((o) => o.key === color)?.dotClass ?? null;
+}
+
+/** Whole-row bookmark tint for a stored color key. */
+function sessionColorStyle(color: string | null | undefined): CSSProperties | undefined {
+  if (!color) return undefined;
+  const token = SESSION_COLOR_OPTIONS.find((o) => o.key === color)?.token;
+  if (!token) return undefined;
+  return { backgroundColor: `color-mix(in srgb, var(${token}) 14%, transparent)` };
 }
 
 /** Triage actions for the right-click menu when more than one row is selected.
@@ -1107,10 +1116,23 @@ export const SessionRow = memo(function SessionRow({
   // row visually so the user can find their starred work fast. Toggled
   // via TUI `f`/`F` or `aoe session favorite|unfavorite`.
   const isFavorited = workspace.sessions.some((s) => s.favorited);
-  // Per-session color label (#2383): the first session in the workspace that
-  // carries a color wins, mirroring how `snoozedUntil` picks the first match.
+  // Per-session bookmark highlight (#2383): the first session in the
+  // workspace that carries a color wins, mirroring how `snoozedUntil` picks
+  // the first match.
   const sessionColor = workspace.sessions.map((s) => s.color).find((c) => c != null) ?? null;
-  const sessionColorDot = sessionColorDotClass(sessionColor);
+  // Keep the chosen tint visible until the session feed moves away from the
+  // value we started with. The pair avoids a prop-to-state synchronization
+  // effect while still distinguishing an optimistic clear from no mutation.
+  const [pendingSessionColor, setPendingSessionColor] = useState<{
+    requested: string | null;
+    serverColor: string | null;
+  } | null>(null);
+  const effectiveSessionColor =
+    pendingSessionColor && sessionColor === pendingSessionColor.serverColor
+      ? pendingSessionColor.requested
+      : sessionColor;
+  const sessionColorDot = sessionColorDotClass(effectiveSessionColor);
+  const sessionHighlightStyle = sessionColorsEnabled ? sessionColorStyle(effectiveSessionColor) : undefined;
   // Web-only triage signals. `pinned` floats the workspace to the top
   // of every sort mode; `archived` and `snoozedUntil` mark the row as
   // sunk (the parent splits sunk workspaces into a separate collapsible
@@ -1154,7 +1176,7 @@ export const SessionRow = memo(function SessionRow({
   const navigationSessionId = navigationSession?.id ?? null;
   const sessionPath = navigationSessionId ? `/session/${encodeURIComponent(navigationSessionId)}` : "/";
   const isDeleting = sessionStatus === "Deleting";
-  // Compact rail: keep status glyph + color dot + truncated title, drop the
+  // Compact rail: keep status glyph + highlight cue + truncated title, drop the
   // prefix markers, trailing badges, and sub-rows that will not fit (#2288).
   const compact = useSidebarCompact();
   const notifyPreset = detectNotifyPreset(
@@ -1194,14 +1216,16 @@ export const SessionRow = memo(function SessionRow({
     await setSessionNotifications(sessionId, preset);
   };
 
-  // Set (or clear, with `null`) this row's color label. Fire-and-forget: the
-  // dot reflects on the next sessions poll (there is no optimistic overlay for
-  // color). A failed request surfaces a toast. See #2383.
+  // Set (or clear, with `null`) this row's highlight. The optimistic tint is
+  // immediate; the next session feed update becomes authoritative. A failed
+  // request restores the server value.
   const applyColor = async (color: string | null) => {
     setContextMenu(null);
-    if (!sessionId || color === sessionColor) return;
+    if (!sessionId || color === effectiveSessionColor) return;
+    setPendingSessionColor({ requested: color, serverColor: sessionColor });
     const result = await setSessionColor(sessionId, color);
     if (!result) {
+      setPendingSessionColor(null);
       reportError(color ? "Failed to set session color" : "Failed to clear session color");
     }
   };
@@ -1566,7 +1590,9 @@ export const SessionRow = memo(function SessionRow({
         tabIndex={isDeleting ? -1 : undefined}
         aria-disabled={isDeleting || undefined}
         data-testid="sidebar-session-row"
+        data-highlight-color={sessionColorsEnabled && sessionColorDot ? effectiveSessionColor : undefined}
         title={needsAttention ? `${label} · ${attentionHint}` : label}
+        style={sessionHighlightStyle}
         draggable={false}
         onClick={(e) => {
           // Let the browser handle non-primary clicks (middle-click still
@@ -1626,10 +1652,10 @@ export const SessionRow = memo(function SessionRow({
             >
               {sessionColorsEnabled && sessionColorDot && (
                 <span
-                  title={`Color: ${sessionColor}`}
-                  aria-label={`Color: ${sessionColor}`}
+                  title={`Highlight: ${effectiveSessionColor}`}
+                  aria-label={`Highlight: ${effectiveSessionColor}`}
                   data-testid="sidebar-session-color-dot"
-                  data-color={sessionColor ?? undefined}
+                  data-color={effectiveSessionColor ?? undefined}
                   className={`shrink-0 inline-block h-2 w-2 rounded-full ${sessionColorDot}`}
                 />
               )}
@@ -1956,10 +1982,10 @@ export const SessionRow = memo(function SessionRow({
                   <>
                     <div className="border-t border-surface-700/20 my-1" />
                     <div className="px-3 py-1 text-[11px] font-mono uppercase tracking-widest text-text-muted">
-                      Color
+                      Highlight row
                     </div>
                     {SESSION_COLOR_OPTIONS.map((opt) => {
-                      const selected = sessionColor === opt.key;
+                      const selected = effectiveSessionColor === opt.key;
                       return (
                         <button
                           key={opt.key}
@@ -1975,14 +2001,14 @@ export const SessionRow = memo(function SessionRow({
                         </button>
                       );
                     })}
-                    {sessionColor && (
+                    {effectiveSessionColor && (
                       <button
                         onClick={() => void applyColor(null)}
                         data-testid="sidebar-context-menu-color-clear"
                         className="w-full text-left pl-6 pr-3 py-2 md:py-2 max-md:py-3 text-sm text-text-secondary hover:bg-surface-700/50 cursor-pointer transition-colors flex items-center gap-2"
                       >
                         <span className="h-2.5 w-2.5 shrink-0 rounded-full border border-surface-600" />
-                        Clear color
+                        Remove highlight
                       </button>
                     )}
                   </>
@@ -4322,6 +4348,7 @@ export function WorkspaceSidebar({
               onAddProject={onAddProject}
               onEditProject={onEditProject}
               onRemoveProject={onRemoveProject}
+              onUpdateAppearance={onUpdateRepoAppearance}
             />
           )}
 

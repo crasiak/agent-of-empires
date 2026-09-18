@@ -805,8 +805,8 @@ describe("SessionRow unread", () => {
   });
 });
 
-describe("SessionRow color label (#2383)", () => {
-  it("renders the color dot when a session carries a color", () => {
+describe("SessionRow bookmark highlight (#2383)", () => {
+  it("highlights the whole row and renders a color cue when a session carries a color", () => {
     const ws = workspace("w-color", [session({ id: "s-color", color: "red" })]);
     render(
       <Wrap>
@@ -814,8 +814,11 @@ describe("SessionRow color label (#2383)", () => {
       </Wrap>,
     );
     const dot = screen.getByTestId("sidebar-session-color-dot");
+    const row = screen.getByTestId("sidebar-session-row");
     expect(dot.getAttribute("data-color")).toBe("red");
     expect(dot.className).toContain("bg-red-500");
+    expect(row.getAttribute("data-highlight-color")).toBe("red");
+    expect(row.style.backgroundColor).toContain("color-mix");
   });
 
   it("renders no color dot when color is unset", () => {
@@ -838,7 +841,7 @@ describe("SessionRow color label (#2383)", () => {
     expect(screen.queryByTestId("sidebar-session-color-dot")).toBeNull();
   });
 
-  it("Color swatch click fires PATCH /api/sessions/:id/color with { color: 'red' }", async () => {
+  it("highlight swatch click fires PATCH /api/sessions/:id/color with { color: 'red' }", async () => {
     const ws = workspace("w-live", [session({ id: "sess-color-it" })]);
     render(
       <Wrap>
@@ -852,9 +855,11 @@ describe("SessionRow color label (#2383)", () => {
     expect(url).toBe("/api/sessions/sess-color-it/color");
     expect(init?.method).toBe("PATCH");
     expect(JSON.parse(init!.body as string)).toEqual({ color: "red" });
+    expect(screen.getByTestId("sidebar-session-row").getAttribute("data-highlight-color")).toBe("red");
+    expect(screen.getByTestId("sidebar-session-row").style.backgroundColor).toContain("color-mix");
   });
 
-  it("shows a Clear color item on a colored row that fires { color: null }", async () => {
+  it("shows a remove item on a highlighted row that fires { color: null }", async () => {
     const ws = workspace("w-colored", [session({ id: "sess-clear-it", color: "green" })]);
     render(
       <Wrap>
@@ -894,7 +899,7 @@ describe("SessionRow color label (#2383)", () => {
 
   // `session.show_session_colors = false` (#3104). The gate hides, it does not
   // forbid: the stored value is untouched, so re-enabling brings the dot back.
-  it("renders no color dot when session colors are disabled, even with a color stored", () => {
+  it("renders no highlight when session colors are disabled, even with a color stored", () => {
     const ws = workspace("w-off-dot", [session({ id: "sess-off-dot", color: "red" })]);
     render(
       <Wrap colorsEnabled={false}>
@@ -902,6 +907,8 @@ describe("SessionRow color label (#2383)", () => {
       </Wrap>,
     );
     expect(screen.queryByTestId("sidebar-session-color-dot")).toBeNull();
+    expect(screen.getByTestId("sidebar-session-row").getAttribute("data-highlight-color")).toBeNull();
+    expect(screen.getByTestId("sidebar-session-row").style.backgroundColor).toBe("");
   });
 
   it("hides the whole color section when session colors are disabled", () => {

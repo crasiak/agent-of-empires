@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ProjectInfo, RepoGroup } from "../lib/types";
-import { repoColorStyle } from "../lib/repoAppearance";
+import { REPO_COLOR_OPTIONS, repoColorStyle, repoSwatchStyle, type RepoAppearanceUpdate } from "../lib/repoAppearance";
 import { menuBus, closeOtherContextMenus } from "../lib/menuBus";
 import { useClampedMenuPosition } from "../lib/menuPosition";
 import { safeGetItem, safeSetItem } from "../lib/safeStorage";
@@ -27,6 +27,7 @@ interface ProjectsSectionProps {
   onAddProject: () => void;
   onEditProject: (project: ProjectInfo) => void;
   onRemoveProject: (group: RepoGroup) => void;
+  onUpdateAppearance: (repoId: string, update: RepoAppearanceUpdate) => void;
 }
 
 // Dedicated, axis-independent section listing registered projects that have no
@@ -42,6 +43,7 @@ export function ProjectsSection({
   onAddProject,
   onEditProject,
   onRemoveProject,
+  onUpdateAppearance,
 }: ProjectsSectionProps) {
   const [expanded, setExpanded] = useState<boolean>(loadExpanded);
   // Slim rail: the header label and rows have to survive ~88px (#2288).
@@ -130,6 +132,7 @@ export function ProjectsSection({
             onCreateSession={onCreateSession}
             onEditProject={onEditProject}
             onRemoveProject={onRemoveProject}
+            onUpdateAppearance={onUpdateAppearance}
           />
         ))}
       {expanded && visible.length === 0 && !compact && (
@@ -148,6 +151,7 @@ const ProjectRow = memo(function ProjectRow({
   onCreateSession,
   onEditProject,
   onRemoveProject,
+  onUpdateAppearance,
 }: {
   project: RepoGroup;
   readOnly?: boolean;
@@ -155,6 +159,7 @@ const ProjectRow = memo(function ProjectRow({
   onCreateSession: (repoPath: string) => void;
   onEditProject: (project: ProjectInfo) => void;
   onRemoveProject: (group: RepoGroup) => void;
+  onUpdateAppearance: (repoId: string, update: RepoAppearanceUpdate) => void;
 }) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -285,6 +290,40 @@ const ProjectRow = memo(function ProjectRow({
                 {project.registeredProjects.length > 1 ? `Edit base branch (${reg.scope})` : "Edit base branch"}
               </button>
             ))}
+            <div className="border-t border-surface-700/20 my-1" />
+            <div className="px-3 py-1 text-[11px] font-mono uppercase tracking-widest text-text-muted">
+              Highlight row
+            </div>
+            <div className="grid grid-cols-4 gap-1 px-3 py-1.5">
+              {REPO_COLOR_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => {
+                    setContextMenu(null);
+                    onUpdateAppearance(project.id, { color: option.id });
+                  }}
+                  data-testid={`sidebar-project-color-${option.id}`}
+                  aria-label={`Set ${option.label} highlight`}
+                  className={`h-8 rounded-md border cursor-pointer transition-colors ${
+                    project.color === option.id ? "border-text-primary" : "border-surface-700"
+                  }`}
+                  style={repoSwatchStyle(option.id)}
+                />
+              ))}
+              <button
+                type="button"
+                onClick={() => {
+                  setContextMenu(null);
+                  onUpdateAppearance(project.id, { color: null });
+                }}
+                data-testid="sidebar-project-color-clear"
+                aria-label="Remove highlight"
+                className="h-8 rounded-md border border-surface-700 bg-surface-900 text-[10px] font-mono text-text-dim cursor-pointer hover:bg-surface-700/40"
+              >
+                None
+              </button>
+            </div>
             <div className="border-t border-surface-700/20 my-1" />
             <button
               onClick={() => {

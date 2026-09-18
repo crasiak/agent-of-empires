@@ -1224,6 +1224,17 @@
       "components": ["web/src/components/WorkspaceSidebar.tsx"]
     },
     {
+      "id": "sidebar.bookmark-highlights",
+      "kind": "vitest",
+      "risk": "low",
+      "specs": [
+        "src/components/__tests__/SessionRowTriage.test.tsx",
+        "src/components/__tests__/ProjectsSection.test.tsx",
+        "tests/sidebar-multi-session.spec.ts"
+      ],
+      "components": ["web/src/components/WorkspaceSidebar.tsx", "web/src/components/ProjectsSection.tsx"]
+    },
+    {
       "id": "sidebar.session-color-toggle",
       "kind": "vitest",
       "risk": "low",

@@ -85,6 +85,7 @@ async function mockApis(
   for (const path of ["themes", "agents", "profiles", "groups", "devices", "docker/status", "about"]) {
     await page.route(`**/api/${path}`, (r) => r.fulfill({ json: path === "docker/status" ? {} : [] }));
   }
+  await page.route("**/api/sessions/*/color", (r) => r.fulfill({ json: { id: "session-color" } }));
 }
 
 test.describe("Sidebar multi-session (#956)", () => {
@@ -355,6 +356,28 @@ test.describe("Sidebar multi-session (#956)", () => {
     const restoredHeader = page.locator('[data-testid="sidebar-group-header"][data-group-id="/tmp/agent-of-empires"]');
     await expect(restoredHeader.getByText("Client Alpha")).toBeVisible();
     await expect(restoredHeader).toHaveAttribute("style", /color-mix/);
+  });
+
+  test("session context menu applies a whole-row highlight", async ({ page }) => {
+    await mockApis(page, [
+      {
+        id: "session-color",
+        title: "Highlighted session",
+        project_path: "/tmp/agent-of-empires",
+        branch: null,
+      },
+    ]);
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto("/");
+
+    const row = page.getByRole("link", { name: /Highlighted session/i });
+    await expect(row).toBeVisible();
+    await row.click({ button: "right" });
+    await page.getByTestId("sidebar-context-menu-color-red").click();
+
+    await expect(row).toHaveAttribute("data-highlight-color", "red");
+    await expect(row).toHaveAttribute("style", /color-mix/);
+    await expect(row.getByTestId("sidebar-session-color-dot")).toHaveAttribute("data-color", "red");
   });
 
   test("project group context menu archives every active session", async ({ page }) => {
