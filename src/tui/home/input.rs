@@ -5017,8 +5017,12 @@ impl HomeView {
         let Some(id) = self.selected_session.clone() else {
             return;
         };
-        let requested = color.map(str::to_string);
         if let Err(e) = self.apply_user_action(&id, move |inst| {
+            let requested = match color {
+                Some(color) if inst.color.as_deref() == Some(color) => None,
+                Some(color) => Some(color.to_string()),
+                None => None,
+            };
             if let Err(err) = inst.set_color(requested) {
                 tracing::error!("set_color (context menu) failed: {}", err);
             }

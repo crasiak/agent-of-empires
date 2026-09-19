@@ -364,6 +364,34 @@ fn context_menu_highlight_action_persists_and_clears_color() {
 
 #[test]
 #[serial]
+fn context_menu_highlight_action_toggles_same_color_off() {
+    let mut env = create_test_env_with_sessions(1);
+    setup_inner(&mut env);
+    env.view.handle_right_click(5, 1);
+    let id = env.view.selected_session.clone().unwrap();
+
+    env.view
+        .dispatch_context_menu_action(ContextMenuAction::HighlightAmber);
+    assert_eq!(
+        env.view.get_instance(&id).unwrap().color.as_deref(),
+        Some("amber")
+    );
+
+    env.view
+        .dispatch_context_menu_action(ContextMenuAction::HighlightAmber);
+    assert_eq!(env.view.get_instance(&id).unwrap().color, None);
+    let row = crate::session::Storage::new_unwatched("test")
+        .unwrap()
+        .load()
+        .unwrap()
+        .into_iter()
+        .find(|inst| inst.id == id)
+        .unwrap();
+    assert_eq!(row.color, None);
+}
+
+#[test]
+#[serial]
 fn context_menu_highlight_actions_hidden_when_setting_is_off() {
     let mut env = create_test_env_with_sessions(1);
     setup_inner(&mut env);
