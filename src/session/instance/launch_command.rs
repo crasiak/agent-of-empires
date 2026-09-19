@@ -212,6 +212,56 @@ pub(super) fn splice_subcommand_or_append(
     }
 }
 
+fn ssh_option_key(option: &str) -> &str {
+    option
+        .split(['=', ' ', '\t'])
+        .next()
+        .unwrap_or(option)
+        .trim()
+}
+
+fn command_has_ssh_prompt_policy(words: &[String]) -> bool {
+    let mut iter = words.iter().skip(1);
+    while let Some(word) = iter.next() {
+        if let Some(option) = word.strip_prefix("-o") {
+            let option = if option.is_empty() {
+                iter.next().map(String::as_str).unwrap_or_default()
+            } else {
+                option
+            };
+            let key = ssh_option_key(option);
+            if key.eq_ignore_ascii_case("BatchMode")
+                || key.eq_ignore_ascii_case("NumberOfPasswordPrompts")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn apply_ssh_prompt_suppression(cmd: &mut String) {
+    let Some(parsed) = parse_launch_command(cmd) else {
+        return;
+    };
+    let Some(executable) = parsed.words.first() else {
+        return;
+    };
+    let is_ssh = std::path::Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "ssh");
+    if !is_ssh || command_has_ssh_prompt_policy(&parsed.words) {
+        return;
+    }
+
+    splice_subcommand_or_append(
+        cmd,
+        "-o BatchMode=yes -o NumberOfPasswordPrompts=0",
+        Some(parsed.executable_end),
+    );
+}
+
 pub(super) fn append_resume_flags(
     tool: &str,
     session_id: Option<&str>,
@@ -516,6 +566,9 @@ impl Instance {
                 tool_cmd.push_str(flag);
             }
             let is_existing = self.apply_session_flags(&mut tool_cmd, "sandboxed")?;
+            if !self.command.is_empty() {
+                apply_ssh_prompt_suppression(&mut tool_cmd);
+            }
             apply_agent_launch_env(&mut tool_cmd, agent);
 
             let sandbox = self
@@ -720,6 +773,7 @@ impl Instance {
                 }
             }
             let is_existing = self.apply_session_flags(&mut cmd, "host custom")?;
+            apply_ssh_prompt_suppression(&mut cmd);
             apply_agent_launch_env(&mut cmd, agent);
             let raw_command = format!("{}{}", env_prefix, cmd);
             let command = if let Some(plan) = omp_capture_plan.as_ref() {
@@ -893,6 +947,64 @@ mod tests {
     use super::*;
 
     use crate::session::test_support::EnvGuard;
+
+    #[test]
+    fn ssh_prompt_suppression_inserts_batch_options() {
+        let mut cmd = "ssh -t lenovo claude".to_string();
+        apply_ssh_prompt_suppression(&mut cmd);
+        assert_eq!(
+            cmd,
+            "ssh -o BatchMode=yes -o NumberOfPasswordPrompts=0 -t lenovo claude"
+        );
+    }
+
+    #[test]
+    fn ssh_prompt_suppression_recognizes_absolute_ssh() {
+        let mut cmd = "/usr/bin/ssh lenovo claude".to_string();
+        apply_ssh_prompt_suppression(&mut cmd);
+        assert_eq!(
+            cmd,
+            "/usr/bin/ssh -o BatchMode=yes -o NumberOfPasswordPrompts=0 lenovo claude"
+        );
+    }
+
+    #[test]
+    fn ssh_prompt_suppression_preserves_explicit_policy() {
+        let cases = [
+            "ssh -o BatchMode=no lenovo claude",
+            "ssh -oBatchMode=no lenovo claude",
+            "ssh -o 'NumberOfPasswordPrompts 2' lenovo claude",
+        ];
+        for case in cases {
+            let mut cmd = case.to_string();
+            apply_ssh_prompt_suppression(&mut cmd);
+            assert_eq!(cmd, case);
+        }
+    }
+
+    #[test]
+    fn ssh_prompt_suppression_ignores_non_ssh_wrappers() {
+        let mut cmd = "env FOO=bar ssh -t lenovo claude".to_string();
+        apply_ssh_prompt_suppression(&mut cmd);
+        assert_eq!(cmd, "env FOO=bar ssh -t lenovo claude");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn host_custom_ssh_launch_suppresses_prompts() {
+        let mut inst = Instance::new("remote claude", "/tmp/remote-claude");
+        inst.tool = "remote-claude".to_string();
+        inst.detect_as = "claude".to_string();
+        inst.command = "ssh -t lenovo claude".to_string();
+        let agent = inst.resolved_agent();
+
+        let (command, _, _) = inst.build_host_command(agent).unwrap();
+        let command = command.unwrap();
+        assert!(
+            command.contains("ssh -o BatchMode=yes -o NumberOfPasswordPrompts=0 -t lenovo claude"),
+            "wrapped launch command should suppress ssh prompts: {command}"
+        );
+    }
 
     #[test]
     fn ordinary_prepared_launch_clears_inherited_restart_intent() {
