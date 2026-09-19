@@ -222,6 +222,7 @@ impl HomeView {
             sort_order,
             group_by,
             row_tag_mode: resolved.session.row_tag,
+            show_session_colors: resolved.session.show_session_colors,
             agent_clipboard_forward: resolved.tmux.clipboard
                 != crate::session::config::TmuxSettingMode::Disabled,
             hyperlink_cells: crate::tui::hyperlink::SharedHyperlinks::default(),

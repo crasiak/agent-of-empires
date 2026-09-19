@@ -97,14 +97,13 @@ fn down_then_enter_in_menu_opens_delete_dialog() {
     let mut env = create_test_env_with_sessions(2);
     disable_delete_to_trash();
     setup_inner(&mut env);
-    // Attention sort surfaces the full session menu (New Session / Rename
-    // / Archive / Snooze / Mark unread / Add project / Delete), so Delete is
-    // six Downs away. (Unread defaults on, so the "Mark unread" row is
-    // present.)
+    // Attention sort surfaces the full session menu, including highlight
+    // choices, so Delete is nine Downs away. (Unread defaults on, so the
+    // "Mark unread" row is present.)
     env.view.sort_order = SortOrder::Attention;
     env.view.flat_items = env.view.build_flat_items();
     env.view.handle_right_click(5, 1);
-    for _ in 0..6 {
+    for _ in 0..9 {
         env.view.handle_key(key(KeyCode::Down), None);
     }
     env.view.handle_key(key(KeyCode::Enter), None);
@@ -194,7 +193,7 @@ fn right_click_unarchive_action_restores_session() {
     // tool is claude (a forkable terminal agent), so the Fork row shows;
     // `right_click_session_menu_hides_fork_for_unforkable_agent` covers the
     // gated-off case. Menu is New Session / Rename / Unarchive / Mark unread
-    // / Add project / Delete / Fork.
+    // / Add project / highlight choices / Delete / Fork.
     assert_eq!(
         labels,
         vec![
@@ -203,6 +202,9 @@ fn right_click_unarchive_action_restores_session() {
             "Unarchive",
             "Mark unread",
             "Add project",
+            "Highlight red",
+            "Highlight amber",
+            "Highlight green",
             "Delete",
             "Fork session"
         ]
@@ -270,6 +272,121 @@ fn right_click_session_menu_hides_fork_for_unforkable_agent() {
         !actions.contains(&ContextMenuAction::Fork),
         "a resume-only agent (gemini) must not show the Fork row"
     );
+}
+
+#[test]
+#[serial]
+fn right_click_session_menu_offers_highlight_actions() {
+    let mut env = create_test_env_with_sessions(1);
+    setup_inner(&mut env);
+    assert!(env.view.handle_right_click(5, 1));
+
+    let actions: Vec<ContextMenuAction> = env
+        .view
+        .context_menu
+        .as_ref()
+        .unwrap()
+        .items_for_test()
+        .iter()
+        .map(|(a, _)| *a)
+        .collect();
+
+    assert!(actions.contains(&ContextMenuAction::HighlightRed));
+    assert!(actions.contains(&ContextMenuAction::HighlightAmber));
+    assert!(actions.contains(&ContextMenuAction::HighlightGreen));
+    assert!(!actions.contains(&ContextMenuAction::ClearHighlight));
+}
+
+#[test]
+#[serial]
+fn right_click_session_menu_clear_highlight_appears_only_when_set() {
+    let mut env = create_test_env_with_sessions(1);
+    setup_inner(&mut env);
+    let id = match &env.view.flat_items[0] {
+        Item::Session { id, .. } => id.clone(),
+        _ => panic!("expected a session row"),
+    };
+    env.view
+        .apply_user_action(&id, |inst| {
+            inst.set_color(Some("green".to_string())).unwrap();
+        })
+        .unwrap();
+
+    assert!(env.view.handle_right_click(5, 1));
+    let actions: Vec<ContextMenuAction> = env
+        .view
+        .context_menu
+        .as_ref()
+        .unwrap()
+        .items_for_test()
+        .iter()
+        .map(|(a, _)| *a)
+        .collect();
+
+    assert!(actions.contains(&ContextMenuAction::ClearHighlight));
+}
+
+#[test]
+#[serial]
+fn context_menu_highlight_action_persists_and_clears_color() {
+    let mut env = create_test_env_with_sessions(1);
+    setup_inner(&mut env);
+    env.view.handle_right_click(5, 1);
+    let id = env.view.selected_session.clone().unwrap();
+
+    env.view
+        .dispatch_context_menu_action(ContextMenuAction::HighlightRed);
+    assert_eq!(
+        env.view.get_instance(&id).unwrap().color.as_deref(),
+        Some("red")
+    );
+    let row = crate::session::Storage::new_unwatched("test")
+        .unwrap()
+        .load()
+        .unwrap()
+        .into_iter()
+        .find(|inst| inst.id == id)
+        .unwrap();
+    assert_eq!(row.color.as_deref(), Some("red"));
+
+    env.view
+        .dispatch_context_menu_action(ContextMenuAction::ClearHighlight);
+    assert_eq!(env.view.get_instance(&id).unwrap().color, None);
+    let row = crate::session::Storage::new_unwatched("test")
+        .unwrap()
+        .load()
+        .unwrap()
+        .into_iter()
+        .find(|inst| inst.id == id)
+        .unwrap();
+    assert_eq!(row.color, None);
+}
+
+#[test]
+#[serial]
+fn context_menu_highlight_actions_hidden_when_setting_is_off() {
+    let mut env = create_test_env_with_sessions(1);
+    setup_inner(&mut env);
+    env.view.show_session_colors = false;
+
+    assert!(env.view.handle_right_click(5, 1));
+    let actions: Vec<ContextMenuAction> = env
+        .view
+        .context_menu
+        .as_ref()
+        .unwrap()
+        .items_for_test()
+        .iter()
+        .map(|(a, _)| *a)
+        .collect();
+
+    assert!(!actions.iter().any(|action| matches!(
+        action,
+        ContextMenuAction::HighlightRed
+            | ContextMenuAction::HighlightAmber
+            | ContextMenuAction::HighlightGreen
+            | ContextMenuAction::ClearHighlight
+    )));
 }
 
 /// The Snooze row mirrors the `'h'` keybinding, which only fires in

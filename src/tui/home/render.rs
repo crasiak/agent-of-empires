@@ -882,6 +882,29 @@ fn selected_row_style(style: Style, theme: &Theme) -> Style {
     }
 }
 
+fn paint_sidebar_row_background(
+    mut line: Line<'static>,
+    list_width: u16,
+    bg: Color,
+) -> Line<'static> {
+    let pad = (list_width as usize).saturating_sub(line.width());
+    if pad > 0 {
+        line.spans.push(Span::raw(" ".repeat(pad)));
+    }
+    line.style(Style::default().bg(bg))
+}
+
+fn session_color_background(color: Color, theme: &Theme) -> Option<Color> {
+    let rgb = |c: Color| match c {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        _ => None,
+    };
+    let (r, g, b) = rgb(color)?;
+    let (br, bg, bb) = rgb(theme.background)?;
+    let lerp = |x: u8, y: u8| ((x as f32) * 0.14 + (y as f32) * 0.86).round() as u8;
+    Some(Color::Rgb(lerp(r, br), lerp(g, bg), lerp(b, bb)))
+}
+
 /// Decide where the right-aligned activity column lives on a session row.
 ///
 /// `prefix_width` is the display width of the spans already pushed (indent,
@@ -1453,20 +1476,8 @@ impl HomeView {
             let is_match =
                 !self.search_matches.is_empty() && self.search_matches.contains(&abs_idx);
             let mut line = self.render_item_line(item, is_selected, is_match, theme, inner.width);
-            // Selection wins over hover: when the mouse is over the
-            // already-selected row, keep the brighter selected bg rather
-            // than the dimmer hover bg.
-            if is_selected || is_hovered {
-                let pad = (inner.width as usize).saturating_sub(line.width());
-                if pad > 0 {
-                    line.spans.push(Span::raw(" ".repeat(pad)));
-                }
-                let bg = if is_selected {
-                    theme.session_selection
-                } else {
-                    theme.selection
-                };
-                line = line.style(Style::default().bg(bg));
+            if let Some(bg) = self.sidebar_row_background(item, is_selected, is_hovered, theme) {
+                line = paint_sidebar_row_background(line, inner.width, bg);
             }
             lines.push(line);
         }
@@ -1529,17 +1540,9 @@ impl HomeView {
                     !self.search_matches.is_empty() && self.search_matches.contains(&abs_idx);
                 let mut line =
                     self.render_item_line(item, is_selected, is_match, theme, inner.width);
-                if is_selected || is_hovered {
-                    let pad = (inner.width as usize).saturating_sub(line.width());
-                    if pad > 0 {
-                        line.spans.push(Span::raw(" ".repeat(pad)));
-                    }
-                    let bg = if is_selected {
-                        theme.session_selection
-                    } else {
-                        theme.selection
-                    };
-                    line = line.style(Style::default().bg(bg));
+                if let Some(bg) = self.sidebar_row_background(item, is_selected, is_hovered, theme)
+                {
+                    line = paint_sidebar_row_background(line, inner.width, bg);
                 }
                 slines.push(line);
             }
@@ -1929,6 +1932,19 @@ impl HomeView {
             None
         };
         line_spans.push(Span::styled(format!("{} ", icon), icon_style));
+        if let Item::Session { id, .. } = item {
+            if let Some(color) = self.session_color(id, theme) {
+                let dot_style = Style::default().fg(color);
+                line_spans.push(Span::styled(
+                    "● ",
+                    if is_selected {
+                        selected_row_style(dot_style, theme)
+                    } else {
+                        dot_style
+                    },
+                ));
+            }
+        }
         if self.row_tag_mode == RowTagMode::Agent {
             let prefix_width: usize = line_spans.iter().map(Span::width).sum();
             if let Some(tag) = row_tag
@@ -2082,6 +2098,39 @@ impl HomeView {
         }
 
         Line::from(line_spans)
+    }
+
+    pub(super) fn sidebar_row_background(
+        &self,
+        item: &Item,
+        is_selected: bool,
+        is_hovered: bool,
+        theme: &Theme,
+    ) -> Option<Color> {
+        if is_selected {
+            return Some(theme.session_selection);
+        }
+        if is_hovered {
+            return Some(theme.selection);
+        }
+        let Item::Session { id, .. } = item else {
+            return None;
+        };
+        self.session_color(id, theme)
+            .and_then(|color| session_color_background(color, theme))
+    }
+
+    fn session_color(&self, id: &str, theme: &Theme) -> Option<Color> {
+        if !self.show_session_colors {
+            return None;
+        }
+        let color = self.get_instance(id)?.color.as_deref()?;
+        match color {
+            "red" => Some(theme.error),
+            "amber" => Some(theme.waiting),
+            "green" => Some(theme.running),
+            _ => None,
+        }
     }
 
     /// Refresh preview cache if needed (session changed, dimensions changed, or timer expired)

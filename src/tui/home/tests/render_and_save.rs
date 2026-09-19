@@ -22,6 +22,67 @@ fn test_default_row_tag_mode_renders_branch_tag() {
     );
 }
 
+#[test]
+#[serial]
+fn session_color_renders_dot_and_row_background() {
+    let mut env = create_test_env_with_sessions(1);
+    let id = match &env.view.flat_items[0] {
+        Item::Session { id, .. } => id.clone(),
+        _ => panic!("expected a session row"),
+    };
+    env.view
+        .apply_user_action(&id, |inst| {
+            inst.set_color(Some("red".to_string())).unwrap();
+        })
+        .unwrap();
+    env.view.flat_items = env.view.build_flat_items();
+    let item = env.view.flat_items[0].clone();
+    let theme = crate::tui::styles::load_theme_with_mode("empire", false);
+
+    let line = env.view.render_item_line(&item, false, false, &theme, 80);
+    assert!(
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref() == "● " && span.style.fg == Some(theme.error)),
+        "highlighted session row should render a colored cue: {line:?}"
+    );
+    let bg = env
+        .view
+        .sidebar_row_background(&item, false, false, &theme)
+        .expect("highlighted row should have a background tint");
+    assert_ne!(bg, theme.background);
+    assert_ne!(bg, theme.error);
+}
+
+#[test]
+#[serial]
+fn session_color_rendering_respects_setting() {
+    let mut env = create_test_env_with_sessions(1);
+    let id = match &env.view.flat_items[0] {
+        Item::Session { id, .. } => id.clone(),
+        _ => panic!("expected a session row"),
+    };
+    env.view
+        .apply_user_action(&id, |inst| {
+            inst.set_color(Some("green".to_string())).unwrap();
+        })
+        .unwrap();
+    env.view.show_session_colors = false;
+    env.view.flat_items = env.view.build_flat_items();
+    let item = env.view.flat_items[0].clone();
+    let theme = crate::tui::styles::load_theme_with_mode("empire", false);
+
+    let line = env.view.render_item_line(&item, false, false, &theme, 80);
+    assert!(
+        !line.spans.iter().any(|span| span.content.as_ref() == "● "),
+        "disabled session colors should not render a cue: {line:?}"
+    );
+    assert_eq!(
+        env.view.sidebar_row_background(&item, false, false, &theme),
+        None
+    );
+}
+
 /// `RowTagMode::Auto` shows the profile short code in all-profiles view.
 #[test]
 #[serial]
