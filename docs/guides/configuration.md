@@ -184,6 +184,22 @@ infer identity from command filenames. A wrapper that delegates account or
 transport selection to another launcher must report from that downstream
 launcher after resolution. Use `unknown` for an unresolved dimension.
 
+Which launcher reports, per route:
+
+| Route | Reporter | `--launcher` | Badge |
+| --- | --- | --- | --- |
+| Headroom only | the `_headroom-launch` wrapper, from the Headroom profile it selects | `headroom` | `h` |
+| Ledger + isolated Headroom | Ledger, after the native harness starts | `ledger-headroom` | `lh` |
+| Ledger only (`direct` binding) | Ledger, after the native harness starts | `ledger` | `l` |
+| Plain wrapper, no launcher | the wrapper itself | `direct` | `d` |
+
+A launch-stack naming scheme keeps profiles, wrappers and badges aligned:
+AoE profiles and wrapper files are `<account>[-headroom][-ledger]`, e.g.
+`personal-sub-headroom` (`[cc:p:h]`) or `work-headroom-ledger` (`[cc:w:lh]`).
+The `-ledger` suffix always means Ledger with a private per-launch Headroom
+proxy. Launcher-internal profile names (Headroom's, Ledger's) stay
+account-only; the wrapper carries the mapping.
+
 Reports are attached to the reporting tmux pane, not to an AOE profile or
 launch default. Profile moves and config edits preserve a running pane's
 identity. Relaunch creates a new pane whose badge stays unknown until its
