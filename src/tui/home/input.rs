@@ -22,8 +22,8 @@ use crate::tui::dialogs::{
     DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, HooksInstallDialog, InfoDialog,
     IntroOutcome, NewSessionData, NewSessionDialog, NoAgentsAction, PaletteAction, PaletteCommand,
     PaletteGroup, ProfilePickerAction, ProjectsDialog, RenameDialog, RenameMode, RepoTrustAction,
-    RestartDialog, SendMessageDialog, TipsDialog, TipsOutcome, UnifiedDeleteDialog,
-    WorktreeNameDialog,
+    RestartDialog, SendMessageDialog, SessionHighlightMenu, TipsDialog, TipsOutcome,
+    UnifiedDeleteDialog, WorktreeNameDialog,
 };
 use crate::tui::diff::{DiffAction, DiffView};
 use crate::tui::responsive;
@@ -4845,13 +4845,21 @@ impl HomeView {
             } else if is_group {
                 ContextMenuDialog::for_group(anchor)
             } else {
-                let (is_archived, is_snoozed, is_unread) = match &self.flat_items[idx] {
-                    super::Item::Session { id, .. } => self
-                        .get_instance(id)
-                        .map(|inst| (inst.is_archived(), inst.is_snoozed(), inst.is_unread()))
-                        .unwrap_or((false, false, false)),
-                    super::Item::Group { .. } => (false, false, false),
-                };
+                let (is_archived, is_snoozed, is_unread, has_highlight) =
+                    match &self.flat_items[idx] {
+                        super::Item::Session { id, .. } => self
+                            .get_instance(id)
+                            .map(|inst| {
+                                (
+                                    inst.is_archived(),
+                                    inst.is_snoozed(),
+                                    inst.is_unread(),
+                                    inst.color.is_some(),
+                                )
+                            })
+                            .unwrap_or((false, false, false, false)),
+                        super::Item::Group { .. } => (false, false, false, false),
+                    };
                 // Snooze is an Attention-sort triage primitive: the `'h'`
                 // keybinding only fires in Attention sort, so the menu omits
                 // the Snooze row everywhere else to keep the mouse and keyboard
@@ -4876,13 +4884,14 @@ impl HomeView {
                     super::Item::Session { id, .. } => self.session_switch_view_target(id),
                     super::Item::Group { .. } => None,
                 };
-                ContextMenuDialog::for_session(
+                ContextMenuDialog::for_session_with_highlights(
                     anchor,
                     is_archived,
                     snooze,
                     unread,
                     can_fork,
                     switch_view,
+                    SessionHighlightMenu::new(self.show_session_colors, has_highlight),
                 )
             });
             return true;
@@ -4976,6 +4985,10 @@ impl HomeView {
             ContextMenuAction::SwitchView => self.prompt_switch_view_for_selected(),
             ContextMenuAction::OpenSortPicker => self.show_sort_picker(),
             ContextMenuAction::AddProject => self.open_add_project_for_selected(),
+            ContextMenuAction::HighlightRed => self.set_selected_session_color(Some("red")),
+            ContextMenuAction::HighlightAmber => self.set_selected_session_color(Some("amber")),
+            ContextMenuAction::HighlightGreen => self.set_selected_session_color(Some("green")),
+            ContextMenuAction::ClearHighlight => self.set_selected_session_color(None),
             ContextMenuAction::OpenGroupPicker => self.show_group_picker(),
             ContextMenuAction::TogglePin => {
                 // The right-click already moved the cursor onto the project
@@ -4997,6 +5010,24 @@ impl HomeView {
                 Some(SidebarSection::Archived) => self.toggle_archived_section(),
                 None => {}
             },
+        }
+    }
+
+    fn set_selected_session_color(&mut self, color: Option<&'static str>) {
+        let Some(id) = self.selected_session.clone() else {
+            return;
+        };
+        if let Err(e) = self.apply_user_action(&id, move |inst| {
+            let requested = match color {
+                Some(color) if inst.color.as_deref() == Some(color) => None,
+                Some(color) => Some(color.to_string()),
+                None => None,
+            };
+            if let Err(err) = inst.set_color(requested) {
+                tracing::error!("set_color (context menu) failed: {}", err);
+            }
+        }) {
+            tracing::error!("set_selected_session_color (context menu) failed: {}", e);
         }
     }
 

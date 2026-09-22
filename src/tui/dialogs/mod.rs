@@ -40,7 +40,7 @@ pub use command_palette::{
     builtin_commands, CommandPaletteDialog, PaletteAction, PaletteCommand, PaletteGroup,
 };
 pub use confirm::ConfirmDialog;
-pub use context_menu::{ContextMenuAction, ContextMenuDialog};
+pub use context_menu::{ContextMenuAction, ContextMenuDialog, SessionHighlightMenu};
 pub use custom_instruction::CustomInstructionDialog;
 pub use delete_options::{DeleteDialogConfig, DeleteOptions, UnifiedDeleteDialog};
 pub use group_delete_options::{GroupDeleteOptions, GroupDeleteOptionsDialog};

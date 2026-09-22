@@ -200,6 +200,9 @@ pub struct HomeView {
     /// the render layer reads this rather than re-resolving the config on
     /// every paint.
     pub(super) row_tag_mode: crate::session::config::RowTagMode,
+    /// Whether session color labels render in the sidebar and appear in the
+    /// session context menu. Cached from `session.show_session_colors`.
+    pub(super) show_session_colors: bool,
     /// Whether an agent's OSC 52 clipboard write (surfaced by the VT capture
     /// worker) is forwarded to the host clipboard (#2420). Cached from
     /// `[tmux] clipboard != disabled` at construction + config refresh. Auto

@@ -68,6 +68,7 @@ impl SessionResponse {
                 .and_then(|w| w.base_branch.clone()),
             base_branch_override: inst.base_branch_override.clone(),
             is_sandboxed: inst.is_sandboxed(),
+            launch_identity: inst.current_launch_identity().cloned(),
             scratch: inst.scratch,
             favorited: inst.is_favorited(),
             color: inst.color.clone(),

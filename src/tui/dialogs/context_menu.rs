@@ -41,6 +41,14 @@ pub enum ContextMenuAction {
     OpenSortPicker,
     /// Attach another repo to this session (#3103).
     AddProject,
+    /// Set the session's per-row highlight color to red.
+    HighlightRed,
+    /// Set the session's per-row highlight color to amber.
+    HighlightAmber,
+    /// Set the session's per-row highlight color to green.
+    HighlightGreen,
+    /// Clear the session's per-row highlight color.
+    ClearHighlight,
     /// Open the group-by mode picker (mirrors `'g'`).
     OpenGroupPicker,
     /// Pin or unpin the project header (project view only; mirrors `'p'`). The
@@ -56,6 +64,26 @@ pub enum ContextMenuAction {
     /// Collapse or expand the synthetic section the menu was opened on. The
     /// label flips to "Expand" when the section is already collapsed.
     ToggleSectionCollapse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionHighlightMenu {
+    show: bool,
+    has_highlight: bool,
+}
+
+impl SessionHighlightMenu {
+    pub const HIDDEN: Self = Self {
+        show: false,
+        has_highlight: false,
+    };
+
+    pub fn new(show: bool, has_highlight: bool) -> Self {
+        Self {
+            show,
+            has_highlight,
+        }
+    }
 }
 
 pub struct ContextMenuDialog {
@@ -129,6 +157,26 @@ impl ContextMenuDialog {
         can_fork: bool,
         switch_view: Option<bool>,
     ) -> Self {
+        Self::for_session_with_highlights(
+            anchor,
+            is_archived,
+            snooze,
+            unread,
+            can_fork,
+            switch_view,
+            SessionHighlightMenu::HIDDEN,
+        )
+    }
+
+    pub fn for_session_with_highlights(
+        anchor: (u16, u16),
+        is_archived: bool,
+        snooze: Option<bool>,
+        unread: Option<bool>,
+        can_fork: bool,
+        switch_view: Option<bool>,
+        highlights: SessionHighlightMenu,
+    ) -> Self {
         let archive_label = if is_archived { "Unarchive" } else { "Archive" };
         let mut items = vec![
             (ContextMenuAction::NewFromSelection, "New Session"),
@@ -148,6 +196,14 @@ impl ContextMenuDialog {
             items.push((ContextMenuAction::ToggleUnread, unread_label));
         }
         items.push((ContextMenuAction::AddProject, "Add project"));
+        if highlights.show {
+            items.push((ContextMenuAction::HighlightRed, "Highlight red"));
+            items.push((ContextMenuAction::HighlightAmber, "Highlight amber"));
+            items.push((ContextMenuAction::HighlightGreen, "Highlight green"));
+            if highlights.has_highlight {
+                items.push((ContextMenuAction::ClearHighlight, "Remove highlight"));
+            }
+        }
         items.push((ContextMenuAction::Delete, "Delete"));
         if can_fork {
             items.push((ContextMenuAction::Fork, "Fork session"));
