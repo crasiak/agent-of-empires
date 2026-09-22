@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 
-import type { Workspace, WorkspaceRepoSummary } from "./types";
+import type { LaunchIdentity, Workspace, WorkspaceRepoSummary } from "./types";
 
 export type SessionRowTagMode = "none" | "auto" | "profile" | "sandbox" | "agent" | "branch";
 
@@ -53,20 +53,65 @@ export function computeSessionRowTag(workspace: Workspace, mode: SessionRowTagMo
     case "sandbox":
       return primary.is_sandboxed ? { content: "sb", title: "Sandboxed", kind: mode } : null;
     case "agent": {
-      const agent = primary.acp_agent?.trim() || primary.tool.trim();
+      // Same precedence as the TUI's `agent_row_tag`: the reported launch
+      // identity names the agent that actually launched, then the structured
+      // agent, then the terminal tool.
+      const identity = primary.launch_identity ?? null;
+      const agent = identity?.agent.trim() || primary.acp_agent?.trim() || primary.tool.trim();
       if (!agent) return null;
+      const code =
+        knownAgentCode(agent) ??
+        knownAgentCode(primary.tool) ??
+        Array.from(agent.toLocaleLowerCase()).slice(0, AGENT_TAG_WIDTH).join("");
+      if (!code) return null;
+      if (code !== "cc" && code !== "cx") {
+        return { content: code, title: agent, kind: mode };
+      }
+      // Claude/Codex rows carry `[agent:account:launcher]`; unreported
+      // dimensions render as `?` so a missing launcher report is visible.
+      const [account, launcher] = identity ? launchIdentityCodes(identity) : ["?", "?"];
       return {
-        content:
-          knownAgentCode(agent) ??
-          knownAgentCode(primary.tool) ??
-          Array.from(agent.toLocaleLowerCase()).slice(0, AGENT_TAG_WIDTH).join(""),
-        title: agent,
+        content: `${code}:${account}:${launcher}`,
+        title: identity ? describeLaunchIdentity(identity) : `${agent} / unknown account / unknown launcher`,
         kind: mode,
       };
     }
     case "branch":
       return branchRowTag(workspace);
   }
+}
+
+/** Mirrors `LaunchIdentity::codes` in `src/session/launch_identity.rs`. */
+export function launchIdentityCodes(identity: LaunchIdentity): [string, string] {
+  const account = identity.account === "personal" ? "p" : identity.account === "work" ? "w" : "?";
+  const launcher =
+    identity.launcher === "direct"
+      ? "d"
+      : identity.launcher === "headroom"
+        ? "h"
+        : identity.launcher === "ledger"
+          ? "l"
+          : identity.launcher === "ledger-headroom"
+            ? "lh"
+            : "?";
+  return [account, launcher];
+}
+
+/** Mirrors `LaunchIdentity::description` in `src/session/launch_identity.rs`. */
+export function describeLaunchIdentity(identity: LaunchIdentity): string {
+  const account =
+    identity.account === "personal" ? "personal" : identity.account === "work" ? "work" : "unknown account";
+  const launcher =
+    identity.launcher === "direct"
+      ? "direct"
+      : identity.launcher === "headroom"
+        ? "Headroom"
+        : identity.launcher === "ledger"
+          ? "Ledger"
+          : identity.launcher === "ledger-headroom"
+            ? "Ledger + Headroom"
+            : "unknown launcher";
+  return `${identity.agent} / ${account} / ${launcher} (profile: ${identity.profile})`;
 }
 
 function knownAgentCode(agent: string): string | null {

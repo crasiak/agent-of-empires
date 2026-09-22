@@ -631,6 +631,7 @@ mod workspace_ordering_tests {
             acp_capable: false,
             acp_session_id: None,
             acp_agent: None,
+            launch_identity: None,
             acp_can_fork: false,
             keeps_context: false,
             clear_aliases: Vec::new(),

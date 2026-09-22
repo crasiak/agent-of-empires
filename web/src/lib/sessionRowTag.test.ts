@@ -105,8 +105,8 @@ describe("computeSessionRowTag", () => {
     const claude = workspace({}, [session({ tool: "claude" })]);
 
     expect(computeSessionRowTag(structured, "agent")).toEqual({
-      content: "cx",
-      title: "codex",
+      content: "cx:?:?",
+      title: "codex / unknown account / unknown launcher",
       kind: "agent",
     });
     expect(computeSessionRowTag(terminal, "agent")).toEqual({
@@ -115,7 +115,46 @@ describe("computeSessionRowTag", () => {
       kind: "agent",
     });
     expect(computeSessionRowTag(blankStructuredAgent, "agent")?.content).toBe("gm");
-    expect(computeSessionRowTag(claude, "agent")?.content).toBe("cc");
+    expect(computeSessionRowTag(claude, "agent")?.content).toBe("cc:?:?");
+  });
+
+  it("expands a reported launch identity to agent:account:launcher like the TUI", () => {
+    const reported = workspace({}, [
+      session({
+        tool: "claude",
+        launch_identity: { agent: "codex", account: "work", launcher: "ledger-headroom", profile: "work" },
+      }),
+    ]);
+    expect(computeSessionRowTag(reported, "agent")).toEqual({
+      content: "cx:w:lh",
+      title: "codex / work / Ledger + Headroom (profile: work)",
+      kind: "agent",
+    });
+
+    const direct = workspace({}, [
+      session({
+        tool: "claude",
+        launch_identity: { agent: "claude", account: "personal", launcher: "direct", profile: "personal" },
+      }),
+    ]);
+    expect(computeSessionRowTag(direct, "agent")?.content).toBe("cc:p:d");
+
+    const partial = workspace({}, [
+      session({
+        tool: "claude",
+        launch_identity: { agent: "claude", account: "unknown", launcher: "headroom", profile: "x" },
+      }),
+    ]);
+    expect(computeSessionRowTag(partial, "agent")?.content).toBe("cc:?:h");
+
+    // Non-Claude/Codex agents keep the bare two-letter code.
+    const pi = workspace({}, [
+      session({
+        tool: "pi",
+        launch_identity: { agent: "claude", account: "personal", launcher: "ledger", profile: "p" },
+      }),
+    ]);
+    expect(computeSessionRowTag(pi, "agent")?.content).toBe("cc:p:l");
   });
 
   it("returns no tag for none, host sandbox mode, or mixed multi-repo branches", () => {

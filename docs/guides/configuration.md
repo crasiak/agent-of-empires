@@ -154,11 +154,22 @@ Notification = "waiting"
 ### Launch identity badges
 
 With `session.row_tag = "agent"`, Claude/Codex rows show
-`[agent:account:launcher]`. Agent codes are `cc` and `cx`; account codes are
-`p` (personal) and `w` (work, including company). Launcher codes are `d`
-(direct/simple wrapper), `h` (Headroom), `l` (Ledger only), and `lh`
-(Ledger + Headroom). Unknown fields use `?`. Very narrow rows omit the badge
-to leave room for the title.
+`[agent:account:launcher]` in both the TUI sidebar and the web dashboard.
+Agent codes are `cc` and `cx`; account codes are `p` (personal) and `w`
+(work, including company). Launcher codes are `d` (direct/simple wrapper),
+`h` (Headroom), `l` (Ledger only), and `lh` (Ledger + Headroom). Unknown
+fields use `?`. Very narrow rows omit the badge to leave room for the title.
+
+AoE exports the reporting contract into every agent pane alongside its hook
+variables: `AOE_REPORT_BIN` (absolute path of the launching `aoe`),
+`AOE_REPORT_AGENT` (the agent AoE asked for, e.g. `claude`), and
+`AOE_REPORT_PROFILE` (the AoE profile). A launcher reports only when
+`AOE_REPORT_AGENT` matches the agent it is starting, and invokes
+`AOE_REPORT_BIN` rather than whatever `aoe` is on `PATH`. The launcher owns
+the account: it derives `--account` from its own resolved binding, since AoE
+cannot know it. A row stuck on `[cc:?:?]` means no launcher reported for that
+pane; Ledger prints the rejected guard to the pane's stderr
+(`ledger: AOE launch identity unavailable: ...`) so the reason is visible.
 
 A launcher reports its resolved identity from inside the AOE agent pane:
 

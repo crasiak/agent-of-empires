@@ -406,6 +406,14 @@ pub struct SessionResponse {
     /// sessions with no resolved agent. See #2803.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acp_agent: Option<String>,
+    /// Launch identity the pane's launcher reported through
+    /// `aoe session report-launch` (agent, account, launcher, launch
+    /// profile). Runtime metadata scoped to the live tmux pane: omitted for
+    /// structured, archived, stopped or dead sessions and for panes whose
+    /// launcher never reported. The web sidebar's `agent` row tag renders it
+    /// as `[cc:p:lh]`, mirroring the TUI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_identity: Option<crate::session::launch_identity::LaunchIdentity>,
     /// True when this session's agent can run a structured ACP `session/fork`,
     /// per `crate::session::fork::structured_fork_capable`. Resume-only ACP
     /// agents (e.g. `aoe-agent`) are ACP-capable yet not forkable, so the web

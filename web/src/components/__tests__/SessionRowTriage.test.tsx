@@ -306,8 +306,27 @@ describe("SessionRow row tags", () => {
     );
 
     const tag = screen.getByTestId("sidebar-session-row-tag");
-    expect(tag.textContent).toBe("[cx]");
-    expect(tag.getAttribute("title")).toBe("codex");
+    expect(tag.textContent).toBe("[cx:?:?]");
+    expect(tag.getAttribute("title")).toBe("codex / unknown account / unknown launcher");
+  });
+
+  it("renders the reported launch identity in agent mode", () => {
+    const ws = workspace("w-agent-reported", [
+      session({
+        tool: "claude",
+        launch_identity: { agent: "claude", account: "personal", launcher: "ledger-headroom", profile: "personal" },
+      }),
+    ]);
+
+    render(
+      <Wrap rowTagMode="agent">
+        <Row ws={ws} />
+      </Wrap>,
+    );
+
+    const tag = screen.getByTestId("sidebar-session-row-tag");
+    expect(tag.textContent).toBe("[cc:p:lh]");
+    expect(tag.getAttribute("title")).toBe("claude / personal / Ledger + Headroom (profile: personal)");
   });
 
   it("renders multi-repo workspace branch tags without removing repo chips", () => {

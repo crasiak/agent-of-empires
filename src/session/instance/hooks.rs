@@ -13,13 +13,22 @@ pub(super) fn status_hook_env_prefix(
     if has_hooks {
         let hook_bin = std::env::current_exe()
             .expect("current executable is required for host identity hooks");
+        let hook_bin = shell_escape(&hook_bin.to_string_lossy());
         // `$$` is the launch shell, which `exec`s into the agent.
+        //
+        // `AOE_REPORT_*` is the launch-identity contract: a launcher (Ledger)
+        // that resolves the agent's account reports it back through
+        // `AOE_REPORT_BIN session report-launch` only when AoE asked for that
+        // agent under this profile. Without these the reporter stays silent
+        // and the `[cc:?:?]` row tag never resolves.
         format!(
-            "AOE_PROFILE={} AOE_INSTANCE_ID={} AOE_HOOK_BIN={} AOE_AGENT_PID=$$ AOE_AGENT_BIN={} ",
-            shell_escape(profile),
-            shell_escape(instance_id),
-            shell_escape(&hook_bin.to_string_lossy()),
-            shell_escape(agent.map_or("", |agent| agent.binary))
+            "AOE_PROFILE={profile} AOE_INSTANCE_ID={instance_id} AOE_HOOK_BIN={hook_bin} \
+             AOE_AGENT_PID=$$ AOE_AGENT_BIN={agent_bin} \
+             AOE_REPORT_BIN={hook_bin} AOE_REPORT_AGENT={agent_name} AOE_REPORT_PROFILE={profile} ",
+            profile = shell_escape(profile),
+            instance_id = shell_escape(instance_id),
+            agent_bin = shell_escape(agent.map_or("", |agent| agent.binary)),
+            agent_name = shell_escape(agent.map_or("", |agent| agent.name)),
         )
     } else {
         String::new()
@@ -664,12 +673,16 @@ mod tests {
     use crate::session::test_support::EnvGuard;
 
     fn expected_status_prefix(profile: &str, instance_id: &str, agent: &str) -> String {
+        let hook_bin = shell_escape(&std::env::current_exe().unwrap().to_string_lossy());
+        let def = crate::agents::get_agent(agent).unwrap();
         format!(
-            "AOE_PROFILE={} AOE_INSTANCE_ID={} AOE_HOOK_BIN={} AOE_AGENT_PID=$$ AOE_AGENT_BIN={} ",
-            shell_escape(profile),
-            shell_escape(instance_id),
-            shell_escape(&std::env::current_exe().unwrap().to_string_lossy()),
-            shell_escape(crate::agents::get_agent(agent).unwrap().binary)
+            "AOE_PROFILE={profile} AOE_INSTANCE_ID={instance_id} AOE_HOOK_BIN={hook_bin} \
+             AOE_AGENT_PID=$$ AOE_AGENT_BIN={agent_bin} \
+             AOE_REPORT_BIN={hook_bin} AOE_REPORT_AGENT={agent_name} AOE_REPORT_PROFILE={profile} ",
+            profile = shell_escape(profile),
+            instance_id = shell_escape(instance_id),
+            agent_bin = shell_escape(def.binary),
+            agent_name = shell_escape(def.name),
         )
     }
 

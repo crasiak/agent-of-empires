@@ -3,6 +3,18 @@ import type { RepoColor } from "./repoAppearance";
 import type { AgentLifecycleInfo } from "./agentProfiles";
 
 /** Session data returned by the API */
+export type LaunchAccount = "personal" | "work" | "unknown";
+export type Launcher = "direct" | "headroom" | "ledger" | "ledger-headroom" | "unknown";
+
+/** Mirrors `crate::session::launch_identity::LaunchIdentity`. */
+export interface LaunchIdentity {
+  agent: string;
+  account: LaunchAccount;
+  launcher: Launcher;
+  /** The launcher's own profile name, not the AoE profile. */
+  profile: string;
+}
+
 export interface SessionResponse {
   id: string;
   title: string;
@@ -40,6 +52,12 @@ export interface SessionResponse {
    *  diff header. See #970. */
   base_branch_override?: string | null;
   is_sandboxed: boolean;
+  /** Launch identity the pane's launcher reported via `aoe session
+   *  report-launch`. Runtime metadata scoped to the live tmux pane: absent
+   *  for structured, archived, stopped or dead sessions and for panes whose
+   *  launcher never reported. The sidebar's `agent` row tag renders it as
+   *  `[cc:p:lh]`, mirroring the TUI. */
+  launch_identity?: LaunchIdentity | null;
   /** True when the session was created in scratch mode (`aoe add
    *  --scratch` or the wizard toggle). The `project_path` points
    *  at an auto-provisioned directory under `<app_dir>/scratch/<id>/`,
