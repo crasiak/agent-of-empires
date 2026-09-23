@@ -41,6 +41,12 @@ pub enum ContextMenuAction {
     OpenSortPicker,
     /// Attach another repo to this session (#3103).
     AddProject,
+    /// Open the Edit Session dialog on its group field. The dialog creates
+    /// the group when the path is new. Session rows in manual grouping only.
+    MoveToGroup,
+    /// Clear the session's group so it drops back to ungrouped. Offered only
+    /// when the row is currently in a group.
+    RemoveFromGroup,
     /// Set the session's per-row highlight color to red.
     HighlightRed,
     /// Set the session's per-row highlight color to amber.
@@ -217,6 +223,25 @@ impl ContextMenuDialog {
             items.push((ContextMenuAction::SwitchView, label));
         }
         Self::new(anchor, items)
+    }
+
+    /// Add the group entries to a session menu, right after Rename: "Move to
+    /// group" always, "Remove from group" only when the row is in a group.
+    pub fn with_group_actions(mut self, in_group: bool) -> Self {
+        let at = self
+            .items
+            .iter()
+            .position(|(action, _)| *action == ContextMenuAction::Rename)
+            .map_or(self.items.len(), |idx| idx + 1);
+        self.items
+            .insert(at, (ContextMenuAction::MoveToGroup, "Move to group"));
+        if in_group {
+            self.items.insert(
+                at + 1,
+                (ContextMenuAction::RemoveFromGroup, "Remove from group"),
+            );
+        }
+        self
     }
 
     pub fn for_group(anchor: (u16, u16)) -> Self {

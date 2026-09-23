@@ -4845,7 +4845,7 @@ impl HomeView {
             } else if is_group {
                 ContextMenuDialog::for_group(anchor)
             } else {
-                let (is_archived, is_snoozed, is_unread, has_highlight) =
+                let (is_archived, is_snoozed, is_unread, has_highlight, in_group) =
                     match &self.flat_items[idx] {
                         super::Item::Session { id, .. } => self
                             .get_instance(id)
@@ -4855,10 +4855,11 @@ impl HomeView {
                                     inst.is_snoozed(),
                                     inst.is_unread(),
                                     inst.color.is_some(),
+                                    !inst.group_path.is_empty(),
                                 )
                             })
-                            .unwrap_or((false, false, false, false)),
-                        super::Item::Group { .. } => (false, false, false, false),
+                            .unwrap_or((false, false, false, false, false)),
+                        super::Item::Group { .. } => (false, false, false, false, false),
                     };
                 // Snooze is an Attention-sort triage primitive: the `'h'`
                 // keybinding only fires in Attention sort, so the menu omits
@@ -4884,7 +4885,7 @@ impl HomeView {
                     super::Item::Session { id, .. } => self.session_switch_view_target(id),
                     super::Item::Group { .. } => None,
                 };
-                ContextMenuDialog::for_session_with_highlights(
+                let menu = ContextMenuDialog::for_session_with_highlights(
                     anchor,
                     is_archived,
                     snooze,
@@ -4892,7 +4893,15 @@ impl HomeView {
                     can_fork,
                     switch_view,
                     SessionHighlightMenu::new(self.show_session_colors, has_highlight),
-                )
+                );
+                // Manual groups are invisible in project and org grouping, so
+                // a move there would look like a no-op; offer group edits only
+                // where the result shows.
+                if self.group_by == GroupByMode::Manual {
+                    menu.with_group_actions(in_group)
+                } else {
+                    menu
+                }
             });
             return true;
         }
@@ -4985,6 +4994,8 @@ impl HomeView {
             ContextMenuAction::SwitchView => self.prompt_switch_view_for_selected(),
             ContextMenuAction::OpenSortPicker => self.show_sort_picker(),
             ContextMenuAction::AddProject => self.open_add_project_for_selected(),
+            ContextMenuAction::MoveToGroup => self.open_move_to_group_for_selected(),
+            ContextMenuAction::RemoveFromGroup => self.remove_selected_from_group(),
             ContextMenuAction::HighlightRed => self.set_selected_session_color(Some("red")),
             ContextMenuAction::HighlightAmber => self.set_selected_session_color(Some("amber")),
             ContextMenuAction::HighlightGreen => self.set_selected_session_color(Some("green")),
@@ -5010,6 +5021,19 @@ impl HomeView {
                 Some(SidebarSection::Archived) => self.toggle_archived_section(),
                 None => {}
             },
+        }
+    }
+
+    fn open_move_to_group_for_selected(&mut self) {
+        self.open_rename_for_selected();
+        if let Some(dialog) = self.rename_dialog.as_mut() {
+            dialog.focus_group();
+        }
+    }
+
+    fn remove_selected_from_group(&mut self) {
+        if let Err(e) = self.rename_selected("", Some(""), None, false) {
+            tracing::error!(target: "tui.input", "Failed to remove session from group: {}", e);
         }
     }
 

@@ -81,6 +81,11 @@ impl RenameDialog {
         self.new_title.value()
     }
 
+    #[cfg(test)]
+    pub fn group_value(&self) -> &str {
+        self.new_group.value()
+    }
+
     pub fn new(
         current_title: &str,
         current_group: &str,
@@ -253,6 +258,15 @@ impl RenameDialog {
             RenameMode::Session => self.focused_field == 1,
             RenameMode::Group => self.focused_field == 0,
         }
+    }
+
+    /// Open with the cursor on the group field, for entry points whose intent
+    /// is the group rather than the title.
+    pub fn focus_group(&mut self) {
+        self.focused_field = match self.mode {
+            RenameMode::Session => 1,
+            RenameMode::Group => 0,
+        };
     }
 
     fn next_field(&mut self) {
@@ -1039,6 +1053,17 @@ mod tests {
         dialog.handle_key(key(KeyCode::Char('b')));
         assert_eq!(dialog.new_title.value(), "a");
         assert_eq!(dialog.new_group.value(), "groupb");
+    }
+
+    #[test]
+    fn test_focus_group_routes_typing_to_group_field() {
+        let mut dialog =
+            RenameDialog::new("Test", "work", "default", default_profiles(), Vec::new());
+        dialog.focus_group();
+
+        dialog.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(dialog.new_title.value(), "");
+        assert_eq!(dialog.new_group.value(), "workx");
     }
 
     #[test]
