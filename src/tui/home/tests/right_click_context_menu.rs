@@ -98,12 +98,12 @@ fn down_then_enter_in_menu_opens_delete_dialog() {
     disable_delete_to_trash();
     setup_inner(&mut env);
     // Attention sort surfaces the full session menu, including highlight
-    // choices, so Delete is nine Downs away. (Unread defaults on, so the
-    // "Mark unread" row is present.)
+    // choices, so Delete is ten Downs away. (Unread defaults on, so the
+    // "Mark unread" row is present; manual grouping adds "Move to group".)
     env.view.sort_order = SortOrder::Attention;
     env.view.flat_items = env.view.build_flat_items();
     env.view.handle_right_click(5, 1);
-    for _ in 0..9 {
+    for _ in 0..10 {
         env.view.handle_key(key(KeyCode::Down), None);
     }
     env.view.handle_key(key(KeyCode::Enter), None);
@@ -127,8 +127,8 @@ fn esc_in_menu_cancels_without_dialog() {
 }
 
 /// Right-click a session, pick the Archive item (New Session -> Rename ->
-/// Archive is two Downs), and the row gets archived through the same `z`
-/// codepath. No follow-up dialog: archiving is immediate.
+/// Move to group -> Archive is three Downs), and the row gets archived
+/// through the same `z` codepath. No follow-up dialog: archiving is immediate.
 #[test]
 #[serial]
 fn right_click_archive_action_archives_session() {
@@ -142,7 +142,8 @@ fn right_click_archive_action_archives_session() {
     );
 
     env.view.handle_key(key(KeyCode::Down), None); // New Session -> Rename
-    env.view.handle_key(key(KeyCode::Down), None); // Rename -> Archive
+    env.view.handle_key(key(KeyCode::Down), None); // Rename -> Move to group
+    env.view.handle_key(key(KeyCode::Down), None); // Move to group -> Archive
     env.view.handle_key(key(KeyCode::Enter), None);
 
     assert!(env.view.context_menu.is_none(), "menu closes after archive");
@@ -192,13 +193,16 @@ fn right_click_unarchive_action_restores_session() {
     // toggle is always-on (any sort) and defaults on. The default session
     // tool is claude (a forkable terminal agent), so the Fork row shows;
     // `right_click_session_menu_hides_fork_for_unforkable_agent` covers the
-    // gated-off case. Menu is New Session / Rename / Unarchive / Mark unread
-    // / Add project / highlight choices / Delete / Fork.
+    // gated-off case. Manual grouping adds "Move to group" after Rename; the
+    // row is ungrouped, so no "Remove from group". Menu is New Session /
+    // Rename / Move to group / Unarchive / Mark unread / Add project /
+    // highlight choices / Delete / Fork.
     assert_eq!(
         labels,
         vec![
             "New Session",
             "Rename",
+            "Move to group",
             "Unarchive",
             "Mark unread",
             "Add project",
@@ -211,7 +215,8 @@ fn right_click_unarchive_action_restores_session() {
     );
 
     env.view.handle_key(key(KeyCode::Down), None); // New Session -> Rename
-    env.view.handle_key(key(KeyCode::Down), None); // Rename -> Unarchive
+    env.view.handle_key(key(KeyCode::Down), None); // Rename -> Move to group
+    env.view.handle_key(key(KeyCode::Down), None); // Move to group -> Unarchive
     env.view.handle_key(key(KeyCode::Enter), None);
     assert!(
         !env.view.get_instance(&id).unwrap().is_archived(),
@@ -415,6 +420,133 @@ fn context_menu_highlight_actions_hidden_when_setting_is_off() {
             | ContextMenuAction::HighlightGreen
             | ContextMenuAction::ClearHighlight
     )));
+}
+
+fn menu_actions(env: &TestEnv) -> Vec<ContextMenuAction> {
+    env.view
+        .context_menu
+        .as_ref()
+        .expect("context_menu should be open")
+        .items_for_test()
+        .iter()
+        .map(|(a, _)| *a)
+        .collect()
+}
+
+/// Screen row of the first session whose grouped state matches `grouped`.
+fn session_row(env: &TestEnv, grouped: bool) -> u16 {
+    let idx = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| match item {
+            Item::Session { id, .. } => env
+                .view
+                .get_instance(id)
+                .is_some_and(|inst| !inst.group_path.is_empty() == grouped),
+            Item::Group { .. } => false,
+        })
+        .expect("test env should have a matching session row");
+    env.view.list_inner_area.y + idx as u16
+}
+
+/// Manual grouping offers "Move to group" on every session row and "Remove
+/// from group" only on a row that is currently in a group.
+#[test]
+#[serial]
+fn right_click_session_menu_offers_group_actions_in_manual_mode() {
+    let mut env = create_test_env_with_groups();
+    setup_inner(&mut env);
+
+    assert!(env.view.handle_right_click(5, session_row(&env, false)));
+    let actions = menu_actions(&env);
+    assert!(actions.contains(&ContextMenuAction::MoveToGroup));
+    assert!(!actions.contains(&ContextMenuAction::RemoveFromGroup));
+
+    env.view.context_menu = None;
+    assert!(env.view.handle_right_click(5, session_row(&env, true)));
+    let actions = menu_actions(&env);
+    assert!(actions.contains(&ContextMenuAction::MoveToGroup));
+    assert!(actions.contains(&ContextMenuAction::RemoveFromGroup));
+}
+
+/// Project and org grouping never show manual groups, so a move there would
+/// look like a no-op; both entries stay off outside manual mode.
+#[test]
+#[serial]
+fn right_click_session_menu_hides_group_actions_outside_manual_mode() {
+    use crate::session::config::GroupByMode;
+    let mut env = create_test_env_with_groups();
+    setup_inner(&mut env);
+    for mode in [GroupByMode::Project, GroupByMode::Org] {
+        env.view.group_by = mode;
+        env.view.flat_items = env.view.build_flat_items();
+        env.view.context_menu = None;
+        let idx = env
+            .view
+            .flat_items
+            .iter()
+            .position(|item| matches!(item, Item::Session { .. }))
+            .expect("session row");
+        let row = env.view.list_inner_area.y + idx as u16;
+        assert!(env.view.handle_right_click(5, row));
+        let actions = menu_actions(&env);
+        assert!(
+            !actions.contains(&ContextMenuAction::MoveToGroup),
+            "{mode:?}"
+        );
+        assert!(
+            !actions.contains(&ContextMenuAction::RemoveFromGroup),
+            "{mode:?}"
+        );
+    }
+}
+
+/// "Move to group" opens the Edit Session dialog with the cursor already on
+/// the group field, so typing lands in the group rather than the title.
+#[test]
+#[serial]
+fn context_menu_move_to_group_opens_edit_dialog_on_group_field() {
+    let mut env = create_test_env_with_groups();
+    setup_inner(&mut env);
+    env.view.handle_right_click(5, session_row(&env, false));
+    env.view.context_menu = None;
+    env.view
+        .dispatch_context_menu_action(ContextMenuAction::MoveToGroup);
+
+    env.view.handle_key(key(KeyCode::Char('x')), None);
+    let dialog = env
+        .view
+        .rename_dialog
+        .as_ref()
+        .expect("Move to group should open the edit dialog");
+    assert_eq!(dialog.title_value(), "");
+    assert_eq!(dialog.group_value(), "x");
+}
+
+/// "Remove from group" drops the session back to ungrouped immediately, with
+/// no follow-up dialog, and persists the change.
+#[test]
+#[serial]
+fn context_menu_remove_from_group_clears_group_path() {
+    let mut env = create_test_env_with_groups();
+    setup_inner(&mut env);
+    env.view.handle_right_click(5, session_row(&env, true));
+    let id = env.view.selected_session.clone().unwrap();
+    env.view.context_menu = None;
+    env.view
+        .dispatch_context_menu_action(ContextMenuAction::RemoveFromGroup);
+
+    assert!(env.view.rename_dialog.is_none());
+    assert_eq!(env.view.get_instance(&id).unwrap().group_path, "");
+    let stored = crate::session::Storage::new_unwatched("test")
+        .unwrap()
+        .load()
+        .unwrap()
+        .into_iter()
+        .find(|inst| inst.id == id)
+        .unwrap();
+    assert_eq!(stored.group_path, "");
 }
 
 /// The Snooze row mirrors the `'h'` keybinding, which only fires in

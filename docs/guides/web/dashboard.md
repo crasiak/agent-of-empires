@@ -59,7 +59,7 @@ Drag-to-reorder is disabled in the computed modes. The picker's state is per-bro
 A grouping toggle (layers icon) next to the sort toggle cycles the axis. Each click advances **By repo** to **By group** to **By repo and group** and back:
 
 - **By repo** (default): groups by git repository.
-- **By group**: groups by the user-defined group assigned in the TUI rename dialog, with `aoe group move`, or via **Edit group** below. Ungrouped sessions fall into an **Ungrouped** bucket pinned to the bottom.
+- **By group**: groups by the user-defined group assigned in the TUI (right-click a session, **Move to group**), with `aoe group move`, or via **Edit group** below. Ungrouped sessions fall into an **Ungrouped** bucket pinned to the bottom.
 - **By repo and group**: repository headers with user groups nested inside each. A session split across groups appears once per subgroup.
 
 The choice is per-browser (localStorage). Collapse state is tracked separately per axis. You can move a session between groups from the web context menu, but group rename, color, and drag-reorder live on the repo axis only.
