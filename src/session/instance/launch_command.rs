@@ -49,6 +49,15 @@ pub(super) fn session_identity_extension_path() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Hand a recorded Ledger restart intent to the replacement pane. Pushed after
+/// the build's own `Unset`, so the replacement sees this intent and no inherited one.
+pub(super) fn attach_restart_intent(prepared: &mut PreparedLaunch, intent: String) {
+    prepared.launch_env.pane.push(tmux::PaneEnvMutation::set(
+        crate::session::ledger_restart::INTENT_ENV.into(),
+        intent,
+    ));
+}
+
 /// Whether a host `environment` list assigns `PATH`.
 pub(super) fn environment_defines_path(environment: &[String]) -> bool {
     environment.iter().any(|entry| {
@@ -445,10 +454,7 @@ impl Instance {
         if let Some(intent) =
             crate::session::ledger_restart::record_before_teardown(self, prior, resume)
         {
-            prepared.launch_env.pane.push(tmux::PaneEnvMutation::set(
-                crate::session::ledger_restart::INTENT_ENV.into(),
-                intent,
-            ));
+            attach_restart_intent(prepared, intent);
         }
     }
 

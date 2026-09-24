@@ -221,27 +221,55 @@ impl Instance {
         conversation_carry: Option<ConversationCarry>,
         prior_native_id: Option<&str>,
     ) -> Result<PreparedLaunch> {
-        // A plain restart builds the command before teardown so the Ledger restart record knows
-        // whether the relaunch resumes; nothing between the build and the kill moves the
-        // conversation. An account swap must carry the transcript before the build, by which
-        // point the outgoing pane is gone, so it records nothing and Ledger keeps its default.
+        // The Ledger restart record seals the outgoing run, so it is made before teardown. A plain
+        // restart builds the command first and records whether it resumes; nothing between the
+        // build and the kill moves the conversation.
         if restart && conversation_carry.is_none() {
             let mut prepared = self.prepare_launch_command()?;
             self.record_restart_before_teardown(&mut prepared, prior_native_id);
             self.kill_clean_locked()?;
             return self.refresh_prepared_prime_launch_after_pane_stop(prepared);
         }
+        // An account swap builds after the carry, so it records the resume the carry sets up.
+        // The new account usually launches under another Ledger profile; Ledger then rejects
+        // the claim and records a gap rather than a link.
+        let mut restart_intent = None;
         if restart {
+            let resume = conversation_carry
+                .as_ref()
+                .and_then(|carry| self.carried_resume_target(carry));
+            restart_intent = crate::session::ledger_restart::record_before_teardown(
+                self,
+                prior_native_id,
+                resume,
+            );
             self.kill_clean_locked()?;
         }
         if let Some(carry) = conversation_carry {
             carry.run();
         }
-        let prepared = self.prepare_launch_command()?;
+        let mut prepared = self.prepare_launch_command()?;
+        if let Some(intent) = restart_intent {
+            launch_command::attach_restart_intent(&mut prepared, intent);
+        }
         if restart {
             return self.refresh_prepared_prime_launch_after_pane_stop(prepared);
         }
         Ok(prepared)
+    }
+
+    /// The conversation a relaunch after `carry` resumes, or `None` for a fresh start. Mirrors
+    /// the resume half of `acquire_session_id_with` without its captures and id minting, so it
+    /// can be asked before the outgoing pane stops.
+    fn carried_resume_target<'a>(&'a self, carry: &ConversationCarry) -> Option<&'a str> {
+        match &self.resume_intent {
+            ResumeIntent::Use(sid) => Some(sid),
+            ResumeIntent::Cleared | ResumeIntent::Fork { .. } => None,
+            ResumeIntent::Default => self
+                .agent_session_id
+                .as_deref()
+                .filter(|sid| carry.will_carry(sid)),
+        }
     }
 
     /// A failure fails the restart: relaunching into the old container would run the new tool
@@ -483,6 +511,77 @@ mod tests {
             prepared.command
         );
     }
+    /// The Ledger record for an account-swap restart is made before teardown,
+    /// ahead of the carry, so it names the resume the carry sets up rather than
+    /// the one a build would read off the outgoing account.
+    #[test]
+    #[serial]
+    fn account_swap_restart_records_the_carried_conversation_as_its_resume() {
+        const SID: &str = "11111111-2222-3333-4444-555555555555";
+        let _app_dir = crate::session::test_support::isolate_app_dir();
+        let home = dirs::home_dir().expect("home");
+        let app_dir = crate::session::get_app_dir().expect("app dir");
+        std::fs::create_dir_all(&app_dir).expect("app dir");
+        std::fs::write(
+            app_dir.join("config.toml"),
+            "[session.agent_detect_as]\n\
+             claude-1 = \"claude\"\n\
+             claude-2 = \"claude\"\n\
+             \n\
+             [session.agent_config_dir]\n\
+             claude-1 = \"~/dot-claude-1\"\n\
+             claude-2 = \"~/dot-claude-2\"\n",
+        )
+        .expect("config");
+        let profile = crate::session::config::effective_profile("");
+        let _registry = crate::tmux::status_rules::ProfileRegistryGuard::take(&profile);
+        crate::session::config::profile_config::resolve_config_or_warn(&profile);
+
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).expect("project");
+        let mut inst = Instance::new("t", project.to_str().unwrap());
+        inst.tool = "claude-1".to_string();
+        inst.detect_as = "claude".to_string();
+        inst.command = "claude".to_string();
+        inst.agent_session_id = Some(SID.to_string());
+        let encoded = crate::session::capture::encode_claude_project_path(
+            &crate::session::capture::canonicalize_or_raw(project.to_str().unwrap())
+                .to_string_lossy(),
+        );
+        let seeded = home.join("dot-claude-1").join("projects").join(&encoded);
+        std::fs::create_dir_all(&seeded).expect("seed dir");
+        std::fs::write(seeded.join(format!("{SID}.jsonl")), "conversation\n").expect("seed");
+
+        let carry = match crate::session::conversation_carry::classify(&inst, &profile, "claude-2")
+        {
+            crate::session::conversation_carry::ToolSwap::KeepConversation(Some(carry)) => carry,
+            other => panic!("expected a planned carry, got {other:?}"),
+        };
+        inst.swap_account("claude-2");
+
+        assert_eq!(inst.carried_resume_target(&carry), Some(SID));
+
+        let cases = [
+            (ResumeIntent::Use("pinned".to_string()), Some("pinned")),
+            (ResumeIntent::Cleared, None),
+            (
+                ResumeIntent::Fork {
+                    from: SID.to_string(),
+                },
+                None,
+            ),
+        ];
+        for (intent, expected) in cases {
+            inst.resume_intent = intent.clone();
+            assert_eq!(inst.carried_resume_target(&carry), expected, "{intent:?}");
+        }
+
+        // A stored id the carry does not bring along starts fresh.
+        inst.resume_intent = ResumeIntent::Default;
+        inst.agent_session_id = Some("unplanned".to_string());
+        assert_eq!(inst.carried_resume_target(&carry), None);
+    }
+
     type PostShellCallback = Box<dyn FnOnce(&crate::tmux::Session)>;
     thread_local! {
         static POST_SHELL_OBSERVER: std::cell::RefCell<Option<PostShellCallback>> = const { std::cell::RefCell::new(None) };
