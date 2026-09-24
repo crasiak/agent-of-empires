@@ -13,6 +13,7 @@ import {
   getSettingsSchema,
   setDefaultProfile,
   updateProfileSettings,
+  updateSettings,
   updateTheme,
 } from "../lib/api";
 import type { ProfileInfo, SettingsFieldDescriptor } from "../lib/types";
@@ -138,6 +139,17 @@ const CITYHALL_TAB_IDS = new Set<TabId>(["theme", "session", "mcp", "telemetry",
 // and the rendered tabs cannot drift apart.
 const CITYHALL_SESSION_FIELDS = ["delete_to_trash", "confirm_delete", "trash_retention_days"];
 const CITYHALL_THEME_HIDDEN = ["color_mode", "idle_decay_minutes"];
+
+/** `session.*` fields the app shell reads into its own state and hands down by
+ *  context. Saving one has to re-read settings, or the shell keeps the old
+ *  value until a reload: the field is written and the surface it drives does
+ *  not move. Keep in step with `parseAppSettings` in App.tsx. */
+const SESSION_FIELDS_THE_APP_READS = new Set([
+  "row_tag",
+  "show_session_colors",
+  "show_diagnostics_pane",
+  "unread_indicator",
+]);
 
 // Fields the CityHall settings search may surface: only sections whose tab is in
 // the curated sidebar, and within those only the fields the curated tabs
@@ -379,13 +391,13 @@ export function SettingsView({
   }, [loadSettings]);
 
   const sendSave = useCallback(
-    async (section: string, data: Record<string, unknown>): Promise<boolean> => {
+    async (section: string, field: string, value: unknown): Promise<boolean> => {
       if (!selectedProfile) return false;
       setSaving(true);
       setSaveError(null);
-      const ok = await updateProfileSettings(selectedProfile, {
-        [section]: data,
-      });
+      const patch = { [section]: { [field]: value } };
+      const saveGlobally = schema.some((d) => d.section === section && d.field === field && !d.profile_overridable);
+      const ok = saveGlobally ? await updateSettings(patch) : await updateProfileSettings(selectedProfile, patch);
       setSaving(false);
       if (!ok) {
         setSaveError("Failed to save, please try again");
@@ -393,7 +405,7 @@ export function SettingsView({
       }
       return ok;
     },
-    [selectedProfile, loadSettings],
+    [selectedProfile, loadSettings, schema],
   );
 
   const updateLocal = useCallback(
@@ -411,7 +423,7 @@ export function SettingsView({
   const saveField = useCallback(
     (section: string, sectionData: Record<string, unknown>, field: string, value: unknown): Promise<boolean> => {
       updateLocal({ [section]: { ...sectionData, [field]: value } });
-      return sendSave(section, { [field]: value });
+      return sendSave(section, field, value);
     },
     [updateLocal, sendSave],
   );
@@ -547,7 +559,7 @@ export function SettingsView({
                 values={session}
                 onSaveField={saveSubField}
                 onAfterSave={(descriptor) => {
-                  if (descriptor.field === "row_tag" || descriptor.field === "show_session_colors") {
+                  if (SESSION_FIELDS_THE_APP_READS.has(descriptor.field)) {
                     return onSettingsRefresh();
                   }
                 }}
