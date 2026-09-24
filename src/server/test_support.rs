@@ -1,9 +1,6 @@
 //! Test-only constructors that integration tests in `tests/` need to drive
-//! `reload_state_instances_from_disk` and the dynamic-profile-rewire helpers
-//! without going through the full daemon. Mirrors the pattern at
-//! `src/tmux/mod.rs`'s `test_support` module: gated on
-//! `#[cfg(any(test, feature = "test-support"))]` so the surface stays out of
-//! production builds, and `#[doc(hidden)]` so it's invisible in rustdoc.
+//! `reload_state_instances_from_disk` and the dynamic-profile-rewire helpers without going
+//! through the full daemon.
 
 use super::*;
 use crate::file_watch::FileWatchService;
@@ -17,10 +14,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
 use tokio_util::sync::CancellationToken;
 
-/// Build a minimal `Arc<AppState>` for helper-equivalence tests. Most
-/// fields are seeded with empty / default values; only `instances`,
-/// `recently_restarted`, and the file-watch trio are real. Acp
-/// fields are stubbed because the helper's acp overlay reads them.
+/// Build a minimal `Arc<AppState>` for helper-equivalence tests.
 pub fn build_test_app_state(prior: Vec<Instance>) -> Arc<AppState> {
     build_test_app_state_with_policy(prior, Vec::new(), Vec::new(), None)
 }
@@ -28,7 +22,14 @@ pub fn build_test_app_state(prior: Vec<Instance>) -> Arc<AppState> {
 /// Like [`build_test_app_state`] but with CityHall client mode on, so route
 /// tests can assert the mode's 403/400 guards fire (#7).
 pub fn build_test_app_state_cityhall(prior: Vec<Instance>) -> Arc<AppState> {
-    build_test_app_state_impl(prior, Vec::new(), Vec::new(), None, true)
+    build_test_app_state_impl(
+        prior,
+        Vec::new(),
+        Vec::new(),
+        None,
+        true,
+        std::convert::identity,
+    )
 }
 
 /// Like [`build_test_app_state`] but seeds the DNS-rebinding allowlist and,
@@ -40,7 +41,26 @@ pub fn build_test_app_state_with_policy(
     allowed_origins: Vec<String>,
     token: Option<String>,
 ) -> Arc<AppState> {
-    build_test_app_state_impl(prior, allowed_hosts, allowed_origins, token, false)
+    build_test_app_state_impl(
+        prior,
+        allowed_hosts,
+        allowed_origins,
+        token,
+        false,
+        std::convert::identity,
+    )
+}
+
+/// Like [`build_test_app_state`] but every worker start goes through
+/// `launcher`, so a test decides how a start ends.
+#[cfg(test)]
+pub(crate) fn build_test_app_state_with_launcher(
+    prior: Vec<Instance>,
+    launcher: crate::acp::supervisor::Launcher,
+) -> Arc<AppState> {
+    build_test_app_state_impl(prior, Vec::new(), Vec::new(), None, false, |s| {
+        s.with_launcher(launcher)
+    })
 }
 
 fn build_test_app_state_impl(
@@ -49,6 +69,10 @@ fn build_test_app_state_impl(
     allowed_origins: Vec<String>,
     token: Option<String>,
     cityhall_mode: bool,
+    customize: impl FnOnce(
+        crate::acp::supervisor::Supervisor<crate::acp::supervisor::ChannelSink>,
+    )
+        -> crate::acp::supervisor::Supervisor<crate::acp::supervisor::ChannelSink>,
 ) -> Arc<AppState> {
     let app_dir = tempfile::tempdir().expect("tempdir");
     let acp_db = app_dir.path().join("acp_events.db");
@@ -61,8 +85,9 @@ fn build_test_app_state_impl(
         event_store: event_store.clone(),
         control_cache: acp_control_cache.clone(),
     });
-    let supervisor =
-        std::sync::Arc::new(crate::acp::supervisor::Supervisor::with_capacity(sink, 1));
+    let supervisor = std::sync::Arc::new(customize(
+        crate::acp::supervisor::Supervisor::with_capacity(sink, 1),
+    ));
     let instances = Arc::new(RwLock::new(prior));
     let instance_locks = Arc::new(RwLock::new(HashMap::new()));
     let idempotency_locks = Arc::new(RwLock::new(HashMap::new()));
@@ -110,6 +135,7 @@ fn build_test_app_state_impl(
         recently_restarted: crate::session::recovery::new_recently_restarted(),
         mutation_epoch: Arc::clone(&mutation_epoch),
         recovery_pending: crate::session::recovery::new_recovery_pending(),
+        metrics_sampler: tokio::sync::Mutex::new(Default::default()),
         cleanup_defaults_cache: RwLock::new(CleanupDefaultsCache {
             refreshed_at: std::time::Instant::now(),
             entries: HashMap::new(),
@@ -197,15 +223,11 @@ pub async fn rename_profile_disk_watch(state: &Arc<AppState>, old: &str, new: &s
 }
 
 /// Replace the `Arc<FileWatchService>` on a unique-Arc'd `AppState`.
-/// Tests build state with a `noop` service, then swap to live before
-/// exercising propagation paths. Crate-internal field access is
-/// hidden behind this helper so the field can stay `pub(crate)`.
 pub fn replace_file_watch(state: &mut AppState, fw: Arc<crate::file_watch::FileWatchService>) {
     state.file_watch = fw;
 }
 
-/// Read the current `Arc<FileWatchService>` for tests asserting on
-/// `subscriber_count`. The Arc clone is cheap.
+/// Read the current `Arc<FileWatchService>` for tests asserting on `subscriber_count`.
 pub fn file_watch(state: &AppState) -> Arc<crate::file_watch::FileWatchService> {
     state.file_watch.clone()
 }

@@ -7,16 +7,15 @@ use std::sync::mpsc;
 use std::thread;
 
 use crate::session::builder::{self, CreatedWorktree, InstanceParams};
-use crate::session::config::repo_config::{self, HookProgress, HooksConfig};
+use crate::session::config::repo_config::{self, HookProgress, ResolvedHooks};
 use crate::session::Instance;
 use crate::tui::dialogs::NewSessionData;
 
 pub struct CreationRequest {
     pub data: NewSessionData,
-    /// Existing instances, used for generating unique titles
     pub existing_instances: Vec<Instance>,
     /// Trusted hooks to execute after instance creation (already approved by user).
-    pub hooks: Option<HooksConfig>,
+    pub hooks: Option<ResolvedHooks>,
 }
 
 #[derive(Debug)]
@@ -24,11 +23,9 @@ pub enum CreationResult {
     Success {
         session_id: String,
         instance: Box<Instance>,
-        /// Worktree created during build, needed for cleanup if cancelled
         created_worktree: Option<CreatedWorktreeInfo>,
         /// Workspace worktrees created during build, needed for rollback.
         created_workspace_worktrees: Vec<CreatedWorktreeInfo>,
-        /// Whether on_launch hooks were already executed in the background
         on_launch_hooks_ran: bool,
         /// Non-fatal warnings from worktree creation (e.g. post-checkout hook
         /// failures). Surfaced as a transient toast in the UI.
@@ -74,6 +71,15 @@ pub struct CreationPoller {
     pending: bool,
     /// Profile from the last creation request (for cross-profile saves)
     last_profile: Option<String>,
+}
+
+/// Appends which config file declared the failing `on_create` commands.
+fn on_create_error(e: &anyhow::Error, hooks: &ResolvedHooks) -> String {
+    let msg = format!("on_create hook failed: {e:#}");
+    match hooks.origin_hint("on_create") {
+        Some(hint) => format!("{msg}\n{hint}"),
+        None => msg,
+    }
 }
 
 impl CreationPoller {
@@ -148,8 +154,12 @@ impl CreationPoller {
         let created_workspace_worktrees = build_result.created_workspace_worktrees;
         let warnings = build_result.warnings;
 
-        let has_on_create = hooks.as_ref().is_some_and(|h| !h.on_create.is_empty());
-        let has_on_launch = hooks.as_ref().is_some_and(|h| !h.on_launch.is_empty());
+        let has_on_create = hooks
+            .as_ref()
+            .is_some_and(|h| !h.hooks().on_create.is_empty());
+        let has_on_launch = hooks
+            .as_ref()
+            .is_some_and(|h| !h.hooks().on_launch.is_empty());
         let mut container_started = false;
         let hook_env = repo_config::lifecycle_env_vars(&instance);
 
@@ -173,7 +183,7 @@ impl CreationPoller {
                 if let Some(ref sandbox) = instance.sandbox_info {
                     let workdir = instance.container_workdir();
                     if let Err(e) = repo_config::execute_hooks_in_container_streamed(
-                        &hooks.on_create,
+                        &hooks.hooks().on_create,
                         &sandbox.container_name,
                         &workdir,
                         progress_tx,
@@ -186,11 +196,11 @@ impl CreationPoller {
                             &created_workspace_worktrees,
                             None,
                         );
-                        return CreationResult::Error(format!("on_create hook failed: {:#}", e));
+                        return CreationResult::Error(on_create_error(&e, hooks));
                     }
                 }
             } else if let Err(e) = repo_config::execute_hooks_streamed(
-                &hooks.on_create,
+                &hooks.hooks().on_create,
                 std::path::Path::new(&instance.project_path),
                 progress_tx,
                 &hook_env,
@@ -201,7 +211,7 @@ impl CreationPoller {
                     &created_workspace_worktrees,
                     None,
                 );
-                return CreationResult::Error(format!("on_create hook failed: {:#}", e));
+                return CreationResult::Error(on_create_error(&e, hooks));
             }
         }
 
@@ -223,7 +233,7 @@ impl CreationPoller {
                     if let Some(ref sandbox) = instance.sandbox_info {
                         let workdir = instance.container_workdir();
                         if let Err(e) = repo_config::execute_hooks_in_container_streamed(
-                            &hooks.on_launch,
+                            &hooks.hooks().on_launch,
                             &sandbox.container_name,
                             &workdir,
                             progress_tx,
@@ -234,7 +244,7 @@ impl CreationPoller {
                     }
                 }
             } else if let Err(e) = repo_config::execute_hooks_streamed(
-                &hooks.on_launch,
+                &hooks.hooks().on_launch,
                 std::path::Path::new(&instance.project_path),
                 progress_tx,
                 &hook_env,
@@ -287,7 +297,6 @@ impl CreationPoller {
         }
     }
 
-    /// Get the profile from the last creation request
     pub fn last_profile(&self) -> Option<String> {
         self.last_profile.clone()
     }

@@ -1,18 +1,4 @@
 //! Drain pollers' session-id mpsc channels and persist observations.
-//!
-//! Shared by the TUI tick (`apply_session_id_updates`) and the daemon's
-//! `status_poll_loop`. Without the daemon-side caller, sessions running
-//! under `aoe serve` without an attached TUI never persist post-`/clear`
-//! sids through the channel and `sessions.json` stays stale until the
-//! next launch's resume-time verify (#2291).
-//!
-//! The helper takes `&mut [Instance]` and mutates the slice's per-instance
-//! `agent_session_id` and `resume_probe_failed_sid` directly. It does NOT
-//! take any tokio lock and is safe to call from within `spawn_blocking`.
-//! Daemon callers MUST satisfy the lock-ordering invariant in
-//! `storage.rs:46`: snapshot the instances under a brief read lock, run the
-//! helper on the snapshot inside `spawn_blocking`, then reapply the
-//! mutations to live state under a brief write lock.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -27,10 +13,7 @@ use crate::session::{
     Status,
 };
 
-/// Per-tick result of [`drain_and_persist_session_ids`]. Lists touched
-/// instance IDs grouped by the persistence outcome so a caller holding an
-/// auxiliary in-memory mirror (e.g. the TUI's `instances` map) can re-sync
-/// each affected entry from the slice.
+/// Per-tick result of [`drain_and_persist_session_ids`].
 #[derive(Debug, Default, Clone)]
 pub(crate) struct SessionIdSyncOutcome {
     /// Instances whose poller observation committed a sid update or an OMP
@@ -39,10 +22,8 @@ pub(crate) struct SessionIdSyncOutcome {
     /// Instances whose in-memory state was reloaded from disk after a
     /// CAS-Skipped persist (peer wrote a different sid first).
     pub(crate) rolled_back: Vec<String>,
-    /// Instances whose poller-observed sid was rejected (validation failed,
-    /// matched a cleared sid in the per-instance exclusion set, or the
-    /// persist returned Failed). The tmux env mirror is republished from
-    /// the in-memory value for these so the on_change publish is overwritten.
+    /// Instances whose poller-observed sid was rejected (validation failed, matched a cleared sid
+    /// in the per-instance exclusion set, or the persist returned Failed).
     pub(crate) filtered: Vec<String>,
 }
 
@@ -95,13 +76,9 @@ fn drain_and_persist_session_ids_inner(
 ) -> SessionIdSyncOutcome {
     let mut updates: Vec<Update> = Vec::with_capacity(instances.len());
     let mut filtered_ids: HashSet<String> = HashSet::with_capacity(instances.len());
-    let mut already_current: Vec<String> = Vec::new();
+    let mut already_current: Vec<(String, SessionIdObservation)> = Vec::new();
 
-    // Frozen pre-update ownership snapshot. Collision checks must read this,
-    // never a map mutated mid-loop: with two pollers that transiently cross
-    // streams (A reports B's id while B reports A's), a dynamic map would
-    // accept or reject by slice iteration order. The snapshot rejects every
-    // cross-claim deterministically (see #2708).
+    // Frozen pre-update ownership snapshot.
     let mut sid_owners: HashMap<String, String> = HashMap::with_capacity(instances.len());
     for inst in instances.iter() {
         if let Some(sid) = inst.agent_session_id.as_deref() {
@@ -122,10 +99,8 @@ fn drain_and_persist_session_ids_inner(
         };
         let confirms_omp_pin = matches!(&inst.resume_intent, ResumeIntent::Use(pinned) if pinned == &sid)
             && matches!(&observation.guard, SessionIdGuard::OmpGeneration(_));
-        // Unguarded and legacy filesystem scans from a stopped session can
-        // belong to a peer sharing the cwd. A generation-typed OMP result is
-        // bound to the exact old pane and must remain eligible for the
-        // restart's post-join final flush.
+        // Unguarded and legacy filesystem scans from a stopped session can belong to a peer sharing
+        // the cwd.
         if matches!(inst.status, Status::Stopped)
             && !matches!(&observation.guard, SessionIdGuard::OmpGeneration(_))
             && inst.agent_session_id.as_deref() != Some(sid.as_str())
@@ -140,9 +115,9 @@ fn drain_and_persist_session_ids_inner(
             filtered_ids.insert(inst.id.clone());
             continue;
         }
-        // While an explicit set-session-id pin is armed, the poller must not
-        // overwrite it with an unowned fresher jsonl that the collision guard
-        // below would otherwise wave through (#2708 invariant 1).
+        // While an explicit set-session-id pin is armed, the poller must not overwrite it with an
+        // unowned fresher jsonl that the collision guard below would otherwise wave through (
+        // invariant 1).
         if let ResumeIntent::Use(pinned) = &inst.resume_intent {
             if sid != *pinned {
                 tracing::debug!(
@@ -157,12 +132,10 @@ fn drain_and_persist_session_ids_inner(
                 continue;
             }
         }
-        // A guarded pin confirmation does not claim a new sid. Its disk CAS
-        // verifies that this row already owns it, so stale in-memory ownership
-        // and capture exclusions must not mask the launch confirmation.
+        // A guarded pin confirmation does not claim a new sid.
         if !confirms_omp_pin {
-            // Never adopt an id another instance already owns: that is the
-            // same-cwd cross-assignment drift itself (#2708 symptom 1).
+            // Never adopt an id another instance already owns: that is the same-cwd
+            // cross-assignment drift itself ( symptom 1).
             if let Some(owner) = sid_owners.get(sid.as_str()) {
                 if owner != &inst.id {
                     tracing::warn!(
@@ -190,13 +163,8 @@ fn drain_and_persist_session_ids_inner(
             }
         }
         if inst.agent_session_id.as_deref() == Some(sid.as_str()) && !confirms_omp_pin {
-            acknowledge_poller_observation(inst, &observation);
-            // The pane published the id this row already holds, so there is no
-            // sid to write. Its transcript path may still be new: a launch
-            // that pre-minted its id never sees one of these observations
-            // reach the write below, and that path is the only durable record
-            // of which file the conversation lives in.
-            already_current.push(inst.id.clone());
+            // The pane published the id this row already holds, so there is no sid to write.
+            already_current.push((inst.id.clone(), observation));
             continue;
         }
         updates.push(Update {
@@ -210,11 +178,9 @@ fn drain_and_persist_session_ids_inner(
         });
     }
 
-    // Reject, don't arbitrate: if two same-cwd peers both claim the same
-    // currently-unowned sid in one tick (neither is in the frozen snapshot, so
-    // the collision guard passed both), picking a winner by iteration order is
-    // silent misassignment. Drop every claimant and defer; the next tick sees
-    // the real owner's anchor advance and the collision guard resolves it (#2708).
+    // Reject, don't arbitrate: if two same-cwd peers both claim the same currently-unowned sid in
+    // one tick (neither is in the frozen snapshot, so the collision guard passed both), picking a
+    // winner by iteration order is silent misassignment.
     let mut sid_claim_counts: HashMap<String, usize> = HashMap::with_capacity(updates.len());
     for update in &updates {
         if !update.confirms_omp_pin {
@@ -237,9 +203,12 @@ fn drain_and_persist_session_ids_inner(
         }
     });
 
-    for id in &already_current {
+    for (id, observation) in &already_current {
         if let Some(inst) = instances.iter_mut().find(|i| i.id == *id) {
-            inst.absorb_published_pi_session();
+            // Unacknowledged, a transcript path whose write failed is retried on the next drain.
+            if inst.persist_observed_pi_transcript(observation) {
+                acknowledge_poller_observation(inst, observation);
+            }
         }
     }
 
@@ -298,10 +267,9 @@ fn drain_and_persist_session_ids_inner(
                 )
             }
             Ok(_) => match &update.guard {
-                // Same CAS as an unguarded write; the guard only records that
-                // the observation named this pane, which the Pi rule below
-                // reads.
-                SessionIdGuard::Unguarded | SessionIdGuard::InstanceSidecar => {
+                // Same CAS as an unguarded write; the guard only records that the observation named
+                // this pane, which the Pi rule below reads.
+                SessionIdGuard::Unguarded | SessionIdGuard::InstanceSidecar { .. } => {
                     persist_session_to_storage(
                         &update.profile,
                         &update.id,
@@ -362,8 +330,8 @@ fn drain_and_persist_session_ids_inner(
             }
         }
         match outcome {
+            // Acknowledged once its transcript path is stored, in the loop below.
             SidWrite::Applied => {
-                acknowledge_poller_observation_for(instances, &update.id, &update.observation);
                 to_apply.push((
                     update.id.clone(),
                     update.sid.clone(),
@@ -377,11 +345,12 @@ fn drain_and_persist_session_ids_inner(
                     if !update.confirms_omp_pin
                         && rb.disk_sid.as_deref() == Some(update.sid.as_str())
                     {
-                        acknowledge_poller_observation_for(
-                            instances,
-                            &update.id,
-                            &update.observation,
-                        );
+                        // Another writer stored this id; the captured path is still ours to store.
+                        if let Some(inst) = instances.iter_mut().find(|i| i.id == update.id) {
+                            if inst.persist_observed_pi_transcript(&update.observation) {
+                                acknowledge_poller_observation(inst, &update.observation);
+                            }
+                        }
                     }
                     to_rollback.push(rb);
                 } else {
@@ -413,11 +382,13 @@ fn drain_and_persist_session_ids_inner(
             } else {
                 inst.resume_probe_failed_sid = None;
             }
-            // The transcript path belongs with the id it names. Recording it
-            // here is what makes it durable while the pane is still running:
-            // the sidecar it comes from lives in the host temp directory, and
-            // the only other writer is teardown, which a reboot never reaches.
-            inst.absorb_published_pi_session();
+            // The transcript path belongs with the id it names. Unacknowledged, a path whose
+            // write failed is retried on the next drain.
+            if let Some(update) = updates.iter().find(|update| update.id == *id) {
+                if inst.persist_observed_pi_transcript(&update.observation) {
+                    acknowledge_poller_observation(inst, &update.observation);
+                }
+            }
         }
     }
     for rb in &to_rollback {
@@ -438,43 +409,19 @@ fn drain_and_persist_session_ids_inner(
     }
 }
 
-/// Bound for a non-attaching CLI launch (`aoe session start` / import
-/// `--launch`) to wait for its poller. Covers the poller's first few ~2s
-/// ticks (`POLL_INITIAL_INTERVAL`) while keeping the foreground bounded.
+/// Bound for a non-attaching CLI launch (`aoe session start` / import `--launch`) to wait for its
+/// poller.
 pub(crate) const CLI_SESSION_ID_CAPTURE_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Bound for `aoe add --launch`, which drains only after `tmux attach`
-/// returns: the poller observed for the whole attached session, so the id is
-/// almost always already queued and this only covers a detach before tick 1.
+/// Bound for `aoe add --launch`, which drains only after `tmux attach` returns: the poller observed
+/// for the whole attached session, so the id is almost always already queued and this only covers a
+/// detach before tick 1.
 pub(crate) const CLI_ATTACHED_SESSION_ID_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// How often the bounded CLI capture re-drains the poller while waiting. Short
-/// enough to land the id promptly once the poller observes it, coarse enough
-/// not to busy-spin the storage flock between the poller's ~2s ticks.
+/// How often the bounded CLI capture re-drains the poller while waiting.
 const CLI_CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Bounded, blocking post-launch capture of `agent_session_id` for the CLI
-/// one-shot launch paths.
-///
-/// The TUI event loop and the `aoe serve` daemon drain each instance's
-/// session-id poller on every tick; a bare CLI launch has no such loop, so for
-/// a capture-deferred agent (every resume-capable agent except claude and
-/// preassigned opencode) the poller-observed id was never persisted and
-/// resume/recovery silently broke. `finalize_launch` has already started the
-/// poller by the time this runs, so this simply drives the SAME
-/// [`drain_and_persist_session_ids`] path the TUI/daemon use, on a
-/// single-instance slice, until the id lands or `timeout` elapses.
-///
-/// Instances with no poller (`ResumeStrategy::Unsupported`, a sandboxed agent
-/// whose container is not up, or a budget-exhausted poller) impose no wait.
-/// Every poller-backed exit stops and joins the producer, whose Stop boundary
-/// performs one final poll, then drains the resulting correction before the
-/// one-shot CLI drops the instance.
-///
-/// Called only from CLI one-shot paths. When `notify` is set it prints a
-/// one-line waiting notice after ~1s; parallel `restart --all` workers pass
-/// `false` so their notices do not interleave. The timeout note is always
-/// printed when the final poll still produced no session id.
+/// Bounded, blocking post-launch capture of `agent_session_id` for the CLI one-shot launch paths.
 pub(crate) fn capture_launched_session_id_blocking(
     inst: &mut Instance,
     file_watch: &Arc<FileWatchService>,
@@ -499,13 +446,7 @@ fn capture_launched_session_id_with_wait(
     let deadline = start + timeout;
     let mut notified = false;
     loop {
-        // Reuse the fleet drain on a one-element slice. Each pass empties the
-        // receiver and keeps its newest observation, so a correction queued
-        // behind an obsolete value wins without an intermediate CAS write.
-        // Intentionally sleepless: a pass only re-loops while it consumed a real
-        // observation, and the producer poller's own poll cadence bounds how
-        // fast the channel refills, so the burst self-terminates on an empty
-        // channel before the outer sleep below.
+        // Reuse the fleet drain on a one-element slice.
         while drain_and_persist_session_ids(std::slice::from_mut(inst), file_watch).touched()
             && Instant::now() < deadline
         {}
@@ -522,9 +463,9 @@ fn capture_launched_session_id_with_wait(
         wait(CLI_CAPTURE_POLL_INTERVAL);
     }
 
-    // Stop joins the producer and performs its final poll before this last
-    // drain, closing the drop-time window where `/clear` or `/new` could queue
-    // a replacement sid after the apparent success above.
+    // Stop joins the producer and performs its final poll before this last drain, closing the
+    // drop-time window where `/clear` or `/new` could queue a replacement sid after the apparent
+    // success above.
     inst.stop_and_flush_poller();
     if inst.agent_session_id.is_none() {
         let title: String = inst.title.chars().filter(|c| !c.is_control()).collect();
@@ -652,10 +593,10 @@ fn publish_tmux_env(
             Some(name) => name,
             None => continue,
         };
-        // Re-assert the instance-id alongside the captured sid: this publish
-        // replaced the poller's on_change pre-CAS publish (which wrote both
-        // keys), and `build_exclusion_set` can only attribute a captured sid
-        // to its owner when AOE_INSTANCE_ID is present on the same session.
+        // Re-assert the instance-id alongside the captured sid: this publish replaced the poller's
+        // on_change pre-CAS publish (which wrote both keys), and `build_exclusion_set` can only
+        // attribute a captured sid to its owner when AOE_INSTANCE_ID is present on the same
+        // session.
         set_batch.push((
             tmux_name.clone(),
             crate::tmux::env::AOE_INSTANCE_ID_KEY.to_string(),
@@ -707,10 +648,7 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::{tempdir, TempDir};
 
-    /// Points `HOME` (and, on Linux/macOS, `XDG_CONFIG_HOME`) at `temp`
-    /// for the current test body. See [`crate::session::test_support`]:
-    /// the snapshot/restore is `EnvGuard`'s, so a non-UTF-8 prior value
-    /// round-trips instead of being dropped (#2751).
+    // Points `HOME` (and, on Linux/macOS, `XDG_CONFIG_HOME`) at `temp` for the current test body.
     fn storage_home_guard(temp: &TempDir) -> EnvGuard {
         let pairs: Vec<(&'static str, PathBuf)> = vec![
             ("HOME", temp.path().to_path_buf()),
@@ -803,102 +741,65 @@ mod tests {
         assert_eq!(disk[0].resume_intent, ResumeIntent::Default);
     }
 
+    /// What the poller reports back for a pinned omp session.
+    enum Observation {
+        /// A generation-tagged sighting of some sid.
+        Omp(&'static str, &'static str),
+        /// A sighting from a build that did not tag generations.
+        LegacyOmp(&'static str),
+        /// A plain, unguarded sid sighting.
+        Plain(&'static str),
+    }
+
     #[test]
     #[serial]
-    fn stale_omp_generation_does_not_consume_pin() {
-        let temp = tempdir().unwrap();
-        let _guard = storage_home_guard(&temp);
-        let profile = "sync-omp-pin-stale";
+    fn only_an_exact_generation_match_consumes_an_omp_pin() {
         let sid = "019342ab-1234-7def-8901-abcdef012341";
-        let mut inst = pinned_omp_instance(profile, sid, "launch-current");
-        seed_instance_on_disk(profile, &inst);
-        attach_poller_with_omp_update(&mut inst, sid, "launch-stale");
+        let other = "019342ab-1234-7def-8901-abcdef012344";
+        // (profile, observation, the outcome bucket the session lands in)
+        let cases = [
+            (
+                "sync-omp-pin-stale",
+                Observation::Omp(sid, "launch-stale"),
+                "rolled_back",
+            ),
+            ("sync-omp-pin-legacy", Observation::LegacyOmp(sid), "none"),
+            ("sync-omp-pin-unguarded", Observation::Plain(sid), "none"),
+            (
+                "sync-omp-pin-mismatch",
+                Observation::Omp(other, "launch-current"),
+                "filtered",
+            ),
+        ];
+        for (profile, observation, bucket) in cases {
+            let temp = tempdir().unwrap();
+            let _guard = storage_home_guard(&temp);
+            let mut inst = pinned_omp_instance(profile, sid, "launch-current");
+            seed_instance_on_disk(profile, &inst);
+            match observation {
+                Observation::Omp(seen, generation) => {
+                    attach_poller_with_omp_update(&mut inst, seen, generation)
+                }
+                Observation::LegacyOmp(seen) => {
+                    attach_poller_with_legacy_omp_update(&mut inst, seen)
+                }
+                Observation::Plain(seen) => attach_poller_with_update(&mut inst, seen),
+            }
 
-        let file_watch = FileWatchService::noop();
-        let mut instances = vec![inst];
-        let outcome = drain_and_persist_session_ids(&mut instances, &file_watch);
+            let mut instances = vec![inst];
+            let outcome = drain_and_persist_session_ids(&mut instances, &FileWatchService::noop());
 
-        assert_eq!(outcome.rolled_back, vec![instances[0].id.clone()]);
-        assert_eq!(
-            instances[0].resume_intent,
-            ResumeIntent::Use(sid.to_string())
-        );
-        let disk = Storage::new_unwatched(profile).unwrap().load().unwrap();
-        assert_eq!(disk[0].resume_intent, ResumeIntent::Use(sid.to_string()));
-    }
-
-    #[test]
-    #[serial]
-    fn legacy_omp_observation_does_not_consume_pin() {
-        let temp = tempdir().unwrap();
-        let _guard = storage_home_guard(&temp);
-        let profile = "sync-omp-pin-legacy";
-        let sid = "019342ab-1234-7def-8901-abcdef012342";
-        let mut inst = pinned_omp_instance(profile, sid, "launch-current");
-        seed_instance_on_disk(profile, &inst);
-        attach_poller_with_legacy_omp_update(&mut inst, sid);
-
-        let file_watch = FileWatchService::noop();
-        let mut instances = vec![inst];
-        let outcome = drain_and_persist_session_ids(&mut instances, &file_watch);
-
-        assert!(!outcome.touched());
-        assert_eq!(
-            instances[0].resume_intent,
-            ResumeIntent::Use(sid.to_string())
-        );
-        let disk = Storage::new_unwatched(profile).unwrap().load().unwrap();
-        assert_eq!(disk[0].resume_intent, ResumeIntent::Use(sid.to_string()));
-    }
-
-    #[test]
-    #[serial]
-    fn unguarded_observation_does_not_consume_omp_pin() {
-        let temp = tempdir().unwrap();
-        let _guard = storage_home_guard(&temp);
-        let profile = "sync-omp-pin-unguarded";
-        let sid = "019342ab-1234-7def-8901-abcdef012349";
-        let mut inst = pinned_omp_instance(profile, sid, "launch-current");
-        seed_instance_on_disk(profile, &inst);
-        attach_poller_with_update(&mut inst, sid);
-
-        let file_watch = FileWatchService::noop();
-        let mut instances = vec![inst];
-        let outcome = drain_and_persist_session_ids(&mut instances, &file_watch);
-
-        assert!(!outcome.touched());
-        assert_eq!(
-            instances[0].resume_intent,
-            ResumeIntent::Use(sid.to_string())
-        );
-        let disk = Storage::new_unwatched(profile).unwrap().load().unwrap();
-        assert_eq!(disk[0].resume_intent, ResumeIntent::Use(sid.to_string()));
-    }
-
-    #[test]
-    #[serial]
-    fn contradictory_omp_observation_does_not_consume_pin() {
-        let temp = tempdir().unwrap();
-        let _guard = storage_home_guard(&temp);
-        let profile = "sync-omp-pin-mismatch";
-        let sid = "019342ab-1234-7def-8901-abcdef012343";
-        let other_sid = "019342ab-1234-7def-8901-abcdef012344";
-        let generation = "launch-current";
-        let mut inst = pinned_omp_instance(profile, sid, generation);
-        seed_instance_on_disk(profile, &inst);
-        attach_poller_with_omp_update(&mut inst, other_sid, generation);
-
-        let file_watch = FileWatchService::noop();
-        let mut instances = vec![inst];
-        let outcome = drain_and_persist_session_ids(&mut instances, &file_watch);
-
-        assert_eq!(outcome.filtered, vec![instances[0].id.clone()]);
-        assert_eq!(
-            instances[0].resume_intent,
-            ResumeIntent::Use(sid.to_string())
-        );
-        let disk = Storage::new_unwatched(profile).unwrap().load().unwrap();
-        assert_eq!(disk[0].resume_intent, ResumeIntent::Use(sid.to_string()));
+            let id = vec![instances[0].id.clone()];
+            match bucket {
+                "rolled_back" => assert_eq!(outcome.rolled_back, id, "{profile}"),
+                "filtered" => assert_eq!(outcome.filtered, id, "{profile}"),
+                _ => assert!(!outcome.touched(), "{profile}"),
+            }
+            let pinned = ResumeIntent::Use(sid.to_string());
+            assert_eq!(instances[0].resume_intent, pinned, "{profile}");
+            let disk = Storage::new_unwatched(profile).unwrap().load().unwrap();
+            assert_eq!(disk[0].resume_intent, pinned, "{profile}: on disk");
+        }
     }
 
     #[test]
@@ -1189,8 +1090,6 @@ mod tests {
         inst.source_profile = "sync-pinned".to_string();
         inst.agent_session_id = Some(pin.to_string());
         inst.resume_intent = ResumeIntent::Use(pin.to_string());
-        // Idle (Instance::new default), so the stopped guard does not fire and
-        // the pin guard is what rejects the peer id.
         seed_instances_on_disk("sync-pinned", &[&inst]);
 
         attach_poller_with_update(&mut inst, peer);
@@ -1237,13 +1136,6 @@ mod tests {
         let temp = tempdir().unwrap();
         let _guard = storage_home_guard(&temp);
 
-        // Cross-process shape (#2858): another aoe process (e.g. the serve
-        // daemon, while this process is the TUI) has already assigned
-        // `contested` to a peer ON DISK, but this process's in-memory slice
-        // predates that write, so every in-memory guard waves the claim
-        // through. The flock-scoped ownership check inside
-        // `persist_session_to_storage` must reject the write and the drain
-        // must roll the claimant back to its disk value.
         let contested = "019342ab-1234-7def-8901-eeeeeeeeeeee";
         let profile = "sync-diskowner";
 
@@ -1259,8 +1151,6 @@ mod tests {
         attach_poller_with_update(&mut claimant, contested);
 
         let file_watch = FileWatchService::noop();
-        // The slice deliberately omits `owner`: its assignment exists only on
-        // disk, as after a concurrent process's drain.
         let mut instances = vec![claimant];
         let outcome = drain_and_persist_session_ids(&mut instances, &file_watch);
 
@@ -1334,9 +1224,8 @@ mod tests {
         assert_eq!(loaded[0].agent_session_id.as_deref(), Some(fresh));
     }
 
-    // The sidecar names the pane, so a conversation started inside it with
-    // `/new` is this session's and replaces the anchor. The store scan is what
-    // may not, and the guard is how the drain tells them apart.
+    // The sidecar names the pane, so a conversation started inside it with `/new` is this session's
+    // and replaces the anchor.
     #[test]
     #[serial]
     fn pi_accepts_a_sidecar_retarget_and_keeps_its_poller() {
@@ -1352,7 +1241,7 @@ mod tests {
         seed_instance_on_disk(profile, &inst);
 
         let poller = SessionPoller::new(format!("test-tmux-{}", inst.id));
-        poller.inject_test_sidecar_update(&inst.id, "pi-new-conversation");
+        poller.inject_test_sidecar_update(&inst.id, "pi-new-conversation", None);
         inst.session_id_poller = Some(Arc::new(Mutex::new(poller)));
 
         let file_watch = FileWatchService::noop();
@@ -1370,14 +1259,67 @@ mod tests {
         );
     }
 
+    // A captured transcript path stays pending until it is stored, whichever branch adopts its id.
+    #[test]
+    #[serial]
+    fn a_captured_pi_transcript_path_survives_a_failed_write_on_every_branch() {
+        use crate::session::instance::FAIL_PI_PATH_WRITES;
+        let old = "01a05234-8889-72e2-a7c9-7ebc27b25b78";
+        let new = "0192f7a1-4b3c-7d2e-9f10-aa1b2c3d4e5f";
+        let path =
+            format!("/home/u/.pi/agent/sessions/--proj--/2026-01-02T00-00-00-000Z_{new}.jsonl");
+        // (label, sid already on disk, first write fails)
+        for (label, disk_sid, fail_first) in [
+            ("applied new id", old, false),
+            ("applied new id, failed path write", old, true),
+            ("another writer stored the id", new, false),
+            ("another writer stored the id, failed path write", new, true),
+        ] {
+            let temp = tempdir().unwrap();
+            let _guard = storage_home_guard(&temp);
+            let profile = "sync-pi-path-delivery";
+            let mut inst = Instance::new("pi-path-delivery", "/tmp/pi-path-delivery");
+            inst.source_profile = profile.to_string();
+            inst.tool = "pi".to_string();
+            inst.mark_pi_extension_launched_for_test();
+            let mut on_disk = inst.clone();
+            on_disk.agent_session_id = Some(disk_sid.to_string());
+            seed_instance_on_disk(profile, &on_disk);
+            inst.agent_session_id = Some(old.to_string());
+
+            // No sidecar exists: only the observation carries the path.
+            let poller = SessionPoller::new(format!("test-tmux-{}", inst.id));
+            poller.inject_test_sidecar_update(&inst.id, new, Some(&path));
+            inst.session_id_poller = Some(Arc::new(Mutex::new(poller)));
+            let file_watch = FileWatchService::noop();
+            let mut instances = [inst];
+            let stored = || Storage::new_unwatched(profile).unwrap().load().unwrap()[0].clone();
+
+            FAIL_PI_PATH_WRITES.with(|fail| fail.set(fail_first));
+            drain_and_persist_session_ids(&mut instances, &file_watch);
+            FAIL_PI_PATH_WRITES.with(|fail| fail.set(false));
+            assert_eq!(stored().agent_session_id.as_deref(), Some(new), "{label}");
+            if fail_first {
+                assert_eq!(stored().pi_session_path, None, "{label}");
+                // Recovery needs no new publication: the held observation is retried.
+                drain_and_persist_session_ids(&mut instances, &file_watch);
+            }
+            assert_eq!(
+                stored().pi_session_path.as_deref(),
+                Some(path.as_str()),
+                "{label}"
+            );
+            let poller = instances[0].session_id_poller.as_ref().unwrap();
+            assert!(
+                poller.lock().unwrap().latest_observation().is_none(),
+                "{label}: a stored path acknowledges its observation"
+            );
+        }
+    }
+
     #[test]
     #[serial]
     fn pi_records_its_transcript_path_when_the_observation_repeats_its_own_id() {
-        // A host Pi launch that pre-mints its id sees every poller
-        // observation match the row, so nothing is ever written through the
-        // sid path. The transcript path still has to land: it is the only
-        // durable record of which file the conversation lives in, and the
-        // sidecar it comes from does not survive a reboot.
         let (_hooks, _base, _hooks_tmp) = crate::hooks::test_support::BaseGuard::ready();
         let temp = tempdir().unwrap();
         let _guard = storage_home_guard(&temp);
@@ -1392,12 +1334,9 @@ mod tests {
         seed_instance_on_disk(profile, &inst);
 
         let published = "/home/u/.pi/agent/sessions/--proj--/2026-01-01T00-00-00-000Z_01a05234-8889-72e2-a7c9-7ebc27b25b78.jsonl";
-        crate::hooks::write_session_id_via_guard(&inst.id, sid).unwrap();
-        let dir = crate::hooks::ensure_instance_dir_path(&inst.id).unwrap();
-        std::fs::write(dir.join("session_path"), format!("{published}\n")).unwrap();
-
+        // The sidecar is already gone: only the observation carries the path.
         let poller = SessionPoller::new(format!("test-tmux-{}", inst.id));
-        poller.inject_test_sidecar_update(&inst.id, sid);
+        poller.inject_test_sidecar_update(&inst.id, sid, Some(published));
         inst.session_id_poller = Some(Arc::new(Mutex::new(poller)));
 
         let file_watch = FileWatchService::noop();

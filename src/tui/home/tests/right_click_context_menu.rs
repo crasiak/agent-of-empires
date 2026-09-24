@@ -1,7 +1,6 @@
-//! Right-click on a sidebar row opens a small popup menu (Rename /
-//! Delete) anchored to the click. Picking Rename routes through the
-//! same helper as the `r` key, Delete through the same helper as
-//! `d`. Click-outside dismisses the menu.
+//! Right-click on a sidebar row opens a popup menu anchored to the click. Rename routes
+//! through the same helper as the `r` key, Delete through the same helper as `d`, and a
+//! click outside dismisses the menu.
 
 use super::*;
 use crate::session::config::SortOrder;
@@ -247,9 +246,9 @@ fn right_click_session_menu_shows_fork_for_forkable_agent() {
     );
 }
 
-/// A resume-only agent (gemini declares `ForkStrategy::Unsupported`) cannot
-/// fork, so the menu must omit the "Fork session" row rather than offer an
-/// action the palette would refuse.
+/// A resume-only agent (gemini declares `ForkStrategy::Unsupported`) cannot fork, so the
+/// menu omits the "Fork session" row rather than offering an action the palette would
+/// refuse.
 #[test]
 #[serial]
 fn right_click_session_menu_hides_fork_for_unforkable_agent() {
@@ -549,9 +548,8 @@ fn context_menu_remove_from_group_clears_group_path() {
     assert_eq!(stored.group_path, "");
 }
 
-/// The Snooze row mirrors the `'h'` keybinding, which only fires in
-/// Attention sort. So the right-click session menu must omit Snooze in
-/// every other sort and include it in Attention sort.
+/// The Snooze row mirrors the `'h'` keybinding, which fires only in Attention sort, so the
+/// menu omits it in every other sort.
 #[test]
 #[serial]
 fn right_click_session_menu_gates_snooze_to_attention_sort() {
@@ -589,12 +587,9 @@ fn right_click_session_menu_gates_snooze_to_attention_sort() {
     );
 }
 
-/// For a forkable agent the Fork row is sort-independent: unlike Snooze
-/// (gated to Attention sort) it appears in every sort. Whether the row shows
-/// at all is gated on fork capability, covered by the
-/// `..._shows_fork_for_forkable_agent` / `..._hides_fork_for_unforkable_agent`
-/// pair; this test pins that the capability gate does not accidentally
-/// couple to sort order. The default test tool is claude (forkable).
+/// For a forkable agent the Fork row is sort-independent, unlike Snooze: whether it shows
+/// at all is gated on fork capability, covered by the shows/hides pair, and this pins that
+/// the gate does not couple to sort order.
 #[test]
 #[serial]
 fn right_click_session_menu_offers_fork_in_every_sort_for_forkable_agent() {
@@ -653,10 +648,9 @@ fn left_click_outside_menu_dismisses_it() {
     setup_inner(&mut env);
     env.view.handle_right_click(5, 1);
     assert!(env.view.context_menu.is_some());
-    // Before a render captures the menu's last_area, every click
-    // reads as "outside", which is exactly the dismissal contract
-    // we want here. (Item-row hit testing has its own unit coverage
-    // in `dialogs::context_menu`.)
+    // Before a render captures the menu's last_area every click reads as "outside", which
+    // is the dismissal contract here; item-row hit testing is covered in
+    // `dialogs::context_menu`.
     let consumed = env.view.handle_context_menu_click(99, 99);
     assert!(consumed, "router should mark the click consumed");
     assert!(
@@ -677,11 +671,9 @@ fn handle_context_menu_click_returns_false_when_no_menu() {
 #[test]
 #[serial]
 fn left_click_on_empty_sidebar_outside_live_mode_is_noop() {
-    // Left-click on empty sidebar space is intentionally low-stakes:
-    // it does NOT open the new-session dialog anymore (right-click
-    // owns that entry point) and it doesn't move selection. The
-    // user can keep clicking the empty area to dismiss preview
-    // selections without summoning modals.
+    // Left-click on empty sidebar space is deliberately low-stakes: it no longer opens the
+    // new-session dialog (right-click owns that) and does not move selection, so the user
+    // can dismiss preview selections without summoning modals.
     let mut env = create_test_env_with_sessions(2);
     setup_inner(&mut env);
     // Sessions occupy inner rows 0 and 1 (y=1, y=2). Row 5 is well
@@ -694,10 +686,8 @@ fn left_click_on_empty_sidebar_outside_live_mode_is_noop() {
 #[test]
 #[serial]
 fn left_click_on_empty_sidebar_in_live_mode_exits_live_mode() {
-    // Quick-exit gesture: when live-send is active, a click on the
-    // empty sidebar drops the user out of live mode. Mirrors the
-    // Ctrl+Q chord but with the mouse, so a user who came in via
-    // a left-click can also leave that way.
+    // Quick-exit gesture: with live-send active, a click on the empty sidebar drops out of
+    // live mode, mirroring Ctrl+Q for users who came in by clicking.
     let mut env = create_test_env_with_sessions(2);
     setup_inner(&mut env);
     use crate::tui::home::live_send;
@@ -723,9 +713,8 @@ fn left_click_on_empty_sidebar_in_live_mode_exits_live_mode() {
 fn click_on_a_real_row_does_not_change_empty_click_state() {
     let mut env = create_test_env_with_sessions(2);
     setup_inner(&mut env);
-    // Row 1 resolves to flat_items[0], a real session row. The
-    // empty-list click handler must defer to the regular click
-    // path; it shouldn't open new-session or exit live mode here.
+    // Row 1 resolves to flat_items[0], a real session row, so the empty-list handler must
+    // defer to the regular click path.
     assert!(!env.view.handle_empty_list_click(5, 1));
     assert!(env.view.new_dialog.is_none());
 }
@@ -743,10 +732,8 @@ fn empty_sidebar_click_is_gated_when_overlay_is_open() {
 #[test]
 #[serial]
 fn right_click_on_empty_sidebar_opens_empty_menu() {
-    // Right-clicking the empty area of the sidebar (below the last
-    // session) opens the dedicated 3-item menu so the mouse can
-    // reach New / Sort / Grouping the same way `n`/`o`/`g` would
-    // from the keyboard.
+    // Right-clicking the empty area opens the dedicated 3-item menu, so the mouse reaches
+    // New / Sort / Grouping the way `n`/`o`/`g` do.
     let mut env = create_test_env_with_sessions(2);
     setup_inner(&mut env);
     assert!(env.view.handle_right_click(5, 5));
@@ -762,11 +749,9 @@ fn right_click_on_empty_sidebar_opens_empty_menu() {
     );
 }
 
-/// Helper: hit a key through the home view's handle_key path so
-/// the dispatch tests run the same wiring real input does. Both
-/// click and keyboard funnel through `dispatch_context_menu_action`,
-/// so this covers the dispatcher without having to mock the menu's
-/// `last_area` for hit-testing.
+/// Hit a key through the home view's handle_key path so the dispatch tests run the wiring
+/// real input does. Click and keyboard both funnel through `dispatch_context_menu_action`,
+/// so this covers the dispatcher without mocking the menu's `last_area`.
 fn send_key(env: &mut crate::tui::home::tests::TestEnv, code: crossterm::event::KeyCode) {
     env.view.handle_key(
         crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE),
@@ -848,10 +833,9 @@ fn empty_sidebar_menu_g_hotkey_opens_group_picker() {
 #[test]
 #[serial]
 fn session_menu_n_hotkey_opens_new_session() {
-    // The session-row menu now carries a New Session entry (issue #2023),
-    // so 'n' submits NewFromSelection just like the group/project menus,
-    // closing the menu and opening the new-session dialog prefilled from
-    // the right-clicked session.
+    // The session-row menu carries a New Session entry (#2023), so 'n' submits
+    // NewFromSelection like the group menus, closing the menu and opening the dialog
+    // prefilled from the right-clicked session.
     let mut env = create_test_env_with_sessions(2);
     setup_inner(&mut env);
     env.view.handle_right_click(5, 1); // row 1 = first session

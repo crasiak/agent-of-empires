@@ -45,6 +45,8 @@ mod acp_session_delete;
 
 mod acp_effort_respawn;
 
+mod acp_model_respawn;
+
 #[cfg(debug_assertions)]
 mod acp_midturn_resume;
 
@@ -63,10 +65,12 @@ mod filewatch_tui_drop_then_abort;
 mod log_filter_watcher_migration;
 mod no_stale_doc_refs;
 mod plugin_install;
+mod project_create_dedupe;
 mod serve_cityhall_lockdown;
 mod serve_daemon_session_id_drain;
 mod serve_disk_reload_helper_equivalence;
 mod serve_dns_rebinding_gate;
 mod serve_dynamic_profile_rewire;
 mod serve_filewatch_propagation;
+mod serve_settings_logging;
 mod telemetry;

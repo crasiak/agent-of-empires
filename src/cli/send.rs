@@ -3,6 +3,8 @@
 use anyhow::{bail, Result};
 use clap::Args;
 
+use crate::acp::client::http::PromptDispositionWire;
+use crate::acp::client::{require_daemon, HttpClient};
 use crate::session::{EnsureReadyError, EnsureReadyOutcome, Storage};
 
 #[derive(Args)]
@@ -33,10 +35,12 @@ pub async fn run(profile: &str, args: SendArgs) -> Result<()> {
     let session_id = inst.id.clone();
     let session_title = inst.title.clone();
     let tool = inst.tool.clone();
+    let is_structured = inst.is_structured();
 
-    // Revive the pane if needed before delivering keystrokes. Without this,
-    // a send to a dead pane silently writes to a corpse with no agent to
-    // respond to it.
+    if is_structured {
+        return send_structured(&session_id, &session_title, &args.message, args.no_revive).await;
+    }
+
     if !args.no_revive {
         if let Some(target) = instances.iter_mut().find(|i| i.id == session_id) {
             match target.ensure_pane_ready() {
@@ -69,16 +73,6 @@ pub async fn run(profile: &str, args: SendArgs) -> Result<()> {
         );
     }
 
-    // Wait for the pane to become ready before typing. A pane that exists
-    // is not necessarily an agent that's finished booting: a session
-    // started by an earlier, separate `aoe session start` reports
-    // `EnsureReadyOutcome::AlreadyAlive` above with no wait at all, and
-    // agents with no interposed shell (e.g. opencode) clear the pane's
-    // "running a shell" check almost immediately even though their own TUI
-    // can still take several more seconds to render and accept input. A
-    // message typed into that window is silently dropped with no error.
-    // Bounded so a genuinely busy/streaming agent doesn't block `send`
-    // forever.
     tmux_session.wait_until_ready(
         std::time::Duration::from_secs(5),
         crate::agents::ready_marker(&tool),
@@ -87,14 +81,6 @@ pub async fn run(profile: &str, args: SendArgs) -> Result<()> {
     let delay = crate::agents::send_keys_enter_delay(&tool);
     tmux_session.send_keys_with_delay(&args.message, delay)?;
 
-    // Stamp last_accessed_at so the "last activity" column reflects user
-    // interaction, and remap the status to Running. The agent has just been
-    // given fresh input; the next status poll will reconcile the real state,
-    // but flipping to Running immediately keeps the row from sticking on a
-    // stale Idle/Waiting label during the gap between send and poll.
-    // `touch_last_accessed` also auto-clears `archived_at` and `snoozed_until`
-    // (see Instance::touch_last_accessed), so a user can wake any sunk row by
-    // sending to it.
     let id_for_save = session_id.clone();
     if let Err(err) = storage.update(|instances, _groups| {
         if let Some(inst) = instances.iter_mut().find(|i| i.id == id_for_save) {
@@ -103,11 +89,6 @@ pub async fn run(profile: &str, args: SendArgs) -> Result<()> {
         }
         Ok(())
     }) {
-        // The tmux send succeeded; the storage write is best-effort
-        // bookkeeping (status remap + auto-unarchive). Surfacing this as a
-        // hard error would tell the user "send failed" when the message
-        // actually reached the agent, so log a warning and keep the success
-        // line. The next status poll will reconcile the row anyway.
         tracing::warn!(
             ?err,
             "send: failed to persist status remap after successful send"
@@ -115,5 +96,28 @@ pub async fn run(profile: &str, args: SendArgs) -> Result<()> {
     }
 
     println!("Sent message to '{}'", session_title);
+    Ok(())
+}
+
+/// ACP/structured-view sessions have no tmux pane; delivering a message means
+/// hitting the running daemon's prompt endpoint instead, the same path the
+/// web composer's send button uses. `no_revive` is enforced by the daemon
+/// itself (atomically, at admission), not checked here first, since a
+/// separate client-side liveness probe would race the daemon's own decision.
+async fn send_structured(
+    session_id: &str,
+    session_title: &str,
+    message: &str,
+    no_revive: bool,
+) -> Result<()> {
+    let endpoint = require_daemon().await?;
+    let client = HttpClient::new(endpoint)?;
+    let dispatch = client.prompt(session_id, message, no_revive).await?;
+    let verb = match dispatch.disposition {
+        PromptDispositionWire::Sent => "Sent",
+        PromptDispositionWire::Steered => "Steered into",
+        PromptDispositionWire::Queued => "Queued",
+    };
+    println!("{verb} message to '{session_title}'");
     Ok(())
 }

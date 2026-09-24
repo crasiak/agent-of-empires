@@ -22,10 +22,7 @@ pub(crate) fn persist_omp_session_to_storage(
     )
 }
 
-/// Build a post-login routing fingerprint check without embedding any routing
-/// value in argv. The pane hashes its live environment through stdin; if no
-/// SHA-256 utility exists or startup files changed routing, capture is skipped
-/// and the original OMP command runs untouched.
+/// Build a post-login routing fingerprint check without embedding any routing value in argv.
 fn omp_routing_fingerprint_check(plan: &OmpCapturePlan) -> String {
     let keys = crate::session::capture::OMP_STORE_ENV_KEYS.join(" ");
     format!(
@@ -47,9 +44,7 @@ fn omp_routing_fingerprint_check(plan: &OmpCapturePlan) -> String {
     )
 }
 
-/// Wait briefly for the parent to publish this launch generation's hidden
-/// capture metadata. A timeout runs the uninstrumented command, so capture
-/// fails closed without preventing the agent from starting.
+/// Wait briefly for the parent to publish this launch generation's hidden capture metadata.
 pub(super) fn gate_omp_launch(
     raw_command: &str,
     marked_command: &str,
@@ -78,9 +73,7 @@ pub(super) fn gate_omp_launch(
     shell_stdin_command("sh", false, &script, "AOE_OMP_CAPTURE_GATE")
 }
 
-/// Apply profile assignments to the marker wrapper itself, not only to its
-/// eventual OMP command. The routing fingerprint must observe the same
-/// effective environment that OMP inherits.
+/// Apply profile assignments to the marker wrapper itself, not only to its eventual OMP command.
 pub(super) fn wrap_omp_host_launch(
     env_prefix: &str,
     tool_cmd: &str,
@@ -90,11 +83,12 @@ pub(super) fn wrap_omp_host_launch(
 }
 
 /// Bind capture to the exact launch PTY. A valid pre-launch breadcrumb is
-/// rewritten to a lexically different but equivalent session path; the marker
-/// records that pending path so capture waits until OMP rewrites the breadcrumb.
-/// If no breadcrumb exists, install a fresh sentinel from a private directory
-/// by a no-clobber hardlink. Invalid breadcrumbs, collisions, symlinks, and
-/// write failures launch raw OMP without capture.
+/// rewritten to a lexically different but equivalent session path while its
+/// recognized extras are preserved. The marker records that pending path so
+/// capture waits until OMP rewrites the breadcrumb. If no breadcrumb exists,
+/// install a fresh sentinel from a private directory by a no-clobber hardlink.
+/// Invalid breadcrumbs, collisions, symlinks, and write failures launch raw OMP
+/// without capture.
 pub(super) fn wrap_omp_launch(tool_cmd: &str, plan: &OmpCapturePlan) -> String {
     let breadcrumb_tmp_leaf = format!(".aoe-omp-breadcrumb-{}", plan.launch_id);
     let pending_sentinel = plan
@@ -121,10 +115,29 @@ pub(super) fn wrap_omp_launch(tool_cmd: &str, plan: &OmpCapturePlan) -> String {
            [ \"$breadcrumb_bytes\" -le 16384 ] || launch_raw; \
            crumb_cwd=$(head -c 16385 \"$breadcrumb\" 2>/dev/null | sed -n '1p') || launch_raw; \
            crumb_path=$(head -c 16385 \"$breadcrumb\" 2>/dev/null | sed -n '2p') || launch_raw; \
-           crumb_marker=$(head -c 16385 \"$breadcrumb\" 2>/dev/null | sed -n '3p') || launch_raw; \
+           crumb_extra_1=$(head -c 16385 \"$breadcrumb\" 2>/dev/null | sed -n '3p') || launch_raw; \
+           crumb_extra_2=$(head -c 16385 \"$breadcrumb\" 2>/dev/null | sed -n '4p') || launch_raw; \
            crumb_lines=$(head -c 16385 \"$breadcrumb\" 2>/dev/null | sed -n '$=') || launch_raw; \
-           case \"$crumb_lines:$crumb_marker\" in '2:'|'3:fresh') ;; *) launch_raw ;; esac; \
+           case \"$crumb_lines\" in 2|3|4) ;; *) launch_raw ;; esac; \
            [ -n \"$crumb_cwd\" ] && [ -n \"$crumb_path\" ] || launch_raw; \
+           crumb_fresh=; crumb_cwdstat=; \
+           validate_extra() {{ \
+             case \"$1\" in \
+               fresh) [ -z \"$crumb_fresh\" ] || launch_raw; crumb_fresh=1 ;; \
+               'cwdstat '*) \
+                 [ -z \"$crumb_cwdstat\" ] || launch_raw; \
+                 cwdstat_values=${{1#cwdstat }}; \
+                 cwdstat_dev=${{cwdstat_values%% *}}; \
+                 cwdstat_ino=${{cwdstat_values#* }}; \
+                 [ \"$cwdstat_ino\" != \"$cwdstat_values\" ] \
+                   && [ -n \"$cwdstat_dev\" ] && [ -n \"$cwdstat_ino\" ] || launch_raw; \
+                 case \"$cwdstat_dev$cwdstat_ino\" in *[!0-9]*) launch_raw ;; esac; \
+                 crumb_cwdstat=1 ;; \
+               *) launch_raw ;; \
+             esac; \
+           }}; \
+           [ \"$crumb_lines\" -lt 3 ] || validate_extra \"$crumb_extra_1\"; \
+           [ \"$crumb_lines\" -lt 4 ] || validate_extra \"$crumb_extra_2\"; \
            case \"$crumb_path\" in \
              /*) crumb_dir=${{crumb_path%/*}}; crumb_base=${{crumb_path##*/}}; \
                  [ -n \"$crumb_dir\" ] || crumb_dir=/; \
@@ -132,21 +145,18 @@ pub(super) fn wrap_omp_launch(tool_cmd: &str, plan: &OmpCapturePlan) -> String {
                  else pending=\"$crumb_dir/./$crumb_base\"; fi ;; \
              *) pending=\"./$crumb_path\" ;; \
            esac; \
-           if [ \"$crumb_marker\" = fresh ]; then \
-             rewritten_bytes=$(printf '%s\\n%s\\nfresh\\n' \"$crumb_cwd\" \"$pending\" | LC_ALL=C wc -c | tr -d '[:space:]'); \
-           else \
-             rewritten_bytes=$(printf '%s\\n%s\\n' \"$crumb_cwd\" \"$pending\" | LC_ALL=C wc -c | tr -d '[:space:]'); \
-           fi; \
+           write_rewritten() {{ \
+             printf '%s\\n%s\\n' \"$crumb_cwd\" \"$pending\" || return 1; \
+             [ \"$crumb_lines\" -lt 3 ] || printf '%s\\n' \"$crumb_extra_1\" || return 1; \
+             [ \"$crumb_lines\" -lt 4 ] || printf '%s\\n' \"$crumb_extra_2\" || return 1; \
+           }}; \
+           rewritten_bytes=$(write_rewritten | LC_ALL=C wc -c | tr -d '[:space:]'); \
            case \"$rewritten_bytes\" in ''|*[!0-9]*) rewritten_bytes=16385 ;; esac; \
            [ \"$rewritten_bytes\" -le 16384 ] || launch_raw; \
            breadcrumb_tmp_dir=\"$terminal_dir\"/{}.tmp.$$; \
            (umask 077; mkdir \"$breadcrumb_tmp_dir\") || launch_raw; \
            breadcrumb_tmp=\"$breadcrumb_tmp_dir/breadcrumb\"; \
-           if [ \"$crumb_marker\" = fresh ]; then \
-             (umask 077; set -C; printf '%s\\n%s\\nfresh\\n' \"$crumb_cwd\" \"$pending\" > \"$breadcrumb_tmp\") || launch_raw; \
-           else \
-             (umask 077; set -C; printf '%s\\n%s\\n' \"$crumb_cwd\" \"$pending\" > \"$breadcrumb_tmp\") || launch_raw; \
-           fi; \
+           (umask 077; set -C; write_rewritten > \"$breadcrumb_tmp\") || launch_raw; \
            mv -f -- \"$breadcrumb_tmp\" \"$breadcrumb\" || launch_raw; \
            rmdir \"$breadcrumb_tmp_dir\" 2>/dev/null || :; \
          elif [ ! -e \"$breadcrumb\" ] && [ ! -L \"$breadcrumb\" ]; then \
@@ -188,9 +198,7 @@ pub(super) fn wrap_omp_launch(tool_cmd: &str, plan: &OmpCapturePlan) -> String {
 }
 
 impl Instance {
-    /// Capture is safe only for the built-in OMP command and a transparent,
-    /// parseable argv. Benign arguments remain supported; store-selecting
-    /// flags are interpreted by the capture resolver.
+    /// Capture is safe only for the built-in OMP command and a transparent, parseable argv.
     pub(super) fn omp_capture_options(&self) -> Option<OmpCliCaptureOptions> {
         if self.resolved_capture_backend() != Some(crate::agents::SessionCaptureBackend::Omp) {
             return None;
@@ -199,9 +207,7 @@ impl Instance {
         OmpCliCaptureOptions::parse(&args).ok()
     }
 
-    /// Resolve OMP's store, routing environment, and per-launch marker after
-    /// `on_launch`. Environment values remain transient; the marker and layout
-    /// survive in capture metadata.
+    /// Resolve OMP's store, routing environment, and per-launch marker after `on_launch`.
     pub(super) fn resolve_omp_capture_plan(
         &self,
         options: &OmpCliCaptureOptions,
@@ -265,9 +271,7 @@ impl Instance {
         })
     }
 
-    /// Reconstruct metadata only for a legacy pane which predates launch
-    /// snapshots. New launches transport their already-resolved plan directly
-    /// into `finalize_launch` and never call this method.
+    /// Reconstruct metadata only for a legacy pane which predates launch snapshots.
     fn resolve_legacy_omp_capture_metadata(
         &self,
         options: &OmpCliCaptureOptions,
@@ -292,9 +296,8 @@ impl Instance {
         })
     }
 
-    /// Load typed launch metadata directly from tmux. A pane carrying the
-    /// regular bootstrap generation is modern; if its hidden metadata is
-    /// absent, capture stays disabled instead of being legacy-migrated.
+    /// Load typed launch metadata directly from tmux. A pane carrying the regular bootstrap
+    /// generation is modern.
     pub(super) fn omp_capture_metadata(
         &self,
         session_name: &str,
@@ -443,10 +446,8 @@ impl Instance {
         if self.resolved_capture_backend() != Some(crate::agents::SessionCaptureBackend::Omp) {
             return true;
         }
-        // No capture plan: persist a distinct sentinel so any observation still
-        // carrying the prior generation fails the CAS. The `tombstone-` prefix
-        // marks it as never-captured in storage/logs (compared for equality,
-        // never parsed).
+        // No capture plan: persist a distinct sentinel so any observation still carrying the prior
+        // generation fails the CAS.
         let tombstone = format!("tombstone-{}", Uuid::new_v4());
         self.persist_omp_capture_generation(profile, &tombstone, expected_prior)
     }
@@ -534,11 +535,11 @@ impl Instance {
 mod tests {
     use super::*;
     use crate::session::instance::launch_command::wrap_command_ignore_suspend;
+    use crate::session::instance::test_helpers::*;
 
     #[test]
     fn omp_capture_accepts_benign_args_and_rejects_opaque_launches() {
-        let mut inst = Instance::new("test", "/tmp/test");
-        inst.tool = "omp".to_string();
+        let mut inst = tool_instance("omp", "/tmp/test");
         inst.extra_args =
             "--model sonnet --profile first --profile=work --session-dir '/tmp/omp sessions'"
                 .to_string();
@@ -624,8 +625,7 @@ mod tests {
 
     #[test]
     fn omp_launch_rejects_api_keys_in_extra_args() {
-        let mut instance = Instance::new("test", "/tmp/test");
-        instance.tool = "omp".to_string();
+        let mut instance = tool_instance("omp", "/tmp/test");
         for extra_args in [
             "--api-key secret",
             "--api-key=secret",
@@ -705,17 +705,9 @@ mod tests {
             command
                 .args(["-c", &script])
                 .env_clear()
-                // `env_clear` is here to control which OMP_STORE_ENV_KEYS the
-                // fingerprint folds in, not to pin a filesystem layout. The
-                // child still needs a PATH that resolves `sha256sum` / `tr`,
-                // so it inherits the caller's.
+                // `env_clear` is here to control which OMP_STORE_ENV_KEYS the fingerprint folds in,
+                // not to pin a filesystem layout.
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default());
-            // Pin the exact routing environment a host launch installs into the
-            // pane for this HOME, so the check reproduces the fingerprint's env
-            // instead of assuming the ambient OMP_STORE_ENV_KEYS are empty. They
-            // are not on every runner, and host_launcher_environment folds them
-            // into the fingerprint, so forcing empties here would diverge from
-            // the digest on any host that exports one of those keys.
             for mutation in omp_host_routing_environment(&[format!("HOME={}", live_home.display())])
             {
                 match mutation {
@@ -885,19 +877,11 @@ mod tests {
         exercise_omp_wrapper(None);
     }
 
-    /// The shim dir, then the caller's `PATH`. Shim first, so the fake `tmux`
-    /// wins over any real one; inherited, so a host whose coreutils sit
-    /// outside the FHS layout still resolves them. `OsString` throughout: a
-    /// `PATH` entry need not be UTF-8.
-    ///
-    /// Child-scoped on purpose. Putting the shim on the process `PATH` would
-    /// hand the fake `tmux` to every test resolving a real one concurrently.
+    /// The shim dir, then the caller's `PATH`. Shim first, so the fake `tmux` wins over any real
+    /// one.
     #[cfg(unix)]
     fn test_path_with_shim(bin: &std::path::Path) -> std::ffi::OsString {
-        // An unset or empty PATH is handled separately: `split_paths("")`
-        // yields one EMPTY entry, and an empty PATH element means the current
-        // directory, so joining it would hand the child `<shim>:` and put cwd
-        // on its PATH.
+        // An unset or empty PATH is handled separately.
         let Some(inherited) = std::env::var_os("PATH").filter(|p| !p.is_empty()) else {
             return bin.as_os_str().to_os_string();
         };
@@ -905,6 +889,176 @@ mod tests {
             .chain(std::env::split_paths(&inherited))
             .collect::<Vec<_>>();
         std::env::join_paths(entries).expect("PATH entries contain no separator")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn omp_launch_wrapper_preserves_known_breadcrumb_extras_and_rejects_invalid_ones() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env = crate::session::test_support::EnvGuard::unset(
+            &crate::session::capture::OMP_STORE_ENV_KEYS,
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let bin = root.join("bin");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&bin).unwrap();
+        let tty = bin.join("tty");
+        std::fs::write(&tty, "#!/bin/sh\nprintf '/dev/pts/omp-extra-test\\n'\n").unwrap();
+        std::fs::set_permissions(&tty, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let real_sh = which::which("sh").unwrap();
+        let sh = bin.join("sh");
+        // Fail a selected breadcrumb write: only it runs after `breadcrumb_tmp` is set and
+        // before `marker_tmp` is. `-ef` on /dev/fd cannot match the file on macOS.
+        let injected_shell = r#"printf() {
+  if [ -n "${AOE_TEST_FAIL_WRITE-}" ] && [ -n "${breadcrumb_tmp-}" ] \
+    && [ -z "${marker_tmp-}" ]; then
+    write_count=$(( ${write_count:-0} + 1 ))
+    if [ "$write_count" -eq "$AOE_TEST_FAIL_WRITE" ]; then
+      command printf partial
+      command printf injected > "$AOE_TEST_WRITE_FAILURE"
+      command printf '%s' "$@" >&-
+      return $?
+    fi
+  fi
+  command printf "$@"
+}
+. /dev/fd/3"#;
+        let injected_script = root.join("inject-write-failure.sh");
+        std::fs::write(&injected_script, injected_shell).unwrap();
+        std::fs::write(
+            &sh,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = /dev/fd/3 ]; then exec {} {}; fi\nexec {} \"$@\"\n",
+                shell_escape(&real_sh.to_string_lossy()),
+                shell_escape(&injected_script.to_string_lossy()),
+                shell_escape(&real_sh.to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let routing = vec![format!("HOME={}", home.display())];
+        let (layout, fingerprint) = resolve_omp_store_layout_with_environment(
+            &routing,
+            root.to_str().unwrap(),
+            &OmpCliCaptureOptions::default(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&layout.terminal_sessions).unwrap();
+        let plan = OmpCapturePlan {
+            layout,
+            routing_fingerprint: fingerprint,
+            launch_id: "wrapper-extra-test".to_string(),
+            launch_marker: root.join("marker").to_string_lossy().into_owned(),
+            container_runtime: None,
+        };
+        let breadcrumb = plan.layout.terminal_sessions.join("pts-omp-extra-test");
+        let launched = root.join("launched");
+        let write_failure = root.join("write-failure");
+        let raw = format!(
+            "printf launched > {}",
+            shell_escape(&launched.to_string_lossy())
+        );
+        let cases = [
+            ("/work\n/session.jsonl\n", true),
+            ("/work\n/session.jsonl\nfresh\n", true),
+            ("/work\n/session.jsonl\ncwdstat 12 34\n", true),
+            ("/work\n/session.jsonl\nfresh\ncwdstat 12 34\n", true),
+            ("/work\n/session.jsonl\ncwdstat 12 34\nfresh\n", true),
+            ("/work\n/session.jsonl\nunknown\n", false),
+            ("/work\n/session.jsonl\ncwdstat 12\n", false),
+            ("/work\n/session.jsonl\ncwdstat 12 34 56\n", false),
+            ("/work\n/session.jsonl\nfresh\nfresh\n", false),
+            (
+                "/work\n/session.jsonl\ncwdstat 12 34\ncwdstat 12 34\n",
+                false,
+            ),
+        ];
+
+        let failed_writes = [
+            ("/work\n/session.jsonl\n", false, Some(1)),
+            ("/work\n/session.jsonl\nfresh\n", false, Some(2)),
+            ("/work\n/session.jsonl\ncwdstat 12 34\n", false, Some(2)),
+            (
+                "/work\n/session.jsonl\nfresh\ncwdstat 12 34\n",
+                false,
+                Some(1),
+            ),
+            (
+                "/work\n/session.jsonl\nfresh\ncwdstat 12 34\n",
+                false,
+                Some(2),
+            ),
+            (
+                "/work\n/session.jsonl\nfresh\ncwdstat 12 34\n",
+                false,
+                Some(3),
+            ),
+        ];
+        for (content, accepted, failed_write) in cases
+            .into_iter()
+            .map(|(content, accepted)| (content, accepted, None))
+            .chain(failed_writes)
+        {
+            let _ = std::fs::remove_file(&plan.launch_marker);
+            let _ = std::fs::remove_file(&launched);
+            let _ = std::fs::remove_file(&write_failure);
+            std::fs::write(&breadcrumb, content).unwrap();
+            let wrapped = wrap_omp_launch(&raw, &plan);
+            let mut command = std::process::Command::new("sh");
+            command
+                .arg("-c")
+                .arg(wrapped)
+                .env("PATH", test_path_with_shim(&bin));
+            command.env_remove("AOE_TEST_FAIL_WRITE");
+            if let Some(index) = failed_write {
+                command
+                    .env("AOE_TEST_FAIL_WRITE", index.to_string())
+                    .env("AOE_TEST_WRITE_FAILURE", &write_failure);
+            }
+            for mutation in omp_host_routing_environment(&routing) {
+                match mutation {
+                    tmux::PaneEnvMutation::Set { key, value } => {
+                        command.env(key, value);
+                    }
+                    tmux::PaneEnvMutation::Unset { key } => {
+                        command.env_remove(key);
+                    }
+                }
+            }
+            let status = command.status().unwrap();
+            assert!(status.success(), "{content:?}");
+            assert_eq!(std::fs::read_to_string(&launched).unwrap(), "launched");
+            if failed_write.is_some() {
+                assert_eq!(std::fs::read_to_string(&write_failure).unwrap(), "injected");
+            }
+
+            if accepted {
+                let marker = std::fs::read_to_string(&plan.launch_marker)
+                    .unwrap_or_else(|error| panic!("{content:?}: {error}"));
+                let marker_fields: Vec<_> = marker.lines().collect();
+                assert_eq!(marker_fields.len(), 4, "{content:?}");
+                let rewritten = std::fs::read_to_string(&breadcrumb).unwrap();
+                let rewritten_fields: Vec<_> = rewritten.lines().collect();
+                assert_eq!(rewritten_fields[0], "/work", "{content:?}");
+                assert_eq!(rewritten_fields[1], marker_fields[2], "{content:?}");
+                assert_ne!(rewritten_fields[1], "/session.jsonl", "{content:?}");
+                assert_eq!(
+                    &rewritten_fields[2..],
+                    &content.lines().collect::<Vec<_>>()[2..],
+                    "{content:?}"
+                );
+            } else {
+                assert!(
+                    !std::path::Path::new(&plan.launch_marker).exists(),
+                    "rejected breadcrumb published a marker: {content:?}, write {failed_write:?}"
+                );
+                assert_eq!(std::fs::read_to_string(&breadcrumb).unwrap(), content);
+            }
+        }
     }
 
     /// Holds `ENV_LOCK` across the `PATH` read that builds the child's.
@@ -944,9 +1098,8 @@ mod tests {
         assert!(status.success());
         assert_eq!(std::fs::read_to_string(&output).unwrap(), "marked");
 
-        // A valid 70 KiB prompt makes the capture gate body larger than
-        // Linux's per-argument exec limit because the raw and marked branches
-        // both contain it. The launch must still execute from the descriptor.
+        // A valid 70 KiB prompt makes the capture gate body larger than Linux's per-argument exec
+        // limit because the raw and marked branches both contain it.
         let payload = "x".repeat(70 * 1024);
         let large_command = format!(
             "printf '%s' {} > {}",

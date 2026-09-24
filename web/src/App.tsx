@@ -30,8 +30,7 @@ import { PluginUiProvider, usePluginUiEntries } from "./lib/pluginUiContext";
 import { buildSortValueMap, pluginSortSpecs } from "./lib/pluginUi";
 import type { PluginSortContext, SidebarSortMode } from "./lib/sidebarSort";
 import { nextAttentionSessionId, sessionNeedsAttention, workspaceIsTrashed } from "./lib/sidebarSort";
-import { useSidebarSortMode } from "./hooks/useSidebarSortMode";
-import { useSidebarAxis } from "./hooks/useSidebarAxis";
+import { useSidebarAxis, useSidebarSortMode } from "./hooks/useSidebarPrefs";
 import { repoGroupToSidebarGroup, type SidebarGroup } from "./lib/sidebarGroups";
 import { useProjects } from "./hooks/useProjects";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
@@ -51,7 +50,7 @@ import { useIsWideViewport } from "./hooks/useIsWideViewport";
 import type { RightPanelView } from "./lib/rightPanelView";
 import { usePaneLayout, dockTabs, dockGroups, dockOf, isActiveTab, isDockCollapsed } from "./lib/paneLayout";
 import { isPluginPaneId, resolvePaneIcon, usePluginPanes, type PluginPane } from "./lib/pluginPanes";
-import { PluginPaneBody } from "./components/plugin/PluginSlots";
+import { PluginPaneBody } from "./components/plugin/PluginPane";
 import { TOUR_ANCHORS, tourAnchor } from "./lib/tourSteps";
 import {
   deleteWorkspaceSessions,
@@ -59,6 +58,7 @@ import {
   restoreSessions,
   trashedWorkspaceRestoreIds,
   trashSessions,
+  sessionsSharingWorktree,
   workspaceCleanupDefaults,
 } from "./lib/trashActions";
 import {
@@ -95,6 +95,8 @@ import { IdleDecayWindowContext, parseIdleDecayWindowMs } from "./lib/idleDecay"
 import { parseUnreadIndicatorEnabled, UnreadIndicatorContext, useUnreadIndicatorEnabled } from "./lib/unreadIndicator";
 import { parseSessionRowTagMode, SessionRowTagContext, type SessionRowTagMode } from "./lib/sessionRowTag";
 import { parseSessionColorsEnabled, SessionColorsContext } from "./lib/sessionColors";
+import { fetchActiveProfileSettings } from "./lib/appSettings";
+import { parseSystemHealthEnabled, SystemHealthEnabledContext } from "./lib/systemHealth";
 import { toastBus, reportError } from "./lib/toastBus";
 import { isAbsolutePath, resolveToRepoRelative, type FileRef } from "./lib/fileRef";
 import { OPEN_SESSION_EVENT } from "./lib/sessionRoute";
@@ -105,7 +107,8 @@ import {
   forwardTerminalBeforeInput,
 } from "./lib/mobileKeyboardProxy";
 import { hydrateWebUiStateFromServer, initWebUiSync } from "./lib/webUiSync";
-import { WorkspaceSidebar, SnoozeModal } from "./components/WorkspaceSidebar";
+import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
+import { SnoozeModal } from "./components/sidebar/SnoozeModal";
 import { DeleteSessionDialog } from "./components/DeleteSessionDialog";
 import { StopSessionDialog } from "./components/StopSessionDialog";
 import { SwitchViewDialog } from "./components/SwitchViewDialog";
@@ -182,16 +185,18 @@ export default function App() {
   const [unreadIndicatorEnabled, setUnreadIndicatorEnabled] = useState(true);
   const [sessionRowTagMode, setSessionRowTagMode] = useState<SessionRowTagMode>("branch");
   const [sessionColorsEnabled, setSessionColorsEnabled] = useState(true);
+  const [systemHealthEnabled, setSystemHealthEnabled] = useState(false);
 
   const applyAppSettings = useCallback((settings: Record<string, unknown> | null | undefined) => {
     setIdleDecayWindowMs(parseIdleDecayWindowMs(settings));
     setUnreadIndicatorEnabled(parseUnreadIndicatorEnabled(settings));
     setSessionRowTagMode(parseSessionRowTagMode(settings));
     setSessionColorsEnabled(parseSessionColorsEnabled(settings));
+    setSystemHealthEnabled(parseSystemHealthEnabled(settings));
   }, []);
 
   const refreshAppSettings = useCallback(async () => {
-    applyAppSettings(await fetchSettings());
+    applyAppSettings(await fetchActiveProfileSettings());
   }, [applyAppSettings]);
 
   useEffect(() => {
@@ -213,16 +218,18 @@ export default function App() {
     return () => window.removeEventListener(LOGIN_REQUIRED_EVENT, onLoginRequired);
   }, []);
 
+  // Settings are read once the login gate says they can be: on a
+  // login-required server an early read is rejected, and nothing would fetch
+  // again afterwards, so the whole session would run on defaults.
   useEffect(() => {
     loginStatus().then(({ required, authenticated }) => {
       setLoginRequired(required);
       setLoginAuthenticated(authenticated);
+      if (!required || authenticated) {
+        void refreshAppSettings();
+      }
     });
-  }, []);
-
-  useEffect(() => {
-    fetchSettings().then(applyAppSettings);
-  }, [applyAppSettings]);
+  }, [refreshAppSettings]);
 
   const handleTokenSuccess = () => {
     setTokenExpired(false);
@@ -230,11 +237,16 @@ export default function App() {
     loginStatus().then(({ required, authenticated }) => {
       setLoginRequired(required);
       setLoginAuthenticated(authenticated);
+      if (!required || authenticated) {
+        void refreshAppSettings();
+      }
     });
   };
 
   const handleLoginSuccess = () => {
     setLoginAuthenticated(true);
+    // First point at which settings are readable on a login-walled server.
+    void refreshAppSettings();
     // Reset dedup flags so a future session expiry can re-fire the event.
     resetTokenExpired();
   };
@@ -266,17 +278,19 @@ export default function App() {
       <UnreadIndicatorContext.Provider value={unreadIndicatorEnabled}>
         <SessionRowTagContext.Provider value={sessionRowTagMode}>
           <SessionColorsContext.Provider value={sessionColorsEnabled}>
-            {/* PluginUiProvider must sit above AppContent: AppContent itself reads
+            <SystemHealthEnabledContext.Provider value={systemHealthEnabled}>
+              {/* PluginUiProvider must sit above AppContent: AppContent itself reads
                 the plugin UI snapshot (usePluginPanes), so the provider can't live
                 inside its own return. */}
-            <PluginUiProvider>
-              <AppContent
-                loginRequired={loginRequired}
-                onLogout={handleLogout}
-                onSettingsRefresh={refreshAppSettings}
-              />
-            </PluginUiProvider>
-            <ElevationPrompt />
+              <PluginUiProvider>
+                <AppContent
+                  loginRequired={loginRequired}
+                  onLogout={handleLogout}
+                  onSettingsRefresh={refreshAppSettings}
+                />
+              </PluginUiProvider>
+              <ElevationPrompt />
+            </SystemHealthEnabledContext.Provider>
           </SessionColorsContext.Provider>
         </SessionRowTagContext.Provider>
       </UnreadIndicatorContext.Provider>
@@ -759,6 +773,12 @@ function AppContent({
     ...(activeSession?.view === "structured" ? ["agents"] : []),
     ...(caps.cityhall ? [] : pluginPanes.map((p) => p.id)),
   ];
+  // The mobile picker/single-pane view reuses this exact list (minus
+  // "terminal", desktop's multi-instance extra-terminal dock, which has no
+  // single-pane mobile equivalent) so its available views can't drift from
+  // desktop's capability/session gating the way the sub-agents and Files
+  // panes previously did.
+  const mobilePaneIds = allPaneIds.filter((id) => id !== "terminal");
 
   // Fetch the diff when the panel is actually showing: on desktop when the
   // split is expanded, on mobile when the diff view is the active pane.
@@ -844,11 +864,14 @@ function AppContent({
     setPairedMounted(true);
   }
 
-  // A plugin pane promoted into the mobile main pane can vanish (plugin
-  // unloaded, or the new session has no such pane). Fall back to the agent
-  // view so the user is never stranded on a blank pane. Mirrors the diff /
-  // paired guards above; render-phase derivation per the block at the top.
-  if (isPluginPaneId(rightPanelView) && !pluginPanes.some((p) => p.id === rightPanelView)) {
+  // A gated mobile view (a builtin pane like diff/files/agents, or a plugin
+  // pane) can vanish out from under the current selection: plugin unloaded,
+  // capability change, or the session's structured-view state changed. Fall
+  // back to the agent view so the user is never stranded on a blank pane.
+  // Mirrors the paired guard above; render-phase derivation per the block at
+  // the top.
+  const isGatedBuiltinView = rightPanelView === "diff" || rightPanelView === "files" || rightPanelView === "agents";
+  if ((isGatedBuiltinView || isPluginPaneId(rightPanelView)) && !mobilePaneIds.includes(rightPanelView)) {
     setRightPanelView("agent");
   }
 
@@ -995,8 +1018,8 @@ function AppContent({
   }, [handleSelectSession]);
 
   const [wizardPrefill, setWizardPrefill] = useState<WizardPrefill | undefined>(undefined);
-  const [deletingWorkspaceId, setDeletingWorkspaceId] = useState<string | null>(null);
-  const [stoppingWorkspaceId, setStoppingWorkspaceId] = useState<string | null>(null);
+  const [deletingSessionIds, setDeletingSessionIds] = useState<string[] | null>(null);
+  const [stoppingSessionId, setStoppingSessionId] = useState<string | null>(null);
   const [switchViewTarget, setSwitchViewTarget] = useState<{ sessionId: string; toStructured: boolean } | null>(null);
   // `serverAbout === null` conflates "not fetched yet" with "fetch failed", so
   // the tour gates auto-launch on an explicit loaded flag instead.
@@ -1063,10 +1086,17 @@ function AppContent({
     void setTelemetryConsent(enabled);
   }, []);
 
-  const deletingWorkspace = deletingWorkspaceId ? workspaces.find((w) => w.id === deletingWorkspaceId) : null;
-  const deletingSessions = deletingWorkspace?.sessions ?? [];
+  // Ids, not a workspace id: a sidebar group slice covers only some of its workspace's sessions.
+  const deletingSessions = useMemo(
+    () =>
+      (deletingSessionIds ?? []).flatMap((id) => {
+        const session = sessions.find((s) => s.id === id);
+        return session ? [session] : [];
+      }),
+    [deletingSessionIds, sessions],
+  );
   const liveDeletingSessions = deletingSessions.filter((session) => !session.trashed_at);
-  const deletingSession = deletingWorkspace?.sessions[0] ?? null;
+  const deletingSession = deletingSessions[0] ?? null;
   const deletingDefaultToTrash = liveDeletingSessions.some((session) => session.cleanup_defaults.delete_to_trash);
   const deletingCleanupDefaults = deletingSession
     ? {
@@ -1074,20 +1104,23 @@ function AppContent({
         ...workspaceCleanupDefaults(deletingSessions),
       }
     : null;
+  const deletingWorktreeSharedWith = useMemo(
+    () => sessionsSharingWorktree(deletingSessions, sessions).map((session) => session.title),
+    [deletingSessions, sessions],
+  );
   const deletingBranchName =
     deletingSessions.find((session) => session.branch)?.branch ?? deletingSession?.branch ?? null;
 
-  const handleDeleteSession = useCallback((workspaceId: string) => {
-    setDeletingWorkspaceId(workspaceId);
+  const handleDeleteSession = useCallback((sessionIds: string[]) => {
+    setDeletingSessionIds(sessionIds);
   }, []);
 
   const handleConfirmDelete = async (options: DeleteSessionOptions) => {
-    if (!deletingWorkspace) return;
-    const sessions = deletingWorkspace.sessions;
+    if (deletingSessions.length === 0) return;
     // Close the dialog immediately; the loop, ordering, and toast logic live
     // in deleteWorkspaceSessions so they are unit-testable without the bundle.
-    setDeletingWorkspaceId(null);
-    await deleteWorkspaceSessions(sessions, options, activeSessionId, {
+    setDeletingSessionIds(null);
+    await deleteWorkspaceSessions(deletingSessions, options, activeSessionId, {
       setStatus: setSessionStatus,
       // Drop a deleted session's local-only state (#1358 acp cache + draft,
       // #1842 diff comments). Cross-tab / cross-device deletes fall to the
@@ -1160,14 +1193,13 @@ function AppContent({
   // Move-to-trash path (#2489): the safe default. Unlike permanent delete it
   // deliberately KEEPS the per-session acp cache, draft, and stored comments
   // so a restore is faithful; only purge clears them. Trashes every session
-  // in the workspace so a multi-session workspace sinks as a whole.
+  // in the row together.
   const handleConfirmTrash = async () => {
-    if (!deletingWorkspace) return;
-    const ids = deletingWorkspace.sessions.map((s) => s.id);
+    const ids = deletingSessions.map((s) => s.id);
     if (ids.length === 0) return;
     const wasActive = activeSessionId != null && ids.includes(activeSessionId);
 
-    setDeletingWorkspaceId(null);
+    setDeletingSessionIds(null);
     for (const id of ids) setSessionStatus(id, "Stopped");
     if (wasActive) {
       navigate("/");
@@ -1190,11 +1222,10 @@ function AppContent({
     [applySession],
   );
 
-  const stoppingWorkspace = stoppingWorkspaceId ? workspaces.find((w) => w.id === stoppingWorkspaceId) : null;
-  const stoppingSession = stoppingWorkspace?.sessions[0] ?? null;
+  const stoppingSession = stoppingSessionId ? (sessions.find((s) => s.id === stoppingSessionId) ?? null) : null;
 
-  const handleStopSession = useCallback((workspaceId: string) => {
-    setStoppingWorkspaceId(workspaceId);
+  const handleStopSession = useCallback((sessionId: string) => {
+    setStoppingSessionId(sessionId);
   }, []);
 
   const handleConfirmStop = useCallback(async () => {
@@ -1203,7 +1234,7 @@ function AppContent({
 
     // Close the dialog and show "Stopped" immediately; the 2s status poller
     // reconciles the true state and corrects this if the request fails.
-    setStoppingWorkspaceId(null);
+    setStoppingSessionId(null);
     setSessionStatus(sessionId, "Stopped");
 
     const result = await stopSession(sessionId);
@@ -1238,22 +1269,18 @@ function AppContent({
   }, [switchViewTarget]);
 
   const handleStartSession = useCallback(
-    async (workspaceId: string) => {
-      const ws = workspaces.find((w) => w.id === workspaceId);
-      const session = ws?.sessions[0];
-      if (!session) return;
-
+    async (sessionId: string) => {
       // Optimistic Starting; the status poller reconciles to the real state.
-      setSessionStatus(session.id, "Starting");
-      const result = await startSession(session.id);
+      setSessionStatus(sessionId, "Starting");
+      const result = await startSession(sessionId);
       if (!result) {
-        setSessionStatus(session.id, "Error");
+        setSessionStatus(sessionId, "Error");
         toastBus.handler?.error("Failed to start session");
         return;
       }
       toastBus.handler?.info("Session started");
     },
-    [workspaces, setSessionStatus],
+    [setSessionStatus],
   );
 
   const handleCreateSession = useCallback(
@@ -1263,6 +1290,10 @@ function AppContent({
         .sort((a, b) => (b.last_accessed_at ?? "").localeCompare(a.last_accessed_at ?? ""));
       const latest = projectSessions[0];
 
+      // Quick-create skips ProjectStep's selection, which is what normally reports the override.
+      const key = normalizeProjectPathKey(repoPath);
+      const registered = projects.find((p) => normalizeProjectPathKey(p.path) === key);
+
       setWizardPrefill({
         path: repoPath,
         tool: latest?.tool ?? "claude",
@@ -1270,10 +1301,11 @@ function AppContent({
         sandboxEnabled: latest?.is_sandboxed ?? false,
         profile: latest?.profile || undefined,
         group: latest?.group_path || undefined,
+        worktreeEnabled: registered?.overrides?.worktree_enabled,
       });
       setShowSessionWizard(true);
     },
-    [sessions],
+    [sessions, projects],
   );
 
   // Pin a repo so its header persists with zero sessions. If the repo is
@@ -1324,6 +1356,25 @@ function AppContent({
   const [projectForm, setProjectForm] = useState<{ editProject: ProjectInfo | null } | null>(null);
   const handleAddProject = useCallback(() => setProjectForm({ editProject: null }), []);
   const handleEditProject = useCallback((project: ProjectInfo) => setProjectForm({ editProject: project }), []);
+
+  // A group with live sessions may be unregistered; register it globally before editing.
+  const handleEditProjectSettings = useCallback(
+    async (group: SidebarGroup) => {
+      if (group.registeredProjects.length > 0) {
+        setProjectForm({ editProject: group.registeredProjects[0]! });
+        return;
+      }
+      if (!group.repoPath) return;
+      const res = await createProject({ path: group.repoPath, scope: "global" });
+      if (!res.ok || !res.project) {
+        toastBus.handler?.error(res.error ?? "Failed to register project");
+        return;
+      }
+      await refreshProjects();
+      setProjectForm({ editProject: res.project });
+    },
+    [refreshProjects],
+  );
 
   // Remove a saved project: delete every registration for its path, then
   // refresh. Confirms first since it is not undoable. See #2212.
@@ -1611,12 +1662,12 @@ function AppContent({
         // abort. Cancel/stop must stay behind an explicit gesture
         // (the assistant-ui Stop button in the composer).
         onEscape: () => {
-          if (deletingWorkspaceId) {
-            setDeletingWorkspaceId(null);
+          if (deletingSessionIds) {
+            setDeletingSessionIds(null);
             return;
           }
-          if (stoppingWorkspaceId) {
-            setStoppingWorkspaceId(null);
+          if (stoppingSessionId) {
+            setStoppingSessionId(null);
             return;
           }
           if (showPalette) {
@@ -1644,8 +1695,8 @@ function AppContent({
         toggleDiff,
         toggleRightDock,
         showPalette,
-        deletingWorkspaceId,
-        stoppingWorkspaceId,
+        deletingSessionIds,
+        stoppingSessionId,
         showSettings,
         handleCloseSettings,
         navigate,
@@ -1793,6 +1844,7 @@ function AppContent({
           view={rightPanelView}
           pluginPanes={pluginPanes}
           onBackToAgent={() => handlePickView("agent")}
+          onOpenAgentsPane={() => handlePickView("agents")}
           pairedMounted={pairedMounted}
           activeSession={activeSession ?? null}
           activeSessionId={activeSessionId}
@@ -2247,6 +2299,7 @@ function AppContent({
               onCreateSession={handleCreateSession}
               onPinProject={handlePinProject}
               onUnpinProject={handleUnpinProject}
+              onEditProjectSettings={handleEditProjectSettings}
               savedProjects={savedProjects}
               onAddProject={handleAddProject}
               onEditProject={handleEditProject}
@@ -2334,9 +2387,10 @@ function AppContent({
               title: session.title,
               isSandboxed: session.is_sandboxed,
             }))}
+            worktreeSharedWith={deletingWorktreeSharedWith}
             onConfirm={handleConfirmDelete}
             onTrash={handleConfirmTrash}
-            onCancel={() => setDeletingWorkspaceId(null)}
+            onCancel={() => setDeletingSessionIds(null)}
           />
         )}
 
@@ -2344,7 +2398,7 @@ function AppContent({
           <StopSessionDialog
             sessionTitle={stoppingSession.title}
             onConfirm={handleConfirmStop}
-            onCancel={() => setStoppingWorkspaceId(null)}
+            onCancel={() => setStoppingSessionId(null)}
           />
         )}
 
@@ -2391,6 +2445,7 @@ function AppContent({
             open={pickerOpen && singlePane}
             active={rightPanelView}
             pluginPanes={pluginPanes}
+            availablePanes={mobilePaneIds}
             onSelect={handlePickView}
             onClose={() => setPickerOpen(false)}
           />
