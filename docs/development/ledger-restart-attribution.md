@@ -16,4 +16,6 @@ If a replacement fails its resume probe, AOE requests `ledger incident seal --ru
 
 Restart intent uses the prior reported Ledger profile. If the user changes the wrapper or profile before restart, strict Ledger attachment may reject the mismatch and leave the prior intent and the independent new run without a verified link. AOE does not parse opaque wrapper commands to infer the replacement profile.
 
+An account-swap restart that carries the conversation to the new account's config root is recorded the same way, before teardown. Its launch command is built only after the carry, so the desired resume is the conversation the carry will copy (or an explicit resume pin), and fresh otherwise. The new account usually launches under a different Ledger profile, so this is the mismatch case above: the prior run is sealed and the intent recorded, and Ledger records the rejected attachment as a gap.
+
 Sandboxed and structured sessions do not currently use this host Ledger adapter. Sessions launched before optional reporting was available retain an explicit attribution gap. Neither an AOE `Resumed` outcome nor a running pane is submitted as verified resume evidence.

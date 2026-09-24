@@ -151,6 +151,17 @@ impl ConversationCarry {
         }
     }
 
+    /// Whether the launch after this carry will find `session_id`'s transcript
+    /// in the incoming account: the carry plans it and the outgoing account has
+    /// it to copy. Read-only, so it can be asked before the outgoing pane stops.
+    pub(crate) fn will_carry(&self, session_id: &str) -> bool {
+        self.session_ids.iter().any(|id| id == session_id)
+            && AnchoredDir::open(&self.source_root)
+                .ok()
+                .and_then(|source| claude_transcripts_for(&source, session_id).ok())
+                .is_some_and(|found| !found.is_empty())
+    }
+
     /// Copy each planned transcript. Best-effort: the launch that follows
     /// falls back to a fresh conversation the same way it does for any sid
     /// whose transcript is missing, so a failure is logged rather than
@@ -503,6 +514,21 @@ mod tests {
             ),
             "after the carry the launch must resume rather than re-pin the id"
         );
+    }
+
+    #[test]
+    fn will_carry_needs_a_planned_id_with_a_transcript_to_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let (source, target) = (temp.path().join("from"), temp.path().join("to"));
+        seed_transcript(&source, "-work-repo", "sid-a", "conversation\n");
+        seed_transcript(&source, "-work-repo", "sid-c", "other\n");
+        let carry = carry(&source, &target, &["sid-a", "sid-b"]);
+
+        assert!(carry.will_carry("sid-a"));
+        // Planned, but the outgoing account never wrote it.
+        assert!(!carry.will_carry("sid-b"));
+        // On disk, but not part of this carry.
+        assert!(!carry.will_carry("sid-c"));
     }
 
     #[test]
