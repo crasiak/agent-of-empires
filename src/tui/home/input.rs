@@ -4346,6 +4346,14 @@ impl HomeView {
     }
 
     fn toggle_group_collapsed(&mut self, path: &str) {
+        self.toggle_group_collapsed_at(self.cursor, path);
+    }
+
+    /// `row` is the `flat_items` index of the header being toggled. In the
+    /// all-profiles view the same group path can exist in several profiles,
+    /// so the owning GroupTree comes from that row, not from wherever the
+    /// cursor sits (a group click toggles without moving the cursor).
+    fn toggle_group_collapsed_at(&mut self, row: usize, path: &str) {
         // The synthetic Archived section is not a member of any
         // GroupTree; its collapsed state lives on HomeView and persists
         // separately. Route here before either branch tries to mutate a
@@ -4379,7 +4387,7 @@ impl HomeView {
             return;
         }
         // Route to the correct profile's GroupTree
-        let profile = self.profile_for_cursor(self.cursor);
+        let profile = self.profile_for_cursor(row);
         if let Some(profile) = profile {
             if let Some(tree) = self.group_trees.get_mut(&profile) {
                 tree.toggle_collapsed(path);
@@ -5661,7 +5669,7 @@ impl HomeView {
 
         match item {
             Item::Group { path, .. } => {
-                self.toggle_group_collapsed(&path);
+                self.toggle_group_collapsed_at(abs_idx, &path);
                 None
             }
             Item::Session { id, .. } => {
