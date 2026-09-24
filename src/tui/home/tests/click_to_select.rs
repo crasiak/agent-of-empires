@@ -1014,3 +1014,121 @@ fn click_on_group_row_toggles_collapsed() {
         .expect("group row should still be present after toggle");
     assert_ne!(was_collapsed, now_collapsed, "group collapsed state flips");
 }
+
+/// All-profiles view with the same group path in two profiles: alpha's
+/// `shared` holds a session, beta's `shared` is empty and collapsed. The
+/// two headers render identically, so a click must toggle the clicked
+/// row's profile, not whichever profile the cursor happens to sit in.
+fn create_all_profiles_env_with_shared_group_path(temp: &TempDir) -> HomeView {
+    let storage_a = Storage::new_unwatched("alpha").unwrap();
+    let mut a1 = Instance::new("A1", "/tmp/a");
+    a1.group_path = "shared".to_string();
+    let xs = vec![a1];
+    storage_a
+        .update(|i, g| {
+            *i = xs.to_vec();
+            *g =
+                GroupTree::new_with_groups(&xs, &[Group::new("shared", "shared")]).get_all_groups();
+            Ok(())
+        })
+        .unwrap();
+
+    let storage_b = Storage::new_unwatched("beta").unwrap();
+    let xs = vec![Instance::new("B1", "/tmp/b")];
+    let mut shared = Group::new("shared", "shared");
+    shared.collapsed = true;
+    storage_b
+        .update(|i, g| {
+            *i = xs.to_vec();
+            *g = GroupTree::new_with_groups(&xs, &[shared]).get_all_groups();
+            Ok(())
+        })
+        .unwrap();
+
+    let _ = temp;
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let mut view =
+        HomeView::new_for_test(None, tools, crate::file_watch::FileWatchService::noop()).unwrap();
+    view.group_by = crate::session::config::GroupByMode::Manual;
+    // Newest sorts alpha's populated `shared` above beta's empty one, so a
+    // path-only lookup lands on alpha.
+    view.sort_order = crate::session::config::SortOrder::Newest;
+    view.flat_items = view.build_flat_items();
+    view.list_inner_area = Rect::new(1, 1, 28, 10);
+    view
+}
+
+fn shared_group_row(view: &HomeView, want: &str) -> (usize, bool) {
+    view.flat_items
+        .iter()
+        .enumerate()
+        .find_map(|(i, item)| match item {
+            crate::session::Item::Group {
+                path,
+                collapsed,
+                profile,
+                ..
+            } if path == "shared" && profile.as_deref() == Some(want) => Some((i, *collapsed)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{want}'s shared group row should be present"))
+}
+
+#[test]
+#[serial]
+fn click_on_group_row_toggles_clicked_profile_not_cursor_profile() {
+    let temp = TempDir::new().unwrap();
+    let _guard = setup_test_home(&temp);
+    let mut view = create_all_profiles_env_with_shared_group_path(&temp);
+
+    // Park the cursor on alpha's session, inside alpha's `shared` group.
+    view.cursor = view
+        .flat_items
+        .iter()
+        .position(|item| {
+            matches!(item, crate::session::Item::Session { id, .. }
+                if view.get_instance(id).is_some_and(|i| i.title == "A1"))
+        })
+        .expect("A1 row should be present");
+    view.update_selected();
+
+    let (beta_idx, beta_was_collapsed) = shared_group_row(&view, "beta");
+    let (_, alpha_was_collapsed) = shared_group_row(&view, "alpha");
+    assert!(beta_was_collapsed);
+    assert!(!alpha_was_collapsed);
+
+    let click_row = view.list_inner_area.y + beta_idx as u16;
+    assert!(view.handle_click(5, click_row).is_none());
+
+    let (_, beta_now_collapsed) = shared_group_row(&view, "beta");
+    let (_, alpha_now_collapsed) = shared_group_row(&view, "alpha");
+    assert!(!beta_now_collapsed, "clicked (beta) group should expand");
+    assert!(
+        !alpha_now_collapsed,
+        "alpha's same-path group must not toggle from a click on beta's row"
+    );
+}
+
+#[test]
+#[serial]
+fn reload_keeps_cursor_on_selected_group_in_its_own_profile() {
+    let temp = TempDir::new().unwrap();
+    let _guard = setup_test_home(&temp);
+    let mut view = create_all_profiles_env_with_shared_group_path(&temp);
+
+    let (alpha_idx, _) = shared_group_row(&view, "alpha");
+    let (beta_idx, _) = shared_group_row(&view, "beta");
+    assert!(alpha_idx < beta_idx);
+    view.cursor = beta_idx;
+    view.update_selected();
+    assert_eq!(view.selected_group_profile.as_deref(), Some("beta"));
+
+    view.reload().unwrap();
+
+    let (beta_idx, _) = shared_group_row(&view, "beta");
+    assert_eq!(
+        view.cursor, beta_idx,
+        "reload must not jump to alpha's same-path group"
+    );
+    assert_eq!(view.selected_group_profile.as_deref(), Some("beta"));
+}

@@ -517,6 +517,7 @@ impl HomeView {
     fn refresh_rows_preserving_selection(&mut self) {
         let prev_selected_session = self.selected_session.clone();
         let prev_selected_group = self.selected_group.clone();
+        let prev_selected_group_profile = self.selected_group_profile.clone();
 
         self.rebuild_flat_items();
 
@@ -533,8 +534,12 @@ impl HomeView {
             }
         } else if let Some(ref gpath) = prev_selected_group {
             for (idx, item) in self.flat_items.iter().enumerate() {
-                if let Item::Group { path, .. } = item {
-                    if path == gpath {
+                // The same path can exist in several profiles in the
+                // all-profiles view; `profile` is only set there.
+                if let Item::Group { path, profile, .. } = item {
+                    if path == gpath
+                        && (profile.is_none() || *profile == prev_selected_group_profile)
+                    {
                         self.cursor = idx;
                         restored = true;
                         break;
