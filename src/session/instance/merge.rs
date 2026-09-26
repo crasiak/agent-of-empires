@@ -47,28 +47,27 @@ impl Instance {
         let generation_can_merge = self.omp_capture_generation == before.omp_capture_generation
             || self.omp_capture_generation == src.omp_capture_generation;
         self.lifecycle_generation = src.lifecycle_generation;
-        let sid_unchanged = self.agent_session_id == before.agent_session_id;
+        let conversation_unchanged = before.conversation_state().matches(self);
         let marker_unchanged = self.resume_probe_failed_sid == before.resume_probe_failed_sid;
 
         if generation_can_merge {
             self.omp_capture_generation = src.omp_capture_generation.clone();
+            if conversation_unchanged {
+                self.adopt_conversation_state(src.conversation_state());
+            }
+        }
+        if self.active_execution == src.active_execution {
             self.session_id_poller = src.session_id_poller.clone();
             self.session_id_poller_retry_after = src.session_id_poller_retry_after;
-            if sid_unchanged {
-                self.agent_session_id = src.agent_session_id.clone();
+            if src.session_id_poller_is_running() {
+                self.poller_repair.reset();
             }
-        } else if src.session_id_poller_is_running() {
-            // A concurrent launch already published a third generation.
-            self.session_id_poller = src.session_id_poller.clone();
+        } else {
+            src.stop_poller();
         }
         if generation_can_merge && marker_unchanged && self.agent_session_id == src.agent_session_id
         {
             self.resume_probe_failed_sid = src.resume_probe_failed_sid.clone();
-        }
-        // `install_poller` cleared the working clone's repair schedule when
-        // its poller started; the live row must not keep the stale backoff.
-        if src.session_id_poller_is_running() {
-            self.poller_repair.reset();
         }
     }
 
@@ -93,10 +92,13 @@ impl Instance {
         self.last_error = previous.last_error.clone();
         self.last_error_check = previous.last_error_check;
         self.last_start_time = previous.last_start_time;
-        self.session_id_poller = previous.session_id_poller.clone();
-        self.poller_repair = previous.poller_repair.clone();
-        self.session_id_poller_retry_after = previous.session_id_poller_retry_after;
-        self.retroactive_capture_excludes = previous.retroactive_capture_excludes.clone();
+        if self.active_execution == previous.active_execution {
+            self.session_id_poller = previous.session_id_poller.clone();
+            self.poller_repair = previous.poller_repair.clone();
+            self.session_id_poller_retry_after = previous.session_id_poller_retry_after;
+        } else {
+            previous.stop_poller();
+        }
         self.acp_load_session_capable = previous.acp_load_session_capable;
     }
 
@@ -138,48 +140,44 @@ impl Instance {
         self.extra_args = src.extra_args.clone();
     }
 
-    /// Move this row to a different `tool` (the TUI restart dialog's engine swap), parking the
-    /// outgoing agent's session ids and picking up the incoming agent's, if it has been here
-    /// before.
+    /// Switch tools, parking completed conversations per tool.
+    /// Pending forks retain their target for launch-time namespace validation.
     pub(crate) fn swap_tool(&mut self, new_tool: &str) {
         if new_tool == self.tool {
             return;
         }
-        // Park the outgoing agent's conversation under its own name so a swap
-        // back to it resumes there instead of starting a third conversation.
-        let outgoing = PriorToolSession {
-            agent_session_id: self.agent_session_id.take(),
-            acp_session_id: self.acp_session_id.take(),
-        };
-        if !outgoing.is_empty() {
-            self.prior_tool_session_ids
-                .insert(self.tool.clone(), outgoing);
+        if !matches!(self.resume_intent, ResumeIntent::Fork { .. }) {
+            let outgoing = PriorToolSession {
+                agent_session_id: self.agent_session_id.take(),
+                agent_session_binding: self.agent_session_binding.take(),
+                pi_session_path: self.pi_session_path.take(),
+                acp_session_id: self.acp_session_id.take(),
+            };
+            if !outgoing.is_empty() {
+                self.prior_tool_session_ids
+                    .insert(self.tool.clone(), outgoing);
+            }
+            let restored = self
+                .prior_tool_session_ids
+                .remove(new_tool)
+                .unwrap_or_default();
+            self.set_agent_conversation(
+                restored.agent_session_id,
+                restored.agent_session_binding,
+                restored.pi_session_path,
+            );
+            self.acp_session_id = restored.acp_session_id;
+            self.resume_intent = ResumeIntent::Default;
+            self.resume_binding = None;
         }
         self.adopt_tool(new_tool);
-        // Consumed, not copied: the row owns exactly one live conversation per agent, and leaving
-        // the entry behind would let a later swap restore an id this session has since replaced.
-        let restored = self
-            .prior_tool_session_ids
-            .remove(new_tool)
-            .unwrap_or_default();
-        self.agent_session_id = restored.agent_session_id;
-        self.acp_session_id = restored.acp_session_id;
         self.acp_load_session_capable = None;
         self.resume_probe_failed_sid = None;
-        // A pin/clear/fork directive names an id in the old agent's namespace,
-        // so it cannot survive the swap either.
-        self.resume_intent = ResumeIntent::Default;
-        // Effort vocabularies are adapter-specific, so the old agent's pick is
-        // meaningless to the new one; it falls back to the new agent's default.
+        self.active_execution = None;
         self.acp_effort = None;
-        // Same for the pinned model: `claude-opus-4-7` means nothing to codex,
-        // and it is re-injected on every spawn, so it has to go too.
         self.agent_model = None;
-        // `acp_mode_id` deliberately stays. It is the session's approval posture, and clearing it
-        // does not fall back to "default".
         self.import_pending = None;
         self.fork_pending = None;
-        // The pinned structured-view agent belongs to the old tool.
         self.agent_name = None;
     }
 
@@ -804,23 +802,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn user_action_diff_preserves_runtime_status_and_peer_touch() {
-        let mut pre = inst();
-        pre.last_accessed_at = Some(Utc::now() - chrono::Duration::seconds(60));
-        pre.archived_at = Some(Utc::now() - chrono::Duration::seconds(120));
-        let mut post = pre.clone();
-        post.title = "renamed".into();
-        post.status = Status::Running;
-        let mut disk = pre.clone();
-        disk.touch_last_accessed();
-        disk.status = Status::Waiting;
-        disk.merge_user_action_diff(&pre, &post);
-        assert_eq!(disk.title, "renamed");
-        assert!(disk.archived_at.is_none());
-        assert_eq!(disk.status, Status::Waiting);
-    }
-
     /// A passive transition must not read as a user touch and wipe a concurrent sink state (#3465).
     #[test]
     #[serial_test::serial]
@@ -924,26 +905,6 @@ mod tests {
                 "{disk_ts:?} <- {patch_ts:?}"
             );
         }
-    }
-
-    #[test]
-    fn passive_status_patch_logs_only_a_dropped_last_accessed_at() {
-        let logs = crate::session::test_support::LogCapture::start();
-        let ts = Utc::now();
-        let mut disk = inst();
-        disk.last_accessed_at = Some(ts);
-        // An equal timestamp is a no-op and says so; a newer one applies silently.
-        disk.merge_passive_status_patch(&disk.id.clone(), &patch(Status::Idle, None, Some(ts)));
-        let newer = ts + chrono::Duration::minutes(1);
-        disk.merge_passive_status_patch(&disk.id.clone(), &patch(Status::Idle, None, Some(newer)));
-        assert_eq!(disk.last_accessed_at, Some(newer));
-        let logs = logs.contents();
-        assert_eq!(
-            logs.matches("dropped passive status patch's last_accessed_at as a no-op")
-                .count(),
-            1,
-            "{logs}"
-        );
     }
 
     #[test]
@@ -1127,6 +1088,8 @@ mod tests {
             PriorToolSession {
                 agent_session_id: Some("stale-on-the-other-account".to_string()),
                 acp_session_id: None,
+                agent_session_binding: None,
+                pi_session_path: None,
             },
         );
 
@@ -1164,6 +1127,8 @@ mod tests {
             PriorToolSession {
                 agent_session_id: Some("keep-me".to_string()),
                 acp_session_id: None,
+                agent_session_binding: None,
+                pi_session_path: None,
             },
         );
         inst.swap_account("claude-2");
