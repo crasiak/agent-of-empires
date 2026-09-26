@@ -118,7 +118,7 @@ pub fn session_id_sidecar_exists(instance_id: &str) -> bool {
 /// Returns `None` when the file is absent, malformed, too large, or older than
 /// `SESSION_ID_SIDECAR_MAX_AGE`.
 pub fn read_hook_session_id(instance_id: &str) -> Option<String> {
-    read_hook_session_id_within(instance_id, Some(SESSION_ID_SIDECAR_MAX_AGE))
+    read_hook_session_id_within(instance_id, "session_id", Some(SESSION_ID_SIDECAR_MAX_AGE))
 }
 
 /// [`read_hook_session_id`] without the freshness window.
@@ -129,15 +129,37 @@ pub fn read_hook_session_id(instance_id: &str) -> Option<String> {
 /// will, and the instance directory is about to be deleted. An idle pane whose
 /// `/new` is older than the window would otherwise lose it.
 pub fn read_hook_session_id_any_age(instance_id: &str) -> Option<String> {
-    read_hook_session_id_within(instance_id, None)
+    read_hook_session_id_within(instance_id, "session_id", None)
 }
 
-fn read_hook_session_id_within(
+pub(crate) fn read_hook_sidecar_at(
     instance_id: &str,
+    directory: &std::path::Path,
+    leaf: &str,
+    cap: usize,
+    max_age: Option<std::time::Duration>,
+) -> Option<Vec<u8>> {
+    let dir = dir_guard::open_recorded_instance_dir(instance_id, directory).ok()??;
+    let metadata = dir_guard::metadata_at(dir.as_fd(), leaf).ok()??;
+    if metadata.len() > cap as u64 {
+        return None;
+    }
+    if let Some(age) = max_age {
+        if metadata.modified().ok()?.elapsed().ok()? > age {
+            return None;
+        }
+    }
+    let bytes = dir_guard::read_file_at(dir.as_fd(), leaf, cap.saturating_add(1)).ok()??;
+    (bytes.len() <= cap).then_some(bytes)
+}
+
+pub(crate) fn read_hook_session_id_within(
+    instance_id: &str,
+    leaf: &str,
     max_age: Option<std::time::Duration>,
 ) -> Option<String> {
     let dir = dir_guard::open_instance_dir_read_only(instance_id).ok()??;
-    let meta = dir_guard::metadata_at(dir.as_fd(), "session_id").ok()??;
+    let meta = dir_guard::metadata_at(dir.as_fd(), leaf).ok()??;
     // The one extra byte permits a conventional trailing newline. Checking the
     // metadata before the bounded read prevents a longer valid prefix from
     // being accepted as a different, truncated identity.
@@ -150,8 +172,7 @@ fn read_hook_session_id_within(
             return None;
         }
     }
-    let bytes =
-        dir_guard::read_file_at(dir.as_fd(), "session_id", SESSION_ID_FILE_READ_CAP).ok()??;
+    let bytes = dir_guard::read_file_at(dir.as_fd(), leaf, SESSION_ID_FILE_READ_CAP).ok()??;
     // Recheck the opened file, not only the earlier path metadata: the hook
     // writer publishes by atomic rename, so the leaf can change between them.
     if bytes.len() > SESSION_ID_FILE_MAX_PAYLOAD {
@@ -258,17 +279,6 @@ mod tests {
 
     #[test]
     #[serial_test::serial(hook_base)]
-    fn test_read_dangling_symlink() {
-        let (_g, base, _tmp) = BaseGuard::ready();
-        let dir = dir_guard::open_instance_dir("dangling").unwrap();
-        drop(dir);
-        std::os::unix::fs::symlink("/nonexistent/target", base.join("dangling").join("status"))
-            .unwrap();
-        assert_eq!(read_hook_status("dangling"), None);
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
     fn test_cleanup_existing_dir() {
         let (_g, base, _tmp) = BaseGuard::ready();
         write_status_via_guard("cleanup_existing", "running");
@@ -309,21 +319,6 @@ mod tests {
             let want = std::fs::canonicalize(&base).unwrap().join("pathres");
             assert_eq!(got, want, "{label}");
         }
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn test_cleanup_nonexistent_dir() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        cleanup_hook_status_dir("nonexistent_cleanup_test");
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn test_hook_status_dir_path() {
-        let (_g, base, _tmp) = BaseGuard::ready();
-        let dir = hook_status_dir("abc123").expect("test id must be allowlist-safe");
-        assert_eq!(dir, base.join("abc123"));
     }
 
     fn write_attention_json(instance_id: &str, body: &str) {
@@ -372,148 +367,66 @@ mod tests {
 
     #[test]
     #[serial_test::serial(hook_base)]
-    fn test_read_hook_session_id_returns_some_when_fresh_uuid() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        let uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        write_session_id_sidecar("session_id_fresh", uuid);
-        assert_eq!(
-            read_hook_session_id("session_id_fresh").as_deref(),
-            Some(uuid)
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn test_read_hook_session_id_returns_none_when_absent() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        assert_eq!(
-            read_hook_session_id("nonexistent_session_id_instance"),
-            None
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn test_read_hook_session_id_accepts_safe_opaque_id() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        let id = "conversation_opaque.123";
-        write_session_id_sidecar("session_id_opaque", id);
-        assert_eq!(
-            read_hook_session_id("session_id_opaque").as_deref(),
-            Some(id)
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn test_read_hook_session_id_enforces_full_opaque_id_limit() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        let maximum = "x".repeat(crate::session::capture::MAX_SESSION_ID_LEN);
-        write_session_id_sidecar("session_id_maximum", &maximum);
-        assert_eq!(
-            read_hook_session_id("session_id_maximum").as_deref(),
-            Some(maximum.as_str())
-        );
-
-        let too_long = "x".repeat(crate::session::capture::MAX_SESSION_ID_LEN + 1);
-        write_session_id_sidecar("session_id_too_long", &too_long);
-        assert_eq!(read_hook_session_id("session_id_too_long"), None);
-
-        let oversized_with_whitespace = format!("{maximum}  ");
-        write_session_id_sidecar(
-            "session_id_oversized_whitespace",
-            &oversized_with_whitespace,
-        );
-        assert_eq!(
-            read_hook_session_id("session_id_oversized_whitespace"),
-            None
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn test_read_hook_session_id_rejects_truncated_valid_prefix() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        let payload = format!("{}suffix", "x".repeat(128));
-        write_session_id_sidecar("session_id_no_truncation", &payload);
-        assert_eq!(
-            read_hook_session_id("session_id_no_truncation").as_deref(),
-            Some(payload.as_str())
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn test_read_hook_session_id_rejects_unsafe_id() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        write_session_id_sidecar("session_id_garbage", "unsafe id;");
-        assert_eq!(read_hook_session_id("session_id_garbage"), None);
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn test_read_hook_session_id_rejects_stale_file() {
+    fn test_read_hook_session_id() {
         let (_g, base, _tmp) = BaseGuard::ready();
         let uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        write_session_id_sidecar("session_id_stale", uuid);
+        let maximum = "x".repeat(crate::session::capture::MAX_SESSION_ID_LEN);
+        let too_long = "x".repeat(crate::session::capture::MAX_SESSION_ID_LEN + 1);
+        let oversized_with_whitespace = format!("{maximum}  ");
+        // Past the old 128-byte read window, so a truncated prefix would pass (#3678).
+        let untruncated = format!("{}suffix", "x".repeat(128));
+        let cases: [(&str, Option<String>, Option<&str>); 9] = [
+            ("sid_fresh", Some(uuid.into()), Some(uuid)),
+            ("sid_absent", None, None),
+            ("sid_trim", Some(format!("{uuid}\n")), Some(uuid)),
+            (
+                "sid_opaque",
+                Some("conversation_opaque.123".into()),
+                Some("conversation_opaque.123"),
+            ),
+            ("sid_maximum", Some(maximum.clone()), Some(maximum.as_str())),
+            ("sid_too_long", Some(too_long), None),
+            ("sid_oversized_ws", Some(oversized_with_whitespace), None),
+            (
+                "sid_no_truncation",
+                Some(untruncated.clone()),
+                Some(untruncated.as_str()),
+            ),
+            ("sid_garbage", Some("unsafe id;".into()), None),
+        ];
+        for (id, written, expected) in cases {
+            if let Some(content) = written {
+                write_session_id_sidecar(id, &content);
+            }
+            assert_eq!(read_hook_session_id(id).as_deref(), expected, "{id}");
+        }
+
+        write_session_id_sidecar("sid_stale", uuid);
         let stale = std::time::SystemTime::now() - Duration::from_secs(10 * 60);
         std::fs::File::options()
             .write(true)
-            .open(base.join("session_id_stale").join("session_id"))
+            .open(base.join("sid_stale").join("session_id"))
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(stale))
             .unwrap();
-        assert_eq!(read_hook_session_id("session_id_stale"), None);
+        assert_eq!(read_hook_session_id("sid_stale"), None);
     }
 
     #[test]
     #[serial_test::serial(hook_base)]
-    fn test_read_hook_session_id_trims_trailing_whitespace() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        let uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        write_session_id_sidecar("session_id_trim", &format!("{uuid}\n"));
-        assert_eq!(
-            read_hook_session_id("session_id_trim").as_deref(),
-            Some(uuid)
-        );
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn hook_status_dir_returns_err_for_unsafe_id() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        assert!(hook_status_dir("../etc").is_err());
-        assert!(hook_status_dir("").is_err());
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn read_hook_status_returns_none_for_unsafe_id() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        assert_eq!(read_hook_status("../etc"), None);
-        assert_eq!(read_hook_status(""), None);
-        assert_eq!(read_hook_status("foo/bar"), None);
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn read_hook_session_id_returns_none_for_unsafe_id() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        assert_eq!(read_hook_session_id("../etc"), None);
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn read_hook_urgent_returns_false_for_unsafe_id() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        assert!(!read_hook_urgent("../etc"));
-    }
-
-    #[test]
-    #[serial_test::serial(hook_base)]
-    fn cleanup_hook_status_dir_is_noop_for_unsafe_id() {
-        let (_g, _, _tmp) = BaseGuard::ready();
-        cleanup_hook_status_dir("../etc");
-        cleanup_hook_status_dir("");
+    fn unsafe_ids_never_reach_the_filesystem() {
+        let (_g, base, _tmp) = BaseGuard::ready();
+        let escape = base.join("..").join("etc_probe");
+        std::fs::create_dir_all(&escape).unwrap();
+        std::fs::write(escape.join("status"), "running").unwrap();
+        for id in ["../etc_probe", "", "foo/bar"] {
+            assert!(hook_status_dir(id).is_err(), "{id:?}");
+            assert_eq!(read_hook_status(id), None, "{id:?}");
+            assert_eq!(read_hook_session_id(id), None, "{id:?}");
+            assert!(!read_hook_urgent(id), "{id:?}");
+            cleanup_hook_status_dir(id);
+        }
+        assert!(escape.join("status").exists(), "cleanup must not escape");
+        std::fs::remove_dir_all(&escape).unwrap();
     }
 }

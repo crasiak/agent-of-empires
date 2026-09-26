@@ -272,27 +272,6 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
                  decouples it from the parent's agent, so the fork's resume flags may not apply."
             );
         }
-        let collides_with_fork_flags = |cmd: &str| {
-            cmd.split_whitespace().any(|w| {
-                w == "resume"
-                    || w == "fork"
-                    || w.starts_with("--resume")
-                    || w.starts_with("--session")
-                    || w.starts_with("--fork")
-            })
-        };
-        for input in [args.command.as_deref(), args.extra_args.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            if collides_with_fork_flags(input) {
-                bail!(
-                    "`--fork-from` cannot be combined with a launch command (--cmd or --extra-args) \
-                     that already contains a resume or fork flag/subcommand: the fork appends its \
-                     own resume flags, which would collide."
-                );
-            }
-        }
     }
 
     let fork_seed: Option<crate::session::ForkSeed> = if let Some(fork_ref) = &args.fork_from {
@@ -307,29 +286,22 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
             );
         }
         let user_chose_tool = args.tool.is_some() || args.command.is_some();
-        if user_chose_tool && resolved_tool != source.tool {
-            bail!(
-                "Cannot fork session '{}' (agent '{}') as agent '{}': a fork must use the parent's \
-                 agent. Drop --tool/--cmd to inherit it, or fork a session created with '{}'.",
-                source.title,
-                source.tool,
-                resolved_tool,
-                resolved_tool
-            );
-        }
         if !user_chose_tool {
             resolved_tool = source.tool.clone();
         }
-        let parent_agent_session_id = source.agent_session_id.clone();
+        let parent_agent = source
+            .fork_parent_binding()
+            .and_then(|binding| binding.execution.as_ref())
+            .map(|execution| execution.agent.clone())
+            .unwrap_or_else(|| source.tool.clone());
         let seed = crate::session::fork::terminal_fork_seed(
-            &resolved_tool,
-            parent_agent_session_id.as_deref(),
+            source.fork_parent_binding(),
             crate::session::capture::generate_session_uuid(),
         )
         .map_err(|denied| match denied {
             crate::session::ForkDenied::AgentCannotFork => anyhow::anyhow!(
                 "Agent '{}' does not support forking. Forkable agents: claude, codex, opencode.",
-                resolved_tool
+                parent_agent
             ),
             crate::session::ForkDenied::NoParentSession => anyhow::anyhow!(
                 "Nothing to fork: session '{}' has no captured agent session yet. Start a conversation in it first.",
@@ -731,13 +703,14 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
     if let Some(seed) = fork_seed {
         match seed {
             crate::session::ForkSeed::Terminal {
-                parent_agent_session_id,
+                parent,
                 child_session_id,
             } => {
                 instance.agent_session_id = Some(child_session_id);
                 instance.resume_intent = crate::session::ResumeIntent::Fork {
-                    from: parent_agent_session_id,
+                    from: parent.session_id.clone(),
                 };
+                instance.resume_binding = Some(*parent);
             }
             crate::session::ForkSeed::Structured { .. } => {}
         }
@@ -1412,70 +1385,44 @@ mod tests {
     const HARDCODED: &str = "ghcr.io/agent-of-empires/aoe-sandbox:latest";
 
     #[test]
-    fn override_launch_binary_uses_command_override() {
-        let mut session = SessionConfig::default();
-        session
-            .agent_command_override
-            .insert("opencode".to_string(), "opencode-plannotator".to_string());
-        assert_eq!(
-            override_launch_binary("opencode", &session).as_deref(),
-            Some("opencode-plannotator")
-        );
+    fn override_launch_binary_takes_the_override_program() {
+        for (override_cmd, expected) in [
+            (None, None),
+            (Some("opencode-plannotator"), Some("opencode-plannotator")),
+            (Some("ocp run sp"), Some("ocp")),
+            (
+                Some("\"/opt/My Wrapper/opencode\" --mode plan"),
+                Some("/opt/My Wrapper/opencode"),
+            ),
+        ] {
+            let mut session = SessionConfig::default();
+            if let Some(cmd) = override_cmd {
+                session
+                    .agent_command_override
+                    .insert("opencode".to_string(), cmd.to_string());
+            }
+            assert_eq!(
+                override_launch_binary("opencode", &session).as_deref(),
+                expected,
+                "{override_cmd:?}"
+            );
+        }
     }
 
     #[test]
-    fn override_launch_binary_takes_first_word_of_multiword_override() {
-        let mut session = SessionConfig::default();
-        session
-            .agent_command_override
-            .insert("opencode".to_string(), "ocp run sp".to_string());
-        assert_eq!(
-            override_launch_binary("opencode", &session).as_deref(),
-            Some("ocp")
-        );
-    }
-
-    #[test]
-    fn override_launch_binary_honors_quoted_path() {
-        let mut session = SessionConfig::default();
-        session.agent_command_override.insert(
-            "opencode".to_string(),
-            "\"/opt/My Wrapper/opencode\" --mode plan".to_string(),
-        );
-        assert_eq!(
-            override_launch_binary("opencode", &session).as_deref(),
-            Some("/opt/My Wrapper/opencode")
-        );
-    }
-
-    #[test]
-    fn override_launch_binary_none_without_override() {
-        let session = SessionConfig::default();
-        assert_eq!(override_launch_binary("opencode", &session), None);
-    }
-
-    #[test]
-    fn flag_overrides_everything() {
-        let image = resolve_sandbox_image(Some(" custom:flag "), "repo:merged", HARDCODED);
-        assert_eq!(image, "custom:flag");
-    }
-
-    #[test]
-    fn merged_default_used_when_no_flag() {
-        let image = resolve_sandbox_image(None, "ghcr.io/example/custom:latest", HARDCODED);
-        assert_eq!(image, "ghcr.io/example/custom:latest");
-    }
-
-    #[test]
-    fn whitespace_merged_falls_back_to_hardcoded() {
-        let image = resolve_sandbox_image(None, "   ", HARDCODED);
-        assert_eq!(image, HARDCODED);
-    }
-
-    #[test]
-    fn empty_merged_falls_back_to_hardcoded() {
-        let image = resolve_sandbox_image(None, "", HARDCODED);
-        assert_eq!(image, HARDCODED);
+    fn resolve_sandbox_image_prefers_flag_then_merged_then_hardcoded() {
+        for (flag, merged, expected) in [
+            (Some(" custom:flag "), "repo:merged", "custom:flag"),
+            (
+                None,
+                "ghcr.io/example/custom:latest",
+                "ghcr.io/example/custom:latest",
+            ),
+            (None, "   ", HARDCODED),
+            (None, "", HARDCODED),
+        ] {
+            assert_eq!(resolve_sandbox_image(flag, merged, HARDCODED), expected);
+        }
     }
 
     mod profile_guard {

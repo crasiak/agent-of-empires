@@ -35,6 +35,9 @@ export const HOST_STATE_VARS = new Set([
   // Discovery must not prefer a host endpoint over the private daemon.
   "AOE_DAEMON_TOKEN",
   "AOE_DAEMON_URL",
+  // A host passphrase would let discovery log in against a host daemon's
+  // session store instead of the private one the harness spawned.
+  "AOE_DAEMON_PASSPHRASE",
   // Private fixture files and subprocess controls cannot come from the host.
   "AOE_E2E_INPUT_BARRIER",
   "AOE_E2E_PARTIAL_FRAME_FILE",
@@ -46,6 +49,10 @@ export const HOST_STATE_VARS = new Set([
   "AOE_OPEN_URL_TO", // appends every URL the TUI opens to a host file
   "AOE_SERVE_INSTANCE_ID", // identifies a host daemon process as this one
   "AOE_SERVE_PASSPHRASE", // host credential for the daemon's own auth
+  // Names one launch's publication. The launch routes its own value into the
+  // pane, so a host shell exporting it would only make a hook or an
+  // `extract-session-id` call read a launch that is not this run's.
+  "AOE_SESSION_SOURCE",
   // Host endpoints for the daemon's outbound calls.
   "AOE_TELEMETRY_ENDPOINT",
   "AOE_UPDATE_API_BASE",

@@ -100,7 +100,7 @@ aoe acp doctor --fix --all-adapters       # every bundled adapter
 
 - **Web wizard**: structured view by default (set [`acp.default_new_session_view`](guides/configuration.md) to change it); turn off **Use structured view** for the terminal.
 - **CLI / TUI**: terminal view by default; opt in with `--structured-view` or `--agent`, or the **Structured** field in the TUI new-session dialog.
-- **An existing session** can switch either way from the web sidebar's right-click menu or the TUI context menu (which needs a running `aoe serve`). Both confirm first, and the worktree, files, and commits are always preserved. For a **claude** session the conversation is kept in both directions (`claude --resume` one way, the ACP adapter the other); every other agent restarts fresh on the target surface.
+- **An existing session** can switch either way from the web sidebar's right-click menu or the TUI context menu (which needs a running `aoe serve`). Both confirm first, and the worktree, files, and commits are always preserved. For a **claude** session, the conversation is kept in both directions only when AoE can resolve a shared native store. A terminal switch whose store cannot be resolved, or which the structured worker does not share, is refused with HTTP 409 and `set-session-id --store` recovery guidance. Every other agent starts fresh on the target surface.
 
 ### Launch command and session naming
 
@@ -126,6 +126,8 @@ aoe acp attach <session_id> --daemon-url https://aoe.example.com
 ```
 
 With `AOE_DAEMON_URL` set, the TUI swaps its home view for a remote session picker and `aoe serve --status` and the `aoe acp *` verbs retarget to the remote. Local-only operations (tmux attach, `aoe stop`, file edit) are not available against a remote; use the dashboard or SSH. The session list is read with a bearer token only over HTTPS or a loopback URL, so a token plus a plaintext remote URL is refused; the other daemon requests do not apply that check yet, so use HTTPS or a tunnel.
+
+A remote daemon running `--auth=passphrase` never mints a bearer token, so `AOE_DAEMON_TOKEN` has nothing to carry. Set `AOE_DAEMON_PASSPHRASE` instead; the CLI logs in via the same `/api/login` handshake the web dashboard uses and caches the resulting session for the process. A local daemon needs neither: the CLI already reads its own `serve.passphrase` file (the same one `aoe serve --restart` recalls from) to log in automatically.
 
 ## Headless CLI verbs
 

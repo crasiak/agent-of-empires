@@ -174,7 +174,7 @@ Run without arguments to launch the TUI dashboard.
 ###### **Options:**
 
 * `-p`, `--profile <PROFILE>` — Profile to use (separate workspace with its own sessions). Commands that consume or create profile state require an existing profile: an unknown name is refused, not created (make one with `aoe profile create`). Profile-independent commands such as `list --all` and `serve --stop` ignore it
-* `--daemon-url <DAEMON_URL>` — Attach to a remote agent daemon instead of using the local session list. Equivalent to setting `AOE_DAEMON_URL`; pair with `AOE_DAEMON_TOKEN` for the bearer token. Only meaningful at the no-subcommand `aoe` invocation (the TUI dashboard); ignored otherwise
+* `--daemon-url <DAEMON_URL>` — Attach to a remote agent daemon instead of using the local session list. Equivalent to setting `AOE_DAEMON_URL`; pair with `AOE_DAEMON_TOKEN` for the bearer token. The session list goes through a bearer-only client, so `AOE_DAEMON_PASSPHRASE` does not work here yet; it works for `aoe acp <verb>` against the same `AOE_DAEMON_URL`. Only meaningful at the no-subcommand `aoe` invocation (the TUI dashboard); ignored otherwise
 
 
 
@@ -400,8 +400,8 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `set-worktree-name` — Edit a managed worktree session's workdir directory name (and, optionally, its git branch). Moves the worktree directory in place; the session must not be running. See #1723
 * `capture` — Capture tmux pane output
 * `current` — Auto-detect current session
-* `add-project` — Attach another repo to an existing session, so an agent that turns out to need a second repo can keep working in the same conversation instead of the session being recreated. Creates a worktree for the repo and restarts the agent so it can see it; the conversation is kept. See #3103
-* `set-session-id` — Set the resume target for a session; agents with resume disabled in AoE store the ID but do not use it
+* `add-project` — Attach another repo to an existing session, creating a worktree for it and restarting the agent. Moving the session's working directory is refused while its resume target is a known conversation bound to that directory. Explicitly clear the resume target to start a new conversation after attaching. An implicitly preallocated ID is re-linked. See #3103
+* `set-session-id` — Set the resume target for a session; an agent whose exact native resume AoE cannot resolve is refused
 * `set-base` — Set or clear the per-session diff base branch. The diff view compares the worktree against this ref instead of the auto-detected default. Useful when the PR target differs from the project default (stacked PRs, hotfix off `release/*`, renamed default branch). See #970
 * `snooze` — Snooze a session for a duration (temporary archive, auto wakes)
 * `unsnooze` — Wake a snoozed session immediately
@@ -598,7 +598,7 @@ Auto-detect current session
 
 ## `aoe session add-project`
 
-Attach another repo to an existing session, so an agent that turns out to need a second repo can keep working in the same conversation instead of the session being recreated. Creates a worktree for the repo and restarts the agent so it can see it; the conversation is kept. See #3103
+Attach another repo to an existing session, creating a worktree for it and restarting the agent. Moving the session's working directory is refused while its resume target is a known conversation bound to that directory. Explicitly clear the resume target to start a new conversation after attaching. An implicitly preallocated ID is re-linked. See #3103
 
 **Usage:** `aoe session add-project [OPTIONS] <IDENTIFIER> <PROJECT>`
 
@@ -615,14 +615,18 @@ Attach another repo to an existing session, so an agent that turns out to need a
 
 ## `aoe session set-session-id`
 
-Set the resume target for a session; agents with resume disabled in AoE store the ID but do not use it
+Set the resume target for a session; an agent whose exact native resume AoE cannot resolve is refused
 
-**Usage:** `aoe session set-session-id <IDENTIFIER> <SESSION_ID>`
+**Usage:** `aoe session set-session-id [OPTIONS] <IDENTIFIER> <SESSION_ID>`
 
 ###### **Arguments:**
 
 * `<IDENTIFIER>` — Session ID or title
-* `<SESSION_ID>` — Resume target: for resume-enabled agents, a UUID/sid pins subsequent launches to that conversation; agents with resume disabled in AoE store but do not use it. An empty string forces a one-shot fresh start
+* `<SESSION_ID>` — Conversation to resume. An empty string requests a one-shot fresh start, which only a terminal session can take: a structured session keeps its ACP conversation and needs the native ID plus an explicit `--store` and a bound Claude conversation
+
+###### **Options:**
+
+* `--store <STORE>` — Assert the native store: a Claude store directory, or a Pi/OMP transcript file
 
 
 
@@ -1669,7 +1673,7 @@ Manage the ACP structured-view workers (doctor, ps, logs, prompt, approve, ...)
 * `approve` — Resolve a pending approval (default: allow). Use --always for a session-scoped allow-list entry, --deny to refuse the request, and --option to answer a request that lists choices
 * `cancel` — Cancel the in-flight prompt for an agent session
 * `tail` — Stream the agent broadcast for a session to stdout as JSON lines (one frame per line). Press Ctrl-C to stop
-* `attach` — Open the TUI structured view directly for a known session id. Combine with `AOE_DAEMON_URL` (+ `AOE_DAEMON_TOKEN`) to attach across machines without going through the home session list
+* `attach` — Open the TUI structured view directly for a known session id. Combine with `AOE_DAEMON_URL` (+ `AOE_DAEMON_TOKEN`, or `AOE_DAEMON_PASSPHRASE` against a `--auth=passphrase` daemon) to attach across machines without going through the home session list
 * `switch-agent` — Switch an agent session to a different ACP agent, keeping the transcript. Valid targets are built-in registry agents and any custom agent configured in `[session.agent_acp_cmd]`. The new agent starts fresh; use `aoe acp agents` to list built-in targets. Handy for returning to claude after a rate-limit handoff to codex
 
 
@@ -1855,7 +1859,7 @@ Stream the agent broadcast for a session to stdout as JSON lines (one frame per 
 
 ## `aoe acp attach`
 
-Open the TUI structured view directly for a known session id. Combine with `AOE_DAEMON_URL` (+ `AOE_DAEMON_TOKEN`) to attach across machines without going through the home session list
+Open the TUI structured view directly for a known session id. Combine with `AOE_DAEMON_URL` (+ `AOE_DAEMON_TOKEN`, or `AOE_DAEMON_PASSPHRASE` against a `--auth=passphrase` daemon) to attach across machines without going through the home session list
 
 **Usage:** `aoe acp attach <SESSION>`
 

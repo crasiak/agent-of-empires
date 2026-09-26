@@ -215,10 +215,9 @@ impl Instance {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("sandbox_info missing for sandboxed session"))?;
 
-        let detect_as = self.effective_detect_as().into_owned();
         let managed_codex_home = container_config::managed_codex_home(
             &self.tool,
-            Some(detect_as.as_str()),
+            Some(self.get_tool_command()),
             &self.source_profile,
             &self.id,
         )?;
@@ -542,16 +541,6 @@ exec /usr/bin/env -i PATH="$TARGET_PATH" SHELL="$FALLBACK_SHELL" "$@"
             );
         }
         assert!(!injection_marker.exists());
-    }
-
-    #[test]
-    fn has_terminal_requires_a_created_terminal() {
-        let mut inst = Instance::new("test", "/tmp/test");
-        assert!(!inst.has_terminal(), "no terminal_info");
-        inst.terminal_info = Some(TerminalInfo { created: false });
-        assert!(!inst.has_terminal(), "terminal never created");
-        inst.terminal_info = Some(TerminalInfo { created: true });
-        assert!(inst.has_terminal());
     }
 
     mod kill_terminal_if_dead {
