@@ -68,7 +68,7 @@ fn right_click_on_group_uses_group_menu() {
 /// Session-menu entries route through the same helpers as their keys: Rename like `r`,
 /// Archive like `z` (immediate, no dialog), Delete like `d`. Esc cancels without a dialog.
 /// Attention sort shows the full menu: New Session / Rename / Move to group (manual grouping)
-/// / Archive / Snooze / Mark unread / Add project / three highlight choices / Delete.
+/// / Archive / Snooze / Mark unread / Add project / five highlight choices / Delete.
 #[test]
 #[serial]
 fn session_menu_entries_route_like_their_keys() {
@@ -80,7 +80,7 @@ fn session_menu_entries_route_like_their_keys() {
         ("archive", 3, KeyCode::Enter, |v, id| {
             v.get_instance(id).unwrap().is_archived()
         }),
-        ("delete", 10, KeyCode::Enter, |v, _| {
+        ("delete", 12, KeyCode::Enter, |v, _| {
             v.unified_delete_dialog.is_some()
         }),
         ("esc", 0, KeyCode::Esc, |v, _| {
@@ -163,6 +163,8 @@ fn right_click_unarchive_action_restores_session() {
             "Highlight red",
             "Highlight amber",
             "Highlight green",
+            "Highlight purple",
+            "Highlight teal",
             "Delete",
         ]
     );
@@ -271,6 +273,8 @@ fn right_click_session_menu_offers_highlight_actions() {
     assert!(actions.contains(&ContextMenuAction::HighlightRed));
     assert!(actions.contains(&ContextMenuAction::HighlightAmber));
     assert!(actions.contains(&ContextMenuAction::HighlightGreen));
+    assert!(actions.contains(&ContextMenuAction::HighlightPurple));
+    assert!(actions.contains(&ContextMenuAction::HighlightTeal));
     assert!(!actions.contains(&ContextMenuAction::ClearHighlight));
 }
 
@@ -390,8 +394,60 @@ fn context_menu_highlight_actions_hidden_when_setting_is_off() {
         ContextMenuAction::HighlightRed
             | ContextMenuAction::HighlightAmber
             | ContextMenuAction::HighlightGreen
+            | ContextMenuAction::HighlightPurple
+            | ContextMenuAction::HighlightTeal
             | ContextMenuAction::ClearHighlight
     )));
+}
+
+/// Purple and teal have no theme slot, so their dot is a fixed hue that still follows the
+/// theme into palette mode. The dot is read off an unselected row, where selection contrast
+/// cannot swap its color.
+#[test]
+#[serial]
+fn purple_and_teal_highlights_persist_and_draw_fixed_hue_dots() {
+    use ratatui::style::Color;
+    for (action, name, rgb) in [
+        (
+            ContextMenuAction::HighlightPurple,
+            "purple",
+            (0xa8, 0x55, 0xf7),
+        ),
+        (ContextMenuAction::HighlightTeal, "teal", (0x14, 0xb8, 0xa6)),
+    ] {
+        let mut env = create_test_env_with_sessions(2);
+        setup_inner(&mut env);
+        env.view.handle_right_click(5, 1);
+        let id = env.view.selected_session.clone().unwrap();
+        env.view.dispatch_context_menu_action(action);
+        assert_eq!(
+            env.view.get_instance(&id).unwrap().color.as_deref(),
+            Some(name)
+        );
+        env.view.cursor = 1;
+        env.view.update_selected();
+        assert_ne!(env.view.selected_session.as_deref(), Some(id.as_str()));
+
+        for palette_mode in [false, true] {
+            let theme = crate::tui::styles::load_theme_with_mode("empire", palette_mode);
+            let want = theme.fixed_hue(rgb.0, rgb.1, rgb.2);
+            assert_eq!(matches!(want, Color::Indexed(_)), palette_mode, "{name}");
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+            terminal
+                .draw(|f| env.view.render(f, f.area(), &theme, None, None, None))
+                .unwrap();
+            let dots: Vec<Color> = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .filter(|cell| cell.symbol() == "\u{25cf}")
+                .map(|cell| cell.fg)
+                .collect();
+            assert_eq!(dots, vec![want], "{name}, palette_mode={palette_mode}");
+        }
+    }
 }
 
 fn menu_actions(env: &TestEnv) -> Vec<ContextMenuAction> {

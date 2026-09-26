@@ -253,6 +253,16 @@ impl Theme {
     pub fn dormant(&self) -> Color {
         blend(self.fresh_idle, self.dimmed, 0.5)
     }
+
+    /// A fixed hue no theme slot carries (the purple and teal session labels), mapped
+    /// to the xterm-256 palette when this theme was downsampled for palette mode.
+    pub fn fixed_hue(&self, r: u8, g: u8, b: u8) -> Color {
+        let color = Color::Rgb(r, g, b);
+        match self.background {
+            Color::Rgb(..) => color,
+            _ => color_to_palette(color),
+        }
+    }
 }
 
 /// Linear RGB blend of `a` and `b` at `t` (0.0 = all `a`). Falls back to `a` for

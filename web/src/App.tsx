@@ -753,6 +753,7 @@ function AppContent({
   // before a pending consent modal.
   const [telemetryConsentKnown, setTelemetryConsentKnown] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 768);
+  const [mainPanelFocused, setMainPanelFocused] = useState(false);
   const keyboardProxyRef = useRef<HTMLTextAreaElement>(null);
   const [keyboardProxy, setKeyboardProxy] = useState<HTMLTextAreaElement | null>(null);
   const setKeyboardProxyRef = useCallback((element: HTMLTextAreaElement | null) => {
@@ -2328,6 +2329,7 @@ function AppContent({
               onReorderWorkspaces={handleReorderWorkspaces}
               onReorderGroups={reorderRepoGroups}
               activeId={activeWorkspace?.id ?? null}
+              mainPanelFocused={mainPanelFocused}
               open={sidebarOpen}
               onToggle={() => setSidebarOpen(false)}
               onSelect={handleSelectWorkspace}
@@ -2363,7 +2365,15 @@ function AppContent({
             />
           )}
 
-          <div className="flex-1 flex flex-col min-h-0 min-w-0">{renderContent()}</div>
+          <div
+            className="flex-1 flex flex-col min-h-0 min-w-0"
+            onFocus={() => setMainPanelFocused(true)}
+            onBlur={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget)) setMainPanelFocused(false);
+            }}
+          >
+            {renderContent()}
+          </div>
         </div>
 
         {showSessionWizard && (

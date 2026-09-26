@@ -281,12 +281,24 @@ describe("SessionRow bookmark highlight (#2383)", () => {
     expect(row.style.backgroundColor).toContain("color-mix");
   });
 
+  it.each([
+    ["purple", "bg-purple-500", "--color-purple-500"],
+    ["teal", "bg-teal-500", "--color-teal-500"],
+  ])("offers %s and paints its fixed hue", (color, dotClass, token) => {
+    openRowMenu(ws());
+    expect(testId(`sidebar-context-menu-color-${color}`)).not.toBeNull();
+    cleanup();
+    renderRow(ws({ color }));
+    expect(testId("sidebar-session-color-dot")!.className).toContain(dotClass);
+    expect(testId("sidebar-session-row")!.style.backgroundColor).toContain(token);
+  });
+
   it("offers Clear only for a colored row and no color section when disabled", () => {
     openRowMenu(ws());
     expect(testId("sidebar-context-menu-color-clear")).toBeNull();
     cleanup();
     openRowMenu(ws({ color: "green" }), { colorsEnabled: false });
-    for (const key of ["red", "amber", "green", "clear"]) {
+    for (const key of ["red", "amber", "green", "purple", "teal", "clear"]) {
       expect(testId(`sidebar-context-menu-color-${key}`)).toBeNull();
     }
   });

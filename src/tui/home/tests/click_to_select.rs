@@ -10,6 +10,10 @@ fn setup_inner(env: &mut TestEnv) {
     env.view.list_inner_area = Rect::new(1, 1, 28, 10);
 }
 
+/// Screen row of `flat_items[2]` while live-send boxes the selected row 0: the box's top and
+/// bottom borders push it down two lines from row 3.
+const ROW_2_BELOW_LIVE_BOX: u16 = 5;
+
 #[test]
 #[serial]
 fn click_selects_session_at_clicked_row() {
@@ -60,7 +64,7 @@ fn select_only_click_on_different_row_exits_live_mode() {
         leader: None,
     });
 
-    let action = env.view.handle_click(5, 3);
+    let action = env.view.handle_click(5, ROW_2_BELOW_LIVE_BOX);
     assert_eq!(action, None, "SelectOnly click never emits an action");
     assert_eq!(env.view.cursor, 2, "the click still moves the cursor");
     assert!(
@@ -255,9 +259,9 @@ fn double_click_tears_down_live_send_before_tmux_attach() {
     let t0 = std::time::Instant::now();
     // Seed last_click so the next click within the threshold is treated
     // as the second click of a double-click on the same row.
-    env.view.last_click = Some((t0, 5, 3));
+    env.view.last_click = Some((t0, 5, ROW_2_BELOW_LIVE_BOX));
     let t1 = t0 + std::time::Duration::from_millis(100);
-    let action = env.view.handle_click_at(t1, 5, 3);
+    let action = env.view.handle_click_at(t1, 5, ROW_2_BELOW_LIVE_BOX);
 
     assert_eq!(
         action,
@@ -510,7 +514,7 @@ fn click_on_other_session_while_live_switches_target() {
     });
 
     // Click session B's row.
-    let action = env.view.handle_click(5, 3);
+    let action = env.view.handle_click(5, ROW_2_BELOW_LIVE_BOX);
     assert_eq!(
         action,
         Some(crate::tui::app::Action::EnterLiveSend(id_b)),
@@ -544,7 +548,7 @@ fn click_on_already_live_session_is_noop() {
         leader: None,
     });
 
-    let action = env.view.handle_click(5, 3);
+    let action = env.view.handle_click(5, ROW_2_BELOW_LIVE_BOX);
     assert!(
         action.is_none(),
         "clicking the already-live session row should not re-enter live mode"

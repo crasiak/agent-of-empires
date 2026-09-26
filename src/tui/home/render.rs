@@ -864,6 +864,57 @@ fn paint_sidebar_row_background(
     line.style(Style::default().bg(bg))
 }
 
+/// Lines a boxed sidebar row adds above and below itself.
+const BOXED_ROW_BORDER_LINES: usize = 2;
+
+/// Frame a row painted at `list_width - 2` in a rounded box spanning `list_width`.
+fn box_sidebar_row(line: Line<'static>, list_width: u16, color: Color) -> [Line<'static>; 3] {
+    let border = Style::default().fg(color);
+    let inner_width = usize::from(list_width.saturating_sub(2));
+    let rule = "\u{2500}".repeat(inner_width);
+    let pad = inner_width.saturating_sub(line.width());
+    let row_style = line.style;
+    let mut middle = vec![Span::styled("\u{2502}", border)];
+    middle.extend(line.spans.into_iter().map(|span| Span {
+        style: row_style.patch(span.style),
+        ..span
+    }));
+    middle.push(Span::styled(" ".repeat(pad), row_style));
+    middle.push(Span::styled("\u{2502}", border));
+    [
+        Line::from(Span::styled(format!("\u{256d}{rule}\u{256e}"), border)),
+        Line::from(middle),
+        Line::from(Span::styled(format!("\u{2570}{rule}\u{256f}"), border)),
+    ]
+}
+
+/// The workspace list's scroll window and the row drawn boxed while live-send is on.
+/// Shared by rendering and hit-testing so clicks land on the rows as drawn.
+pub(super) struct ListRowLayout {
+    pub(super) scroll: crate::tui::components::scroll::ScrollLayout,
+    pub(super) boxed: Option<usize>,
+}
+
+impl ListRowLayout {
+    /// The `flat_items` index drawn on `item_row`, counted from the first item line.
+    pub(super) fn index_at(&self, item_row: usize) -> Option<usize> {
+        let extra = if self.boxed.is_some() {
+            BOXED_ROW_BORDER_LINES
+        } else {
+            0
+        };
+        if item_row >= self.scroll.list_visible + extra {
+            return None;
+        }
+        let offset = match self.boxed.map(|idx| idx - self.scroll.scroll_offset) {
+            Some(top) if item_row > top + BOXED_ROW_BORDER_LINES => item_row - extra,
+            Some(top) if item_row >= top => top,
+            _ => item_row,
+        };
+        Some(self.scroll.scroll_offset + offset)
+    }
+}
+
 fn session_color_background(color: Color, theme: &Theme) -> Option<Color> {
     let rgb = |c: Color| match c {
         Color::Rgb(r, g, b) => Some((r, g, b)),
@@ -1375,16 +1426,8 @@ impl HomeView {
         } else {
             list_region.height as usize
         };
-        // The cursor may be parked in the shelf; clamp it to the last list row
-        // for scroll purposes so the list keeps a stable offset instead of
-        // trying to scroll to a shelf index. No list row ends up selected in
-        // that case, because the real `self.cursor` never matches a list index.
-        let list_cursor = self.cursor.min(list_len.saturating_sub(1));
-        let scroll = crate::tui::components::scroll::calculate_scroll(
-            list_len,
-            list_cursor,
-            list_visible_height,
-        );
+        let rows = self.list_row_layout(list_len, list_visible_height);
+        let scroll = &rows.scroll;
 
         let mut lines: Vec<Line> = Vec::new();
         if scroll.has_more_above {
@@ -1404,11 +1447,21 @@ impl HomeView {
             let is_hovered = !is_selected && Some(abs_idx) == hover_idx;
             let is_match =
                 !self.search_matches.is_empty() && self.search_matches.contains(&abs_idx);
-            let mut line = self.render_item_line(item, is_selected, is_match, theme, inner.width);
+            let boxed = rows.boxed == Some(abs_idx);
+            let width = if boxed {
+                inner.width.saturating_sub(2)
+            } else {
+                inner.width
+            };
+            let mut line = self.render_item_line(item, is_selected, is_match, theme, width);
             if let Some(bg) = self.sidebar_row_background(item, is_selected, is_hovered, theme) {
-                line = paint_sidebar_row_background(line, inner.width, bg);
+                line = paint_sidebar_row_background(line, width, bg);
             }
-            lines.push(line);
+            if boxed {
+                lines.extend(box_sidebar_row(line, inner.width, theme.text));
+            } else {
+                lines.push(line);
+            }
         }
         if scroll.has_more_below {
             let remaining = list_len - scroll.scroll_offset - scroll.list_visible;
@@ -2000,6 +2053,9 @@ impl HomeView {
             "red" => Some(theme.error),
             "amber" => Some(theme.waiting),
             "green" => Some(theme.running),
+            // Tailwind purple-500 and teal-500, matching the web sidebar's dots.
+            "purple" => Some(theme.fixed_hue(0xa8, 0x55, 0xf7)),
+            "teal" => Some(theme.fixed_hue(0x14, 0xb8, 0xa6)),
             _ => None,
         }
     }
@@ -2045,6 +2101,41 @@ impl HomeView {
             (Some(_), Some(selected), Item::Session { id, .. }) => id == selected,
             (Some(_), Some(_), _) => false,
             _ => index == self.cursor,
+        }
+    }
+
+    /// Lay out the first `list_len` items in `visible_height` lines. The live-send row is
+    /// boxed when the box fits on screen; otherwise it keeps the plain highlight.
+    pub(super) fn list_row_layout(&self, list_len: usize, visible_height: usize) -> ListRowLayout {
+        use crate::tui::components::scroll::calculate_scroll;
+        // A cursor parked in the shelf scrolls the list as if on its last row; no list
+        // row is selected then because `self.cursor` matches no list index.
+        let cursor = self.cursor.min(list_len.saturating_sub(1));
+        let live_idx = self
+            .live_send
+            .as_ref()
+            .and(self.selected_session.as_deref())
+            .and_then(|selected| {
+                self.flat_items[..list_len]
+                    .iter()
+                    .position(|item| matches!(item, Item::Session { id, .. } if id == selected))
+            });
+        if let Some(idx) = live_idx {
+            if visible_height > BOXED_ROW_BORDER_LINES {
+                let scroll =
+                    calculate_scroll(list_len, cursor, visible_height - BOXED_ROW_BORDER_LINES);
+                if (scroll.scroll_offset..scroll.scroll_offset + scroll.list_visible).contains(&idx)
+                {
+                    return ListRowLayout {
+                        scroll,
+                        boxed: Some(idx),
+                    };
+                }
+            }
+        }
+        ListRowLayout {
+            scroll: calculate_scroll(list_len, cursor, visible_height),
+            boxed: None,
         }
     }
 

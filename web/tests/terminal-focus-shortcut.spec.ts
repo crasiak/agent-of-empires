@@ -190,3 +190,36 @@ test.describe("Cmd/Ctrl+` mobile", () => {
     await expect.poll(() => focusedKind(page)).toBe("paired");
   });
 });
+
+// ────────────────────────────────────────────────────────────────────
+//  Sidebar row while the main panel has input focus
+// ────────────────────────────────────────────────────────────────────
+test.describe("Open session row input focus", () => {
+  test.use({ viewport: { width: 1280, height: 800 }, hasTouch: false });
+
+  async function ringToken(page: Page) {
+    const row = page.getByRole("link").filter({ hasText: "pinch-test" }).first();
+    return row.evaluate((el) => {
+      const ring = getComputedStyle(el).getPropertyValue("--tw-ring-color").trim();
+      const root = getComputedStyle(document.documentElement);
+      if (ring === root.getPropertyValue("--color-text-primary").trim()) return "text-primary";
+      if (ring === root.getPropertyValue("--color-session-active").trim()) return "session-active";
+      return ring;
+    });
+  }
+
+  test("frames the open row in text-primary while a main panel terminal has focus", async ({ page }) => {
+    await mockTerminalApis(page);
+    await page.goto("/");
+    await openSession(page);
+
+    for (const kind of ["agent", "paired"] as const) {
+      await focusKind(page, kind);
+      await expect.poll(() => focusedKind(page)).toBe(kind);
+      await expect.poll(() => ringToken(page)).toBe("text-primary");
+
+      await blurAll(page);
+      await expect.poll(() => ringToken(page)).toBe("session-active");
+    }
+  });
+});

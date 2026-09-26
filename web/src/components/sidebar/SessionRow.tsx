@@ -43,6 +43,8 @@ export interface SessionRowProps {
   workspace: Workspace;
   isActive: boolean;
   isSelected: boolean;
+  /** The open row while keyboard focus is in its main panel. */
+  hasInputFocus: boolean;
   onActivate: RowActivate;
   /** Receives the row's sessions, which a group slice narrows to a subset of the workspace. */
   onDelete?: (sessionIds: string[]) => void;
@@ -62,7 +64,7 @@ export interface SessionRowProps {
 }
 
 export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
-  const { workspace, isActive, isSelected, onActivate, readOnly, indented, bulkApi } = props;
+  const { workspace, isActive, isSelected, hasInputFocus, onActivate, readOnly, indented, bulkApi } = props;
   const idleDecayWindowMs = useIdleDecayWindowMs();
   const unreadIndicatorEnabled = useUnreadIndicatorEnabled();
   const sessionColorsEnabled = useSessionColorsEnabled();
@@ -204,7 +206,7 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
         data-selected={isSelected || undefined}
         className={`block w-full text-left py-2 cursor-pointer select-none [-webkit-touch-callout:none] transition-colors duration-75 ${
           compact ? (indented ? "pl-3 pr-1" : "px-2") : indented ? "pl-6 pr-3" : "px-3"
-        } ${sessionRowChromeClass(isActive, isSelected)} ${isDeleting ? "opacity-50 pointer-events-none" : ""}`}
+        } ${sessionRowChromeClass(isActive, isSelected, hasInputFocus)} ${isDeleting ? "opacity-50 pointer-events-none" : ""}`}
       >
         {isSelected && <span className="sr-only">Selected</span>}
         <div className="flex items-center gap-2">

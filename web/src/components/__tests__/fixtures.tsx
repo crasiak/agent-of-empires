@@ -97,6 +97,7 @@ function Row({ ws, readOnly, isActive = false, onCreateSession }: RowOptions & {
       workspace={ws}
       isActive={isActive}
       isSelected={false}
+      hasInputFocus={false}
       onActivate={() => {}}
       onCreateSession={onCreateSession}
       readOnly={readOnly}

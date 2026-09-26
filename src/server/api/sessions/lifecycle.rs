@@ -163,7 +163,10 @@ pub async fn update_session_color(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
-                    "error": format!("invalid color {c:?}; expected one of: red, amber, green, or null"),
+                    "error": format!(
+                        "invalid color {c:?}; expected one of: {}, or null",
+                        crate::session::SESSION_COLORS.join(", ")
+                    ),
                 })),
             )
                 .into_response();

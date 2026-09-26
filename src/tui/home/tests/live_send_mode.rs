@@ -1013,3 +1013,97 @@ mod paste_splitting {
         assert!(split_paste_for_live_send("").is_empty());
     }
 }
+
+/// The list row at screen row `y`, cropped to the list's inner columns.
+fn list_row_text(screen: &str, inner: ratatui::layout::Rect, y: u16) -> String {
+    screen
+        .lines()
+        .nth(y as usize)
+        .unwrap_or_default()
+        .chars()
+        .skip(inner.x as usize)
+        .take(inner.width as usize)
+        .collect()
+}
+
+/// The live row draws inside a rounded box, clicks on any of its three lines resolve to it,
+/// neighbors resolve past it, and leaving live mode drops the box. The long case scrolls the
+/// live row to the bottom, where the box must still fit inside the list.
+#[test]
+#[serial]
+fn live_row_is_boxed_and_neighbors_resolve_around_the_box() {
+    for (count, live_last) in [(3, false), (60, true)] {
+        let mut env = create_test_env_with_sessions(count);
+        let session_rows: Vec<usize> = (0..env.view.flat_items.len())
+            .filter(|&i| session_id_at(&env.view, i).is_some())
+            .collect();
+        let live_idx = if live_last {
+            *session_rows.last().unwrap()
+        } else {
+            session_rows[0]
+        };
+        env.view.cursor = live_idx;
+        env.view.update_selected();
+        let live_id = env.view.selected_session.clone().unwrap();
+        let title = env.view.get_instance(&live_id).unwrap().title.clone();
+        let tmux_name = crate::tmux::Session::generate_name(&live_id, &title);
+        crate::tmux::test_inject_session_into_cache(&tmux_name);
+        env.view.live_send = Some(LiveSendState {
+            session_id: live_id,
+            title: title.clone(),
+            tmux_name,
+            target: crate::tui::home::live_send::LiveSendTarget::Agent,
+            exit_chords: Vec::new(),
+            leader: None,
+        });
+
+        let screen = render_home_to_string(&mut env.view, 120, 40);
+        let inner = env.view.list_inner_area;
+        let box_top = (inner.y..inner.bottom())
+            .find(|&y| list_row_text(&screen, inner, y).starts_with('\u{256d}'))
+            .unwrap_or_else(|| panic!("{count} sessions: no boxed row in\n{screen}"));
+        assert!(
+            box_top + 2 < inner.bottom(),
+            "{count}: box clipped\n{screen}"
+        );
+        let middle = list_row_text(&screen, inner, box_top + 1);
+        assert!(
+            middle.starts_with('\u{2502}')
+                && middle.ends_with('\u{2502}')
+                && middle.contains(&title),
+            "{count}: middle row {middle:?}"
+        );
+        assert!(list_row_text(&screen, inner, box_top + 2).starts_with('\u{2570}'));
+
+        let col = inner.x + 2;
+        for y in box_top..box_top + 3 {
+            assert_eq!(
+                env.view.resolve_row_to_index(col, y),
+                Some(live_idx),
+                "{count}: row {y}"
+            );
+        }
+        if box_top > inner.y {
+            assert_eq!(
+                env.view.resolve_row_to_index(col, box_top - 1),
+                Some(live_idx - 1),
+                "{count}: row above the box"
+            );
+        }
+        if !live_last {
+            assert_eq!(
+                env.view.resolve_row_to_index(col, box_top + 3),
+                Some(live_idx + 1),
+                "{count}: row below the box"
+            );
+        }
+
+        env.view.live_send = None;
+        let screen = render_home_to_string(&mut env.view, 120, 40);
+        assert!(
+            !(inner.y..inner.bottom())
+                .any(|y| list_row_text(&screen, inner, y).starts_with('\u{256d}')),
+            "{count}: box must go away with live mode"
+        );
+    }
+}
