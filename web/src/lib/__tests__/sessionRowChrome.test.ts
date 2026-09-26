@@ -23,6 +23,19 @@ describe("sessionRowChromeClass", () => {
     expect(sessionRowChromeClass(true, true)).not.toContain("hover:");
   });
 
+  it("swaps the open row's frame to the primary text color while its main panel has input focus", () => {
+    for (const isSelected of [false, true]) {
+      const chrome = sessionRowChromeClass(true, isSelected, true);
+      expect(chrome).toContain("ring-2 ring-inset ring-text-primary");
+      expect(chrome).not.toContain("ring-session-active");
+    }
+  });
+
+  it("ignores main panel focus on rows that are not open", () => {
+    expect(sessionRowChromeClass(false, false, true)).toBe(sessionRowChromeClass(false, false));
+    expect(sessionRowChromeClass(false, true, true)).toBe(sessionRowChromeClass(false, true));
+  });
+
   it("keeps hover on every row that is not the open one", () => {
     expect(sessionRowChromeClass(false, false)).toContain("hover:bg-surface-700/40");
     expect(sessionRowChromeClass(false, true)).toContain("hover:bg-surface-700/40");

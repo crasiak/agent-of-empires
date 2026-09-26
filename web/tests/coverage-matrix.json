@@ -3784,7 +3784,8 @@
       "specs": [
         "src/lib/__tests__/sessionRowChrome.test.ts",
         "tests/sidebar-multi-session.spec.ts",
-        "tests/sidebar-grouping.spec.ts"
+        "tests/sidebar-grouping.spec.ts",
+        "tests/terminal-focus-shortcut.spec.ts"
       ],
       "components": ["web/src/lib/sessionRowChrome.ts", "web/src/components/WorkspaceSidebar.tsx"]
     },

@@ -4425,20 +4425,12 @@ impl HomeView {
             return None;
         }
 
-        // Cursor may sit in the shelf; clamp it into the list range so the
-        // list's scroll offset matches what the renderer computed.
-        let list_cursor = self.cursor.min(list_len.saturating_sub(1));
-        let scroll =
-            crate::tui::components::scroll::calculate_scroll(list_len, list_cursor, visible_height);
-        let row_offset = if scroll.has_more_above { 1 } else { 0 };
+        let rows = self.list_row_layout(list_len, visible_height);
+        let row_offset = if rows.scroll.has_more_above { 1 } else { 0 };
         if row_in_inner < row_offset {
             return None;
         }
-        let item_row = row_in_inner - row_offset;
-        if item_row >= scroll.list_visible {
-            return None;
-        }
-        let abs_idx = scroll.scroll_offset + item_row;
+        let abs_idx = rows.index_at(row_in_inner - row_offset)?;
         (abs_idx < list_len).then_some(abs_idx)
     }
 

@@ -53,6 +53,8 @@ interface Props {
   onReorderWorkspaces: (newOrder: string[]) => void;
   onReorderGroups: (orderedGroupIds: string[]) => void;
   activeId: string | null;
+  /** Keyboard focus is inside the main panel, so keystrokes go to the open session. */
+  mainPanelFocused: boolean;
   open: boolean;
   onToggle: () => void;
   onSelect: (workspaceId: string, sessionId: string | null) => void;
@@ -173,23 +175,27 @@ export function WorkspaceSidebar(props: Props) {
     onUnpinProject: props.onUnpinProject,
     onEditProjectSettings: props.onEditProjectSettings,
     onArchiveGroup,
-    rowProps: (v: SidebarWorkspaceView) => ({
-      workspace: v.workspace,
-      isActive: v.workspace.id === selection.displayedActiveId,
-      isSelected: selection.isSelected(v.workspace.id),
-      onActivate: selection.handleRowActivate,
-      onDelete: props.onDeleteSession,
-      onStop: props.onStopSession,
-      onStart: props.onStartSession,
-      onSwitchView: props.onSwitchView,
-      readOnly,
-      optimistic: triage.optimisticFor(v.workspace.id),
-      onPinToggle: triage.pinToggle,
-      onArchiveToggle: triage.archiveToggle,
-      onSnooze: triage.snooze,
-      onUnreadToggle: triage.unreadToggle,
-      bulkApi: selection.rowBulkApi,
-    }),
+    rowProps: (v: SidebarWorkspaceView) => {
+      const isActive = v.workspace.id === selection.displayedActiveId;
+      return {
+        workspace: v.workspace,
+        isActive,
+        isSelected: selection.isSelected(v.workspace.id),
+        hasInputFocus: isActive && props.mainPanelFocused,
+        onActivate: selection.handleRowActivate,
+        onDelete: props.onDeleteSession,
+        onStop: props.onStopSession,
+        onStart: props.onStartSession,
+        onSwitchView: props.onSwitchView,
+        readOnly,
+        optimistic: triage.optimisticFor(v.workspace.id),
+        onPinToggle: triage.pinToggle,
+        onArchiveToggle: triage.archiveToggle,
+        onSnooze: triage.snooze,
+        onUnreadToggle: triage.unreadToggle,
+        bulkApi: selection.rowBulkApi,
+      };
+    },
   };
 
   const savedProjectsMatchQuery =

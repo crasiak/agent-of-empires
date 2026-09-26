@@ -70,6 +70,8 @@ theme.
 - Use rounded block borders.
 - Keep one character of horizontal padding in the list and preview panels.
 - Adjacent list and preview panels share one separator, never a double border.
+- While live-send is on, frame the live session's list row in a rounded box
+  drawn in the theme's text color.
 - Dialogs remain boxed and manage their own internal spacing.
 - Prefer geometric text symbols over emoji where column width must be stable.
 
@@ -89,7 +91,9 @@ content. It is denser and quieter than the marketing site.
 - The open session's sidebar row must meet WCAG's 3:1 non-text contrast
   against every surface its indicator can sit on. A surface-ramp step alone
   does not reach it, so the row uses the `session-active` token, which the
-  projection lifts from the theme accent until it clears that floor.
+  projection lifts from the theme accent until it clears that floor. While
+  keyboard focus is inside the main panel, the frame switches to
+  `text-primary` to mark the session keystrokes go to.
 - Prefer instant state changes or `transition-colors`. Named motion is limited
   to existing fade, slide, and terminal-cursor behavior.
 - Fixed palette colors are allowed only when hue carries meaning, such as
