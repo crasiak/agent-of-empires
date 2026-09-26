@@ -61,6 +61,11 @@ Adding a builtin theme requires its TOML file and one `BUILTIN_THEMES` entry.
 Keep optional fields backwards-compatible for user themes. ANSI colors are
 derived from semantic fields rather than declared separately.
 
+Session color labels `red`, `amber` and `green` use the `error`, `waiting` and
+`running` slots in both the TUI and the dashboard. `purple` and `teal` have no
+theme slot, so both surfaces use Tailwind's fixed `purple-500` and `teal-500`,
+downsampled in palette mode. The user picks the hue, so the hue is the meaning.
+
 The marketing site keeps the brand palette above and does not follow the user's
 theme.
 

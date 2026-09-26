@@ -4647,6 +4647,8 @@ impl HomeView {
             ContextMenuAction::HighlightRed => self.set_selected_session_color(Some("red")),
             ContextMenuAction::HighlightAmber => self.set_selected_session_color(Some("amber")),
             ContextMenuAction::HighlightGreen => self.set_selected_session_color(Some("green")),
+            ContextMenuAction::HighlightPurple => self.set_selected_session_color(Some("purple")),
+            ContextMenuAction::HighlightTeal => self.set_selected_session_color(Some("teal")),
             ContextMenuAction::ClearHighlight => self.set_selected_session_color(None),
             ContextMenuAction::OpenGroupPicker => self.show_group_picker(),
             ContextMenuAction::TogglePin => {

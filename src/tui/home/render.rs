@@ -2053,6 +2053,9 @@ impl HomeView {
             "red" => Some(theme.error),
             "amber" => Some(theme.waiting),
             "green" => Some(theme.running),
+            // Tailwind purple-500 and teal-500, matching the web sidebar's dots.
+            "purple" => Some(theme.fixed_hue(0xa8, 0x55, 0xf7)),
+            "teal" => Some(theme.fixed_hue(0x14, 0xb8, 0xa6)),
             _ => None,
         }
     }

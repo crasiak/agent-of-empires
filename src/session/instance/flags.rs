@@ -3,8 +3,8 @@
 
 use super::*;
 
-/// The MVP palette for the per-session color label. Kept deliberately small and status-oriented.
-pub const SESSION_COLORS: &[&str] = &["red", "amber", "green"];
+/// The palette for the per-session color label: three status colors plus two neutral hues.
+pub const SESSION_COLORS: &[&str] = &["red", "amber", "green", "purple", "teal"];
 
 /// True when `color` is a member of the [`SESSION_COLORS`] palette.
 pub fn is_valid_session_color(color: &str) -> bool {
@@ -266,6 +266,8 @@ mod tests {
             ("red", true),
             ("amber", true),
             ("green", true),
+            ("purple", true),
+            ("teal", true),
             ("blue", false),
             ("", false),
             ("Red", false),

@@ -11,11 +11,14 @@ import {
 } from "../../lib/sidebarOptimistic";
 
 /** Mirrors the Rust `SESSION_COLORS` list. Theme tokens keep the row tint legible in custom
- *  light and dark themes while the solid dot remains an accessible cue. */
+ *  light and dark themes while the solid dot remains an accessible cue. Purple and teal have
+ *  no theme slot, so they tint from Tailwind's fixed palette, as the TUI does. */
 export const SESSION_COLOR_OPTIONS: { key: string; label: string; dotClass: string; token: string }[] = [
   { key: "red", label: "Red · needs attention", dotClass: "bg-red-500", token: "--color-status-error" },
   { key: "amber", label: "Amber · working", dotClass: "bg-amber-400", token: "--color-status-waiting" },
   { key: "green", label: "Green · done", dotClass: "bg-green-500", token: "--color-status-running" },
+  { key: "purple", label: "Purple", dotClass: "bg-purple-500", token: "--color-purple-500" },
+  { key: "teal", label: "Teal", dotClass: "bg-teal-500", token: "--color-teal-500" },
 ];
 
 /** Tailwind dot class for a stored color key, or null when unset / unknown. */

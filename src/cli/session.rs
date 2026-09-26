@@ -204,7 +204,8 @@ pub enum SessionCommands {
     /// the web sidebar for at-a-glance signaling. Intended for a
     /// running agent to flag its own state, e.g.
     /// `aoe session color $(aoe session current -q) red`. Colors: `red`
-    /// (needs attention), `amber` (working), `green` (done); `none` clears it.
+    /// (needs attention), `amber` (working), `green` (done), `purple`, `teal`;
+    /// `none` clears it.
     Color(SetColorArgs),
 
     /// Archive a session: sink it in the Attention sort and tear down its
@@ -457,7 +458,7 @@ pub struct SetColorArgs {
     /// Session ID or title
     pub identifier: String,
     /// Color label: `red` (needs attention), `amber` (working), `green`
-    /// (done), or `none`/`clear` to remove the label.
+    /// (done), `purple`, `teal`, or `none`/`clear` to remove the label.
     pub color: String,
 }
 

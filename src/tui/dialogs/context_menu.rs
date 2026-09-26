@@ -45,6 +45,10 @@ pub enum ContextMenuAction {
     HighlightAmber,
     /// Set the session's per-row highlight color to green.
     HighlightGreen,
+    /// Set the session's per-row highlight color to purple.
+    HighlightPurple,
+    /// Set the session's per-row highlight color to teal.
+    HighlightTeal,
     /// Clear the session's per-row highlight color.
     ClearHighlight,
     /// Open the group-by mode picker (`'g'`).
@@ -170,6 +174,8 @@ impl ContextMenuDialog {
             items.push((ContextMenuAction::HighlightRed, "Highlight red"));
             items.push((ContextMenuAction::HighlightAmber, "Highlight amber"));
             items.push((ContextMenuAction::HighlightGreen, "Highlight green"));
+            items.push((ContextMenuAction::HighlightPurple, "Highlight purple"));
+            items.push((ContextMenuAction::HighlightTeal, "Highlight teal"));
             if highlights.has_highlight {
                 items.push((ContextMenuAction::ClearHighlight, "Remove highlight"));
             }
