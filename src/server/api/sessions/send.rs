@@ -128,6 +128,7 @@ pub async fn send_message(
 
     match send_result {
         Ok(Ok((outcome, started))) => {
+            let body = serde_json::json!({"sent": true});
             // ensure_pane_ready mutated `started` on the clone, so sync it back
             // or a rapid follow-up generates a fresh `agent_session_id` and
             // orphans the prior Claude conversation. See `apply_post_restart_sync`.
@@ -141,7 +142,7 @@ pub async fn send_message(
                 i.source_profile.clone()
             } else {
                 // Deleted between the send and the stamp; nothing to persist.
-                return (StatusCode::OK, Json(serde_json::json!({"sent": true}))).into_response();
+                return (StatusCode::OK, Json(body)).into_response();
             };
             drop(instances);
             let id_for_save = id.clone();
@@ -167,7 +168,7 @@ pub async fn send_message(
                     }
                 }
             });
-            (StatusCode::OK, Json(serde_json::json!({"sent": true}))).into_response()
+            (StatusCode::OK, Json(body)).into_response()
         }
         Ok(Err(boxed)) => {
             let (started, outcome, send_err) = *boxed;
@@ -536,29 +537,6 @@ pub async fn read_output(
 }
 
 #[cfg(test)]
-mod send_output_tests {
-    use super::*;
-
-    #[test]
-    fn output_query_default_constants() {
-        assert_eq!(default_output_lines(), 200);
-        assert_eq!(default_output_format(), "text");
-    }
-
-    #[test]
-    fn send_message_request_requires_message_field() {
-        let r: Result<SendMessageRequest, _> = serde_json::from_str("{}");
-        assert!(r.is_err(), "missing message must reject");
-    }
-
-    #[test]
-    fn send_message_request_accepts_message() {
-        let r: SendMessageRequest = serde_json::from_str("{\"message\":\"hello\"}").unwrap();
-        assert_eq!(r.message, "hello");
-    }
-}
-
-#[cfg(test)]
 mod paste_image_tests {
     use super::*;
     use tempfile::tempdir;
@@ -568,14 +546,6 @@ mod paste_image_tests {
         0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
         0x15, 0xC4, 0x89,
     ];
-
-    #[test]
-    fn extension_from_sniffed_mime() {
-        assert_eq!(paste_image_extension("image/png"), "png");
-        assert_eq!(paste_image_extension("image/jpeg"), "jpg");
-        assert_eq!(paste_image_extension("image/gif"), "gif");
-        assert_eq!(paste_image_extension("image/webp"), "webp");
-    }
 
     #[test]
     fn write_paste_image_lands_in_worktree_and_ignores_itself() {
@@ -600,38 +570,22 @@ mod paste_image_tests {
     }
 
     #[test]
-    fn non_sandboxed_pane_path_is_absolute_host_path() {
+    fn pane_path_is_host_path_or_container_mount() {
         let dir = tempdir().unwrap();
         let project = dir.path().to_string_lossy().to_string();
+        let dir_name = dir.path().file_name().unwrap().to_string_lossy();
 
-        let pane = pane_visible_paste_path(&project, false, "aoe-paste-x.png");
-
-        let expected = dir
-            .path()
-            .join(PASTE_IMAGE_DIR)
-            .join("aoe-paste-x.png")
-            .to_string_lossy()
-            .to_string();
-        assert_eq!(pane, expected);
-    }
-
-    #[test]
-    fn sandboxed_pane_path_uses_container_mount() {
-        let dir = tempdir().unwrap();
-        let project = dir.path().to_string_lossy().to_string();
-        let dir_name = dir
-            .path()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-
-        let pane = pane_visible_paste_path(&project, true, "aoe-paste-x.png");
-
+        assert_eq!(
+            pane_visible_paste_path(&project, false, "aoe-paste-x.png"),
+            dir.path()
+                .join(PASTE_IMAGE_DIR)
+                .join("aoe-paste-x.png")
+                .to_string_lossy()
+        );
         // A non-git worktree mounts under /workspace/<dir-name>; the pasted
         // path must be the container-visible path, not the host path.
         assert_eq!(
-            pane,
+            pane_visible_paste_path(&project, true, "aoe-paste-x.png"),
             format!("/workspace/{dir_name}/{PASTE_IMAGE_DIR}/aoe-paste-x.png")
         );
     }

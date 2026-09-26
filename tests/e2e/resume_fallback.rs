@@ -35,13 +35,18 @@ fn assert_default_resume_intent(row: &Value) {
     );
 }
 
-fn install_fake_agent(h: &mut TuiTestHarness) -> PathBuf {
+fn install_fake_agent(h: &mut TuiTestHarness, reject_stale: bool) -> PathBuf {
     let bin = h.install_path_command(FAKE_AGENT);
     let log = h.home_path().join("resume-fallback-agent.log");
+    let rejection = if reject_stale {
+        format!("case \"$*\" in\n  *{STALE_SID}*) exit 42 ;;\nesac\n")
+    } else {
+        String::new()
+    };
     let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncase \"$*\" in\n  *{}*) exit 42 ;;\nesac\nexec sleep 30\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n{}exec sleep 30\n",
         sh_quote(&log),
-        STALE_SID,
+        rejection,
     );
     write_executable(&bin.join(FAKE_AGENT), &script);
     log
@@ -69,10 +74,25 @@ fn read_log_lines(path: &Path) -> Vec<String> {
         .collect()
 }
 
+fn wait_for_logged_args(path: &Path, sid: &str) -> Vec<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let lines = read_log_lines(path);
+        if lines.iter().any(|line| line.contains(sid)) {
+            return lines;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "agent never received {sid}: {lines:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// Seed a Claude transcript at `$HOME/.claude/projects/<encoded project>/
 /// <sid>.jsonl` (every char outside `[A-Za-z0-9-]` maps to `-`) so the restart
 /// takes the `--resume <sid>` path instead of #2700's fresh-pin shortcut.
-fn seed_claude_transcript(h: &TuiTestHarness, project_path: &Path, sid: &str) {
+fn seed_claude_transcript(h: &TuiTestHarness, project_path: &Path, sid: &str) -> PathBuf {
     let canonical = fs::canonicalize(project_path).unwrap_or_else(|_| project_path.to_path_buf());
     let encoded: String = canonical
         .to_string_lossy()
@@ -87,7 +107,9 @@ fn seed_claude_transcript(h: &TuiTestHarness, project_path: &Path, sid: &str) {
         .collect();
     let dir = h.home_path().join(".claude").join("projects").join(encoded);
     fs::create_dir_all(&dir).expect("create claude projects dir");
-    fs::write(dir.join(format!("{sid}.jsonl")), "{}\n").expect("write claude transcript");
+    let path = dir.join(format!("{sid}.jsonl"));
+    fs::write(&path, "{}\n").expect("write claude transcript");
+    path
 }
 
 struct StopSessionOnDrop<'a> {
@@ -102,77 +124,106 @@ impl Drop for StopSessionOnDrop<'_> {
 
 #[test]
 #[parallel]
-fn stale_resume_failure_persists_loop_breaker_and_next_restart_starts_fresh() {
+fn migrated_unknown_restart_resumes_the_stored_conversation() {
     require_tmux!();
-
-    let mut h = TuiTestHarness::new_in_tmp("resume_fallback_loop_breaker");
+    let mut h = TuiTestHarness::new_in_tmp("resume_unknown_restart");
     disable_restart_wake_message(&h);
-    let log_path = install_fake_agent(&mut h);
+    let log = install_fake_agent(&mut h, false);
     let project = h.project_path();
-
-    h.run_cli_ok(&[
+    let add = h.run_cli(&[
         "add",
         project.to_str().unwrap(),
         "--cmd",
-        "claude",
+        FAKE_AGENT,
         "-t",
         TITLE,
     ]);
+    assert!(add.status.success(), "{add:?}");
     let _cleanup = StopSessionOnDrop { h: &h };
-
+    let transcript = seed_claude_transcript(&h, &project, STALE_SID);
+    let original = fs::read(&transcript).unwrap();
     patch_session(&h, TITLE, |row| {
-        row.insert("command".to_string(), Value::String(FAKE_AGENT.to_string()));
-        row.insert("tool".to_string(), Value::String("claude".to_string()));
-        row.insert("status".to_string(), Value::String("idle".to_string()));
+        row.insert("agent_session_id".into(), Value::String(STALE_SID.into()));
         row.insert(
-            "agent_session_id".to_string(),
-            Value::String(STALE_SID.to_string()),
+            "agent_session_binding".into(),
+            serde_json::json!({
+                "session_id": STALE_SID,
+                "execution": null,
+                "provenance": "unknown",
+                "transcript_path": null
+            }),
         );
-        row.remove("resume_probe_failed_sid");
         row.remove("resume_intent");
+        row.remove("resume_binding");
+        row.remove("active_execution");
     });
-
-    seed_claude_transcript(&h, &project, STALE_SID);
-
-    h.run_cli_err(&["session", "restart", TITLE]);
-
+    let restarted = h.run_cli(&["session", "restart", TITLE]);
+    assert!(restarted.status.success(), "{restarted:?}");
+    let lines = wait_for_logged_args(&log, STALE_SID);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("--resume") && line.contains(STALE_SID)),
+        "restart must pass native resume flags: {lines:?}"
+    );
     let sessions = h.read_sessions();
     let row = session_by_title(&sessions, TITLE);
     assert_eq!(row["agent_session_id"].as_str(), Some(STALE_SID));
-    assert_eq!(row["resume_probe_failed_sid"].as_str(), Some(STALE_SID));
     assert_default_resume_intent(row);
+    assert_eq!(fs::read(&transcript).unwrap(), original);
+}
 
-    let first_lines = read_log_lines(&log_path);
+#[test]
+#[parallel]
+fn migrated_unknown_start_resumes_without_attested_context() {
+    require_tmux!();
+    let mut h = TuiTestHarness::new_in_tmp("resume_unknown_start");
+    let log = install_fake_agent(&mut h, false);
+    let project = h.project_path();
+    let add = h.run_cli(&[
+        "add",
+        project.to_str().unwrap(),
+        "--cmd",
+        FAKE_AGENT,
+        "-t",
+        TITLE,
+    ]);
+    assert!(add.status.success(), "{add:?}");
+    let _cleanup = StopSessionOnDrop { h: &h };
+    let stopped = h.run_cli(&["session", "stop", TITLE]);
+    assert!(stopped.status.success(), "{stopped:?}");
+    let transcript = seed_claude_transcript(&h, &project, STALE_SID);
+    let original = fs::read(&transcript).unwrap();
+    patch_session(&h, TITLE, |row| {
+        row.insert(
+            "extra_args".into(),
+            Value::String("--mcp-config /tmp/unattested.json".into()),
+        );
+        row.insert("agent_session_id".into(), Value::String(STALE_SID.into()));
+        row.insert(
+            "agent_session_binding".into(),
+            serde_json::json!({
+                "session_id": STALE_SID,
+                "execution": null,
+                "provenance": "unknown",
+                "transcript_path": null
+            }),
+        );
+        row.remove("resume_intent");
+        row.remove("resume_binding");
+        row.remove("active_execution");
+    });
+    let started = h.run_cli(&["session", "start", TITLE]);
+    assert!(started.status.success(), "{started:?}");
+    let lines = wait_for_logged_args(&log, STALE_SID);
     assert!(
-        first_lines.iter().any(|line| line.contains(STALE_SID)),
-        "first restart must pass stale sid to fake agent; log={first_lines:?}"
+        lines
+            .iter()
+            .any(|line| line.contains(STALE_SID) && line.contains("--mcp-config")),
+        "unattested launch must still try the stored ID: {lines:?}"
     );
-
-    let before_second = first_lines.len();
-    h.run_cli_ok(&["session", "restart", TITLE]);
-
     let sessions = h.read_sessions();
     let row = session_by_title(&sessions, TITLE);
-    let fresh_sid = row["agent_session_id"]
-        .as_str()
-        .expect("fresh restart should persist a new agent_session_id");
-    assert_ne!(fresh_sid, STALE_SID);
-    assert!(!fresh_sid.trim().is_empty());
-    assert!(
-        row["resume_probe_failed_sid"].is_null(),
-        "fresh restart should clear resume_probe_failed_sid, got {:?}",
-        row["resume_probe_failed_sid"]
-    );
-    assert_default_resume_intent(row);
-
-    let all_lines = read_log_lines(&log_path);
-    let second_lines = &all_lines[before_second..];
-    assert!(
-        !second_lines.is_empty(),
-        "second restart should invoke fake agent; log={all_lines:?}"
-    );
-    assert!(
-        second_lines.iter().all(|line| !line.contains(STALE_SID)),
-        "second restart must not retry stale sid; new log lines={second_lines:?}"
-    );
+    assert_eq!(row["agent_session_id"].as_str(), Some(STALE_SID));
+    assert_eq!(fs::read(&transcript).unwrap(), original);
 }

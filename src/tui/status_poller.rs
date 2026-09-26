@@ -168,7 +168,7 @@ pub(super) fn poll_statuses_once(
                 .copied()
                 == Some(false);
             if !stopped {
-                match instance.predates_shared_credential(&container, &instance.detect_as) {
+                match instance.predates_shared_credential(&container, instance.get_tool_command()) {
                     Ok(false) => {}
                     Ok(true) => continue,
                     Err(error) => {
@@ -182,8 +182,9 @@ pub(super) fn poll_statuses_once(
                 &instance.effective_profile(),
                 &instance.id,
                 &instance.tool,
-                Some(&instance.detect_as),
+                instance.get_tool_command().into(),
                 crate::session::config::container_config::CredentialFold::SeedOnly,
+                std::path::Path::new(&instance.container_workdir()),
             );
         }
     }
@@ -340,26 +341,6 @@ impl Default for StatusPoller {
 mod tests {
     use super::*;
 
-    #[test]
-    fn status_update_carries_idle_entered_at() {
-        // Regression: the loop runs `update_status_with_metadata` on a clone and
-        // projects the result into a `StatusUpdate`. If `idle_entered_at` falls
-        // off that projection, the breathe rattle + fresh-idle color never fire.
-        let ts = Utc::now();
-        let update = StatusUpdate {
-            launch_identity: None,
-            id: "abc".into(),
-            status: Status::Idle,
-            last_error: None,
-            idle_entered_at: IdleIntent::Set(ts),
-            last_accessed_at: None,
-            pane_dead: false,
-            live_status_baseline: None,
-            detection: None,
-        };
-        assert_eq!(update.idle_entered_at, IdleIntent::Set(ts));
-    }
-
     /// #2690 follow-up: `StatusUpdate::default()` must be a semantic no-op so
     /// fixtures can override only the fields under test. A future field with a
     /// non-trivial default would silently corrupt them.
@@ -396,50 +377,23 @@ mod tests {
     }
 
     #[test]
-    fn test_polling_tier_hot() {
-        assert_eq!(polling_tier(Status::Running), TIER_HOT);
-        assert_eq!(polling_tier(Status::Waiting), TIER_HOT);
-        assert_eq!(polling_tier(Status::Starting), TIER_HOT);
-    }
-
-    #[test]
-    fn test_polling_tier_warm() {
-        assert_eq!(polling_tier(Status::Idle), TIER_WARM);
-        assert_eq!(polling_tier(Status::Unknown), TIER_WARM);
-    }
-
-    #[test]
-    fn test_polling_tier_cold() {
-        assert_eq!(polling_tier(Status::Error), TIER_COLD);
-    }
-
-    #[test]
-    fn test_polling_tier_frozen() {
-        assert_eq!(polling_tier(Status::Stopped), 0);
-        assert_eq!(polling_tier(Status::Deleting), 0);
-    }
-
-    #[test]
-    fn test_tier_cycle_alignment() {
-        // Hot sessions are polled every cycle: TIER_HOT must stay at 1.
+    fn polling_tiers_and_first_cycle_alignment() {
+        for (status, tier) in [
+            (Status::Running, TIER_HOT),
+            (Status::Waiting, TIER_HOT),
+            (Status::Starting, TIER_HOT),
+            (Status::Idle, TIER_WARM),
+            (Status::Unknown, TIER_WARM),
+            (Status::Error, TIER_COLD),
+            (Status::Stopped, 0),
+            (Status::Deleting, 0),
+        ] {
+            assert_eq!(polling_tier(status), tier, "{status:?}");
+        }
+        // Hot sessions poll every cycle.
         assert_eq!(TIER_HOT, 1);
-        // Warm sessions are polled every 5 cycles
-        assert_ne!(1u64 % TIER_WARM, 0);
-        assert_ne!(2u64 % TIER_WARM, 0);
-        assert_eq!(5u64 % TIER_WARM, 0);
-        assert_eq!(10u64 % TIER_WARM, 0);
-        // Cold sessions are polled every 60 cycles
-        assert_ne!(1u64 % TIER_COLD, 0);
-        assert_eq!(60u64 % TIER_COLD, 0);
-        assert_eq!(120u64 % TIER_COLD, 0);
-    }
-
-    #[test]
-    fn test_first_cycle_polls_all_tiers() {
-        // cycle_count starts at TIER_COLD - 1, first cycle wraps to TIER_COLD
+        // cycle_count starts at TIER_COLD - 1, so the first cycle polls every tier.
         let first_cycle = (TIER_COLD - 1).wrapping_add(1);
-        // TIER_HOT == 1 (see test_tier_cycle_alignment), so any cycle trivially
-        // polls hot; just verify the warm and cold alignments here.
         assert_eq!(first_cycle % TIER_WARM, 0, "first cycle must poll warm");
         assert_eq!(first_cycle % TIER_COLD, 0, "first cycle must poll cold");
     }

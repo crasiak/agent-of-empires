@@ -18,6 +18,8 @@ pub const MAX_SESSIONS: usize = 200;
 pub struct ClaudeSessionSummary {
     /// The on-disk session id (filename stem). Fed to `session/load`.
     pub session_id: String,
+    #[serde(skip)]
+    pub config_dir: PathBuf,
     /// The working directory recorded in the transcript. The structured
     /// session must run here for `claude --resume` to resolve the file.
     pub cwd: String,
@@ -133,7 +135,7 @@ pub fn scan_sessions_in(config_dir: &Path) -> Vec<ClaudeSessionSummary> {
             if fpath.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            if let Some(summary) = summarize_file(&fpath) {
+            if let Some(summary) = summarize_file(&fpath, config_dir) {
                 // Scratch sessions live under `<app_dir>/scratch/<id>`.
                 if cwd_is_aoe_scratch(&summary.cwd) {
                     continue;
@@ -168,7 +170,7 @@ pub fn sessions_under_paths(
 
 /// Build a summary for one `.jsonl` file. Returns `None` when the file has no
 /// recoverable `cwd` (a session we could not safely resume), or no session id.
-fn summarize_file(path: &Path) -> Option<ClaudeSessionSummary> {
+fn summarize_file(path: &Path, config_dir: &Path) -> Option<ClaudeSessionSummary> {
     let session_id = path.file_stem()?.to_str()?.to_string();
 
     let last_modified_ms = fs::metadata(path)
@@ -209,6 +211,7 @@ fn summarize_file(path: &Path) -> Option<ClaudeSessionSummary> {
     let cwd_exists = Path::new(&cwd).is_dir();
     Some(ClaudeSessionSummary {
         session_id,
+        config_dir: crate::session::capture::canonicalize_or_raw(config_dir.to_str()?),
         cwd,
         title,
         last_modified_ms,
@@ -271,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn extracts_cwd_and_title_skipping_noise() {
+    fn summarize_file_reads_cwd_and_title_and_flags_missing_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let real_cwd = tmp.path().join("work");
         fs::create_dir(&real_cwd).unwrap();
@@ -290,32 +293,42 @@ mod tests {
             ],
         );
 
-        let s = summarize_file(&path).unwrap();
+        let s = summarize_file(&path, path.parent().unwrap()).unwrap();
         assert_eq!(s.session_id, "713b7f46-d0f2-454e-91be-a3305d35660c");
         assert_eq!(s.cwd, cwd_str);
         assert_eq!(s.title.as_deref(), Some("Fix the spinner bug please"));
         assert!(s.cwd_exists);
+
+        let path = write_jsonl(
+            tmp.path(),
+            "abc",
+            &[
+                r#"{"type":"user","cwd":"/nonexistent/path/xyz","message":{"role":"user","content":"hi"}}"#,
+            ],
+        );
+        let s = summarize_file(&path, path.parent().unwrap()).unwrap();
+        assert_eq!(s.cwd, "/nonexistent/path/xyz");
+        assert!(!s.cwd_exists, "a missing cwd is flagged, not dropped");
+        assert_eq!(s.title.as_deref(), Some("hi"));
+
+        let path = write_jsonl(
+            tmp.path(),
+            "nocwd",
+            &[r#"{"type":"last-prompt","sessionId":"nocwd"}"#],
+        );
+        assert!(summarize_file(&path, path.parent().unwrap()).is_none());
     }
 
     #[test]
-    fn title_keeps_angle_bracket_prompts_and_skips_only_wrappers() {
-        assert_eq!(
-            displayable_user_text("<div> is rendering wrong"),
-            Some("<div> is rendering wrong")
-        );
-        assert_eq!(
-            displayable_user_text("<local-command-caveat>x</local-command-caveat>"),
-            None
-        );
-        assert_eq!(
-            displayable_user_text("<command-name>/foo</command-name>"),
-            None
-        );
-        assert_eq!(displayable_user_text("   "), None);
-    }
-
-    #[test]
-    fn title_picks_first_real_text_part_after_wrapper() {
+    fn title_skips_only_command_wrappers() {
+        for (text, expected) in [
+            ("<div> is rendering wrong", Some("<div> is rendering wrong")),
+            ("<local-command-caveat>x</local-command-caveat>", None),
+            ("<command-name>/foo</command-name>", None),
+            ("   ", None),
+        ] {
+            assert_eq!(displayable_user_text(text), expected, "{text:?}");
+        }
         let record = serde_json::json!({
             "type": "user",
             "message": { "role": "user", "content": [
@@ -330,30 +343,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_cwd_dir_flagged_not_dropped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = write_jsonl(
-            tmp.path(),
-            "abc",
-            &[
-                r#"{"type":"user","cwd":"/nonexistent/path/xyz","message":{"role":"user","content":"hi"}}"#,
-            ],
-        );
-        let s = summarize_file(&path).unwrap();
-        assert_eq!(s.cwd, "/nonexistent/path/xyz");
-        assert!(!s.cwd_exists);
-        assert_eq!(s.title.as_deref(), Some("hi"));
-    }
-
-    #[test]
-    fn strip_placeholders_leaves_literal() {
+    fn cwd_under_worktree_matches_worktree_and_workspace_dirs() {
         assert_eq!(strip_placeholders("{repo-name}-worktrees"), "-worktrees");
         assert_eq!(strip_placeholders("{branch}"), "");
         assert_eq!(strip_placeholders(".."), "..");
-    }
-
-    #[test]
-    fn cwd_under_worktree_matches_worktree_and_workspace_dirs() {
         let markers = vec!["-worktrees".to_string(), "-workspace-".to_string()];
         assert!(cwd_under_worktree(
             "/Users/me/aoe/agent-of-empires-worktrees/Saracens",
@@ -386,20 +379,10 @@ mod tests {
         assert!(!cwd_is_aoe_scratch("/Users/me/projects/alpha"));
     }
 
-    #[test]
-    fn no_cwd_means_unimportable_skipped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = write_jsonl(
-            tmp.path(),
-            "nocwd",
-            &[r#"{"type":"last-prompt","sessionId":"nocwd"}"#],
-        );
-        assert!(summarize_file(&path).is_none());
-    }
-
     fn summary(id: &str, cwd: &str) -> ClaudeSessionSummary {
         ClaudeSessionSummary {
             session_id: id.to_string(),
+            config_dir: PathBuf::from("/claude-import-store"),
             cwd: cwd.to_string(),
             title: None,
             last_modified_ms: 0,
@@ -408,34 +391,20 @@ mod tests {
     }
 
     #[test]
-    fn sessions_under_paths_is_component_aware() {
+    fn sessions_under_paths_is_component_aware_and_matches_any_root() {
         let sessions = vec![
             summary("a", "/home/me/app"),
             summary("b", "/home/me/app/sub/deep"),
             summary("c", "/home/me/app-v2"),
             summary("d", "/home/me/other"),
+            summary("e", "/p/three/z"),
         ];
-        let roots = vec![PathBuf::from("/home/me/app")];
+        let roots = vec![PathBuf::from("/home/me/app"), PathBuf::from("/p/three")];
         let kept: Vec<_> = sessions_under_paths(sessions, &roots)
             .into_iter()
             .map(|s| s.session_id)
             .collect();
-        assert_eq!(kept, vec!["a", "b"]);
-    }
-
-    #[test]
-    fn sessions_under_paths_matches_any_root() {
-        let sessions = vec![
-            summary("a", "/p/one/x"),
-            summary("b", "/p/two/y"),
-            summary("c", "/p/three/z"),
-        ];
-        let roots = vec![PathBuf::from("/p/one"), PathBuf::from("/p/three")];
-        let kept: Vec<_> = sessions_under_paths(sessions, &roots)
-            .into_iter()
-            .map(|s| s.session_id)
-            .collect();
-        assert_eq!(kept, vec!["a", "c"]);
+        assert_eq!(kept, vec!["a", "b", "e"]);
     }
 
     #[test]

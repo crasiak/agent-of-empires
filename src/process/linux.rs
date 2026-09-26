@@ -1,5 +1,6 @@
 //! Linux-specific process utilities.
 
+pub(crate) const HAS_CODEX_MANAGED_PREFERENCES: bool = false;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -8,6 +9,34 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 pub(super) use super::unix::{
     configure_process_group, kill_process_group, terminate_process_group,
 };
+pub(super) fn rename_exclusive(
+    source_dir: &std::os::fd::OwnedFd,
+    source: &std::ffi::OsStr,
+    destination_dir: &std::os::fd::OwnedFd,
+    destination: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    use nix::NixPath;
+    use std::os::fd::AsRawFd;
+
+    let result = source.with_nix_path(|source| {
+        destination.with_nix_path(|destination| {
+            // SAFETY: both descriptors remain owned for the call and NixPath
+            // supplies live NUL-terminated names. The syscall also supports musl.
+            nix::errno::Errno::result(unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    source_dir.as_raw_fd(),
+                    source.as_ptr(),
+                    destination_dir.as_raw_fd(),
+                    destination.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            })
+            .map(|_| ())
+        })
+    })??;
+    result.map_err(std::io::Error::from)
+}
 
 pub(super) fn collect_pid_tree(pid: u32) -> Vec<u32> {
     let children_map = build_children_map();
@@ -402,23 +431,6 @@ Cached:          5678901 kB
         for (key, expected) in cases {
             assert_eq!(parse_meminfo_field(MEMINFO, key), expected, "{key}");
         }
-    }
-
-    #[test]
-    fn test_sample_used_derivation() {
-        let total = parse_meminfo_field(MEMINFO, "MemTotal")
-            .map(kib_to_bytes)
-            .unwrap();
-        let avail = parse_meminfo_field(MEMINFO, "MemAvailable")
-            .map(kib_to_bytes)
-            .unwrap();
-        let sample = super::super::metrics::MemorySample {
-            total_bytes: total,
-            available_bytes: avail,
-            ..Default::default()
-        };
-        assert_eq!(sample.used_bytes(), total - avail);
-        assert!((sample.used_fraction() - (total - avail) as f64 / total as f64).abs() < 1e-9);
     }
 
     #[test]

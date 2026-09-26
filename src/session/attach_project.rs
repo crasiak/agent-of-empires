@@ -206,6 +206,13 @@ impl Conversion {
         }
     }
 }
+/// Whether the next launch resumes a known conversation that cannot move.
+fn conversation_cannot_follow(instance: &super::Instance) -> bool {
+    instance
+        .conversation_target()
+        .and_then(|(_, binding, _)| binding)
+        .is_some_and(crate::session::ConversationBinding::is_known)
+}
 
 /// Decide how to make room for the new repo, and where the workspace lands.
 fn plan_conversion(
@@ -393,6 +400,16 @@ pub fn plan(
     // Plan the conversion before touching anything, so a refusal (dirty checkout, workspace path
     // taken, branch already checked out) happens with nothing created.
     let conversion = plan_conversion(instance, profile, on_existing)?;
+    if !matches!(conversion, Conversion::Append { .. }) && conversation_cannot_follow(instance) {
+        bail!(
+            "'{}' carries a conversation bound to its current working directory; \
+             moving the session into '{}' would leave that conversation \
+             unresumable. Keep its current directory, or explicitly clear the \
+             resume target before attaching to start a new conversation.",
+            instance.title,
+            conversion.workspace_dir().display()
+        );
+    }
 
     let workspace_dir = conversion.workspace_dir().to_path_buf();
     let worktree_path = workspace_dir.join(&repo_name);
@@ -685,6 +702,20 @@ pub fn attach_planned(
     instance: &super::Instance,
     plan: AttachPlan,
 ) -> Result<AttachOutcome> {
+    // A publication that has not been drained yet would be flushed after the
+    // move with the stale cwd, re-qualifying the old directory after the
+    // commit. Flush it first so the durable recheck sees the row as it will
+    // stand at the commit.
+    if plan.moves_session {
+        match instance.flush_published_conversation(storage) {
+            Some(crate::session::SidWrite::Applied) | None => {}
+            Some(outcome) => anyhow::bail!(
+                "'{}' has an undrained conversation publication ({outcome:?}); drain it or \
+                 clear the resume target before converting",
+                instance.title
+            ),
+        }
+    }
     let prepared = execute(instance, plan)?;
 
     let id = session_id.to_string();
@@ -696,6 +727,12 @@ pub fn attach_planned(
             .iter_mut()
             .find(|i| i.id == id)
             .with_context(|| format!("session not found: {id}"))?;
+        anyhow::ensure!(
+            !converted || !conversation_cannot_follow(inst),
+            "'{}' now resumes a conversation bound to its current working directory; \
+             conversion cannot be committed",
+            inst.title
+        );
         inst.workspace_info = Some(workspace);
         if converted {
             // The session now works in the workspace directory, and its old single-repo worktree
@@ -912,12 +949,7 @@ fn attach_and_restart(request: AttachProjectRequest) -> Result<String, String> {
     }
 
     if restarts {
-        message.push_str("\n\nRestarted the session so it comes up with the new repo");
-        if quiesced.worker_was_running {
-            message.push_str("; the conversation is preserved.");
-        } else {
-            message.push('.');
-        }
+        message.push_str("\n\nRestarted the session so it comes up with the new repo.");
     } else {
         message.push_str(
             "\n\nThe agent is already working in this directory, so nothing was restarted.",
@@ -1000,65 +1032,38 @@ mod tests {
     }
 
     #[test]
-    fn plan_refuses_a_scratch_session() {
-        let mut inst = Instance::new("Scratchpad", "/tmp/scratch/abc");
-        inst.scratch = true;
-        let Err(err) = plan(
-            &inst,
-            "default",
-            Path::new("/tmp/definitely-not-a-repo"),
-            ExistingBranch::Refuse,
-        ) else {
-            panic!("a scratch session has no repo to attach to");
-        };
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("scratch session"),
-            "the scratch refusal must win over the not-a-git-repo error: {msg}"
-        );
-    }
-
-    #[test]
     fn plan_refuses_states_that_are_never_attachable() {
-        let attempt = |inst: &Instance| {
+        use super::super::Status;
+        type Setup = fn(&mut Instance);
+        // Each refusal must win over the not-a-git-repo error; a Running session reaches it.
+        let cases: [(Setup, &str); 6] = [
+            (|i| i.scratch = true, "scratch session"),
+            (
+                |i| i.status = Status::Creating,
+                "being created or is being deleted",
+            ),
+            (
+                |i| i.status = Status::Deleting,
+                "being created or is being deleted",
+            ),
+            (|i| i.trashed_at = Some(Utc::now()), "in the trash"),
+            (|i| i.archived_at = Some(Utc::now()), "archived"),
+            (|i| i.status = Status::Running, "not a git repository"),
+        ];
+        for (setup, want) in cases {
+            let mut inst = Instance::new("Attach", "/tmp/attach");
+            setup(&mut inst);
             let Err(err) = plan(
-                inst,
+                &inst,
                 "default",
                 Path::new("/tmp/definitely-not-a-repo"),
                 ExistingBranch::Refuse,
             ) else {
-                panic!("this lifecycle state must be refused");
+                panic!("{want}: must be refused");
             };
-            format!("{err:#}")
-        };
-
-        for status in [
-            super::super::Status::Creating,
-            super::super::Status::Deleting,
-        ] {
-            let mut inst = Instance::new("Busy", "/tmp/busy");
-            inst.status = status;
-            let msg = attempt(&inst);
-            assert!(
-                msg.contains("being created or is being deleted"),
-                "{status:?} must be refused with its own reason: {msg}"
-            );
+            let msg = format!("{err:#}");
+            assert!(msg.contains(want), "{want}: {msg}");
         }
-
-        let mut trashed = Instance::new("Trashed", "/tmp/trashed");
-        trashed.trashed_at = Some(Utc::now());
-        assert!(attempt(&trashed).contains("in the trash"));
-
-        let mut archived = Instance::new("Archived", "/tmp/archived");
-        archived.archived_at = Some(Utc::now());
-        assert!(attempt(&archived).contains("archived"));
-
-        let mut running = Instance::new("Running", "/tmp/running");
-        running.status = super::super::Status::Running;
-        assert!(
-            attempt(&running).contains("not a git repository"),
-            "a Running session must reach the repo checks, not a lifecycle refusal"
-        );
     }
 
     #[test]
@@ -1329,49 +1334,50 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_by_main_repo_path_is_rejected() {
-        let inst = workspace_instance();
-        let err = reject_duplicate(&inst, Path::new("/tmp/src/backend"), "backend-alias")
-            .expect_err("the same repo must not attach twice");
-        assert!(
-            err.to_string().contains("already attached"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn duplicate_by_leaf_name_is_rejected_case_insensitively() {
-        let inst = workspace_instance();
-        let err = reject_duplicate(&inst, Path::new("/other/src/BackEnd"), "BackEnd")
-            .expect_err("a colliding directory leaf must not attach");
-        assert!(
-            err.to_string().contains("collide on disk"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn attaching_the_sessions_own_repo_is_rejected() {
-        let mut inst = Instance::new("WT", "/tmp/worktrees/feature");
-        inst.worktree_info = Some(WorktreeInfo {
+    fn reject_duplicate_cases() {
+        let workspace = workspace_instance();
+        let mut own = Instance::new("WT", "/tmp/worktrees/feature");
+        own.worktree_info = Some(WorktreeInfo {
             branch: "feature/abc".to_string(),
             main_repo_path: "/tmp/src/backend".to_string(),
             managed_by_aoe: true,
             created_at: Utc::now(),
             base_branch: None,
         });
-        let err = reject_duplicate(&inst, Path::new("/tmp/src/backend"), "backend")
-            .expect_err("the session's own repo must not attach to itself");
-        assert!(
-            err.to_string().contains("already this session's own repo"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn a_genuinely_new_repo_is_accepted() {
-        let inst = workspace_instance();
-        reject_duplicate(&inst, Path::new("/tmp/src/frontend"), "frontend").unwrap();
+        // (session, repo, leaf, expected error fragment; None = accepted)
+        let cases = [
+            (
+                &workspace,
+                "/tmp/src/backend",
+                "backend-alias",
+                Some("already attached"),
+            ),
+            (
+                &workspace,
+                "/other/src/BackEnd",
+                "BackEnd",
+                Some("collide on disk"),
+            ),
+            (
+                &own,
+                "/tmp/src/backend",
+                "backend",
+                Some("already this session's own repo"),
+            ),
+            (&workspace, "/tmp/src/frontend", "frontend", None),
+        ];
+        for (inst, repo, leaf, want) in cases {
+            let got = reject_duplicate(inst, Path::new(repo), leaf)
+                .err()
+                .map(|e| e.to_string());
+            match want {
+                Some(want) => assert!(
+                    got.as_deref().is_some_and(|e| e.contains(want)),
+                    "{repo} {leaf}: {got:?}"
+                ),
+                None => assert_eq!(got, None, "{repo} {leaf}"),
+            }
+        }
     }
 
     #[test]

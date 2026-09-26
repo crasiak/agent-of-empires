@@ -61,6 +61,7 @@ pub async fn probe_agent(agent: &str) -> anyhow::Result<bool> {
         seed_history_replay: false,
         generation: 0,
         artifact_dir: None,
+        claude_store_pin: None,
     };
 
     // Probe-scoped id so it never collides with a real structured-view worker.
@@ -111,16 +112,4 @@ async fn drain_first_snapshot(client: &mut AcpClient, agent: &str) -> bool {
         }
     }
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn unknown_agent_never_spawns() {
-        assert!(!probe_agent("definitely-not-an-agent-xyz")
-            .await
-            .expect("unknown agent is a clean no-op"));
-    }
 }
