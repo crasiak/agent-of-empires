@@ -1,0 +1,95 @@
+//! Local usage log: agent context resets, prompts, turns, and aoe lifecycle
+//! events per instance, stored in `<app_dir>/usage.db`. The table and export
+//! format are the Ledger contract in `docs/development/usage-events.md`.
+
+mod normalize;
+mod store;
+mod summary;
+
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+
+pub use normalize::{normalize, Normalized};
+pub use store::UsageStore;
+pub use summary::{is_context_boundary, summarize, UsageSummary};
+
+const DB_FILE: &str = "usage.db";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageKind {
+    ContextStart,
+    ContextEnd,
+    Compact,
+    Prompt,
+    TurnEnd,
+    InstanceCreated,
+    InstanceRestarted,
+    InstanceDeleted,
+}
+
+impl UsageKind {
+    const ALL: [UsageKind; 8] = [
+        UsageKind::ContextStart,
+        UsageKind::ContextEnd,
+        UsageKind::Compact,
+        UsageKind::Prompt,
+        UsageKind::TurnEnd,
+        UsageKind::InstanceCreated,
+        UsageKind::InstanceRestarted,
+        UsageKind::InstanceDeleted,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UsageKind::ContextStart => "context_start",
+            UsageKind::ContextEnd => "context_end",
+            UsageKind::Compact => "compact",
+            UsageKind::Prompt => "prompt",
+            UsageKind::TurnEnd => "turn_end",
+            UsageKind::InstanceCreated => "instance_created",
+            UsageKind::InstanceRestarted => "instance_restarted",
+            UsageKind::InstanceDeleted => "instance_deleted",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UsageEvent {
+    /// Store-assigned and monotonic; 0 before insert.
+    pub id: i64,
+    pub occurred_at: DateTime<Utc>,
+    pub instance_id: String,
+    pub profile: Option<String>,
+    pub agent: Option<String>,
+    pub kind: UsageKind,
+    pub detail: Option<String>,
+    pub agent_session_id: Option<String>,
+}
+
+pub fn db_path() -> anyhow::Result<PathBuf> {
+    Ok(crate::session::get_app_dir()?.join(DB_FILE))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kinds_round_trip_through_their_names() {
+        for kind in UsageKind::ALL {
+            assert_eq!(UsageKind::parse(kind.as_str()), Some(kind));
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                serde_json::Value::String(kind.as_str().to_string())
+            );
+        }
+        assert_eq!(UsageKind::parse("nope"), None);
+    }
+}
