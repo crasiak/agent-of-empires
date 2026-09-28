@@ -95,20 +95,22 @@ Computed in Rust from one instance's events in `id` order:
   the first start is the instance's first life, not a reset
 - **`resets`** (the headline) = `clears + compactions + resumes`
 - `prompts`, `turns`, `turn_errors`: totals
-- current context: begins at the latest `context_start` or `compact`;
+- current context: begins at the latest context boundary, which is a
+  `compact` or a `context_start` other than `context_start/compact`;
   `context_started_at`, `context_prompts`, `context_turns` count from there
 - `tracked_since` (first event) and `last_event_at`
 
 A compaction emits both `compact` and `context_start/compact` for Claude and
-Codex; counting compactions only from `compact` avoids double counting and
-keeps Pi (which has no post-compaction start) consistent.
+Codex; counting compactions and boundaries only from `compact` avoids double
+counting and empty contexts, and keeps Pi (which has no post-compaction start)
+consistent.
 
 ## Capture
 
 ### Claude and Codex hooks
 
 - `HookEvent` and `ResolvedHookEvent` gain `usage: bool`. `resolved_hook_events`
-  sets it to `event.usage && config.usage.enabled`.
+  sets it to `event.usage && config.session.usage_tracking`.
 - Claude's `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure` gain
   `usage: true`; two new events, `PostCompact` and `SessionEnd`, have no status
   and `usage: true`. Codex's `SessionStart`, `UserPromptSubmit`, `Stop` gain
@@ -148,10 +150,11 @@ instance is deleted. It is a no-op when usage is disabled.
 
 ## Settings
 
-New section `[usage]` (category "Usage"):
+Two fields on the existing `[session]` section, next to
+`show_diagnostics_pane`, so the web reads them through `sessionFlagGate`:
 
-- `enabled: bool`, default `true`: install usage hooks and record events.
-- `show_overlay: bool`, default `true`: show the TUI and web overlays.
+- `usage_tracking: bool`, default `true`: install usage hooks and record events.
+- `show_usage_overlay: bool`, default `true`: show the TUI and web overlays.
 
 ## TUI overlay
 
@@ -163,7 +166,7 @@ New section `[usage]` (category "Usage"):
   - `clr 12 · cmp 3 (2a) · rsm 2`
   - `ctx 42m · 18p 17t`
   - `age 3d 4h` (instance age from `created_at`)
-- Hidden when `show_overlay` is off, when the instance has no events, or when
+- Hidden when `show_usage_overlay` is off, when the instance has no events, or when
   the pane is too small (box plus 10 columns or plus 2 rows).
 
 ## Web overlay
