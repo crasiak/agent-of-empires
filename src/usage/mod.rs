@@ -77,6 +77,41 @@ pub fn db_path() -> anyhow::Result<PathBuf> {
     Ok(crate::session::get_app_dir()?.join(DB_FILE))
 }
 
+/// Best-effort: a lifecycle row never fails the operation that produced it.
+pub fn record_lifecycle(instance: &crate::session::Instance, kind: UsageKind) {
+    let enabled = crate::session::config::profile_config::resolve_config_or_warn(
+        &instance.effective_profile(),
+    )
+    .session
+    .usage_tracking;
+    let result = db_path().and_then(|db| record_lifecycle_at(&db, instance, kind, enabled));
+    if let Err(e) = result {
+        tracing::debug!(target: "usage", "lifecycle event dropped: {e}");
+    }
+}
+
+fn record_lifecycle_at(
+    db: &std::path::Path,
+    instance: &crate::session::Instance,
+    kind: UsageKind,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    UsageStore::open(db)?.insert(&UsageEvent {
+        id: 0,
+        occurred_at: Utc::now(),
+        instance_id: instance.id.clone(),
+        profile: Some(instance.effective_profile()),
+        agent: Some(instance.tool.clone()),
+        kind,
+        detail: None,
+        agent_session_id: instance.agent_session_id.clone(),
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +126,23 @@ mod tests {
             );
         }
         assert_eq!(UsageKind::parse("nope"), None);
+    }
+
+    #[test]
+    fn lifecycle_rows_carry_instance_identity_and_respect_the_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("usage.db");
+        let mut instance = crate::session::Instance::new("t", "/tmp/project");
+        instance.tool = "claude".into();
+        record_lifecycle_at(&db, &instance, UsageKind::InstanceCreated, true).unwrap();
+        record_lifecycle_at(&db, &instance, UsageKind::InstanceDeleted, false).unwrap();
+        let events = UsageStore::open(&db)
+            .unwrap()
+            .events_for_instance(&instance.id)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, UsageKind::InstanceCreated);
+        assert_eq!(events[0].agent.as_deref(), Some("claude"));
+        assert_eq!(events[0].profile, Some(instance.effective_profile()));
     }
 }

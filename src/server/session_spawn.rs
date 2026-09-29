@@ -412,6 +412,10 @@ pub(crate) async fn spawn_structured_session(
             service
                 .telemetry_session_creates
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::usage::record_lifecycle(
+                &response_instance,
+                crate::usage::UsageKind::InstanceCreated,
+            );
 
             if let Some((
                 id,
