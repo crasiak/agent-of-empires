@@ -1078,6 +1078,7 @@ impl HomeView {
             let list_rect = self.diagnostics_dock(frame, chunks[0], theme);
             self.render_list(frame, list_rect, theme, ListLayout::Stacked);
             self.render_preview(frame, chunks[1], theme);
+            self.render_usage_overlay(frame, theme);
         } else {
             // Side-by-side: cap list width so the preview pane keeps its
             // usability floor (PREVIEW_MIN_WIDTH).
