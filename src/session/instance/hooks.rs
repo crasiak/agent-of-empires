@@ -1233,6 +1233,7 @@ mod tests {
             return;
         }
         let temp = tempfile::tempdir().unwrap();
+        let _claude_config_guard = EnvGuard::unset(&["CLAUDE_CONFIG_DIR"]);
         let _home = crate::session::test_support::isolate_app_dir_at(temp.path());
         acknowledge_hooks();
 
