@@ -26,8 +26,8 @@ describe("usage overlay text", () => {
     expect([20_000, 42 * min, 125 * min, 76 * 60 * min, -5_000].map(formatDurationShort)).toEqual([
       "<1m",
       "42m",
-      "2h 5m",
-      "3d 4h",
+      "2h5m",
+      "3d4h",
       "<1m",
     ]);
   });
@@ -47,11 +47,7 @@ describe("usage overlay text", () => {
       contextTurns: 17,
     };
     const created = new Date(now - 76 * 3_600_000).toISOString();
-    expect(usageLines(summary, created, now)).toEqual([
-      "clr 12 · cmp 3 (2a) · rsm 2",
-      "ctx 42m · 18p 17t",
-      "age 3d 4h",
-    ]);
+    expect(usageLines(summary, created, now)).toEqual(["clr 12 cmp 3/2a rsm 2", "42m 18p 17t age 3d4h"]);
   });
 
   it("defaults the overlay on", () => {
