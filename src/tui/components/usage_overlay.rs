@@ -134,9 +134,11 @@ pub(crate) fn render_usage_overlay(
             let pos = (x, y);
             let under_bg = buf[pos].bg;
             let under_fg = buf[pos].fg;
-            let base_bg = match under_bg {
-                Color::Rgb(..) => under_bg,
-                _ => theme.background,
+            let under_bg_is_rgb = matches!(under_bg, Color::Rgb(..));
+            let base_bg = if under_bg_is_rgb {
+                under_bg
+            } else {
+                theme.background
             };
             let backdrop = blend(base_bg, theme.background, BACKDROP_ALPHA);
             let over = scratch[pos].clone();
@@ -145,14 +147,21 @@ pub(crate) fn render_usage_overlay(
                 cell.set_symbol(over.symbol());
                 cell.modifier = over.modifier;
                 cell.fg = blend(backdrop, over.fg, INK_ALPHA);
-                cell.bg = backdrop;
+                // aoe never paints `theme.background`, so most preview cells carry
+                // the terminal's own non-Rgb background. Only overwrite bg when we
+                // know what's underneath, or the overlay paints a solid rectangle.
+                if under_bg_is_rgb {
+                    cell.bg = backdrop;
+                }
             } else {
                 let under_fg = match under_fg {
                     Color::Rgb(..) => under_fg,
                     _ => theme.text,
                 };
                 let cell = &mut buf[pos];
-                cell.bg = backdrop;
+                if under_bg_is_rgb {
+                    cell.bg = backdrop;
+                }
                 cell.fg = blend(under_fg, backdrop, BACKDROP_ALPHA);
             }
         }
@@ -278,5 +287,42 @@ mod tests {
             .expect("a digit glyph cell should be drawn");
         assert_eq!(digit.bg, backdrop);
         assert_eq!(digit.fg, blend(backdrop, theme.error, INK_ALPHA));
+    }
+
+    #[test]
+    fn overlay_leaves_a_reset_background_alone() {
+        use ratatui::backend::TestBackend;
+        let theme = Theme::default();
+        let now = Utc.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap();
+        let summary = UsageSummary {
+            resets: 7,
+            ..UsageSummary::default()
+        };
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|f| render_usage_overlay(f, f.area(), &summary, now, now, &theme))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        // A padding cell over the terminal's own (non-Rgb) background: bg must
+        // stay Reset rather than getting painted with the theme's background.
+        let padding = buf
+            .content()
+            .iter()
+            .find(|c| c.symbol() == " " && c.bg == Color::Reset && c.fg != Color::Reset)
+            .expect("a padding cell over a Reset background should be found");
+        assert_eq!(padding.bg, Color::Reset);
+        assert_eq!(
+            padding.fg,
+            blend(theme.text, theme.background, BACKDROP_ALPHA)
+        );
+        // Same for a digit glyph cell: ink still blends against theme.background,
+        // but bg is left untouched.
+        let digit = buf
+            .content()
+            .iter()
+            .find(|c| matches!(c.symbol(), "█" | "▀" | "▄"))
+            .expect("a digit glyph cell should be drawn");
+        assert_eq!(digit.bg, Color::Reset);
+        assert_eq!(digit.fg, blend(theme.background, theme.error, INK_ALPHA));
     }
 }
