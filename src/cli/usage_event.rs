@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use clap::Args;
 
-const STDIN_BYTE_CAP: u64 = 1 << 20;
+use super::hook_input::{fired_by_pane_agent, read_json};
 
 #[derive(Args)]
 pub struct UsageEventArgs {
@@ -20,9 +20,12 @@ pub async fn run(args: UsageEventArgs) -> Result<()> {
     let Ok(instance_id) = std::env::var("AOE_INSTANCE_ID") else {
         return Ok(());
     };
-    if crate::session::validate_instance_id(&instance_id).is_err()
-        || !super::extract_session_id::fired_by_pane_agent()
-    {
+    if let Err(e) = crate::session::validate_instance_id(&instance_id) {
+        tracing::debug!(target: "usage", "rejecting unsafe AOE_INSTANCE_ID: {e}");
+        return Ok(());
+    }
+    if !fired_by_pane_agent() {
+        tracing::debug!(target: "usage", "ignoring hook from a nested agent process");
         return Ok(());
     }
     let env = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
@@ -51,9 +54,7 @@ fn record<R: Read>(
     agent: Option<&str>,
     profile: Option<&str>,
 ) -> Result<bool> {
-    let mut buf = String::new();
-    stdin.take(STDIN_BYTE_CAP).read_to_string(&mut buf)?;
-    let payload: serde_json::Value = serde_json::from_str(&buf)?;
+    let payload = read_json(stdin)?;
     let Some(normalized) = crate::usage::normalize(agent.unwrap_or(""), &payload) else {
         return Ok(false);
     };
