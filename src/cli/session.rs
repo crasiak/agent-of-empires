@@ -989,6 +989,20 @@ fn build_import_instance(
     inst
 }
 
+/// Attributes an imported instance to the profile it's being imported into, so
+/// its usage lifecycle event is recorded (and gated) under that profile
+/// rather than the process-wide default.
+fn prepare_import_instance(
+    s: &crate::session::claude_import::ClaudeSessionSummary,
+    structured: bool,
+    group: &str,
+    profile: &str,
+) -> Instance {
+    let mut inst = build_import_instance(s, structured, group);
+    inst.source_profile = profile.to_string();
+    inst
+}
+
 fn apply_import_mode(
     inst: &mut Instance,
     s: &crate::session::claude_import::ClaudeSessionSummary,
@@ -1102,7 +1116,7 @@ async fn import_sessions(profile: &str, args: ImportArgs) -> Result<()> {
             if already_imported(all_instances, &s.session_id) {
                 continue;
             }
-            let inst = build_import_instance(s, structured, &group);
+            let inst = prepare_import_instance(s, structured, &group, profile);
             all_instances.push(inst.clone());
             if !inst.group_path.is_empty() {
                 let mut tree = GroupTree::new_with_groups(all_instances, groups);
@@ -3352,6 +3366,17 @@ mod import_tests {
         assert_eq!(structured.acp_session_id.as_deref(), Some("sid-1"));
         assert_eq!(structured.import_pending, Some(true));
         assert_eq!(structured.resume_intent, ResumeIntent::Default);
+    }
+
+    #[test]
+    fn prepare_import_instance_attributes_the_target_profile() {
+        let inst = prepare_import_instance(
+            &summary("abc123-def456", "/home/me/proj", Some("Fix bug")),
+            false,
+            "",
+            "work",
+        );
+        assert_eq!(inst.source_profile, "work");
     }
 
     #[test]
