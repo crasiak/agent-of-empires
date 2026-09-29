@@ -226,7 +226,11 @@ impl Instance {
         let config = crate::session::config::profile_config::resolve_config_or_warn(
             &self.effective_profile(),
         );
-        if !crate::agents::hook_install_required(agent, config.session.agent_status_hooks) {
+        if !crate::agents::hook_install_required(
+            agent,
+            config.session.agent_status_hooks,
+            config.session.usage_tracking,
+        ) {
             return Ok(());
         }
         if !host_hooks_acknowledged() {
@@ -281,7 +285,11 @@ impl Instance {
             return;
         };
         if !self.is_sandboxed()
-            && crate::agents::hook_install_required(agent, status_hooks_enabled)
+            && crate::agents::hook_install_required(
+                agent,
+                status_hooks_enabled,
+                config.session.usage_tracking,
+            )
             && !host_hooks_acknowledged()
         {
             tracing::warn!(
@@ -550,7 +558,7 @@ fn resolved_host_hook_events(
         }
     };
     if !status_hooks_enabled {
-        events.retain(|event| event.identity_field.is_some());
+        events.retain(|event| event.identity_field.is_some() || event.usage);
         for event in &mut events {
             event.status = None;
         }
@@ -684,6 +692,16 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&hooks).unwrap();
         assert!(parsed["hooks"]["PreToolUse"].is_array());
         assert!(hooks.contains("aoe-hooks"));
+    }
+
+    /// Status hooks disabled but usage tracking still on: `hooks.json` is
+    /// written with usage recorders only, no status-writer commands.
+    fn assert_aoe_codex_usage_only_hooks(path: &std::path::Path) {
+        let hooks = std::fs::read_to_string(path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&hooks).unwrap();
+        assert!(parsed["hooks"]["PreToolUse"].is_null());
+        assert!(hooks.contains("__usage-event"));
+        assert!(!hooks.contains("umask 077"), "no status writer commands");
     }
 
     fn acknowledge_hooks() {
@@ -947,20 +965,23 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn codex_hook_installer_follows_detect_as_and_profile_hook_setting() {
-        // (tool, profile config, global hooks off, expect hooks.json)
-        for (tool, profile, global_off, installed) in [
-            ("my-codex-wrapper", None, false, true),
+        // (tool, profile config, global hooks off, expect full status hooks,
+        // expect usage-only hooks)
+        for (tool, profile, global_off, full, usage_only) in [
+            ("my-codex-wrapper", None, false, true, false),
             (
                 "codex",
                 Some("[session]\nagent_status_hooks = false\n"),
                 false,
                 false,
+                true,
             ),
             (
                 "codex",
                 Some("[session]\nagent_status_hooks = true\n"),
                 true,
                 true,
+                false,
             ),
         ] {
             let tmp = tempfile::TempDir::new().unwrap();
@@ -982,8 +1003,10 @@ mod tests {
             inst.install_agent_status_hooks(crate::agents::get_agent(&inst.detect_as), None);
 
             let hooks = tmp.path().join(".codex").join("hooks.json");
-            if installed {
+            if full {
                 assert_aoe_codex_hooks(&hooks);
+            } else if usage_only {
+                assert_aoe_codex_usage_only_hooks(&hooks);
             } else {
                 assert!(!hooks.exists(), "{tool} {profile:?}");
             }

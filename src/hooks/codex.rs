@@ -59,7 +59,9 @@ pub(crate) fn install_codex_json_hooks(
         },
     };
     if codex_hooks_feature_is_disabled(&config, &config_path) {
-        return Ok(());
+        // Stale AoE entries are still cleaned up; usage hooks made `events`
+        // non-empty even though Codex's own status hooks are off.
+        return super::install_hooks(hooks_path, &[], target);
     }
     super::install_hooks(hooks_path, events, target)
 }
@@ -416,7 +418,10 @@ hooks = { PreToolUse = [{ matcher = "Bash", hooks = [{ type = "command", command
             config["hooks"]["state"]["user"]["trusted_hash"].as_str(),
             Some("keep")
         );
-        assert_eq!(text.matches("sh -c").count(), codex_events().len());
+        assert_eq!(
+            text.matches("sh -c").count(),
+            codex_events().iter().filter(|e| e.status.is_some()).count()
+        );
 
         assert!(uninstall_codex_hooks(&path).unwrap());
         let (text, _) = read_toml(&path);
@@ -453,8 +458,14 @@ hooks = { PreToolUse = [{ matcher = "Bash", hooks = [{ type = "command", command
         install_codex_hooks(&path, codex_events()).unwrap();
 
         let (text, config) = read_toml(&path);
-        for event in codex_events() {
-            assert_eq!(config["hooks"][event.name].as_array().unwrap().len(), 1);
+        for event in codex_events().iter().filter(|e| e.status.is_some()) {
+            assert_eq!(
+                config["hooks"][event.name.as_str()]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
         }
         assert_eq!(
             config["hooks"]["state"]["trusted"]["trusted_hash"].as_str(),
@@ -464,7 +475,10 @@ hooks = { PreToolUse = [{ matcher = "Bash", hooks = [{ type = "command", command
             config["projects"]["/tmp/aoe-project"]["trust_level"].as_str(),
             Some("trusted")
         );
-        assert_eq!(text.matches("sh -c").count(), codex_events().len());
+        assert_eq!(
+            text.matches("sh -c").count(),
+            codex_events().iter().filter(|e| e.status.is_some()).count()
+        );
     }
 
     #[test]
@@ -532,14 +546,23 @@ hooks = { PreToolUse = [{ matcher = "Bash", hooks = [{ type = "command", command
         });
 
         let (text, config) = read_toml(&path);
-        for event in codex_events() {
-            assert_eq!(config["hooks"][event.name].as_array().unwrap().len(), 1);
+        for event in codex_events().iter().filter(|e| e.status.is_some()) {
+            assert_eq!(
+                config["hooks"][event.name.as_str()]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
         }
         assert_eq!(
             config["projects"]["/tmp/aoe-project"]["trust_level"].as_str(),
             Some("trusted")
         );
-        assert_eq!(text.matches("sh -c").count(), codex_events().len());
+        assert_eq!(
+            text.matches("sh -c").count(),
+            codex_events().iter().filter(|e| e.status.is_some()).count()
+        );
     }
 
     #[cfg(unix)]
