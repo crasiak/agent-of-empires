@@ -1,13 +1,19 @@
 //! The session's context-reset count in big red digits, with a usage
-//! breakdown, drawn over the top-right corner of the preview pane.
+//! breakdown, drawn translucently over the top-right corner of the preview
+//! pane.
 
 use chrono::{DateTime, Duration, Utc};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 use unicode_width::UnicodeWidthStr;
 
-use crate::tui::styles::Theme;
+use crate::tui::styles::{blend, Theme};
 use crate::usage::UsageSummary;
+
+/// Opacity of the overlay's own panel color over whatever sits underneath.
+const BACKDROP_ALPHA: f32 = 0.25;
+/// Opacity of overlay glyph ink over the blended backdrop.
+const INK_ALPHA: f32 = 0.9;
 
 /// 3x5 pixel digits, one bit per pixel, top row first, left pixel highest.
 const DIGIT_PIXELS: [[u8; 5]; 10] = [
@@ -120,8 +126,41 @@ pub(crate) fn render_usage_overlay(
         .border_style(Style::default().fg(theme.error))
         .title(Span::styled(" resets ", number))
         .padding(Padding::horizontal(1));
-    frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(text).block(block), area);
+
+    // Terminals can't alpha-composite, so render the overlay into a scratch
+    // buffer and blend it into the frame buffer by hand.
+    let mut scratch = Buffer::empty(area);
+    Paragraph::new(text).block(block).render(area, &mut scratch);
+
+    let buf = frame.buffer_mut();
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            let pos = (x, y);
+            let under_bg = buf[pos].bg;
+            let under_fg = buf[pos].fg;
+            let base_bg = match under_bg {
+                Color::Rgb(..) => under_bg,
+                _ => theme.background,
+            };
+            let backdrop = blend(base_bg, theme.background, BACKDROP_ALPHA);
+            let over = scratch[pos].clone();
+            if over.symbol() != " " {
+                let cell = &mut buf[pos];
+                cell.set_symbol(over.symbol());
+                cell.modifier = over.modifier;
+                cell.fg = blend(backdrop, over.fg, INK_ALPHA);
+                cell.bg = backdrop;
+            } else {
+                let under_fg = match under_fg {
+                    Color::Rgb(..) => under_fg,
+                    _ => theme.text,
+                };
+                let cell = &mut buf[pos];
+                cell.bg = backdrop;
+                cell.fg = blend(under_fg, backdrop, BACKDROP_ALPHA);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -198,5 +237,48 @@ mod tests {
         assert!(top_right.contains("resets"), "{top_right}");
         let cramped = draw(20, 5);
         assert!(cramped.content().iter().all(|c| c.symbol() == " "));
+    }
+
+    #[test]
+    fn overlay_blends_over_the_backdrop() {
+        use ratatui::backend::TestBackend;
+        let theme = Theme::default();
+        let now = Utc.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap();
+        let summary = UsageSummary {
+            resets: 7,
+            ..UsageSummary::default()
+        };
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                let row = "x".repeat(area.width as usize);
+                let fill = Paragraph::new(vec![Line::raw(row); area.height as usize]).style(
+                    Style::default()
+                        .fg(Color::Rgb(200, 200, 200))
+                        .bg(Color::Rgb(0, 0, 0)),
+                );
+                f.render_widget(fill, area);
+                render_usage_overlay(f, area, &summary, now, now, &theme);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let backdrop = blend(Color::Rgb(0, 0, 0), theme.background, BACKDROP_ALPHA);
+        let padding = buf
+            .content()
+            .iter()
+            .find(|c| c.symbol() == "x" && c.bg == backdrop)
+            .expect("a padding cell should keep the underlying fill");
+        assert_eq!(
+            padding.fg,
+            blend(Color::Rgb(200, 200, 200), backdrop, BACKDROP_ALPHA)
+        );
+        let digit = buf
+            .content()
+            .iter()
+            .find(|c| matches!(c.symbol(), "█" | "▀" | "▄"))
+            .expect("a digit glyph cell should be drawn");
+        assert_eq!(digit.bg, backdrop);
+        assert_eq!(digit.fg, blend(backdrop, theme.error, INK_ALPHA));
     }
 }
