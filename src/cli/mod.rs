@@ -35,6 +35,7 @@ pub mod tmux;
 pub mod uninstall;
 pub mod update;
 pub mod url;
+pub mod usage_event;
 pub mod worktree;
 
 pub use definition::{command_name, Cli, Commands, CLI_COMMAND_NAMES};

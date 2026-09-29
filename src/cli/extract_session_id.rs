@@ -48,7 +48,7 @@ pub async fn run(args: ExtractSessionIdArgs) -> Result<()> {
     Ok(())
 }
 
-fn fired_by_pane_agent() -> bool {
+pub(crate) fn fired_by_pane_agent() -> bool {
     let agent_pid = std::env::var("AOE_AGENT_PID")
         .ok()
         .and_then(|pid| pid.parse().ok());

@@ -33,6 +33,7 @@ use super::tmux::TmuxCommands;
 use super::uninstall::UninstallArgs;
 use super::update::UpdateArgs;
 use super::url::UrlArgs;
+use super::usage_event::UsageEventArgs;
 use super::worktree::WorktreeCommands;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -237,6 +238,11 @@ pub enum Commands {
     #[command(name = "__extract-session-id", hide = true)]
     ExtractSessionId(ExtractSessionIdArgs),
 
+    /// Internal: record one agent hook event in the usage log. Spawned by
+    /// host hooks and the Pi extension. Hidden from help.
+    #[command(name = "__usage-event", hide = true)]
+    UsageEvent(UsageEventArgs),
+
     /// Uninstall Agent of Empires
     Uninstall(UninstallArgs),
 
@@ -328,6 +334,7 @@ pub fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Acp { .. } => "acp",
         Commands::AcpRunner(_) => return None,
         Commands::ExtractSessionId(_) => return None,
+        Commands::UsageEvent(_) => return None,
         Commands::Uninstall(_) => "uninstall",
         Commands::Update(_) => "update",
         Commands::Migrate => "migrate",
