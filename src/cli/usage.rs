@@ -1,0 +1,229 @@
+//! `aoe usage`: session usage from the local usage log.
+
+use std::collections::HashMap;
+
+use anyhow::Result;
+use chrono::Utc;
+use clap::{Args, Subcommand};
+use serde::Serialize;
+
+use crate::session::{Instance, Storage};
+use crate::usage::{build_report, UsageEvent, UsageReport, UsageStore, UsageSummary};
+
+#[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct UsageArgs {
+    #[command(subcommand)]
+    command: Option<UsageCommands>,
+    /// Window to summarize, like `30d`, `12h`, or `90m`.
+    #[arg(long, default_value = "30d")]
+    since: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand)]
+pub enum UsageCommands {
+    /// One session's usage summary and its latest events.
+    Show {
+        /// Session id, id prefix, or title.
+        session: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Raw usage events as JSON lines, oldest first (the Ledger feed).
+    Export {
+        /// Only events with a larger id.
+        #[arg(long, default_value_t = 0)]
+        after_id: i64,
+        #[arg(long, default_value_t = 10_000)]
+        limit: usize,
+    },
+}
+
+pub async fn run(args: UsageArgs) -> Result<()> {
+    let store = UsageStore::open_default()?;
+    match args.command {
+        None => report(&store, &args.since, args.json),
+        Some(UsageCommands::Show { session, json }) => show(&store, &session, json),
+        Some(UsageCommands::Export { after_id, limit }) => {
+            for event in store.events_after(after_id, limit)? {
+                println!("{}", serde_json::to_string(&event)?);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// `30d`, `12h`, `90m` into a duration.
+fn parse_since(value: &str) -> Result<chrono::Duration> {
+    let (number, unit) = value.split_at(value.len().saturating_sub(1));
+    let n: i64 = number
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--since must look like 30d, 12h, or 90m"))?;
+    match unit {
+        "d" => Ok(chrono::Duration::days(n)),
+        "h" => Ok(chrono::Duration::hours(n)),
+        "m" => Ok(chrono::Duration::minutes(n)),
+        _ => anyhow::bail!("--since must look like 30d, 12h, or 90m"),
+    }
+}
+
+fn report(store: &UsageStore, since: &str, json: bool) -> Result<()> {
+    let events = store.events_since(Utc::now() - parse_since(since)?)?;
+    let report = build_report(&events);
+    if json {
+        return super::output::print_json(&report);
+    }
+    print_report(&report)
+}
+
+fn fmt_median(value: Option<f64>) -> String {
+    value.map_or_else(|| "-".to_string(), |v| format!("{v:.1}"))
+}
+
+fn print_report(report: &UsageReport) -> Result<()> {
+    println!("Instances:   {}", report.instances);
+    println!("Contexts:    {}", report.contexts);
+    println!("Clears:      {}", report.clears);
+    println!(
+        "Compactions: {} (auto {}, manual {})",
+        report.compactions, report.compactions_auto, report.compactions_manual
+    );
+    println!("Resumes:     {}", report.resumes);
+    println!("Prompts:     {}", report.prompts);
+    println!(
+        "Turns:       {} (errors {})",
+        report.turns, report.turn_errors
+    );
+    println!();
+    println!(
+        "Median prompts/context: {}",
+        fmt_median(report.median_prompts_per_context)
+    );
+    println!(
+        "Median context minutes: {}",
+        fmt_median(report.median_context_minutes)
+    );
+    println!(
+        "Median resets/instance:  {}",
+        fmt_median(report.median_resets_per_instance)
+    );
+    println!("Max resets/instance:    {}", report.max_resets_per_instance);
+
+    if !report.top.is_empty() {
+        let titles = instance_titles();
+        println!();
+        println!("Top resets:");
+        for (id, resets) in &report.top {
+            let title = titles.get(id).map(String::as_str).unwrap_or(id);
+            println!("  {resets:>3}  {title} ({})", super::truncate_id(id, 8));
+        }
+    }
+    Ok(())
+}
+
+/// Every session's title across all profiles, best-effort: a profile that
+/// fails to load is skipped rather than failing the whole report.
+fn instance_titles() -> HashMap<String, String> {
+    let mut titles = HashMap::new();
+    let Ok(profiles) = crate::session::list_profiles() else {
+        return titles;
+    };
+    for profile in &profiles {
+        let Ok(storage) = Storage::open_unwatched(profile) else {
+            continue;
+        };
+        let Ok((instances, _)) = storage.load_with_groups() else {
+            continue;
+        };
+        for inst in instances {
+            titles.insert(inst.id, inst.title);
+        }
+    }
+    titles
+}
+
+fn all_instances() -> Result<Vec<Instance>> {
+    let mut all = Vec::new();
+    for profile in crate::session::list_profiles()? {
+        let storage = Storage::open_unwatched(&profile)?;
+        let (instances, _) = storage.load_with_groups()?;
+        all.extend(instances);
+    }
+    Ok(all)
+}
+
+#[derive(Serialize)]
+struct ShowJson<'a> {
+    session: &'a str,
+    title: &'a str,
+    summary: &'a UsageSummary,
+    events: &'a [UsageEvent],
+}
+
+fn show(store: &UsageStore, session: &str, json: bool) -> Result<()> {
+    let instances = all_instances()?;
+    let inst = super::resolve_session(session, &instances)?;
+    let summary = store.summary_for(&inst.id)?;
+    let events = store.events_for_instance(&inst.id)?;
+    let start = events.len().saturating_sub(20);
+    let events = &events[start..];
+
+    if json {
+        return super::output::print_json(&ShowJson {
+            session: &inst.id,
+            title: &inst.title,
+            summary: &summary,
+            events,
+        });
+    }
+
+    println!("Session: {} ({})", inst.title, inst.id);
+    println!("resets: {}", summary.resets);
+    println!("  clears: {}", summary.clears);
+    println!(
+        "  compactions: {} (auto {}, manual {})",
+        summary.compactions, summary.compactions_auto, summary.compactions_manual
+    );
+    println!("  resumes: {}", summary.resumes);
+    println!("prompts: {}", summary.prompts);
+    println!("turns: {} (errors {})", summary.turns, summary.turn_errors);
+    if let Some(at) = summary.context_started_at {
+        println!(
+            "context started: {at} ({}p {}t)",
+            summary.context_prompts, summary.context_turns
+        );
+    }
+    if let Some(at) = summary.tracked_since {
+        println!("tracked since: {at}");
+    }
+    if let Some(at) = summary.last_event_at {
+        println!("last event: {at}");
+    }
+    println!();
+    for event in events {
+        println!(
+            "{}  {}  {}  {}",
+            event.occurred_at,
+            event.kind.as_str(),
+            event.detail.as_deref().unwrap_or("-"),
+            event.agent.as_deref().unwrap_or("-"),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_since_accepts_days_hours_and_minutes() {
+        assert_eq!(parse_since("30d").unwrap(), chrono::Duration::days(30));
+        assert_eq!(parse_since("12h").unwrap(), chrono::Duration::hours(12));
+        assert_eq!(parse_since("90m").unwrap(), chrono::Duration::minutes(90));
+        assert!(parse_since("x").is_err());
+        assert!(parse_since("5w").is_err());
+    }
+}

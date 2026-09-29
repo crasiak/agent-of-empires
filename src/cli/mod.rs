@@ -36,6 +36,7 @@ pub mod tmux;
 pub mod uninstall;
 pub mod update;
 pub mod url;
+pub mod usage;
 pub mod usage_event;
 pub mod worktree;
 

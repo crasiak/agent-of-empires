@@ -3,6 +3,7 @@
 //! format are the Ledger contract in `docs/development/usage-events.md`.
 
 mod normalize;
+mod report;
 mod store;
 mod summary;
 
@@ -12,6 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 pub use normalize::{normalize, Normalized};
+pub use report::{build_report, UsageReport};
 pub use store::UsageStore;
 pub use summary::{is_context_boundary, summarize, UsageSummary};
 

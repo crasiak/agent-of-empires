@@ -33,6 +33,7 @@ use super::tmux::TmuxCommands;
 use super::uninstall::UninstallArgs;
 use super::update::UpdateArgs;
 use super::url::UrlArgs;
+use super::usage::UsageArgs;
 use super::usage_event::UsageEventArgs;
 use super::worktree::WorktreeCommands;
 
@@ -107,6 +108,9 @@ pub enum Commands {
 
     /// Show session status summary
     Status(StatusArgs),
+
+    /// Session usage: context resets, prompts, and turns from the local usage log
+    Usage(UsageArgs),
 
     /// Force-stop everything aoe is running: the serve daemon, all agent
     /// workers, and all aoe tmux sessions. Destructive and unprompted.
@@ -275,6 +279,7 @@ pub const CLI_COMMAND_NAMES: &[&str] = &[
     "remove",
     "send",
     "status",
+    "usage",
     "killall",
     "session",
     "group",
@@ -312,6 +317,7 @@ pub fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Remove(_) => "remove",
         Commands::Send(_) => "send",
         Commands::Status(_) => "status",
+        Commands::Usage(_) => "usage",
         Commands::Killall(_) => "killall",
         Commands::Stop { .. } => return None,
         Commands::Session { .. } => "session",
