@@ -170,6 +170,9 @@ mod tests {
         let db = dir.path().join("usage.db");
         let mut instance = crate::session::Instance::new("t", "/tmp/project");
         instance.tool = "claude".into();
+        // Pin an explicit profile so this test doesn't race other tests mutating the
+        // process-global default profile that `effective_profile()` falls back to.
+        instance.source_profile = "lifecycle-busy-reservation".into();
         record_lifecycle_at(&db, &instance, UsageKind::InstanceCreated, true).unwrap();
         record_lifecycle_at(&db, &instance, UsageKind::InstanceDeleted, false).unwrap();
         let events = UsageStore::open(&db)
@@ -179,6 +182,9 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, UsageKind::InstanceCreated);
         assert_eq!(events[0].agent.as_deref(), Some("claude"));
-        assert_eq!(events[0].profile, Some(instance.effective_profile()));
+        assert_eq!(
+            events[0].profile.as_deref(),
+            Some("lifecycle-busy-reservation")
+        );
     }
 }
