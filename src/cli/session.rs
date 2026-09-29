@@ -1096,23 +1096,27 @@ async fn import_sessions(profile: &str, args: ImportArgs) -> Result<()> {
 
     let group = args.group.clone().unwrap_or_default();
     let storage = Storage::open_unwatched(profile)?;
-    let created_ids = storage.update(|all_instances, groups| {
-        let mut ids = Vec::new();
+    let created = storage.update(|all_instances, groups| {
+        let mut created = Vec::new();
         for s in &to_import {
             if already_imported(all_instances, &s.session_id) {
                 continue;
             }
             let inst = build_import_instance(s, structured, &group);
-            ids.push(inst.id.clone());
             all_instances.push(inst.clone());
             if !inst.group_path.is_empty() {
                 let mut tree = GroupTree::new_with_groups(all_instances, groups);
                 tree.create_group(&inst.group_path);
                 *groups = tree.get_all_groups();
             }
+            created.push(inst);
         }
-        Ok(ids)
+        Ok(created)
     })?;
+    for inst in &created {
+        crate::usage::record_lifecycle(inst, crate::usage::UsageKind::InstanceCreated);
+    }
+    let created_ids: Vec<String> = created.into_iter().map(|inst| inst.id).collect();
 
     println!("✓ Imported {} session(s).", created_ids.len());
 

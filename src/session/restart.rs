@@ -76,9 +76,6 @@ pub fn perform_restart(request: RestartRequest) -> RestartResult {
     if should_wake && !wake_message.is_empty() {
         spawn_wake_worker(session_id.clone(), title, tool, wake_message);
     }
-    if should_wake {
-        crate::usage::record_lifecycle(&instance, crate::usage::UsageKind::InstanceRestarted);
-    }
 
     RestartResult {
         session_id,
