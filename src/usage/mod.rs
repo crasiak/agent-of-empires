@@ -9,7 +9,7 @@ mod summary;
 
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 
 pub use normalize::{normalize, Normalized};
@@ -66,6 +66,7 @@ impl UsageKind {
 pub struct UsageEvent {
     /// Store-assigned and monotonic; 0 before insert.
     pub id: i64,
+    #[serde(serialize_with = "serialize_occurred_at")]
     pub occurred_at: DateTime<Utc>,
     pub instance_id: String,
     pub profile: Option<String>,
@@ -73,6 +74,20 @@ pub struct UsageEvent {
     pub kind: UsageKind,
     pub detail: Option<String>,
     pub agent_session_id: Option<String>,
+}
+
+/// RFC 3339 UTC with milliseconds, the contract's timestamp format
+/// (`docs/development/usage-events.md`); chrono's default serde impl drops
+/// the fraction on an exact second.
+pub(crate) fn format_occurred_at(at: &DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn serialize_occurred_at<S: serde::Serializer>(
+    at: &DateTime<Utc>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&format_occurred_at(at))
 }
 
 pub fn db_path() -> anyhow::Result<PathBuf> {
@@ -117,6 +132,25 @@ fn record_lifecycle_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The export contract promises milliseconds always; chrono's default
+    /// serde impl drops the fraction on an exact second (M2).
+    #[test]
+    fn occurred_at_serializes_with_milliseconds_on_an_exact_second() {
+        use chrono::TimeZone;
+        let event = UsageEvent {
+            id: 1,
+            occurred_at: Utc.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap(),
+            instance_id: "inst".into(),
+            profile: None,
+            agent: None,
+            kind: UsageKind::Prompt,
+            detail: None,
+            agent_session_id: None,
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["occurred_at"], "2026-09-29T12:00:00.000Z");
+    }
 
     #[test]
     fn kinds_round_trip_through_their_names() {

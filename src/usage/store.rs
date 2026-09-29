@@ -4,10 +4,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
-use super::{summarize, UsageEvent, UsageKind, UsageSummary};
+use super::{format_occurred_at, summarize, UsageEvent, UsageKind, UsageSummary};
 
 const SCHEMA_VERSION: &str = "1";
 
@@ -63,9 +63,7 @@ impl UsageStore {
                  (occurred_at, instance_id, profile, agent, kind, detail, agent_session_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
-                event
-                    .occurred_at
-                    .to_rfc3339_opts(SecondsFormat::Millis, true),
+                format_occurred_at(&event.occurred_at),
                 event.instance_id,
                 event.profile,
                 event.agent,
@@ -96,7 +94,7 @@ impl UsageStore {
     pub fn events_since(&self, since: DateTime<Utc>) -> Result<Vec<UsageEvent>> {
         self.query(
             "WHERE occurred_at >= ?1 ORDER BY id",
-            params![since.to_rfc3339_opts(SecondsFormat::Millis, true)],
+            params![format_occurred_at(&since)],
         )
     }
 
