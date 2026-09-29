@@ -5,6 +5,11 @@ use axum::response::Response;
 use super::*;
 
 pub async fn session_usage(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    // CityHall hides the terminal view the usage overlay sits on, so this
+    // read must be closed too.
+    if let Some(resp) = crate::server::api::cityhall_block(&state) {
+        return resp;
+    }
     let Some(instance) = find_instance(&state, &id).await else {
         return bare_not_found();
     };

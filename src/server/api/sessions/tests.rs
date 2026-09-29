@@ -3466,3 +3466,15 @@ async fn session_usage_reports_summary_and_404_for_unknown_session() {
         .into_response();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// CityHall hides the terminal view the usage overlay sits on, so the read
+// underneath it must be closed too, matching /output's cityhall_block gate.
+#[tokio::test]
+async fn session_usage_is_blocked_in_cityhall_mode() {
+    let inst = Instance::new("usage-overlay-cityhall", "/tmp/usage-overlay-cityhall");
+    let id = inst.id.clone();
+    let state = crate::server::test_support::build_test_app_state_cityhall(vec![inst]);
+
+    let resp = session_usage(State(state), Path(id)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
