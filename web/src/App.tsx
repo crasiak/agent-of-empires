@@ -100,6 +100,7 @@ import { parseSessionRowTagMode, SessionRowTagContext, type SessionRowTagMode } 
 import { parseSessionColorsEnabled, SessionColorsContext } from "./lib/sessionColors";
 import { fetchActiveProfileSettings } from "./lib/appSettings";
 import { parseSystemHealthEnabled, SystemHealthEnabledContext } from "./lib/systemHealth";
+import { parseUsageOverlayEnabled, UsageOverlayEnabledContext } from "./lib/usage";
 import { toastBus, reportError } from "./lib/toastBus";
 import { isAbsolutePath, resolveToRepoRelative, type FileRef } from "./lib/fileRef";
 import { NAVIGATE_EVENT, OPEN_SESSION_EVENT } from "./lib/sessionRoute";
@@ -189,6 +190,7 @@ export default function App() {
   const [sessionRowTagMode, setSessionRowTagMode] = useState<SessionRowTagMode>("branch");
   const [sessionColorsEnabled, setSessionColorsEnabled] = useState(true);
   const [systemHealthEnabled, setSystemHealthEnabled] = useState(false);
+  const [usageOverlayEnabled, setUsageOverlayEnabled] = useState(true);
 
   const applyAppSettings = useCallback((settings: Record<string, unknown> | null | undefined) => {
     setIdleDecayWindowMs(parseIdleDecayWindowMs(settings));
@@ -196,6 +198,7 @@ export default function App() {
     setSessionRowTagMode(parseSessionRowTagMode(settings));
     setSessionColorsEnabled(parseSessionColorsEnabled(settings));
     setSystemHealthEnabled(parseSystemHealthEnabled(settings));
+    setUsageOverlayEnabled(parseUsageOverlayEnabled(settings));
   }, []);
 
   const refreshAppSettings = useCallback(async () => {
@@ -282,18 +285,20 @@ export default function App() {
         <SessionRowTagContext.Provider value={sessionRowTagMode}>
           <SessionColorsContext.Provider value={sessionColorsEnabled}>
             <SystemHealthEnabledContext.Provider value={systemHealthEnabled}>
-              {/* PluginUiProvider must sit above AppContent: AppContent itself reads
-                the plugin UI snapshot (usePluginPanes), so the provider can't live
-                inside its own return. */}
-              <PluginUiProvider>
-                <AppContent
-                  loginRequired={loginRequired}
-                  onLogout={handleLogout}
-                  onSettingsRefresh={refreshAppSettings}
-                  resolvedTheme={resolvedTheme}
-                />
-              </PluginUiProvider>
-              <ElevationPrompt />
+              <UsageOverlayEnabledContext.Provider value={usageOverlayEnabled}>
+                {/* PluginUiProvider must sit above AppContent: AppContent itself reads
+                  the plugin UI snapshot (usePluginPanes), so the provider can't live
+                  inside its own return. */}
+                <PluginUiProvider>
+                  <AppContent
+                    loginRequired={loginRequired}
+                    onLogout={handleLogout}
+                    onSettingsRefresh={refreshAppSettings}
+                    resolvedTheme={resolvedTheme}
+                  />
+                </PluginUiProvider>
+                <ElevationPrompt />
+              </UsageOverlayEnabledContext.Provider>
             </SystemHealthEnabledContext.Provider>
           </SessionColorsContext.Provider>
         </SessionRowTagContext.Provider>
