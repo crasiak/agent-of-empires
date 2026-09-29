@@ -17,6 +17,7 @@ const base: UsageSummary = {
   contextTurns: 0,
   trackedSince: null,
   lastEventAt: null,
+  tracked: false,
 };
 
 describe("usage overlay text", () => {

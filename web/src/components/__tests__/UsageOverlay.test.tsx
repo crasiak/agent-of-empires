@@ -36,6 +36,7 @@ function summary(overrides: Partial<UsageSummary> = {}): UsageSummary {
     contextTurns: 3,
     trackedSince: "2026-09-28T00:00:00Z",
     lastEventAt: "2026-09-29T11:59:00Z",
+    tracked: true,
     ...overrides,
   };
 }
@@ -70,5 +71,18 @@ describe("UsageOverlay", () => {
 
     expect(screen.queryByTestId("usage-overlay")).toBeNull();
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("renders nothing for a lifecycle-only session", async () => {
+    mockFetch.mockResolvedValue(summary({ tracked: false }));
+
+    render(
+      <UsageOverlayEnabledContext.Provider value={true}>
+        <UsageOverlay session={session} />
+      </UsageOverlayEnabledContext.Provider>,
+    );
+
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalled());
+    expect(screen.queryByTestId("usage-overlay")).toBeNull();
   });
 });

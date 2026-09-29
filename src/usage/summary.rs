@@ -24,14 +24,18 @@ pub struct UsageSummary {
     pub context_turns: u32,
     pub tracked_since: Option<DateTime<Utc>>,
     pub last_event_at: Option<DateTime<Utc>>,
+    /// True once any agent-sourced event (as opposed to lifecycle-only rows)
+    /// has been seen, so lifecycle-only sessions don't show a permanent 0.
+    pub tracked: bool,
 }
 
 /// A compaction logs both `compact` and `context_start/compact`; only the
-/// former opens a context, so the pair counts once.
+/// former opens a context, so the pair counts once. A `context_start` with
+/// detail `reload` is Pi reloading the same conversation, not a new one.
 pub fn is_context_boundary(event: &UsageEvent) -> bool {
     match event.kind {
         UsageKind::Compact => true,
-        UsageKind::ContextStart => event.detail.as_deref() != Some("compact"),
+        UsageKind::ContextStart => !matches!(event.detail.as_deref(), Some("compact" | "reload")),
         _ => false,
     }
 }
@@ -42,6 +46,16 @@ pub fn summarize(events: &[UsageEvent]) -> UsageSummary {
     for event in events {
         summary.tracked_since.get_or_insert(event.occurred_at);
         summary.last_event_at = Some(event.occurred_at);
+        if matches!(
+            event.kind,
+            UsageKind::ContextStart
+                | UsageKind::ContextEnd
+                | UsageKind::Compact
+                | UsageKind::Prompt
+                | UsageKind::TurnEnd
+        ) {
+            summary.tracked = true;
+        }
         if is_context_boundary(event) {
             summary.context_started_at = Some(event.occurred_at);
             summary.context_prompts = 0;
@@ -50,7 +64,7 @@ pub fn summarize(events: &[UsageEvent]) -> UsageSummary {
         match event.kind {
             UsageKind::ContextStart => match event.detail.as_deref() {
                 Some("clear") => summary.clears += 1,
-                Some("compact") => {}
+                Some("compact" | "reload") => {}
                 _ => starts += 1,
             },
             UsageKind::Compact => {
@@ -141,5 +155,41 @@ pub(crate) mod tests {
     fn a_first_seen_resume_is_not_a_reset() {
         let s = summarize(&[ev(0, UsageKind::ContextStart, Some("resume"))]);
         assert_eq!((s.resumes, s.resets), (0, 0));
+    }
+
+    #[test]
+    fn lifecycle_only_events_are_untracked() {
+        use UsageKind::*;
+        let s = summarize(&[
+            ev(0, InstanceCreated, None),
+            ev(1, InstanceRestarted, None),
+            ev(2, InstanceDeleted, None),
+        ]);
+        assert!(!s.tracked);
+        assert!(s.last_event_at.is_some());
+    }
+
+    #[test]
+    fn one_agent_event_marks_the_session_tracked() {
+        let s = summarize(&[
+            ev(0, UsageKind::InstanceCreated, None),
+            ev(1, UsageKind::Prompt, None),
+        ]);
+        assert!(s.tracked);
+    }
+
+    #[test]
+    fn pi_reload_is_not_a_boundary_or_a_resume() {
+        use UsageKind::*;
+        let events = vec![
+            ev(0, ContextStart, Some("startup")),
+            ev(1, Prompt, None),
+            ev(2, ContextStart, Some("reload")),
+            ev(3, Prompt, None),
+        ];
+        let s = summarize(&events);
+        assert_eq!((s.resumes, s.resets), (0, 0));
+        assert_eq!(s.context_prompts, 2);
+        assert_eq!(s.context_started_at, Some(events[0].occurred_at));
     }
 }

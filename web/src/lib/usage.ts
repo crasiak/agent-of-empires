@@ -16,6 +16,7 @@ export interface UsageSummary {
   contextTurns: number;
   trackedSince: string | null;
   lastEventAt: string | null;
+  tracked: boolean;
 }
 
 /** On by default, matching `session.show_usage_overlay`. */

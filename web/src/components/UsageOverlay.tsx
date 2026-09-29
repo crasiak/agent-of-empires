@@ -32,10 +32,10 @@ export function UsageOverlay({ session }: { session: SessionResponse }) {
     };
   }, [enabled, session.id]);
 
-  if (!enabled || !summary?.lastEventAt) return null;
+  if (!enabled || !summary?.tracked) return null;
   return (
     <div
-      className="pointer-events-none absolute top-2 right-3 z-10 rounded-md bg-surface-900/80 px-3 py-2 text-right"
+      className="pointer-events-none absolute top-2 right-3 z-10 hidden rounded-md bg-surface-900/80 px-3 py-2 text-right sm:block"
       data-testid="usage-overlay"
       title="Context resets: clears + compactions + resumes"
     >

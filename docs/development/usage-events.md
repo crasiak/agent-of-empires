@@ -42,6 +42,7 @@ additive only: new kinds, new detail values, new nullable columns.
 
 A compaction logs both `compact` and `context_start` with detail `compact`.
 Count compactions and context boundaries from `compact` only.
+A `context_start` with detail `reload` (Pi reloading the same conversation) is not a new context.
 
 Sandboxed sessions record lifecycle events only. Sessions launched through a
 launcher that renders its own agent settings (for example Harness Ledger

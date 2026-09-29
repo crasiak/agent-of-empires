@@ -2765,7 +2765,7 @@ impl HomeView {
         let Some((id, summary)) = &self.usage_summary else {
             return;
         };
-        if id != selected || summary.last_event_at.is_none() {
+        if id != selected || !summary.tracked {
             return;
         }
         let Some(instance) = self.get_instance(selected) else {
