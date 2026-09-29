@@ -58,8 +58,8 @@ pub(crate) fn format_duration_short(d: Duration) -> String {
     match minutes {
         m if m < 1 => "<1m".to_string(),
         m if m < 60 => format!("{m}m"),
-        m if m < 24 * 60 => format!("{}h {}m", m / 60, m % 60),
-        m => format!("{}d {}h", m / (24 * 60), (m / 60) % 24),
+        m if m < 24 * 60 => format!("{}h{}m", m / 60, m % 60),
+        m => format!("{}d{}h", m / (24 * 60), (m / 60) % 24),
     }
 }
 
@@ -74,14 +74,15 @@ pub(crate) fn overlay_lines(
         .unwrap_or_else(|| "?".to_string());
     vec![
         format!(
-            "clr {} · cmp {} ({}a) · rsm {}",
+            "clr {} cmp {}/{}a rsm {}",
             summary.clears, summary.compactions, summary.compactions_auto, summary.resumes
         ),
         format!(
-            "ctx {context_age} · {}p {}t",
-            summary.context_prompts, summary.context_turns
+            "{context_age} {}p {}t age {}",
+            summary.context_prompts,
+            summary.context_turns,
+            format_duration_short(now - created_at)
         ),
-        format!("age {}", format_duration_short(now - created_at)),
     ]
 }
 
@@ -96,14 +97,13 @@ pub(crate) fn render_usage_overlay(
 ) {
     let digits = big_digits(summary.resets);
     let lines = overlay_lines(summary, created_at, now);
-    let content_width = digits
+    let width = digits
         .iter()
         .chain(lines.iter())
         .map(|line| line.width())
         .max()
         .unwrap_or(0) as u16;
-    let width = content_width + 4;
-    let height = (digits.len() + lines.len()) as u16 + 2;
+    let height = (digits.len() + lines.len()) as u16;
     if pane.width < width + 10 || pane.height < height + 2 {
         return;
     }
@@ -120,17 +120,13 @@ pub(crate) fn render_usage_overlay(
         .map(|row| Line::styled(row, number))
         .chain(lines.into_iter().map(|row| Line::styled(row, detail)))
         .collect();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.error))
-        .title(Span::styled(" resets ", number))
-        .padding(Padding::horizontal(1));
 
     // Terminals can't alpha-composite, so render the overlay into a scratch
     // buffer and blend it into the frame buffer by hand.
     let mut scratch = Buffer::empty(area);
-    Paragraph::new(text).block(block).render(area, &mut scratch);
+    Paragraph::new(text)
+        .alignment(Alignment::Right)
+        .render(area, &mut scratch);
 
     let buf = frame.buffer_mut();
     for y in area.y..area.bottom() {
@@ -180,8 +176,8 @@ mod tests {
         let cases = [
             (Duration::seconds(20), "<1m"),
             (Duration::minutes(42), "42m"),
-            (Duration::minutes(125), "2h 5m"),
-            (Duration::hours(76), "3d 4h"),
+            (Duration::minutes(125), "2h5m"),
+            (Duration::hours(76), "3d4h"),
             (Duration::seconds(-5), "<1m"),
         ];
         for (d, want) in cases {
@@ -207,9 +203,8 @@ mod tests {
         assert_eq!(
             overlay_lines(&summary, now - Duration::hours(76), now),
             vec![
-                "clr 12 · cmp 3 (2a) · rsm 2".to_string(),
-                "ctx 42m · 18p 17t".to_string(),
-                "age 3d 4h".to_string(),
+                "clr 12 cmp 3/2a rsm 2".to_string(),
+                "42m 18p 17t age 3d4h".to_string(),
             ]
         );
     }
@@ -234,7 +229,10 @@ mod tests {
         let top_right: String = (40..80)
             .map(|x| wide[(x, 0)].symbol().to_string())
             .collect();
-        assert!(top_right.contains("resets"), "{top_right}");
+        assert!(
+            top_right.contains('█') || top_right.contains('▀') || top_right.contains('▄'),
+            "{top_right}"
+        );
         let cramped = draw(20, 5);
         assert!(cramped.content().iter().all(|c| c.symbol() == " "));
     }

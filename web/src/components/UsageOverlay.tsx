@@ -35,13 +35,13 @@ export function UsageOverlay({ session }: { session: SessionResponse }) {
   if (!enabled || !summary?.tracked) return null;
   return (
     <div
-      className="pointer-events-none absolute top-2 right-3 z-10 hidden rounded-md bg-surface-900/25 px-3 py-2 text-right sm:block"
+      className="pointer-events-none absolute top-2 right-3 z-10 hidden rounded-md bg-surface-900/25 px-2 py-1 text-right sm:block"
       data-testid="usage-overlay"
       title="Context resets: clears + compactions + resumes"
     >
-      <div className="text-5xl font-black leading-none text-status-error tabular-nums opacity-90">{summary.resets}</div>
+      <div className="text-3xl font-black leading-none text-status-error tabular-nums opacity-90">{summary.resets}</div>
       {currentUsageLines(summary, session.created_at).map((line) => (
-        <div key={line} className="mt-1 font-mono text-[11px] text-text-secondary opacity-90">
+        <div key={line} className="mt-1 font-mono text-[10px] text-text-secondary opacity-90">
           {line}
         </div>
       ))}
