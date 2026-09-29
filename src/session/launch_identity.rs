@@ -78,8 +78,8 @@ impl LaunchIdentity {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            matches!(self.agent.as_str(), "claude" | "codex"),
-            "agent must be claude or codex"
+            matches!(self.agent.as_str(), "claude" | "codex" | "pi"),
+            "agent must be claude, codex or pi"
         );
         anyhow::ensure!(
             self.profile.len() <= 128 && !self.profile.chars().any(char::is_control),
@@ -157,6 +157,43 @@ impl crate::session::Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_launch_reports_are_validated_and_pane_scoped() {
+        use clap::Parser;
+        let argv = [
+            "aoe",
+            "session",
+            "report-launch",
+            "--agent",
+            "pi",
+            "--account",
+            "personal",
+            "--launcher",
+            "ledger-headroom",
+            "--launch-profile",
+            "personal-oss",
+        ];
+        assert!(crate::cli::Cli::try_parse_from(argv).is_ok());
+        let mut report = LaunchReport {
+            instance_id: "1234567890abcdef".into(),
+            pane_id: "%17".into(),
+            identity: LaunchIdentity {
+                agent: "pi".into(),
+                account: LaunchAccount::Personal,
+                launcher: Launcher::LedgerHeadroom,
+                profile: "personal-oss".into(),
+            },
+        };
+        let encoded = report.encode().unwrap();
+        assert_eq!(LaunchReport::decode(&encoded, "%17"), Some(report.clone()));
+        assert_eq!(LaunchReport::decode(&encoded, "%18"), None);
+        report.identity.agent = "other".into();
+        assert!(report.encode().is_err());
+        let mut invalid_argv = argv;
+        invalid_argv[4] = "other";
+        assert!(crate::cli::Cli::try_parse_from(invalid_argv).is_err());
+    }
 
     #[test]
     fn reports_require_explicit_identity_and_the_original_pane() {
