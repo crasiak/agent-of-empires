@@ -1057,6 +1057,7 @@ impl HomeView {
             let strip_col = self.diagnostics_dock(frame, strip_area, theme);
             self.render_collapsed_strip(frame, strip_col, theme);
             self.render_preview(frame, preview_area, theme);
+            self.render_usage_overlay(frame, theme);
         } else if available_width < responsive::STACKED_BREAKPOINT {
             let main_height = content_area.height;
             let list_height = responsive::stacked_list_height(main_height);
@@ -1101,6 +1102,7 @@ impl HomeView {
             let layout = ListLayout::Horizontal(self.sidebar_position);
             self.render_list(frame, list_rect, theme, layout);
             self.render_preview(frame, preview_area, theme);
+            self.render_usage_overlay(frame, theme);
         }
         self.render_status_bar(frame, main_chunks[1], theme);
 
@@ -2748,6 +2750,34 @@ impl HomeView {
     }
     fn active_captured_lines(&self) -> usize {
         self.active_preview_cache().captured_lines
+    }
+
+    /// Draws the reset counter over the preview's top-right corner while a
+    /// summary for the selected session is loaded.
+    fn render_usage_overlay(&self, frame: &mut Frame, theme: &Theme) {
+        if !self.show_usage_overlay || self.system_health_open {
+            return;
+        }
+        let Some(selected) = self.selected_session.as_deref() else {
+            return;
+        };
+        let Some((id, summary)) = &self.usage_summary else {
+            return;
+        };
+        if id != selected || summary.last_event_at.is_none() {
+            return;
+        }
+        let Some(instance) = self.get_instance(selected) else {
+            return;
+        };
+        crate::tui::components::usage_overlay::render_usage_overlay(
+            frame,
+            self.preview_pane_area,
+            summary,
+            instance.created_at,
+            chrono::Utc::now(),
+            theme,
+        );
     }
 
     /// Paint the preview and refresh geometry used by selection and live-send.

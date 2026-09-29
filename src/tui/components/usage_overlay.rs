@@ -1,0 +1,202 @@
+//! The session's context-reset count in big red digits, with a usage
+//! breakdown, drawn over the top-right corner of the preview pane.
+
+use chrono::{DateTime, Duration, Utc};
+use ratatui::prelude::*;
+use ratatui::widgets::*;
+use unicode_width::UnicodeWidthStr;
+
+use crate::tui::styles::Theme;
+use crate::usage::UsageSummary;
+
+/// 3x5 pixel digits, one bit per pixel, top row first, left pixel highest.
+const DIGIT_PIXELS: [[u8; 5]; 10] = [
+    [0b111, 0b101, 0b101, 0b101, 0b111],
+    [0b010, 0b110, 0b010, 0b010, 0b111],
+    [0b111, 0b001, 0b111, 0b100, 0b111],
+    [0b111, 0b001, 0b111, 0b001, 0b111],
+    [0b101, 0b101, 0b111, 0b001, 0b001],
+    [0b111, 0b100, 0b111, 0b001, 0b111],
+    [0b111, 0b100, 0b111, 0b101, 0b111],
+    [0b111, 0b001, 0b001, 0b001, 0b001],
+    [0b111, 0b101, 0b111, 0b101, 0b111],
+    [0b111, 0b101, 0b111, 0b001, 0b111],
+];
+
+pub(crate) fn big_digits(n: u32) -> [String; 3] {
+    let digits: Vec<usize> = n.to_string().bytes().map(|b| (b - b'0') as usize).collect();
+    let pixel =
+        |d: usize, row: usize, col: usize| row < 5 && DIGIT_PIXELS[d][row] & (0b100 >> col) != 0;
+    std::array::from_fn(|line| {
+        digits
+            .iter()
+            .map(|&d| {
+                (0..3)
+                    .map(
+                        |col| match (pixel(d, line * 2, col), pixel(d, line * 2 + 1, col)) {
+                            (true, true) => '█',
+                            (true, false) => '▀',
+                            (false, true) => '▄',
+                            (false, false) => ' ',
+                        },
+                    )
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
+}
+
+pub(crate) fn format_duration_short(d: Duration) -> String {
+    let minutes = d.num_minutes();
+    match minutes {
+        m if m < 1 => "<1m".to_string(),
+        m if m < 60 => format!("{m}m"),
+        m if m < 24 * 60 => format!("{}h {}m", m / 60, m % 60),
+        m => format!("{}d {}h", m / (24 * 60), (m / 60) % 24),
+    }
+}
+
+pub(crate) fn overlay_lines(
+    summary: &UsageSummary,
+    created_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    let context_age = summary
+        .context_started_at
+        .map(|at| format_duration_short(now - at))
+        .unwrap_or_else(|| "?".to_string());
+    vec![
+        format!(
+            "clr {} · cmp {} ({}a) · rsm {}",
+            summary.clears, summary.compactions, summary.compactions_auto, summary.resumes
+        ),
+        format!(
+            "ctx {context_age} · {}p {}t",
+            summary.context_prompts, summary.context_turns
+        ),
+        format!("age {}", format_duration_short(now - created_at)),
+    ]
+}
+
+/// Draws nothing when the pane cannot fit the box with room to spare.
+pub(crate) fn render_usage_overlay(
+    frame: &mut Frame,
+    pane: Rect,
+    summary: &UsageSummary,
+    created_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    theme: &Theme,
+) {
+    let digits = big_digits(summary.resets);
+    let lines = overlay_lines(summary, created_at, now);
+    let content_width = digits
+        .iter()
+        .chain(lines.iter())
+        .map(|line| line.width())
+        .max()
+        .unwrap_or(0) as u16;
+    let width = content_width + 4;
+    let height = (digits.len() + lines.len()) as u16 + 2;
+    if pane.width < width + 10 || pane.height < height + 2 {
+        return;
+    }
+    let area = Rect {
+        x: pane.right() - width - 1,
+        y: pane.y,
+        width,
+        height,
+    };
+    let number = Style::default().fg(theme.error).bold();
+    let detail = Style::default().fg(theme.text);
+    let text: Vec<Line> = digits
+        .into_iter()
+        .map(|row| Line::styled(row, number))
+        .chain(lines.into_iter().map(|row| Line::styled(row, detail)))
+        .collect();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.error))
+        .title(Span::styled(" resets ", number))
+        .padding(Padding::horizontal(1));
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(text).block(block), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn digits_pack_two_pixel_rows_per_line() {
+        assert_eq!(big_digits(0), ["█▀█", "█ █", "▀▀▀"]);
+        assert_eq!(big_digits(1), ["▄█ ", " █ ", "▀▀▀"]);
+        assert_eq!(big_digits(47), ["█ █ ▀▀█", "▀▀█   █", "  ▀   ▀"]);
+    }
+
+    #[test]
+    fn durations_use_the_two_largest_units() {
+        let cases = [
+            (Duration::seconds(20), "<1m"),
+            (Duration::minutes(42), "42m"),
+            (Duration::minutes(125), "2h 5m"),
+            (Duration::hours(76), "3d 4h"),
+            (Duration::seconds(-5), "<1m"),
+        ];
+        for (d, want) in cases {
+            assert_eq!(format_duration_short(d), want);
+        }
+    }
+
+    #[test]
+    fn lines_show_breakdown_context_and_age() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap();
+        let summary = UsageSummary {
+            resets: 17,
+            clears: 12,
+            compactions: 3,
+            compactions_auto: 2,
+            compactions_manual: 1,
+            resumes: 2,
+            context_started_at: Some(now - Duration::minutes(42)),
+            context_prompts: 18,
+            context_turns: 17,
+            ..UsageSummary::default()
+        };
+        assert_eq!(
+            overlay_lines(&summary, now - Duration::hours(76), now),
+            vec![
+                "clr 12 · cmp 3 (2a) · rsm 2".to_string(),
+                "ctx 42m · 18p 17t".to_string(),
+                "age 3d 4h".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn overlay_draws_top_right_and_hides_when_cramped() {
+        use ratatui::backend::TestBackend;
+        let theme = Theme::default();
+        let now = Utc.with_ymd_and_hms(2026, 9, 29, 12, 0, 0).unwrap();
+        let summary = UsageSummary {
+            resets: 7,
+            ..UsageSummary::default()
+        };
+        let draw = |w: u16, h: u16| {
+            let mut terminal = ratatui::Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal
+                .draw(|f| render_usage_overlay(f, f.area(), &summary, now, now, &theme))
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let wide = draw(80, 20);
+        let top_right: String = (40..80)
+            .map(|x| wide[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(top_right.contains("resets"), "{top_right}");
+        let cramped = draw(20, 5);
+        assert!(cramped.content().iter().all(|c| c.symbol() == " "));
+    }
+}

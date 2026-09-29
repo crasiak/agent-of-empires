@@ -115,6 +115,39 @@ impl HomeView {
         }
     }
 
+    /// Request the selected session's usage summary while the overlay is on.
+    pub fn request_usage_refresh(&mut self) {
+        if !self.show_usage_overlay || self.pending_usage_refresh {
+            return;
+        }
+        if let Some(id) = self.selected_session.clone() {
+            self.usage_poller.request_refresh(id);
+            self.pending_usage_refresh = true;
+        }
+    }
+
+    /// Apply a loaded usage summary; true when the overlay needs a repaint.
+    pub fn apply_usage_updates(&mut self) -> bool {
+        use std::sync::mpsc::TryRecvError;
+
+        match self.usage_poller.try_recv_updates() {
+            Ok((id, summary)) => {
+                self.pending_usage_refresh = false;
+                let next = summary.map(|summary| (id, summary));
+                let changed = next != self.usage_summary;
+                self.usage_summary = next;
+                changed
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                tracing::error!(target: "tui.home", "usage poller worker gone; respawning");
+                self.usage_poller = crate::tui::usage_poller::UsagePoller::new();
+                self.pending_usage_refresh = false;
+                false
+            }
+        }
+    }
+
     /// Toggle the diagnostics strip and persist the new state to
     /// `session.show_diagnostics_pane` so it survives restarts.
     pub fn toggle_diagnostics(&mut self) {

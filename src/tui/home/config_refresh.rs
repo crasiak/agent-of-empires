@@ -66,6 +66,7 @@ impl HomeView {
         self.show_session_colors = config.session.show_session_colors;
         self.set_sidebar_position(sidebar_position);
         self.show_diagnostics = config.session.show_diagnostics_pane;
+        self.show_usage_overlay = config.session.show_usage_overlay;
         self.daemon_sidebar = config.session.daemon_sidebar;
         if !self.daemon_sidebar {
             self.set_sidebar_source(
