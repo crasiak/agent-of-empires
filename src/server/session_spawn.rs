@@ -412,10 +412,15 @@ pub(crate) async fn spawn_structured_session(
             service
                 .telemetry_session_creates
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::usage::record_lifecycle(
-                &response_instance,
-                crate::usage::UsageKind::InstanceCreated,
-            );
+            // `record_lifecycle` does blocking file/SQLite I/O; keep it off this async
+            // task by handing it to a blocking thread rather than awaiting it here.
+            let lifecycle_instance = response_instance.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::usage::record_lifecycle(
+                    &lifecycle_instance,
+                    crate::usage::UsageKind::InstanceCreated,
+                );
+            });
 
             if let Some((
                 id,
