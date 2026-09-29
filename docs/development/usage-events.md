@@ -49,3 +49,5 @@ launcher that renders its own agent settings (for example Harness Ledger
 profiles) record agent events only when that launcher's settings include
 AoE's `__usage-event` hook command; otherwise they record lifecycle events
 only.
+
+Codex sessions record agent events only when AoE's agent status hooks are enabled for the profile.

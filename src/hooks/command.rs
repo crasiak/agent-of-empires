@@ -168,7 +168,8 @@ fn hook_command_session_id_host(field: HookIdentityField) -> String {
 /// Output is discarded because Claude reads `SessionStart` stdout as context.
 pub(crate) fn hook_command_usage_event() -> String {
     format!(
-        "sh -c '[ -n \"$AOE_INSTANCE_ID\" ] || exit 0; \
+        "sh -c '[ \"$AOE_USAGE\" = 1 ] || exit 0; \
+         [ -n \"$AOE_INSTANCE_ID\" ] || exit 0; \
          [ -n \"$AOE_HOOK_BIN\" ] || exit 0; \
          [ -x \"$AOE_HOOK_BIN\" ] || exit 0; \
          \"$AOE_HOOK_BIN\" __usage-event >/dev/null 2>&1; exit 0 # {AOE_HOOK_MARKER}'"
@@ -396,6 +397,18 @@ mod tests {
     #[test]
     fn usage_command_is_recognized_as_aoe() {
         assert!(is_aoe_hook_command(&hook_command_usage_event()));
+    }
+
+    /// A profile with usage off spawns no process at all (M1), not just a
+    /// recorded-but-dropped event: the guard runs before `AOE_HOOK_BIN` is
+    /// even checked, let alone invoked.
+    #[test]
+    fn usage_command_exits_before_invoking_the_binary_when_disabled() {
+        let cmd = hook_command_usage_event();
+        assert!(cmd.contains(r#"[ "$AOE_USAGE" = 1 ] || exit 0;"#), "{cmd}");
+        let guard_pos = cmd.find(r#"[ "$AOE_USAGE" = 1 ]"#).unwrap();
+        let invoke_pos = cmd.find("__usage-event").unwrap();
+        assert!(guard_pos < invoke_pos, "{cmd}");
     }
 
     #[test]

@@ -1058,17 +1058,13 @@ fn append_configured_status_events(
     }
 }
 
-pub(crate) fn hook_install_required(
-    agent: &AgentDef,
-    status_hooks_enabled: bool,
-    usage_enabled: bool,
-) -> bool {
+pub(crate) fn hook_install_required(agent: &AgentDef, status_hooks_enabled: bool) -> bool {
     (status_hooks_enabled && (agent.hook_config.is_some() || agent.sidecar_hooks.is_some()))
         || agent.hook_config.as_ref().is_some_and(|hooks| {
             hooks
                 .events
                 .iter()
-                .any(|event| event.identity_field.is_some() || (usage_enabled && event.usage))
+                .any(|event| event.identity_field.is_some())
         })
         || agent.sidecar_hooks.as_ref().is_some_and(|hooks| {
             hooks

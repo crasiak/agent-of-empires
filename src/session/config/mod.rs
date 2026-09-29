@@ -967,8 +967,10 @@ pub struct SessionConfig {
     pub show_diagnostics_pane: bool,
 
     /// Record agent context resets, prompts, and turns per session in a local
-    /// usage log (`usage.db` in the app directory). Installs small Claude and
-    /// Codex hooks and a Pi extension hook; nothing leaves this machine.
+    /// usage log (`usage.db` in the app directory). Claude and Pi always
+    /// record when this is on; Codex records only when agent status hooks
+    /// are also on, since Codex has no identity hooks to tether the usage
+    /// hooks to. Off adds nothing. Nothing leaves this machine.
     #[serde(default = "default_true")]
     #[setting(label = "Record session usage", widget = "toggle")]
     pub usage_tracking: bool,
@@ -1039,9 +1041,11 @@ pub struct SessionConfig {
     pub agent_command_override: HashMap<String, String>,
 
     /// Install status-detection hooks into the agent's config file (e.g.
-    /// ~/.claude/settings.json). When disabled, AoE will not modify the
-    /// agent's settings file; status detection falls back to tmux pane
-    /// content parsing, which is less reliable.
+    /// ~/.claude/settings.json). When disabled, AoE installs no status hooks;
+    /// status detection falls back to tmux pane content parsing, which is
+    /// less reliable. Agents whose resume depends on it (Claude) still get
+    /// the session-identity hooks, and, when usage recording is on, the
+    /// usage hooks too.
     #[serde(default = "default_true")]
     #[setting(label = "Agent Status Hooks", widget = "toggle", category = "Agents")]
     pub agent_status_hooks: bool,

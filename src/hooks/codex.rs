@@ -59,8 +59,7 @@ pub(crate) fn install_codex_json_hooks(
         },
     };
     if codex_hooks_feature_is_disabled(&config, &config_path) {
-        // Stale AoE entries are still cleaned up; usage hooks made `events`
-        // non-empty even though Codex's own status hooks are off.
+        // Codex's hooks feature is off: remove stale AoE entries rather than install.
         return super::install_hooks(hooks_path, &[], target);
     }
     super::install_hooks(hooks_path, events, target)

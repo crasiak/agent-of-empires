@@ -2037,11 +2037,8 @@ impl HomeView {
                             .map(|c| c.app_state.has_acknowledged_agent_hooks)
                             .unwrap_or(false);
 
-                        if crate::agents::hook_install_required(
-                            hook_agent,
-                            hooks_enabled,
-                            resolved_config.session.usage_tracking,
-                        ) && !acknowledged
+                        if crate::agents::hook_install_required(hook_agent, hooks_enabled)
+                            && !acknowledged
                         {
                             self.hooks_install_dialog =
                                 Some(HooksInstallDialog::new_for_profile_resolved(
