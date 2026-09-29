@@ -384,7 +384,7 @@ Session usage: context resets, prompts, and turns from the local usage log
 
 ###### **Options:**
 
-* `--since <SINCE>` — Window to summarize, like `30d`, `12h`, or `90m`
+* `--since <SINCE>` — Window to summarize, like `30d`, `12h`, or `90m`. Resumes are counted within the window
 
   Default value: `30d`
 * `--json`

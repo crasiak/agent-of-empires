@@ -15,7 +15,8 @@ use crate::usage::{build_report, UsageEvent, UsageReport, UsageStore, UsageSumma
 pub struct UsageArgs {
     #[command(subcommand)]
     command: Option<UsageCommands>,
-    /// Window to summarize, like `30d`, `12h`, or `90m`.
+    /// Window to summarize, like `30d`, `12h`, or `90m`. Resumes are counted
+    /// within the window.
     #[arg(long, default_value = "30d")]
     since: String,
     #[arg(long)]
@@ -61,12 +62,17 @@ fn parse_since(value: &str) -> Result<chrono::Duration> {
     let unit = value.chars().last().ok_or_else(err)?;
     let number = &value[..value.len() - unit.len_utf8()];
     let n: i64 = number.parse().map_err(|_| err())?;
-    match unit {
-        'd' => Ok(chrono::Duration::days(n)),
-        'h' => Ok(chrono::Duration::hours(n)),
-        'm' => Ok(chrono::Duration::minutes(n)),
-        _ => Err(err()),
+    if n <= 0 {
+        return Err(err());
     }
+    // try_* rejects magnitudes that would overflow rather than panicking.
+    let duration = match unit {
+        'd' => chrono::Duration::try_days(n),
+        'h' => chrono::Duration::try_hours(n),
+        'm' => chrono::Duration::try_minutes(n),
+        _ => return Err(err()),
+    };
+    duration.ok_or_else(err)
 }
 
 fn report(store: &UsageStore, since: &str, json: bool) -> Result<()> {
@@ -237,6 +243,15 @@ mod tests {
         assert!(parse_since("5w").is_err());
         assert!(parse_since("3д").is_err(), "multibyte unit must not panic");
         assert!(parse_since("").is_err());
+        assert!(parse_since("0d").is_err(), "a zero window is meaningless");
+        assert!(
+            parse_since("-5d").is_err(),
+            "a negative window is meaningless"
+        );
+        assert!(
+            parse_since("99999999999999d").is_err(),
+            "an overflowing window must not panic"
+        );
     }
 
     #[test]
