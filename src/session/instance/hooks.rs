@@ -23,7 +23,7 @@ pub(super) fn status_hook_env_prefix(
         // agent under this profile. Without these the reporter stays silent
         // and the `[cc:?:?]` row tag never resolves.
         //
-        // `AOE_USAGE` gates the usage-event command itself (M1): Claude and
+        // `AOE_USAGE` gates the usage-event command itself: Claude and
         // Codex settings are shared across profiles, so a profile with usage
         // off must not record just because another profile installed the hooks.
         let usage_env = if usage_enabled { "AOE_USAGE=1 " } else { "" };
@@ -965,7 +965,7 @@ mod tests {
     #[serial_test::serial]
     fn codex_hook_installer_follows_detect_as_and_profile_hook_setting() {
         // Codex has no identity hooks to tether usage hooks to, so status off
-        // means no AoE hooks at all (I4): (tool, profile config, global hooks
+        // means no AoE hooks at all: (tool, profile config, global hooks
         // off, expect full status hooks).
         for (tool, profile, global_off, full) in [
             ("my-codex-wrapper", None, false, true),
@@ -1011,7 +1011,7 @@ mod tests {
     }
 
     /// Usage off, status on: usage commands and the usage-only groups
-    /// (`PostCompact`, `SessionEnd`) disappear, but status hooks stay put (I4).
+    /// (`PostCompact`, `SessionEnd`) disappear, but status hooks stay put.
     #[test]
     #[serial_test::serial]
     fn usage_tracking_off_installs_no_usage_hooks() {
@@ -1043,7 +1043,7 @@ mod tests {
     }
 
     /// Status off + Claude: identity hooks (native resume depends on them)
-    /// and usage hooks stay, but no status-writer commands (I4).
+    /// and usage hooks stay, but no status-writer commands.
     #[test]
     #[serial_test::serial]
     fn status_off_keeps_identity_and_usage_for_claude() {

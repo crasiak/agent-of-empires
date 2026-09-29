@@ -871,7 +871,7 @@ mod tests {
     }
 
     /// The convergence point records `instance_restarted` once a restart's
-    /// agent actually launched, and never on a first start (I3).
+    /// agent actually launched, and never on a first start.
     #[test]
     #[serial]
     fn restart_records_one_row_and_a_fresh_start_records_none() {

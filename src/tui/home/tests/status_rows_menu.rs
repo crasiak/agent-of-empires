@@ -1928,7 +1928,7 @@ fn launch_identity_status_updates_reject_stale_launches() {
 }
 
 /// A usage fetch that lands after the selection moved on must not leave the
-/// new selection's overlay waiting for the next tick (M5).
+/// new selection's overlay waiting for the next tick.
 #[test]
 #[serial]
 fn apply_one_usage_update_requests_a_refresh_when_the_selection_has_moved_on() {

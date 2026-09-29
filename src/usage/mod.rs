@@ -134,7 +134,7 @@ mod tests {
     use super::*;
 
     /// The export contract promises milliseconds always; chrono's default
-    /// serde impl drops the fraction on an exact second (M2).
+    /// serde impl drops the fraction on an exact second.
     #[test]
     fn occurred_at_serializes_with_milliseconds_on_an_exact_second() {
         use chrono::TimeZone;

@@ -399,7 +399,7 @@ mod tests {
         assert!(is_aoe_hook_command(&hook_command_usage_event()));
     }
 
-    /// A profile with usage off spawns no process at all (M1), not just a
+    /// A profile with usage off spawns no process at all, not just a
     /// recorded-but-dropped event: the guard runs before `AOE_HOOK_BIN` is
     /// even checked, let alone invoked.
     #[test]

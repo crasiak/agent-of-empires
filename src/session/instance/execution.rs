@@ -229,7 +229,7 @@ pub(super) struct NativeLaunchInputs {
     pub(super) pane_env: Vec<crate::tmux::PaneEnvMutation>,
     pub(super) identity_extension: Option<(String, String)>,
     /// The profile's `session.usage_tracking`, resolved here so
-    /// `status_hook_env_prefix` doesn't need its own config load (M1).
+    /// `status_hook_env_prefix` doesn't need its own config load.
     pub(super) usage_tracking: bool,
 }
 impl NativeLaunchInputs {
