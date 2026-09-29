@@ -12,7 +12,7 @@ use crate::session::{
 
 #[derive(Args)]
 pub struct ReportLaunchArgs {
-    #[arg(long, value_parser = ["claude", "codex"])]
+    #[arg(long, value_parser = ["claude", "codex", "pi"])]
     agent: String,
     #[arg(long, value_enum)]
     account: crate::session::launch_identity::LaunchAccount,

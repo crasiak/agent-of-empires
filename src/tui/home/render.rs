@@ -662,7 +662,7 @@ fn agent_row_tag(inst: &crate::session::Instance) -> Option<RowTag> {
     if code.is_empty() {
         return None;
     }
-    let content = if matches!(code.as_str(), "cc" | "cx") {
+    let content = if matches!(code.as_str(), "cc" | "cx" | "pi") {
         let (account, launcher) = inst
             .current_launch_identity()
             .map(|identity| identity.codes())
@@ -4903,7 +4903,13 @@ mod tests {
         let mut instance = crate::session::Instance::new("test", "/tmp");
         instance.command = "codex-ledger-work-isolated".into();
         assert_eq!(agent_row_tag(&instance).unwrap().rendered(), "[cc:?:?]");
-        for (agent, code) in [("claude", "cc"), ("codex", "cx")] {
+        for (agent, code) in [("claude", "cc"), ("codex", "cx"), ("pi", "pi")] {
+            instance.tool = agent.into();
+            instance.launch_identity = None;
+            assert_eq!(
+                agent_row_tag(&instance).unwrap().rendered(),
+                format!("[{code}:?:?]")
+            );
             for (account, account_code) in
                 [(LaunchAccount::Personal, "p"), (LaunchAccount::Work, "w")]
             {

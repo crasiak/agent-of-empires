@@ -16,16 +16,7 @@ pub(super) fn status_hook_env_prefix(
             .expect("current executable is required for host identity hooks");
         let hook_bin = shell_escape(&hook_bin.to_string_lossy());
         // `$$` is the launch shell, which `exec`s into the agent.
-        //
-        // `AOE_REPORT_*` is the launch-identity contract: a launcher (Ledger)
-        // that resolves the agent's account reports it back through
-        // `AOE_REPORT_BIN session report-launch` only when AoE asked for that
-        // agent under this profile. Without these the reporter stays silent
-        // and the `[cc:?:?]` row tag never resolves.
-        //
-        // `AOE_USAGE` gates the usage-event command itself: Claude and
-        // Codex settings are shared across profiles, so a profile with usage
-        // off must not record just because another profile installed the hooks.
+        // Shared hook settings must not enable usage for a profile that opted out.
         let usage_env = if usage_enabled { "AOE_USAGE=1 " } else { "" };
         format!(
             "AOE_PROFILE={profile} AOE_INSTANCE_ID={instance_id} AOE_HOOK_BIN={hook_bin} \
@@ -36,6 +27,17 @@ pub(super) fn status_hook_env_prefix(
             instance_id = shell_escape(instance_id),
             agent_bin = shell_escape(agent.map_or("", |agent| agent.binary)),
             agent_name = shell_escape(agent.map_or("", |agent| agent.name)),
+        )
+    } else if agent.is_some_and(|agent| agent.name == "pi") {
+        // Pi reports launch identity without installing status or usage hooks.
+        let reporter = std::env::current_exe()
+            .expect("current executable is required for launch identity reports");
+        format!(
+            "AOE_PROFILE={profile} AOE_INSTANCE_ID={instance_id} \
+             AOE_REPORT_BIN={reporter} AOE_REPORT_AGENT=pi AOE_REPORT_PROFILE={profile} ",
+            profile = shell_escape(profile),
+            instance_id = shell_escape(instance_id),
+            reporter = shell_escape(&reporter.to_string_lossy()),
         )
     } else {
         String::new()
@@ -1383,6 +1385,26 @@ mod tests {
             );
             result.unwrap();
         }
+    }
+
+    #[test]
+    fn pi_launch_reporting_does_not_enable_status_or_usage_hooks() {
+        let agent = crate::agents::get_agent("pi").unwrap();
+        assert!(agent.hook_config.is_none() && agent.sidecar_hooks.is_none());
+        let reporter = shell_escape(&std::env::current_exe().unwrap().to_string_lossy());
+        let profile = "personal oss's";
+        for usage_enabled in [true, false] {
+            let prefix = status_hook_env_prefix(profile, "abc123", Some(agent), usage_enabled);
+            assert_eq!(
+                prefix,
+                format!(
+                    "AOE_PROFILE={profile} AOE_INSTANCE_ID='abc123' \
+                     AOE_REPORT_BIN={reporter} AOE_REPORT_AGENT=pi AOE_REPORT_PROFILE={profile} ",
+                    profile = shell_escape(profile),
+                )
+            );
+        }
+        assert_eq!(status_hook_env_prefix("work", "abc123", None, true), "");
     }
 
     #[test]

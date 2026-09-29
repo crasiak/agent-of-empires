@@ -207,7 +207,7 @@ fn test_row_tag_agent_maps_known_terminal_tools() {
         assert!(
             text.contains(&format!(
                 "[{code}{}]",
-                if matches!(code, "cc" | "cx") {
+                if matches!(code, "cc" | "cx" | "pi") {
                     ":?:?"
                 } else {
                     ""

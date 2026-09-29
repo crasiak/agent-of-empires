@@ -485,7 +485,7 @@ Report resolved launch identity from inside the agent pane
 
 * `--agent <AGENT>`
 
-  Possible values: `claude`, `codex`
+  Possible values: `claude`, `codex`, `pi`
 
 * `--account <ACCOUNT>`
 
