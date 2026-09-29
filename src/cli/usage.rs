@@ -57,15 +57,15 @@ pub async fn run(args: UsageArgs) -> Result<()> {
 
 /// `30d`, `12h`, `90m` into a duration.
 fn parse_since(value: &str) -> Result<chrono::Duration> {
-    let (number, unit) = value.split_at(value.len().saturating_sub(1));
-    let n: i64 = number
-        .parse()
-        .map_err(|_| anyhow::anyhow!("--since must look like 30d, 12h, or 90m"))?;
+    let err = || anyhow::anyhow!("--since must look like 30d, 12h, or 90m");
+    let unit = value.chars().last().ok_or_else(err)?;
+    let number = &value[..value.len() - unit.len_utf8()];
+    let n: i64 = number.parse().map_err(|_| err())?;
     match unit {
-        "d" => Ok(chrono::Duration::days(n)),
-        "h" => Ok(chrono::Duration::hours(n)),
-        "m" => Ok(chrono::Duration::minutes(n)),
-        _ => anyhow::bail!("--since must look like 30d, 12h, or 90m"),
+        'd' => Ok(chrono::Duration::days(n)),
+        'h' => Ok(chrono::Duration::hours(n)),
+        'm' => Ok(chrono::Duration::minutes(n)),
+        _ => Err(err()),
     }
 }
 
@@ -96,20 +96,33 @@ fn print_report(report: &UsageReport) -> Result<()> {
         "Turns:       {} (errors {})",
         report.turns, report.turn_errors
     );
+    let medians = [
+        (
+            "Median prompts/context:",
+            fmt_median(report.median_prompts_per_context),
+        ),
+        (
+            "Median context minutes:",
+            fmt_median(report.median_context_minutes),
+        ),
+        (
+            "Median resets/instance:",
+            fmt_median(report.median_resets_per_instance),
+        ),
+        (
+            "Max resets/instance:",
+            report.max_resets_per_instance.to_string(),
+        ),
+    ];
+    let label_width = medians
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0);
     println!();
-    println!(
-        "Median prompts/context: {}",
-        fmt_median(report.median_prompts_per_context)
-    );
-    println!(
-        "Median context minutes: {}",
-        fmt_median(report.median_context_minutes)
-    );
-    println!(
-        "Median resets/instance:  {}",
-        fmt_median(report.median_resets_per_instance)
-    );
-    println!("Max resets/instance:    {}", report.max_resets_per_instance);
+    for (label, value) in medians {
+        println!("{label:<label_width$} {value}");
+    }
 
     if !report.top.is_empty() {
         let titles = instance_titles();
@@ -123,35 +136,31 @@ fn print_report(report: &UsageReport) -> Result<()> {
     Ok(())
 }
 
-/// Every session's title across all profiles, best-effort: a profile that
-/// fails to load is skipped rather than failing the whole report.
-fn instance_titles() -> HashMap<String, String> {
-    let mut titles = HashMap::new();
-    let Ok(profiles) = crate::session::list_profiles() else {
-        return titles;
-    };
-    for profile in &profiles {
-        let Ok(storage) = Storage::open_unwatched(profile) else {
+/// Every session across all profiles. A profile whose storage fails to open
+/// or load is skipped rather than failing the whole listing.
+fn all_instances() -> Result<Vec<Instance>> {
+    let mut all = Vec::new();
+    for profile in crate::session::list_profiles()? {
+        let Ok(storage) = Storage::open_unwatched(&profile) else {
             continue;
         };
         let Ok((instances, _)) = storage.load_with_groups() else {
             continue;
         };
-        for inst in instances {
-            titles.insert(inst.id, inst.title);
-        }
-    }
-    titles
-}
-
-fn all_instances() -> Result<Vec<Instance>> {
-    let mut all = Vec::new();
-    for profile in crate::session::list_profiles()? {
-        let storage = Storage::open_unwatched(&profile)?;
-        let (instances, _) = storage.load_with_groups()?;
         all.extend(instances);
     }
     Ok(all)
+}
+
+/// Every session's title across all profiles, best-effort: any failure
+/// (including `list_profiles` itself) leaves the map empty rather than
+/// failing the whole report.
+fn instance_titles() -> HashMap<String, String> {
+    all_instances()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|inst| (inst.id, inst.title))
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -217,6 +226,7 @@ fn show(store: &UsageStore, session: &str, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn parse_since_accepts_days_hours_and_minutes() {
@@ -225,5 +235,41 @@ mod tests {
         assert_eq!(parse_since("90m").unwrap(), chrono::Duration::minutes(90));
         assert!(parse_since("x").is_err());
         assert!(parse_since("5w").is_err());
+        assert!(parse_since("3д").is_err(), "multibyte unit must not panic");
+        assert!(parse_since("").is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn a_profile_with_an_unreadable_sessions_file_is_skipped_not_fatal() {
+        let _guard = crate::session::test_support::isolate_app_dir();
+        crate::session::create_profile("good").unwrap();
+        crate::session::create_profile("broken").unwrap();
+
+        Storage::open_unwatched("good")
+            .unwrap()
+            .update(|instances, _groups| {
+                instances.push(Instance::new("keep-me", "/repo"));
+                Ok(())
+            })
+            .unwrap();
+        std::fs::write(
+            crate::session::get_profile_dir_path("broken")
+                .unwrap()
+                .join("sessions.json"),
+            "not json",
+        )
+        .unwrap();
+
+        let instances = all_instances().expect("a broken sibling profile must not fail this");
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].title, "keep-me");
+
+        let titles = instance_titles();
+        assert_eq!(titles.len(), 1);
+        assert_eq!(
+            titles.get(&instances[0].id).map(String::as_str),
+            Some("keep-me")
+        );
     }
 }
