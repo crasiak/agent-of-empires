@@ -589,6 +589,7 @@ impl App {
         const REFRESH_COOLDOWN: Duration = Duration::from_millis(15);
         let mut last_status_refresh = std::time::Instant::now();
         let mut last_metrics_sample = std::time::Instant::now();
+        let mut last_usage_refresh = std::time::Instant::now();
         let mut last_session_feed_refresh = std::time::Instant::now();
         let mut last_disk_refresh = std::time::Instant::now();
         let mut full_heartbeat_deferred = false;
@@ -602,6 +603,7 @@ impl App {
         const SESSION_FEED_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
         const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
         const METRICS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+        const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
         // Fastest spinner (breathe) changes every 180ms.
         const SPINNER_REDRAW_INTERVAL: Duration = Duration::from_millis(120);
         const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
@@ -1224,6 +1226,12 @@ impl App {
                 last_metrics_sample = std::time::Instant::now();
             }
             refresh_needed |= self.home.apply_metrics_updates();
+
+            if last_usage_refresh.elapsed() >= USAGE_REFRESH_INTERVAL {
+                self.home.request_usage_refresh();
+                last_usage_refresh = std::time::Instant::now();
+            }
+            refresh_needed |= self.home.apply_usage_updates();
 
             if last_session_feed_refresh.elapsed() >= SESSION_FEED_REFRESH_INTERVAL {
                 self.home.request_session_feed_refresh();

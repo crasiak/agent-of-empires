@@ -205,6 +205,9 @@ mod tests {
                                 crate::agents::HookIdentityField::SessionId,
                             ));
                         }
+                        if event_def.usage {
+                            canonical_set.push(crate::hooks::hook_command_usage_event());
+                        }
                         if let Some(status) = event_def.status {
                             let waiting_tools: Vec<String> = event_def
                                 .waiting_tools
@@ -659,12 +662,17 @@ mod tests {
             let parsed: Value =
                 serde_json::from_str(&fs::read_to_string(override_dir.join(file)).unwrap())
                     .unwrap();
-            let cmd = parsed["hooks"][event][0]["hooks"][0]["command"]
-                .as_str()
-                .expect("AoE command must be present at the override path");
+            let commands: Vec<&str> = parsed["hooks"][event][0]["hooks"]
+                .as_array()
+                .expect("AoE commands must be present at the override path")
+                .iter()
+                .filter_map(|h| h["command"].as_str())
+                .collect();
             assert!(
-                cmd.contains("case \"$AOE_INSTANCE_ID\""),
-                "{var} override must be reached and rewritten; got: {cmd}"
+                commands
+                    .iter()
+                    .any(|c| c.contains("case \"$AOE_INSTANCE_ID\"")),
+                "{var} override must be reached and rewritten; got: {commands:?}"
             );
             assert!(
                 !home.join(default).exists(),

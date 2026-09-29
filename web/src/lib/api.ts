@@ -18,6 +18,7 @@ import type {
 } from "./types";
 import type { ConfigOptionDescriptor } from "./acpTypes";
 import type { ResolvedTheme } from "./theme";
+import type { UsageSummary } from "./usage";
 import { clearDeviceBindingSecret, getOrCreateDeviceBindingSecret } from "./deviceBinding";
 
 // --- Request helpers ---
@@ -283,6 +284,10 @@ export interface SystemHealth {
 
 export function fetchSystemHealth(): Promise<SystemHealth | null> {
   return fetchJson<SystemHealth>("/api/system/health");
+}
+
+export function fetchSessionUsage(id: string): Promise<UsageSummary | null> {
+  return fetchJson<UsageSummary>(`/api/sessions/${encodeURIComponent(id)}/usage`);
 }
 
 export function fetchSettings(profile?: string): Promise<SettingsResponse | null> {

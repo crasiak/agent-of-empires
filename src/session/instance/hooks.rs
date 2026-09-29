@@ -7,6 +7,7 @@ pub(super) fn status_hook_env_prefix(
     profile: &str,
     instance_id: &str,
     agent: Option<&crate::agents::AgentDef>,
+    usage_enabled: bool,
 ) -> String {
     let has_hooks = agent.is_some_and(|a| a.hook_config.is_some() || a.sidecar_hooks.is_some());
 
@@ -21,10 +22,16 @@ pub(super) fn status_hook_env_prefix(
         // `AOE_REPORT_BIN session report-launch` only when AoE asked for that
         // agent under this profile. Without these the reporter stays silent
         // and the `[cc:?:?]` row tag never resolves.
+        //
+        // `AOE_USAGE` gates the usage-event command itself: Claude and
+        // Codex settings are shared across profiles, so a profile with usage
+        // off must not record just because another profile installed the hooks.
+        let usage_env = if usage_enabled { "AOE_USAGE=1 " } else { "" };
         format!(
             "AOE_PROFILE={profile} AOE_INSTANCE_ID={instance_id} AOE_HOOK_BIN={hook_bin} \
              AOE_AGENT_PID=$$ AOE_AGENT_BIN={agent_bin} \
-             AOE_REPORT_BIN={hook_bin} AOE_REPORT_AGENT={agent_name} AOE_REPORT_PROFILE={profile} ",
+             AOE_REPORT_BIN={hook_bin} AOE_REPORT_AGENT={agent_name} AOE_REPORT_PROFILE={profile} \
+             {usage_env}",
             profile = shell_escape(profile),
             instance_id = shell_escape(instance_id),
             agent_bin = shell_escape(agent.map_or("", |agent| agent.binary)),
@@ -550,7 +557,10 @@ fn resolved_host_hook_events(
         }
     };
     if !status_hooks_enabled {
-        events.retain(|event| event.identity_field.is_some());
+        // Claude with status off keeps identity + usage hooks; Codex with status off installs
+        // nothing (Codex has no identity hooks to keep usage tethered to).
+        let identity = events.iter().any(|e| e.identity_field.is_some());
+        events.retain(|e| e.identity_field.is_some() || (identity && e.usage));
         for event in &mut events {
             event.status = None;
         }
@@ -653,13 +663,20 @@ mod tests {
 
     use crate::session::test_support::EnvGuard;
 
-    fn expected_status_prefix(profile: &str, instance_id: &str, agent: &str) -> String {
+    fn expected_status_prefix(
+        profile: &str,
+        instance_id: &str,
+        agent: &str,
+        usage_enabled: bool,
+    ) -> String {
         let hook_bin = shell_escape(&std::env::current_exe().unwrap().to_string_lossy());
         let def = crate::agents::get_agent(agent).unwrap();
+        let usage_env = if usage_enabled { "AOE_USAGE=1 " } else { "" };
         format!(
             "AOE_PROFILE={profile} AOE_INSTANCE_ID={instance_id} AOE_HOOK_BIN={hook_bin} \
              AOE_AGENT_PID=$$ AOE_AGENT_BIN={agent_bin} \
-             AOE_REPORT_BIN={hook_bin} AOE_REPORT_AGENT={agent_name} AOE_REPORT_PROFILE={profile} ",
+             AOE_REPORT_BIN={hook_bin} AOE_REPORT_AGENT={agent_name} AOE_REPORT_PROFILE={profile} \
+             {usage_env}",
             profile = shell_escape(profile),
             instance_id = shell_escape(instance_id),
             agent_bin = shell_escape(def.binary),
@@ -947,8 +964,10 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn codex_hook_installer_follows_detect_as_and_profile_hook_setting() {
-        // (tool, profile config, global hooks off, expect hooks.json)
-        for (tool, profile, global_off, installed) in [
+        // Codex has no identity hooks to tether usage hooks to, so status off
+        // means no AoE hooks at all: (tool, profile config, global hooks
+        // off, expect full status hooks).
+        for (tool, profile, global_off, full) in [
             ("my-codex-wrapper", None, false, true),
             (
                 "codex",
@@ -982,13 +1001,73 @@ mod tests {
             inst.install_agent_status_hooks(crate::agents::get_agent(&inst.detect_as), None);
 
             let hooks = tmp.path().join(".codex").join("hooks.json");
-            if installed {
+            if full {
                 assert_aoe_codex_hooks(&hooks);
             } else {
                 assert!(!hooks.exists(), "{tool} {profile:?}");
             }
             assert!(!tmp.path().join(".codex").join("config.toml").exists());
         }
+    }
+
+    /// Usage off, status on: usage commands and the usage-only groups
+    /// (`PostCompact`, `SessionEnd`) disappear, but status hooks stay put.
+    #[test]
+    #[serial_test::serial]
+    fn usage_tracking_off_installs_no_usage_hooks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _codex_home_guard = EnvGuard::unset(&["CODEX_HOME"]);
+        let _claude_config_guard = EnvGuard::unset(&["CLAUDE_CONFIG_DIR"]);
+        let _home_guard = crate::session::test_support::isolate_home(tmp.path());
+        acknowledge_hooks();
+        write_profile("usage-off", "[session]\nusage_tracking = false\n");
+
+        for (tool, path) in [
+            ("claude", tmp.path().join(".claude").join("settings.json")),
+            ("codex", tmp.path().join(".codex").join("hooks.json")),
+        ] {
+            let mut inst = hook_inst(tool);
+            inst.source_profile = "usage-off".to_string();
+            inst.install_agent_status_hooks(crate::agents::get_agent(tool), None);
+
+            let content = std::fs::read_to_string(&path).unwrap();
+            assert!(!content.contains("__usage-event"), "{tool}: {content}");
+            let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+            assert!(
+                settings["hooks"]["SessionStart"].is_array(),
+                "{tool}: status hooks stay on"
+            );
+            assert!(settings["hooks"].get("PostCompact").is_none(), "{tool}");
+            assert!(settings["hooks"].get("SessionEnd").is_none(), "{tool}");
+        }
+    }
+
+    /// Status off + Claude: identity hooks (native resume depends on them)
+    /// and usage hooks stay, but no status-writer commands.
+    #[test]
+    #[serial_test::serial]
+    fn status_off_keeps_identity_and_usage_for_claude() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _claude_config_guard = EnvGuard::unset(&["CLAUDE_CONFIG_DIR"]);
+        let _home_guard = crate::session::test_support::isolate_home(tmp.path());
+        acknowledge_hooks();
+        write_profile(
+            "claude-status-off",
+            "[session]\nagent_status_hooks = false\n",
+        );
+
+        let mut inst = hook_inst("claude");
+        inst.source_profile = "claude-status-off".to_string();
+        inst.install_agent_status_hooks(crate::agents::get_agent("claude"), None);
+
+        let path = tmp.path().join(".claude").join("settings.json");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("__extract-session-id"), "{content}");
+        assert!(content.contains("__usage-event"), "{content}");
+        assert!(
+            !content.contains("umask 077"),
+            "no status writer commands: {content}"
+        );
     }
 
     #[test]
@@ -1210,6 +1289,7 @@ mod tests {
             return;
         }
         let temp = tempfile::tempdir().unwrap();
+        let _claude_config_guard = EnvGuard::unset(&["CLAUDE_CONFIG_DIR"]);
         let _home = crate::session::test_support::isolate_app_dir_at(temp.path());
         acknowledge_hooks();
 
@@ -1308,13 +1388,20 @@ mod tests {
     #[test]
     fn status_hook_env_prefix_is_set_for_hook_agents_only() {
         for agent in ["codex", "hermes", "settl", "claude", "kiro", "kimi"] {
-            assert_eq!(
-                status_hook_env_prefix("work", "abc123", crate::agents::get_agent(agent)),
-                expected_status_prefix("work", "abc123", agent)
-            );
+            for usage_enabled in [true, false] {
+                assert_eq!(
+                    status_hook_env_prefix(
+                        "work",
+                        "abc123",
+                        crate::agents::get_agent(agent),
+                        usage_enabled
+                    ),
+                    expected_status_prefix("work", "abc123", agent, usage_enabled)
+                );
+            }
         }
         assert_eq!(
-            status_hook_env_prefix("work", "abc123", crate::agents::get_agent("opencode")),
+            status_hook_env_prefix("work", "abc123", crate::agents::get_agent("opencode"), true),
             ""
         );
     }

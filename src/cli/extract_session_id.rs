@@ -5,8 +5,7 @@ use std::io::Read;
 use anyhow::{anyhow, Result};
 use clap::Args;
 
-const STDIN_BYTE_CAP: u64 = 1 << 20;
-const MAX_ANCESTORS: usize = 64;
+use super::hook_input::{fired_by_pane_agent, read_json};
 
 #[derive(Args)]
 pub struct ExtractSessionIdArgs {
@@ -48,63 +47,13 @@ pub async fn run(args: ExtractSessionIdArgs) -> Result<()> {
     Ok(())
 }
 
-fn fired_by_pane_agent() -> bool {
-    let agent_pid = std::env::var("AOE_AGENT_PID")
-        .ok()
-        .and_then(|pid| pid.parse().ok());
-    let agent_bin = std::env::var("AOE_AGENT_BIN")
-        .ok()
-        .filter(|bin| !bin.is_empty());
-    let (Some(agent_pid), Some(agent_bin)) = (agent_pid, agent_bin) else {
-        return true;
-    };
-    walk_reaches_single_agent(
-        std::os::unix::process::parent_id(),
-        agent_pid,
-        &agent_bin,
-        crate::process::parent_and_argv0,
-    )
-}
-
-fn walk_reaches_single_agent(
-    start: u32,
-    agent_pid: u32,
-    agent_bin: &str,
-    parent_and_argv0: impl Fn(u32) -> Option<(u32, String)>,
-) -> bool {
-    let mut pid = start;
-    let mut agents = 0;
-    for hop in 0..MAX_ANCESTORS {
-        let Some((ppid, argv0)) = parent_and_argv0(pid) else {
-            return hop == 0;
-        };
-        if std::path::Path::new(&argv0)
-            .file_name()
-            .and_then(|name| name.to_str())
-            == Some(agent_bin)
-        {
-            agents += 1;
-        }
-        if pid == agent_pid {
-            return agents <= 1;
-        }
-        if ppid == 0 || ppid == pid {
-            return false;
-        }
-        pid = ppid;
-    }
-    false
-}
-
 fn run_inner<R: Read>(
     stdin: R,
     instance_id: &str,
     field: crate::agents::HookIdentityField,
     source: Option<&str>,
 ) -> Result<()> {
-    let mut buf = String::new();
-    stdin.take(STDIN_BYTE_CAP).read_to_string(&mut buf)?;
-    let value: serde_json::Value = serde_json::from_str(&buf)?;
+    let value = read_json(stdin)?;
     let sid = match field {
         crate::agents::HookIdentityField::SessionId => value
             .get("session_id")
@@ -144,63 +93,6 @@ mod tests {
 
     fn read_sidecar(base: &std::path::Path, instance_id: &str) -> Option<String> {
         std::fs::read_to_string(base.join(instance_id).join("session_id")).ok()
-    }
-
-    #[test]
-    fn only_the_pane_agent_owns_the_hook() {
-        type Chain = &'static [(u32, u32, &'static str)];
-        let cases: [(&str, u32, Chain, bool); 7] = [
-            ("direct launch", 9, &[(10, 9, "sh"), (9, 1, "claude")], true),
-            (
-                "wrapper runs the agent as a child",
-                8,
-                &[(10, 9, "sh"), (9, 8, "/opt/bin/claude"), (8, 1, "/bin/sh")],
-                true,
-            ),
-            (
-                "nested agent from the shell tool",
-                7,
-                &[
-                    (10, 9, "sh"),
-                    (9, 8, "claude"),
-                    (8, 7, "bash"),
-                    (7, 1, "claude"),
-                ],
-                false,
-            ),
-            (
-                "nested agent under a wrapper",
-                6,
-                &[
-                    (10, 9, "sh"),
-                    (9, 8, "claude"),
-                    (8, 7, "bash"),
-                    (7, 6, "claude"),
-                    (6, 1, "sh"),
-                ],
-                false,
-            ),
-            (
-                "detached from the launched pid",
-                7,
-                &[(10, 9, "sh"), (9, 1, "claude"), (1, 0, "init")],
-                false,
-            ),
-            ("unreadable ancestor", 7, &[(10, 9, "sh")], false),
-            ("process table unavailable", 7, &[], true),
-        ];
-        for (name, agent_pid, chain, owned) in cases {
-            let table: std::collections::HashMap<u32, (u32, String)> = chain
-                .iter()
-                .map(|(pid, ppid, argv0)| (*pid, (*ppid, argv0.to_string())))
-                .collect();
-            let lookup = |pid| table.get(&pid).cloned();
-            assert_eq!(
-                walk_reaches_single_agent(10, agent_pid, "claude", lookup),
-                owned,
-                "{name}"
-            );
-        }
     }
 
     #[test]
@@ -247,7 +139,7 @@ mod tests {
     #[serial_test::serial(hook_base)]
     fn rejected_payloads_write_no_sidecar() {
         let (_g, base, _tmp) = BaseGuard::ready();
-        let oversized = "x".repeat(STDIN_BYTE_CAP as usize * 2);
+        let oversized = "x".repeat(crate::cli::hook_input::STDIN_BYTE_CAP as usize * 2);
         let cases: [(&str, &str, &str); 6] = [
             ("no_sid", r#"{"cwd":"/x","other":"value"}"#, "session_id"),
             ("non_string", r#"{"session_id":12345}"#, "session_id"),

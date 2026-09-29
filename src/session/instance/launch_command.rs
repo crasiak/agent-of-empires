@@ -901,13 +901,22 @@ impl Instance {
             .and_then(|context| self.resolve_omp_capture_plan(context, None));
 
         let fallback_profile;
-        let profile = if let Some(execution) = execution {
-            execution.inputs.profile.as_str()
+        let fallback_usage_tracking;
+        let (profile, usage_enabled) = if let Some(execution) = execution {
+            (
+                execution.inputs.profile.as_str(),
+                execution.inputs.usage_tracking,
+            )
         } else {
             fallback_profile = self.effective_profile();
-            &fallback_profile
+            fallback_usage_tracking =
+                crate::session::config::profile_config::resolve_config_or_warn(&fallback_profile)
+                    .session
+                    .usage_tracking;
+            (fallback_profile.as_str(), fallback_usage_tracking)
         };
-        let mut env_prefix = status_hook_env_prefix(profile, &self.id, self.status_agent());
+        let mut env_prefix =
+            status_hook_env_prefix(profile, &self.id, self.status_agent(), usage_enabled);
         // The publisher is pane-scoped, including for safe Default wrappers.
         self.pi_extension_launched = false;
         if let Some((_, ref env)) = identity_extension {

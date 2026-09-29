@@ -33,6 +33,8 @@ use super::tmux::TmuxCommands;
 use super::uninstall::UninstallArgs;
 use super::update::UpdateArgs;
 use super::url::UrlArgs;
+use super::usage::UsageArgs;
+use super::usage_event::UsageEventArgs;
 use super::worktree::WorktreeCommands;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -106,6 +108,9 @@ pub enum Commands {
 
     /// Show session status summary
     Status(StatusArgs),
+
+    /// Session usage: context resets, prompts, and turns from the local usage log
+    Usage(UsageArgs),
 
     /// Force-stop everything aoe is running: the serve daemon, all agent
     /// workers, and all aoe tmux sessions. Destructive and unprompted.
@@ -237,6 +242,11 @@ pub enum Commands {
     #[command(name = "__extract-session-id", hide = true)]
     ExtractSessionId(ExtractSessionIdArgs),
 
+    /// Internal: record one agent hook event in the usage log. Spawned by
+    /// host hooks and the Pi extension. Hidden from help.
+    #[command(name = "__usage-event", hide = true)]
+    UsageEvent(UsageEventArgs),
+
     /// Uninstall Agent of Empires
     Uninstall(UninstallArgs),
 
@@ -269,6 +279,7 @@ pub const CLI_COMMAND_NAMES: &[&str] = &[
     "remove",
     "send",
     "status",
+    "usage",
     "killall",
     "session",
     "group",
@@ -306,6 +317,7 @@ pub fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Remove(_) => "remove",
         Commands::Send(_) => "send",
         Commands::Status(_) => "status",
+        Commands::Usage(_) => "usage",
         Commands::Killall(_) => "killall",
         Commands::Stop { .. } => return None,
         Commands::Session { .. } => "session",
@@ -328,6 +340,7 @@ pub fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Acp { .. } => "acp",
         Commands::AcpRunner(_) => return None,
         Commands::ExtractSessionId(_) => return None,
+        Commands::UsageEvent(_) => return None,
         Commands::Uninstall(_) => "uninstall",
         Commands::Update(_) => "update",
         Commands::Migrate => "migrate",

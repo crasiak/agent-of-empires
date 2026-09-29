@@ -228,6 +228,9 @@ pub(super) struct NativeLaunchInputs {
     pub(super) docker_env: Option<crate::session::environment::DockerExecEnv>,
     pub(super) pane_env: Vec<crate::tmux::PaneEnvMutation>,
     pub(super) identity_extension: Option<(String, String)>,
+    /// The profile's `session.usage_tracking`, resolved here so
+    /// `status_hook_env_prefix` doesn't need its own config load.
+    pub(super) usage_tracking: bool,
 }
 impl NativeLaunchInputs {
     fn read_native_file(&self, path: &std::path::Path) -> Result<Option<Vec<u8>>> {
@@ -1070,6 +1073,7 @@ impl Instance {
                 pane_env: Vec::new(),
                 identity_extension,
                 profile,
+                usage_tracking: config.session.usage_tracking,
             })
         } else {
             let entries = self.resolved_host_environment_from(config.environment.clone());
@@ -1096,6 +1100,7 @@ impl Instance {
                 pane_env,
                 identity_extension,
                 profile,
+                usage_tracking: config.session.usage_tracking,
             })
         }
     }
@@ -2411,6 +2416,7 @@ mod tests {
             docker_env: None,
             pane_env: Vec::new(),
             identity_extension: None,
+            usage_tracking: false,
         };
         let database = crate::session::instance::test_helpers::create_hermes_database(root.path());
         (root, inputs, database)
@@ -2548,6 +2554,7 @@ mod tests {
             docker_env: None,
             pane_env: Vec::new(),
             identity_extension: None,
+            usage_tracking: false,
         };
         let database = alias.join("new/opencode.db");
         let before = inputs.canonical_path(&database).unwrap();

@@ -27,7 +27,9 @@ pub(crate) use codex::{
 };
 pub(crate) use command::HOOK_STATUS_BASE_IN_CONTAINER;
 #[cfg(test)]
-pub(crate) use command::{hook_command, hook_command_session_id, status_command_for_event};
+pub(crate) use command::{
+    hook_command, hook_command_session_id, hook_command_usage_event, status_command_for_event,
+};
 pub(crate) use config_io::with_config_lock_policy;
 pub use config_io::SymlinkPolicy;
 pub(crate) use dir_guard::{
