@@ -53,9 +53,7 @@ export function computeSessionRowTag(workspace: Workspace, mode: SessionRowTagMo
     case "sandbox":
       return primary.is_sandboxed ? { content: "sb", title: "Sandboxed", kind: mode } : null;
     case "agent": {
-      // Same precedence as the TUI's `agent_row_tag`: the reported launch
-      // identity names the agent that actually launched, then the structured
-      // agent, then the terminal tool.
+      // Match the TUI's agent_row_tag precedence.
       const identity = primary.launch_identity ?? null;
       const agent = identity?.agent.trim() || primary.acp_agent?.trim() || primary.tool.trim();
       if (!agent) return null;
@@ -64,14 +62,14 @@ export function computeSessionRowTag(workspace: Workspace, mode: SessionRowTagMo
         knownAgentCode(primary.tool) ??
         Array.from(agent.toLocaleLowerCase()).slice(0, AGENT_TAG_WIDTH).join("");
       if (!code) return null;
-      if (code !== "cc" && code !== "cx") {
+      if (code !== "cc" && code !== "cx" && code !== "pi") {
         return { content: code, title: agent, kind: mode };
       }
-      // Claude/Codex rows carry `[agent:account:launcher]`; unreported
-      // dimensions render as `?` so a missing launcher report is visible.
+      // Unreported account and launcher dimensions remain unknown.
       const [account, launcher] = identity ? launchIdentityCodes(identity) : ["?", "?"];
+      const suffix = identity?.agent === "pi" && identity.profile.split(/[-_]/).includes("oss") ? ":oss" : "";
       return {
-        content: `${code}:${account}:${launcher}`,
+        content: `${code}:${account}:${launcher}${suffix}`,
         title: identity ? describeLaunchIdentity(identity) : `${agent} / unknown account / unknown launcher`,
         kind: mode,
       };

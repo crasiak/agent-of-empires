@@ -95,6 +95,10 @@ for the harness API.
 
 ## Pull requests
 
+This project is maintained in `crasiak/agent-of-empires`. Target PRs and pushes
+at this fork. The original upstream is read-only unless a human explicitly
+confirms the specific PR, comment, or other write to that project.
+
 - Branch prefixes: `feature/`, `fix/`, `docs/`, `refactor/`.
 - Use conventional commit and PR titles.
 - Follow `.github/pull_request_template.md`; include what changed, why, tests,
