@@ -754,6 +754,13 @@
       ]
     },
     {
+      "id": "sidebar.pi-launch-identity",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/lib/sessionRowTag.test.ts", "src/components/__tests__/SessionRowTriage.test.tsx"],
+      "components": ["web/src/lib/sessionRowTag.ts", "web/src/components/sidebar/RowBadges.tsx"]
+    },
+    {
       "id": "sidebar.attention-badges",
       "kind": "vitest",
       "risk": "medium",

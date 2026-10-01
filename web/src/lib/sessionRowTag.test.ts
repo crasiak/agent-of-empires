@@ -110,8 +110,8 @@ describe("computeSessionRowTag", () => {
       kind: "agent",
     });
     expect(computeSessionRowTag(terminal, "agent")).toEqual({
-      content: "pi",
-      title: "pi",
+      content: "pi:?:?",
+      title: "pi / unknown account / unknown launcher",
       kind: "agent",
     });
     expect(computeSessionRowTag(blankStructuredAgent, "agent")?.content).toBe("gm");
@@ -147,7 +147,7 @@ describe("computeSessionRowTag", () => {
     ]);
     expect(computeSessionRowTag(partial, "agent")?.content).toBe("cc:?:h");
 
-    // Non-Claude/Codex agents keep the bare two-letter code.
+    // The reported agent wins over the configured tool.
     const pi = workspace({}, [
       session({
         tool: "pi",
@@ -155,6 +155,33 @@ describe("computeSessionRowTag", () => {
       }),
     ]);
     expect(computeSessionRowTag(pi, "agent")?.content).toBe("cc:p:l");
+  });
+
+  it("includes Pi accounts, launchers, and the OSS profile in agent badges", () => {
+    for (const [account, code] of [
+      ["personal", "p"],
+      ["work", "w"],
+      ["unknown", "?"],
+    ] as const) {
+      for (const [launcher, backend] of [
+        ["direct", "d"],
+        ["headroom", "h"],
+        ["ledger", "l"],
+        ["ledger-headroom", "lh"],
+        ["unknown", "?"],
+      ] as const) {
+        for (const profile of ["personal", "work", "oss", "personal-oss", "personal_oss", "blossom"]) {
+          const identity = { agent: "pi", account, launcher, profile };
+          const tag = computeSessionRowTag(
+            workspace({}, [session({ tool: "pi", launch_identity: identity })]),
+            "agent",
+          );
+          const suffix = ["oss", "personal-oss", "personal_oss"].includes(profile) ? ":oss" : "";
+          expect(tag?.content).toBe(`pi:${code}:${backend}${suffix}`);
+          expect(tag?.title).toContain(`(profile: ${profile})`);
+        }
+      }
+    }
   });
 
   it("returns no tag for none, host sandbox mode, or mixed multi-repo branches", () => {
