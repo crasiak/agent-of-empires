@@ -1,5 +1,6 @@
 //! Preserve legacy SID exclusions without inventing their namespace.
 
+use super::progress;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{fs, path::Path};
@@ -54,6 +55,13 @@ fn migrate_file(path: &Path) -> Result<()> {
         }
     }
     if changed {
+        if let Err(error) = crate::session::backup_before_migration(path) {
+            tracing::warn!(%error, path = %path.display(), "v032: no migration backup for the retype");
+            progress::notice(format!(
+                "could not back up {} before binding capture exclusions",
+                path.display()
+            ));
+        }
         crate::session::atomic_write(path, serde_json::to_string_pretty(&value)?.as_bytes())?;
         tracing::info!(
             "v032: bound legacy capture exclusions in {}",
@@ -87,10 +95,10 @@ mod tests {
             agent: "claude".into(),
             stores: vec![temp.path().join("new-store")],
             configuration: Vec::new(),
-            exported_default_store: false,
             cwd: temp.path().into(),
             cwd_filesystem: "host".into(),
             filesystem: "host".into(),
+            exported_default_store: None,
         };
         assert!(exclusions
             .iter()

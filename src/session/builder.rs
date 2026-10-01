@@ -16,6 +16,39 @@ use super::{
     civilizations, Config, Instance, SandboxInfo, WorkspaceInfo, WorkspaceRepo, WorktreeInfo,
 };
 
+/// Applies per-session launch values over the config defaults for
+/// `instance.tool`. Empty strings and `None` count as unset. Command priority:
+/// per-session > `agent_command_override` > `custom_agents` > the value already
+/// on `instance`.
+pub(crate) fn apply_agent_launch_config(
+    instance: &mut Instance,
+    session: &super::config::SessionConfig,
+    extra_args: &str,
+    command_override: &str,
+    yolo_mode: Option<bool>,
+) {
+    let extra = match extra_args {
+        "" => session
+            .agent_extra_args
+            .get(&instance.tool)
+            .map_or("", String::as_str),
+        set => set,
+    };
+    if !extra.is_empty() {
+        instance.extra_args = extra.to_string();
+    }
+
+    let command = match command_override {
+        "" => session.resolve_tool_command(&instance.tool),
+        set => set.to_string(),
+    };
+    if !command.is_empty() {
+        instance.command = command;
+    }
+
+    instance.yolo_mode = yolo_mode.unwrap_or(session.yolo_mode_default);
+}
+
 /// Parameters for creating a new session instance.
 #[derive(Debug, Clone)]
 pub struct InstanceParams {
@@ -705,30 +738,18 @@ pub fn build_instance(
     }
     instance.worktree_info = worktree_info;
     instance.workspace_info = workspace_info;
-    instance.yolo_mode = params.yolo_mode;
-
-    // Apply command overrides and custom agent commands from resolved config.
-    // Priority: per-session params > agent_command_override > custom_agents > AgentDef default.
-    if !params.command_override.is_empty() {
-        instance.command = params.command_override;
-    } else {
-        let resolved = config.session.resolve_tool_command(&params.tool);
-        if !resolved.is_empty() {
-            instance.command = resolved;
-        }
-    }
+    apply_agent_launch_config(
+        &mut instance,
+        &config.session,
+        &params.extra_args,
+        &params.command_override,
+        Some(params.yolo_mode),
+    );
     if instance.command.trim().is_empty() && crate::agents::get_agent(&params.tool).is_none() {
         bail!(
             "No launch command resolved for custom agent '{}'. Config may have changed since validation.",
             params.tool
         );
-    }
-    if !params.extra_args.is_empty() {
-        instance.extra_args = params.extra_args;
-    } else if let Some(extra) = config.session.agent_extra_args.get(&params.tool) {
-        if !extra.is_empty() {
-            instance.extra_args = extra.clone();
-        }
     }
 
     if params.sandbox {
@@ -761,7 +782,25 @@ pub fn build_instance(
             crate::session::ForkSeed::Terminal {
                 parent,
                 child_session_id,
+                unattributed_parent_agent,
             } => {
+                // Only an unattributed parent needs this: the launch
+                // identity-checks a qualified one itself. The parent's
+                // capability came from its own row's agent, so the child must
+                // actually launch that same agent.
+                if let Some(parent_agent) = unattributed_parent_agent.as_deref() {
+                    let launched = Instance::execution_agent_for(
+                        &instance.tool,
+                        instance.get_tool_command(),
+                        &config.session,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    crate::session::fork::ensure_child_matches_parent_agent(
+                        Some(parent_agent),
+                        launched.name,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                }
                 instance.agent_session_id = Some(child_session_id);
                 instance.resume_intent = crate::session::ResumeIntent::Fork {
                     from: parent.session_id.clone(),
@@ -1879,6 +1918,61 @@ mod tests {
     }
 
     #[test]
+    fn apply_agent_launch_config_prefers_set_session_values_over_config() {
+        // (session extra, config extra, session command, config override,
+        //  session yolo, config yolo) -> (extra, command, yolo)
+        let cases = [
+            (("", None, "", None, None, false), ("", "claude", false)),
+            (
+                ("", Some("--cfg"), "", Some("wrap"), None, true),
+                ("--cfg", "wrap", true),
+            ),
+            (
+                ("", Some(""), "", Some(""), None, false),
+                ("", "claude", false),
+            ),
+            (
+                (
+                    "--mine",
+                    Some("--cfg"),
+                    "mine",
+                    Some("wrap"),
+                    Some(false),
+                    true,
+                ),
+                ("--mine", "mine", false),
+            ),
+        ];
+        for ((extra, cfg_extra, cmd, cfg_cmd, yolo, cfg_yolo), expected) in cases {
+            let mut session = crate::session::config::SessionConfig {
+                yolo_mode_default: cfg_yolo,
+                ..Default::default()
+            };
+            if let Some(v) = cfg_extra {
+                session.agent_extra_args.insert("claude".into(), v.into());
+            }
+            if let Some(v) = cfg_cmd {
+                session
+                    .agent_command_override
+                    .insert("claude".into(), v.into());
+            }
+            let mut inst = Instance::new("t", "/p");
+            inst.tool = "claude".into();
+            inst.command = "claude".into();
+            apply_agent_launch_config(&mut inst, &session, extra, cmd, yolo);
+            assert_eq!(
+                (
+                    inst.extra_args.as_str(),
+                    inst.command.as_str(),
+                    inst.yolo_mode
+                ),
+                expected,
+                "extra={extra:?} cfg_extra={cfg_extra:?} cmd={cmd:?} cfg_cmd={cfg_cmd:?}"
+            );
+        }
+    }
+
+    #[test]
     #[serial_test::serial]
     fn build_instance_resolves_custom_agent_commands_and_detect_as() {
         let temp_home = tempfile::tempdir().unwrap();
@@ -2040,10 +2134,10 @@ mod tests {
                 agent: "claude".into(),
                 stores: vec![std::path::PathBuf::from("/tmp/store")],
                 configuration: Vec::new(),
-                exported_default_store: false,
                 cwd: "/tmp".into(),
                 cwd_filesystem: "host".into(),
                 filesystem: "host".into(),
+                exported_default_store: None,
             }),
             provenance: crate::session::ConversationProvenance::Observed,
             transcript_path: None,
@@ -2069,6 +2163,7 @@ mod tests {
             fork_seed: Some(ForkSeed::Terminal {
                 parent: Box::new(parent.clone()),
                 child_session_id: "child-conversation".into(),
+                unattributed_parent_agent: None,
             }),
         };
         let inst = build_instance(params, &[], &[], "default")
@@ -2124,5 +2219,50 @@ mod tests {
                 "{label}: fork-seed build must restore the prior alias and compiled rule"
             );
         }
+    }
+
+    /// The parent's capability is checked against the parent row's own agent,
+    /// and the launch skips identity checking for an unattributed binding, so
+    /// a child that would launch another agent must be refused here rather
+    /// than fork a conversation it cannot resume.
+    #[test]
+    #[serial_test::serial]
+    fn a_fork_child_that_would_launch_another_agent_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(root.path());
+        let mut parent = crate::session::Instance::new("parent", root.path().to_str().unwrap());
+        parent.tool = "claude".into();
+        parent.agent_session_id = Some("legacy-uuid".into());
+        parent.agent_session_binding =
+            Some(crate::session::ConversationBinding::unknown("legacy-uuid"));
+        let seed = crate::session::fork::terminal_fork_seed(
+            parent.fork_parent_ref().unwrap(),
+            "child-uuid".into(),
+        )
+        .expect("an unattributed parent is admitted");
+
+        let mut same_agent = custom_agent_params(root.path(), "claude");
+        same_agent.command_override = "claude".into();
+        same_agent.fork_seed = Some(seed.clone());
+        assert_eq!(
+            build_instance(same_agent, &[], &[], "default")
+                .expect("a child launching the parent's own agent still forks")
+                .instance
+                .agent_session_id
+                .as_deref(),
+            Some("child-uuid")
+        );
+
+        let mut other_agent = custom_agent_params(root.path(), "codex");
+        other_agent.command_override = "codex".into();
+        other_agent.fork_seed = Some(seed);
+        let refused = match build_instance(other_agent, &[], &[], "default") {
+            Ok(_) => panic!("a child launching another agent cannot carry the conversation"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            refused.contains("codex") && refused.contains("claude"),
+            "the refusal must name both agents: {refused}"
+        );
     }
 }

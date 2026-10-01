@@ -20,13 +20,52 @@ pub enum SessionBucket {
     Trashed,
 }
 
+/// Why an archived or trashed session refuses to launch its agent or take input into a live pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum StartBlocked {
+    #[error("session is archived; unarchive it first")]
+    Archived,
+    #[error("session is in trash; restore it first")]
+    Trashed,
+}
+
+impl StartBlocked {
+    /// Stable machine-readable code for API error bodies.
+    pub fn code(self) -> &'static str {
+        match self {
+            StartBlocked::Archived => "session_archived",
+            StartBlocked::Trashed => "session_trashed",
+        }
+    }
+}
+
 impl Instance {
+    /// Archived and trashed sessions must be unarchived or restored before any
+    /// path starts or resumes their agent. Snooze is not a block: it expires on its own.
+    pub fn ensure_startable(&self) -> Result<(), StartBlocked> {
+        match self.effective_bucket() {
+            SessionBucket::Active => Ok(()),
+            SessionBucket::Archived => Err(StartBlocked::Archived),
+            SessionBucket::Trashed => Err(StartBlocked::Trashed),
+        }
+    }
+
     /// Stamp `last_accessed_at` to the current time AND wake the session from any sink state.
     pub fn touch_last_accessed(&mut self) {
         self.last_accessed_at = Some(Utc::now());
         self.archived_at = None;
         self.snoozed_until = None;
         self.idle_dormant_since = None;
+    }
+
+    /// Stamp recency after input reached a live pane. Callers stamp after releasing the lock
+    /// `lock_for_input` held, so an archive or trash may have landed since; never clear it.
+    pub fn touch_after_input(&mut self) {
+        if self.ensure_startable().is_ok() {
+            self.touch_last_accessed();
+        } else {
+            self.last_accessed_at = Some(Utc::now());
+        }
     }
 
     /// Whether this session's structured view worker was auto-stopped for inactivity and should not
@@ -92,6 +131,26 @@ impl Instance {
 
     pub fn is_trashed(&self) -> bool {
         self.trashed_at.is_some()
+    }
+
+    /// Whether this session currently occupies a slot in its owning plugin's
+    /// `MAX_ACTIVE_PLUGIN_SESSIONS` cap: actively running, or not parked by the user and not
+    /// in one of the counted statuses. `is_trashed()` is checked first and wins outright: a
+    /// trashed row never reaches `apply_status_intent` (which returns early on it), so nothing
+    /// would ever clear a pending mark that outlived a trash. `plugin_revival_pending` then
+    /// counts unconditionally ahead of the remaining archived/snoozed checks:
+    /// `sessions.turn.send` sets it before waking a resting session, and the wake that follows
+    /// clears those park flags moments later, so a target caught mid-wake by a concurrent
+    /// count must not read as unparked-and-thus-uncounted.
+    pub(crate) fn counts_toward_plugin_session_cap(&self) -> bool {
+        !self.is_trashed()
+            && (self.plugin_revival_pending
+                || (!self.is_archived()
+                    && !self.is_snoozed()
+                    && matches!(
+                        self.status,
+                        Status::Creating | Status::Starting | Status::Running | Status::Waiting
+                    )))
     }
 
     /// The mutually-exclusive lifecycle bucket a session renders in. Precedence is `Trashed >
@@ -245,6 +304,46 @@ mod tests {
 
     fn inst() -> Instance {
         Instance::new("test", "/tmp/test")
+    }
+
+    #[test]
+    fn plugin_revival_pending_counts_unconditionally() {
+        let mut i = inst();
+        i.status = Status::Idle;
+        assert!(!i.counts_toward_plugin_session_cap());
+
+        i.plugin_revival_pending = true;
+        assert!(i.counts_toward_plugin_session_cap());
+
+        // `sessions.turn.send` marks pending before the wake that follows clears these; a
+        // concurrent count caught in that gap must still see it as occupying a slot.
+        i.archived_at = Some(Utc::now());
+        assert!(i.counts_toward_plugin_session_cap());
+        i.archived_at = None;
+        i.snoozed_until = Some(Utc::now() + chrono::Duration::hours(1));
+        assert!(i.counts_toward_plugin_session_cap());
+        i.snoozed_until = None;
+
+        i.plugin_revival_pending = false;
+        i.status = Status::Running;
+        assert!(i.counts_toward_plugin_session_cap());
+
+        i.status = Status::Idle;
+        assert!(!i.counts_toward_plugin_session_cap());
+    }
+
+    /// A trashed row never reaches `apply_status_intent` (which returns early on it), so
+    /// nothing would ever clear a pending mark that outlived a trash; `is_trashed()` must win
+    /// outright rather than being masked by an unconditional pending check.
+    #[test]
+    fn trashed_wins_over_a_pending_plugin_revival() {
+        let mut i = inst();
+        i.status = Status::Idle;
+        i.plugin_revival_pending = true;
+        assert!(i.counts_toward_plugin_session_cap());
+
+        i.trashed_at = Some(Utc::now());
+        assert!(!i.counts_toward_plugin_session_cap());
     }
 
     #[test]

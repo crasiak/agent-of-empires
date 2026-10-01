@@ -909,6 +909,29 @@ pub struct AppStateConfig {
     pub web_ui_state: std::collections::BTreeMap<String, String>,
 }
 
+/// Whether a scratch session (no repo, so never repo-config-overridden) follows the global
+/// `smart_rename` toggle or forces its own value, since scratch sessions have no stable path to
+/// key a per-project override on the way a registered repo does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScratchSmartRenameMode {
+    #[default]
+    Inherit,
+    On,
+    Off,
+}
+
+impl ScratchSmartRenameMode {
+    /// `None` defers to the resolved `smart_rename` toggle; `Some` forces it either way.
+    pub fn as_override(self) -> Option<bool> {
+        match self {
+            Self::Inherit => None,
+            Self::On => Some(true),
+            Self::Off => Some(false),
+        }
+    }
+}
+
 /// Session-related configuration defaults
 #[derive(Debug, Clone, Serialize, Deserialize, SettingsSection)]
 // `repo_default = "deny"`: most of this section is personal preference, but
@@ -1080,6 +1103,17 @@ pub struct SessionConfig {
     #[setting(label = "Smart Session Rename", widget = "toggle", category = "Agents")]
     pub smart_rename: bool,
 
+    /// Override Smart Session Rename for scratch sessions specifically, since they have no repo
+    /// path to key a per-project override on the way a registered project does.
+    #[serde(default)]
+    #[setting(
+        label = "Smart Session Rename (Scratch)",
+        widget = "select",
+        options = "inherit:Use Smart Session Rename,on:On,off:Off",
+        category = "Agents"
+    )]
+    pub scratch_smart_rename: ScratchSmartRenameMode,
+
     /// Agent used for one-shot utility calls (the smart-rename title and the
     /// conversation summary). Empty means use the session's own agent. Set
     /// this to point utility calls at a cheaper or more obedient model (e.g.
@@ -1224,10 +1258,15 @@ pub struct SessionConfig {
 
     /// Config directory read by the session's agent instead of its built-in
     /// default. Host sessions use the directory directly. Sandboxed sessions
-    /// use its `sandbox` subdirectory, which AoE mounts at the resolved
-    /// built-in config path and uses for hooks, credentials, and native-session
-    /// capture. Native MCP discovery reads it too, so AoE reconciles the
-    /// servers the agent loads.
+    /// use a per-session `sandbox-v2/<instance id>` child of it, which AoE
+    /// mounts at the resolved built-in config path and uses for hooks,
+    /// credentials, and native-session capture. Every agent but Claude
+    /// re-reads this entry on the next launch, so a repointed entry moves the
+    /// session, except where an OMP profile or dotenv pins its own directory,
+    /// which refuses the launch instead. A Claude conversation keeps the store
+    /// its own binding recorded and resumes there, in the host and structured
+    /// views alike; this entry still owns that conversation's folder-trust
+    /// records.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[setting(
         label = "Agent Config Dir",
@@ -1305,21 +1344,21 @@ pub struct SessionConfig {
     #[setting(label = "Confirm Before Delete", widget = "toggle")]
     pub confirm_delete: bool,
 
-    /// Days a session stays in the trash before it is automatically purged,
-    /// measured from when it was trashed. `0` keeps trashed sessions
-    /// forever (manual purge only). Auto-purge is enforced by the `aoe serve`
-    /// daemon (a startup sweep plus an hourly tick); without a running daemon,
-    /// expired trash is purged on the next daemon start or by an explicit
-    /// manual purge (`aoe rm --purge`, `aoe session empty-trash`).
-    #[serde(default = "default_trash_retention_days")]
+    /// Minutes a session stays in the trash before it is automatically
+    /// purged, measured from when it was trashed. Default 43200 (30 days);
+    /// `0` keeps trashed sessions forever. Trashed sessions keep their
+    /// container and volumes, so a shorter window frees disk sooner. Enforced
+    /// by the `aoe serve` daemon; without one, expired trash waits for the
+    /// next daemon start or a manual purge (`aoe session empty-trash`).
+    #[serde(default = "default_trash_retention_minutes")]
     #[setting(
-        label = "Trash Retention (days)",
+        label = "Trash Retention (minutes)",
         widget = "number",
         min = 0,
-        max = 3650,
-        validate = "range:0:3650"
+        max = 5256000,
+        validate = "range:0:5256000"
     )]
-    pub trash_retention_days: u32,
+    pub trash_retention_minutes: u32,
 
     /// Seconds of inactivity after which a plain TUI/tmux session that has
     /// been `Idle` this long is auto-stopped (its tmux session and any
@@ -1811,6 +1850,7 @@ impl Default for SessionConfig {
             merge_hooks_into_selected_agent: true,
             conversation_summary: false,
             smart_rename: true,
+            scratch_smart_rename: ScratchSmartRenameMode::default(),
             smart_rename_agent: String::new(),
             smart_rename_model: HashMap::new(),
             auto_resume_on_restart: true,
@@ -1827,7 +1867,7 @@ impl Default for SessionConfig {
             session_id_poller_max_threads: default_session_id_poller_max_threads(),
             delete_to_trash: true,
             confirm_delete: true,
-            trash_retention_days: default_trash_retention_days(),
+            trash_retention_minutes: default_trash_retention_minutes(),
             auto_stop_idle_secs: default_auto_stop_idle_secs(),
             prevent_sleep_when_active: false,
             prevent_sleep_idle_grace_minutes: default_prevent_sleep_idle_grace_minutes(),
@@ -1857,8 +1897,8 @@ fn default_session_id_poller_max_threads() -> u32 {
     crate::session::poller::DEFAULT_SESSION_ID_POLLER_MAX_THREADS
 }
 
-fn default_trash_retention_days() -> u32 {
-    30
+fn default_trash_retention_minutes() -> u32 {
+    30 * 24 * 60
 }
 
 fn default_restart_wake_message() -> String {

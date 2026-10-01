@@ -51,7 +51,10 @@ pub struct AddArgs {
     #[arg(long = "tool", conflicts_with = "command")]
     tool: Option<String>,
 
-    /// Parent session (creates sub-session, inherits group)
+    /// Parent session (creates sub-session, inherits group). The sub-session
+    /// does not inherit the parent's worktree or path: without `--worktree`
+    /// it opens at `<path>` (default: the current directory) on whatever
+    /// branch is checked out there.
     #[arg(short = 'P', long)]
     parent: Option<String>,
 
@@ -276,37 +279,21 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
 
     let fork_seed: Option<crate::session::ForkSeed> = if let Some(fork_ref) = &args.fork_from {
         let source = super::resolve_session(fork_ref, &instances)?;
-        if matches!(
-            source.resume_intent,
-            crate::session::ResumeIntent::Fork { .. }
-        ) {
-            bail!(
-                "Cannot fork from session '{}': its own fork has not launched yet. Start it once, then fork from the child conversation.",
-                source.title
-            );
-        }
         let user_chose_tool = args.tool.is_some() || args.command.is_some();
         if !user_chose_tool {
             resolved_tool = source.tool.clone();
         }
-        let parent_agent = source
-            .fork_parent_binding()
-            .and_then(|binding| binding.execution.as_ref())
-            .map(|execution| execution.agent.clone())
-            .unwrap_or_else(|| source.tool.clone());
+        // One rule on both surfaces: a row whose native identity cannot be
+        // resolved names no conversation a fork could carry, so it is not a
+        // candidate here either, exactly as the REST election drops it.
+        let parent_ref = source.fork_parent_ref().unwrap_or(None);
         let seed = crate::session::fork::terminal_fork_seed(
-            source.fork_parent_binding(),
+            parent_ref,
             crate::session::capture::generate_session_uuid(),
         )
-        .map_err(|denied| match denied {
-            crate::session::ForkDenied::AgentCannotFork => anyhow::anyhow!(
-                "Agent '{}' does not support forking. Forkable agents: claude, codex, opencode.",
-                parent_agent
-            ),
-            crate::session::ForkDenied::NoParentSession => anyhow::anyhow!(
-                "Nothing to fork: session '{}' has no captured agent session yet. Start a conversation in it first.",
-                source.title
-            ),
+        .map_err(|denied| {
+            let profile = source.effective_profile();
+            anyhow::Error::msg(denied.user_message(&source.title, &source.id, &profile))
         })?;
         Some(seed)
     } else {
@@ -555,24 +542,13 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
         instance.workspace_info = Some(workspace_info);
     }
 
-    instance.yolo_mode = args.yolo || config.session.yolo_mode_default;
-
-    if let Some(ref extra) = args.extra_args {
-        instance.extra_args = extra.clone();
-    } else if let Some(extra) = config.session.agent_extra_args.get(&instance.tool) {
-        if !extra.is_empty() {
-            instance.extra_args = extra.clone();
-        }
-    }
-
-    if let Some(ref cmd) = args.cmd_override {
-        instance.command = cmd.clone();
-    } else {
-        let resolved = config.session.resolve_tool_command(&instance.tool);
-        if !resolved.is_empty() {
-            instance.command = resolved;
-        }
-    }
+    crate::session::builder::apply_agent_launch_config(
+        &mut instance,
+        &config.session,
+        args.extra_args.as_deref().unwrap_or_default(),
+        args.cmd_override.as_deref().unwrap_or_default(),
+        args.yolo.then_some(true),
+    );
 
     let user_picked_agent = args.agent.is_some();
     let user_wants_structured = args.structured_view || user_picked_agent;
@@ -705,7 +681,24 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
             crate::session::ForkSeed::Terminal {
                 parent,
                 child_session_id,
+                unattributed_parent_agent,
             } => {
+                // Only an unattributed parent needs this: the launch
+                // identity-checks a qualified one itself, and this path builds
+                // the child itself, so nothing else would hold it.
+                if let Some(parent_agent) = unattributed_parent_agent.as_deref() {
+                    let launched = crate::session::Instance::execution_agent_for(
+                        &instance.tool,
+                        instance.get_tool_command(),
+                        &config.session,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    crate::session::fork::ensure_child_matches_parent_agent(
+                        Some(parent_agent),
+                        launched.name,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                }
                 instance.agent_session_id = Some(child_session_id);
                 instance.resume_intent = crate::session::ResumeIntent::Fork {
                     from: parent.session_id.clone(),
@@ -831,13 +824,7 @@ pub async fn run(profile: &str, args: AddArgs) -> Result<()> {
                         println!(
                             "Skipped (session created without trusting repo hooks or project MCP)"
                         );
-                        match &trust.hooks {
-                            TrustSurface::Trusted(h) => {
-                                repo_config::ResolvedHooks::with_repo(profile, repo_root, h.clone())
-                            }
-                            TrustSurface::NeedsTrust { .. } => None,
-                            TrustSurface::Absent => repo_config::ResolvedHooks::global(profile),
-                        }
+                        hooks_when_trust_declined(profile, repo_root, &trust.hooks)
                     }
                 }
                 Err(e) => {
@@ -1256,6 +1243,23 @@ fn detect_tool(cmd: &str) -> Result<String> {
         })
 }
 
+/// Declined trust keeps already-trusted repo hooks; unapproved ones fall back
+/// to the personal global and profile hooks.
+fn hooks_when_trust_declined(
+    profile: &str,
+    repo_root: &std::path::Path,
+    hooks: &repo_config::TrustSurface<crate::session::HooksConfig>,
+) -> Option<repo_config::ResolvedHooks> {
+    match hooks {
+        repo_config::TrustSurface::Trusted(h) => {
+            repo_config::ResolvedHooks::with_repo(profile, repo_root, h.clone())
+        }
+        repo_config::TrustSurface::NeedsTrust { .. } | repo_config::TrustSurface::Absent => {
+            repo_config::ResolvedHooks::global(profile)
+        }
+    }
+}
+
 fn override_launch_binary(
     tool: &str,
     session: &crate::session::config::SessionConfig,
@@ -1362,8 +1366,58 @@ fn resolve_sandbox_image(
 
 #[cfg(test)]
 mod tests {
-    use super::{override_launch_binary, parse_repo_base, resolve_sandbox_image};
+    use super::{
+        hooks_when_trust_declined, override_launch_binary, parse_repo_base, resolve_sandbox_image,
+    };
+    use crate::session::config::repo_config::TrustSurface;
     use crate::session::config::SessionConfig;
+    use crate::session::HooksConfig;
+
+    #[test]
+    fn declined_trust_keeps_personal_on_create_hooks_only() {
+        let _app = crate::session::test_support::isolate_app_dir();
+        let write = |path: std::path::PathBuf, body: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write(
+            crate::session::get_app_dir().unwrap().join("config.toml"),
+            "[hooks]\non_create = [\"global-create\"]\n",
+        );
+        write(
+            crate::session::get_profile_dir_path("work")
+                .unwrap()
+                .join("config.toml"),
+            "[hooks]\non_create = [\"profile-create\"]\n",
+        );
+        let repo = HooksConfig {
+            on_create: vec!["repo-create".into()],
+            on_launch: vec!["repo-launch".into()],
+            ..Default::default()
+        };
+        let root = std::path::Path::new("/repo");
+
+        for (profile, expected) in [("default", "global-create"), ("work", "profile-create")] {
+            let unapproved = TrustSurface::NeedsTrust {
+                config: repo.clone(),
+                hash: "h".into(),
+            };
+            for surface in [unapproved, TrustSurface::Absent] {
+                let hooks = hooks_when_trust_declined(profile, root, &surface)
+                    .expect("personal on_create hooks must survive a declined prompt");
+                assert_eq!(
+                    hooks.hooks().on_create,
+                    vec![expected.to_string()],
+                    "{profile}"
+                );
+                assert!(hooks.hooks().on_launch.is_empty(), "{profile}");
+            }
+            let trusted =
+                hooks_when_trust_declined(profile, root, &TrustSurface::Trusted(repo.clone()))
+                    .unwrap();
+            assert_eq!(trusted.hooks().on_create, vec!["repo-create".to_string()]);
+        }
+    }
 
     #[test]
     fn parse_repo_base_splits_on_the_first_equals() {
@@ -1439,6 +1493,114 @@ mod tests {
                 Some(Commands::Add(args)) => (profile, *args),
                 _ => panic!("expected an add invocation"),
             }
+        }
+
+        /// `add` builds the fork child itself rather than through the session
+        /// builder, so it needs its own identity comparison: a child asked for
+        /// under another agent must not fork a conversation it cannot resume.
+        /// A wrapper with no execution contract resolves to no agent, so the
+        /// row names no conversation a fork could carry and is not a candidate.
+        /// The REST election drops it; the CLI has to refuse it the same way
+        /// rather than propagating the resolution error the other surface hides.
+        #[tokio::test]
+        #[serial]
+        async fn add_refuses_an_unresolvable_parent_the_way_rest_drops_it() {
+            let _guard = crate::session::test_support::isolate_app_dir();
+            let project = tempfile::tempdir().unwrap();
+            let parent_id = "unresolvable-parent-uuid";
+            crate::session::Storage::new_unwatched("real")
+                .unwrap()
+                .update(|rows, _| {
+                    let mut parent =
+                        crate::session::Instance::new("parent", project.path().to_str().unwrap());
+                    parent.id = parent_id.to_string();
+                    parent.tool = "claude".into();
+                    parent.command = "ssh -t host claude".into();
+                    parent.agent_session_id = Some("legacy-conversation-uuid".into());
+                    parent.agent_session_binding = Some(
+                        crate::session::ConversationBinding::unknown("legacy-conversation-uuid"),
+                    );
+                    *rows = vec![parent];
+                    Ok(())
+                })
+                .unwrap();
+
+            let (profile, args) = dispatch_argv(&[
+                "aoe",
+                "add",
+                project.path().to_str().unwrap(),
+                "--fork-from",
+                parent_id,
+                "-p",
+                "real",
+            ]);
+            let msg = super::super::run(&profile, args)
+                .await
+                .expect_err("a parent whose agent cannot be resolved is not a candidate")
+                .to_string();
+            assert_eq!(
+                msg,
+                crate::session::ForkDenied::NoParentSession
+                    .user_message("parent", parent_id, "real"),
+                "the CLI and the REST election must refuse the row the same way"
+            );
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn add_refuses_a_fork_child_under_another_agent() {
+            let root = tempfile::tempdir().unwrap();
+            let _guard = crate::session::test_support::isolate_app_dir_at(root.path());
+            // The CLI resolves the requested tool's binary before the fork parent
+            // check, so both agents need a command on the path.
+            let _claude = crate::session::test_support::install_login_shell_path_command(
+                root.path(),
+                "claude",
+                "#!/bin/sh\nexit 1\n",
+            );
+            let _codex = crate::session::test_support::install_login_shell_path_command(
+                root.path(),
+                "codex",
+                "#!/bin/sh\nexit 1\n",
+            );
+            let project = tempfile::tempdir().unwrap();
+            let parent_id = "parent-session-uuid";
+            crate::session::Storage::new_unwatched("real")
+                .unwrap()
+                .update(|rows, _| {
+                    let mut parent =
+                        crate::session::Instance::new("parent", project.path().to_str().unwrap());
+                    parent.id = parent_id.to_string();
+                    parent.tool = "claude".into();
+                    parent.command = "claude".into();
+                    parent.agent_session_id = Some("legacy-conversation-uuid".into());
+                    parent.agent_session_binding = Some(
+                        crate::session::ConversationBinding::unknown("legacy-conversation-uuid"),
+                    );
+                    *rows = vec![parent];
+                    Ok(())
+                })
+                .unwrap();
+
+            let (profile, args) = dispatch_argv(&[
+                "aoe",
+                "add",
+                project.path().to_str().unwrap(),
+                "--fork-from",
+                parent_id,
+                "--tool",
+                "codex",
+                "-p",
+                "real",
+            ]);
+            let msg = super::super::run(&profile, args)
+                .await
+                .expect_err("a fork under another agent must refuse")
+                .to_string();
+            assert!(
+                msg.contains("codex") && msg.contains("claude"),
+                "the refusal must name both agents, got: {msg}"
+            );
         }
 
         #[tokio::test]
