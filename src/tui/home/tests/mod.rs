@@ -27,10 +27,10 @@ fn observed_fork_parent(agent: &str) -> Instance {
                 agent: agent.into(),
                 stores: vec!["/native-store".into()],
                 configuration: Vec::new(),
-                exported_default_store: false,
                 cwd: "/tmp/repo".into(),
                 cwd_filesystem: "host".into(),
                 filesystem: "host".into(),
+                exported_default_store: None,
             }),
             provenance: crate::session::ConversationProvenance::Observed,
             transcript_path: None,
@@ -48,6 +48,7 @@ mod apply_session_id_updates;
 mod archive_restart_grouping;
 mod click_to_select;
 mod default_attach_mode;
+mod dialog_mouse;
 mod divider_drag;
 mod footer_toolbar;
 mod fork_rename_dialogs;

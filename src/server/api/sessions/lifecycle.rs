@@ -259,10 +259,12 @@ pub async fn update_session_archive(
 
     let archived = body.archived;
     let persist_id = id.clone();
-    if persist_session_update(
+    // Locked so an archive cannot land while `aoe send` types into a live pane.
+    if persist_session_update_locked(
         profile,
         "archive update",
         state.file_watch.clone(),
+        id.clone(),
         move |instances| {
             if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
                 if archived {
@@ -1007,6 +1009,10 @@ pub async fn stop_session(
         if is_structured {
             inst.status = Status::Stopped;
             inst.mark_idle_dormant();
+            // A direct stop bypasses apply_status_intent, which normally releases this on
+            // reaching a terminal status; do the same here, on the live in-memory row (the
+            // disk-persisted copy above is a fresh load, so this field is always false there).
+            inst.plugin_revival_pending = false;
         }
         inst.clone()
     };
@@ -1105,6 +1111,9 @@ pub async fn start_session(
             return session_not_found();
         };
 
+        if let Err(blocked) = inst.ensure_startable() {
+            return crate::server::api::start_blocked_response(blocked);
+        }
         let structured = inst.is_structured();
         (
             inst.source_profile.clone(),
@@ -1114,8 +1123,18 @@ pub async fn start_session(
         )
     };
 
-    // Only a stopped session has anything to start; otherwise return current.
+    // Only a stopped session has anything to start; otherwise return current,
+    // unless a peer has since shelved or purged the stored row.
     if !is_stopped {
+        match crate::server::api::load_persisted_instance(&state, &profile, &id).await {
+            Ok(Some(stored)) => {
+                if let Err(blocked) = stored.ensure_startable() {
+                    return crate::server::api::start_blocked_response(blocked);
+                }
+            }
+            Ok(None) => return session_not_found(),
+            Err(resp) => return resp,
+        }
         let instances = state.instances.read().await;
         let response = match instances.iter().find(|i| i.id == id) {
             Some(inst) => {
@@ -1133,12 +1152,21 @@ pub async fn start_session(
         // reconciler's next tick respawns the worker against the preserved
         // transcript.
         let persist_id = id.clone();
+        // Unset when a peer purged the row; `Err` when it archived or trashed it since the
+        // memory check.
+        let stored = Arc::new(std::sync::OnceLock::new());
+        let stored_on_disk = Arc::clone(&stored);
         if persist_session_update(
             profile,
             "start session",
             state.file_watch.clone(),
             move |instances| {
                 if let Some(inst) = instances.iter_mut().find(|i| i.id == persist_id) {
+                    let startable = inst.ensure_startable();
+                    let _ = stored_on_disk.set(startable);
+                    if startable.is_err() {
+                        return;
+                    }
                     inst.idle_dormant_since = None;
                     inst.status = Status::Idle;
                     inst.last_error = None;
@@ -1149,6 +1177,11 @@ pub async fn start_session(
         .is_err()
         {
             return persist_failed_response();
+        }
+        match stored.get() {
+            None => return session_not_found(),
+            Some(Err(refusal)) => return crate::server::api::start_blocked_response(*refusal),
+            Some(Ok(())) => {}
         }
         {
             let mut instances = state.instances.write().await;
@@ -1235,14 +1268,18 @@ pub async fn start_session(
         }
         Ok(Err(boxed)) => {
             let (started, e) = *boxed;
+            let blocked = e.downcast_ref::<crate::session::StartBlocked>().copied();
             let msg = e.to_string();
             tracing::warn!(target: "http.api.sessions", "start_session restart failed for {id}: {msg}");
             let mut instances = state.instances.write().await;
             if let Some(inst) = instances.iter_mut().find(|i| i.id == id) {
-                if apply_post_restart_sync(inst, &sync_base, &started) {
+                if apply_post_restart_sync(inst, &sync_base, &started) && blocked.is_none() {
                     inst.status = Status::Error;
                     inst.last_error = Some(msg.clone());
                 }
+            }
+            if let Some(blocked) = blocked {
+                return crate::server::api::start_blocked_response(blocked);
             }
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "restart_failed", msg)
         }

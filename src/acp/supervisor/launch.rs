@@ -103,6 +103,8 @@ impl<S: BroadcastSink> Supervisor<S> {
             stored_id = ?config.stored_acp_session_id,
             "spawning structured view worker"
         );
+        // The hooks above may re-enter aoe, so the lifecycle lock is taken only for each check.
+        admit_durable_launch(&req).await?;
         // Clear a partial replay from a failed import before session/load re-emits it.
         if config.seed_history_replay {
             self.sink.clear_session_events(session_id);
@@ -130,6 +132,13 @@ impl<S: BroadcastSink> Supervisor<S> {
                 return Err(SupervisorError::Acp(err));
             }
         };
+
+        // A peer that archived or trashed the row during the handshake wins: retire the runner.
+        if let Err(refused) = admit_durable_launch(&req).await {
+            drop(client);
+            self.reap_failed_launch(&lease).await;
+            return Err(refused);
+        }
 
         if warmup_guard.is_some() {
             lock_recover(&self.warmed_up_agents).insert(req.agent.clone());
@@ -229,12 +238,14 @@ impl<S: BroadcastSink> Supervisor<S> {
             req.effort.clone(),
         );
 
+        let mut base_host_environment = Vec::new();
         let mut host_environment = Vec::new();
         if req.sandbox_info.is_none() {
             // Trusted global/profile configuration; repo overrides cannot contribute it.
-            host_environment = crate::session::environment::resolve_host_environment_pairs(
+            base_host_environment = crate::session::environment::resolve_host_environment_pairs(
                 &resolved_cfg.environment,
             );
+            host_environment = base_host_environment.clone();
             if !resolved_cfg.host_hooks.before_session.is_empty() {
                 let minted = before_session_env(
                     &req.session_id,
@@ -346,6 +357,7 @@ impl<S: BroadcastSink> Supervisor<S> {
                 additional_dirs: req.additional_dirs.clone(),
                 provider_env,
                 host_environment,
+                base_host_environment,
                 default_effort: effort,
                 default_effort_explicit: req.effort_explicit,
                 default_mode: acp_defaults.and_then(|defaults| defaults.mode()),
@@ -712,6 +724,36 @@ pub(super) fn publish_rejection(err: &AcpError, mut publish: impl FnMut(Event)) 
     true
 }
 
+/// Recheck the stored row under its lifecycle lock: the caller's check ran before
+/// `spawn_config` awaited the `before_session` hook. Refuses an archived or trashed row, or one
+/// purged since. A request without a source profile has no stored row to check.
+async fn admit_durable_launch(req: &SpawnRequest) -> Result<(), SupervisorError> {
+    let Some(profile) = req.source_profile.clone() else {
+        return Ok(());
+    };
+    let session_id = req.session_id.clone();
+    let spawn_error = |e: anyhow::Error| {
+        SupervisorError::Acp(AcpError::Spawn(format!("launch admission: {e:#}")))
+    };
+    tokio::task::spawn_blocking(move || {
+        let storage = crate::session::Storage::new_unwatched(&profile).map_err(spawn_error)?;
+        let _lock = storage
+            .acquire_instance_lifecycle_lock(&session_id)
+            .map_err(spawn_error)?;
+        let stored = storage
+            .load()
+            .map_err(spawn_error)?
+            .into_iter()
+            .find(|row| row.id == session_id);
+        match stored {
+            None => Err(SupervisorError::SessionGone(session_id)),
+            Some(row) => row.ensure_startable().map_err(SupervisorError::Blocked),
+        }
+    })
+    .await
+    .map_err(|e| SupervisorError::Acp(AcpError::Spawn(format!("launch admission task: {e}"))))?
+}
+
 /// Run the profile's `before_session` host hooks and return the env they mint.
 pub(super) async fn before_session_env(
     session_id: &str,
@@ -746,14 +788,11 @@ pub(super) fn overlay_env(env: &mut Vec<(String, String)>, minted: Vec<(String, 
         env.push((key, value));
     }
 }
-/// Pins a structured Claude worker to its store and returns the directory its
-/// `.claude.json` is then read from.
 pub(super) fn apply_claude_store_pin(
     environment: &mut Vec<(String, String)>,
     pin: Option<&crate::session::capture::ClaudeStorePin>,
 ) -> Option<std::path::PathBuf> {
     let pin = pin?;
-    let store = pin.store.as_path();
     let value = |key: &str| {
         environment
             .iter()
@@ -763,21 +802,18 @@ pub(super) fn apply_claude_store_pin(
             .or_else(|| std::env::var(key).ok())
             .filter(|value| !value.is_empty())
     };
-    // Leave the default store unexported, as the terminal launch does (#4119).
-    if !pin.explicit && value("CLAUDE_CONFIG_DIR").is_none() {
-        if let Some(home) = value("HOME")
-            .map(std::path::PathBuf::from)
-            .filter(|home| crate::session::capture::is_default_claude_store(store, home))
-        {
-            return Some(home);
-        }
-    }
+    let home = value("HOME").map(std::path::PathBuf::from);
+    let export = crate::session::capture::exports_claude_store(pin, home.as_deref());
     environment.retain(|(key, _)| key != "CLAUDE_CONFIG_DIR");
-    environment.push((
-        "CLAUDE_CONFIG_DIR".into(),
-        store.to_string_lossy().into_owned(),
-    ));
-    Some(store.to_path_buf())
+    if export {
+        environment.push((
+            "CLAUDE_CONFIG_DIR".into(),
+            pin.store.to_string_lossy().into_owned(),
+        ));
+        Some(pin.store.clone())
+    } else {
+        home
+    }
 }
 
 pub(super) async fn resolve_mcp_servers(
@@ -926,7 +962,7 @@ mod tests {
         let mut request = spawn_request("selected-store");
         request.claude_store_pin = Some(crate::session::capture::ClaudeStorePin {
             store: selected.clone(),
-            explicit: false,
+            exported_default_store: Some(false),
         });
         let (config, context_reset) = supervisor.spawn_config(&request, 1).await.unwrap();
         assert!(context_reset.is_none());
@@ -945,68 +981,92 @@ mod tests {
             .contains(&("HOOK_VALUE".into(), "kept".into())));
     }
 
-    /// A structured Claude worker in the default store must not get
-    /// `CLAUDE_CONFIG_DIR`, which moves its `.claude.json` (#4119).
     #[test]
     #[serial_test::serial]
-    fn claude_store_pin_skips_an_unexported_default_store() {
+    fn claude_route_distinguishes_implicit_explicit_and_custom_stores() {
         let (_home, temp) = isolate_home();
-        let default = temp.path().join(".claude");
-        let custom = temp.path().join("custom");
-        let pinned =
-            |store: &std::path::Path, explicit: bool, environment: &[(&str, &std::path::Path)]| {
-                let mut environment = environment
-                    .iter()
-                    .map(|(key, value)| (key.to_string(), value.display().to_string()))
-                    .collect();
-                let pin = crate::session::capture::ClaudeStorePin {
+        let home = temp.path().to_path_buf();
+        let default = home.join(".claude");
+        let custom = home.join("custom");
+        std::fs::create_dir_all(&default).unwrap();
+        std::fs::create_dir_all(&custom).unwrap();
+        let route = |store: &std::path::Path, provenance: Option<bool>, hook: &str| {
+            let mut environment = vec![
+                ("HOME".into(), home.display().to_string()),
+                ("CLAUDE_CONFIG_DIR".into(), hook.into()),
+                ("AUTH_SENTINEL".into(), "kept".into()),
+            ];
+            let effective = apply_claude_store_pin(
+                &mut environment,
+                Some(&crate::session::capture::ClaudeStorePin {
                     store: store.to_path_buf(),
-                    explicit,
-                };
-                let config_dir = apply_claude_store_pin(&mut environment, Some(&pin));
-                let exported = environment
-                    .into_iter()
-                    .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
-                    .map(|(_, value)| std::path::PathBuf::from(value));
-                // MCP discovery reads `.claude.json` where the worker will.
-                assert_eq!(
-                    config_dir.as_deref(),
-                    Some(exported.as_deref().unwrap_or(temp.path()))
-                );
-                exported
-            };
-        for (ambient, store, explicit, environment, expected) in [
-            (None, &default, false, vec![], None),
-            (None, &default, true, vec![], Some(&default)),
-            (None, &custom, false, vec![], Some(&custom)),
-            (Some(&default), &default, false, vec![], Some(&default)),
-            (
-                None,
-                &default,
-                false,
-                vec![("CLAUDE_CONFIG_DIR", custom.as_path())],
-                Some(&default),
-            ),
-            (
-                None,
-                &default,
-                false,
-                vec![("HOME", custom.as_path())],
-                Some(&default),
-            ),
-        ] {
-            let _env = match ambient {
-                Some(dir) => {
-                    crate::session::test_support::EnvGuard::set(&[("CLAUDE_CONFIG_DIR", dir)])
-                }
-                None => crate::session::test_support::EnvGuard::unset(&["CLAUDE_CONFIG_DIR"]),
-            };
-            assert_eq!(
-                pinned(store, explicit, &environment).as_ref(),
-                expected,
-                "ambient={ambient:?} store={store:?} explicit={explicit} environment={environment:?}"
+                    exported_default_store: provenance,
+                }),
             );
-        }
+            let exported = environment
+                .iter()
+                .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+                .map(|(_, value)| PathBuf::from(value));
+            assert!(environment.contains(&("AUTH_SENTINEL".into(), "kept".into())));
+            (effective, exported)
+        };
+
+        assert_eq!(
+            route(&default, Some(false), "/other"),
+            (Some(home.clone()), None)
+        );
+        assert_eq!(route(&default, None, "/other"), (Some(home.clone()), None));
+        assert_eq!(
+            route(&default, Some(true), "/other"),
+            (Some(default.clone()), Some(default.clone()))
+        );
+        assert_eq!(
+            route(&custom, Some(false), "/other"),
+            (Some(custom.clone()), Some(custom.clone()))
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn implicit_default_claude_store_aligns_native_mcp_with_home() {
+        let (_home, temp) = isolate_home();
+        let hook_store = temp.path().join("hook-store");
+        let home = temp.path().to_path_buf();
+        let default = home.join(".claude");
+        std::fs::create_dir_all(&hook_store).unwrap();
+        std::fs::write(
+            hook_store.join(".claude.json"),
+            r#"{ "mcpServers": { "stale": { "command": "stale" } } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".claude.json"),
+            r#"{ "mcpServers": { "home": { "command": "home" } } }"#,
+        )
+        .unwrap();
+        let app_dir = crate::session::get_app_dir().unwrap();
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::write(
+            app_dir.join("config.toml"),
+            format!(
+                "[host_hooks]\nbefore_session = \"printf 'CLAUDE_CONFIG_DIR={}\\n'\n",
+                hook_store.display()
+            ),
+        )
+        .unwrap();
+
+        let supervisor = Supervisor::new(VecSink::new());
+        let mut request = spawn_request("implicit-default");
+        request.claude_store_pin = Some(crate::session::capture::ClaudeStorePin {
+            store: default,
+            exported_default_store: Some(false),
+        });
+        let (config, _) = supervisor.spawn_config(&request, 1).await.unwrap();
+        assert!(!config
+            .host_environment
+            .iter()
+            .any(|(key, _)| key == "CLAUDE_CONFIG_DIR"));
+        assert_eq!(mcp_names(&config.mcp_servers), ["home"]);
     }
 
     #[test]
@@ -1118,6 +1178,67 @@ mod tests {
         assert!(
             !explicit,
             "a resolved default effort must not read as a session pin"
+        );
+    }
+
+    /// #4116: the handshake holds no lifecycle lock, so an archive (which a TUI takes on its
+    /// input thread) commits without waiting; the post-handshake recheck retires the runner.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn spawn_retires_a_runner_whose_row_was_archived_during_the_handshake() {
+        let _home = isolate_home();
+        let control = Arc::new(FakeProcessControl::default());
+        control.alive(4545);
+        let gate = Gate::default();
+        let sup = Arc::new(
+            Supervisor::new(VecSink::new())
+                .with_process_control(control.clone())
+                .with_launcher(gated_launcher(&gate, 4545)),
+        );
+        let mut inst = crate::session::Instance::new("s-archived", "/tmp");
+        inst.id = "s-archived".into();
+        let storage = crate::session::Storage::new_unwatched(&inst.source_profile).unwrap();
+        storage
+            .update(|rows, _| {
+                *rows = vec![inst.clone()];
+                Ok(())
+            })
+            .unwrap();
+        let mut req = spawn_request("s-archived");
+        req.source_profile = Some(inst.source_profile.clone());
+        let spawner = {
+            let sup = Arc::clone(&sup);
+            tokio::spawn(async move { sup.spawn(req).await })
+        };
+        gate.entered.notified().await;
+
+        assert!(
+            !storage.instance_lifecycle_lock_is_held_for_test("s-archived"),
+            "the handshake must not hold the lifecycle lock"
+        );
+        {
+            let _lock = storage
+                .acquire_instance_lifecycle_lock("s-archived")
+                .unwrap();
+            storage
+                .update(|rows, _| {
+                    rows[0].archive();
+                    Ok(())
+                })
+                .unwrap();
+        }
+        gate.open.notify_one();
+
+        assert!(matches!(
+            spawner.await.unwrap(),
+            Err(SupervisorError::Blocked(
+                crate::session::StartBlocked::Archived
+            ))
+        ));
+        assert_eq!(sup.worker_state("s-archived").await, AcpWorkerState::Absent);
+        assert!(
+            control.signals().iter().any(|(pid, _)| *pid == 4545),
+            "the runner launched for the archived row must be torn down"
         );
     }
 

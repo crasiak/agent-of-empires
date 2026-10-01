@@ -399,18 +399,16 @@ impl Instance {
             return None;
         }
         let observation = match self.source_capture_backend()? {
+            _ if self.capture_reads_hook_sidecar() => super::execution::hook_session_observation(
+                &self.id,
+                self.active_execution.as_ref(),
+                None,
+            )?,
             SessionCaptureBackend::Pi => self.pi_published_conversation(false)?,
             SessionCaptureBackend::PrimeAgent => self.prime_published_conversation()?,
-            SessionCaptureBackend::Claude | SessionCaptureBackend::HookSidecar => {
-                super::execution::hook_session_observation(
-                    &self.id,
-                    self.active_execution.as_ref(),
-                    None,
-                )?
-            }
             _ => self.try_retroactive_capture()?,
         };
-        if self.is_capture_excluded(&observation.sid, observation.source.as_ref()) {
+        if self.is_capture_excluded(&observation.sid, observation.source()) {
             return None;
         }
         if self.agent_session_id.as_ref() == Some(&observation.sid)
@@ -741,7 +739,7 @@ impl Instance {
         });
 
         match outcome {
-            Ok(write @ (SidWrite::Applied | SidWrite::Skipped | SidWrite::PinnedForeign)) => {
+            Ok(write @ (SidWrite::Applied | SidWrite::Skipped)) => {
                 if let Some(disk) = storage
                     .load()
                     .ok()
@@ -756,6 +754,15 @@ impl Instance {
             Ok(SidWrite::Failed) => {
                 tracing::warn!(target: "session.store",
                     "Resume-probe failure marker found no instance row for {}", self.id);
+                SidWrite::Failed
+            }
+            // The closure above writes a marker on the caller's own row, so it can
+            // neither lose a peer-owned sid nor meet a foreign pin. Fail closed if
+            // that ever stops holding rather than reloading a refusal we cannot act on.
+            Ok(refused @ (SidWrite::OwnershipConflict | SidWrite::PinnedForeign)) => {
+                tracing::warn!(target: "session.store",
+                    instance = %self.id, sid, ?refused,
+                    "Resume-probe failure marker hit an unexpected refusal");
                 SidWrite::Failed
             }
             Err(e) => {
@@ -1367,14 +1374,14 @@ work-opencode = "opencode"
 
     #[test]
     fn unsupported_context_without_identity_neither_resumes_nor_polls() {
-        let mut inst = tool_instance("codex", "/tmp/test");
+        let mut inst = tool_instance("gemini", "/tmp/test");
         assert_eq!(inst.acquire_session_id_with(None, &|_| None), (None, false));
         assert_eq!(inst.agent_session_id, None);
-        let mut cmd = String::from("codex");
+        let mut cmd = String::from("gemini");
         assert!(!inst
             .apply_session_flags(&mut cmd, "test", None, None)
             .unwrap());
-        assert_eq!(cmd, "codex");
+        assert_eq!(cmd, "gemini");
         inst.capture_started_at = Some(std::time::SystemTime::now());
         inst.maybe_start_poller_since(None);
         assert!(inst.session_id_poller.is_none());
