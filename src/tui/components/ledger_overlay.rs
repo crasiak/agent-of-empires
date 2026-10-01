@@ -3,9 +3,11 @@
 //! file; both are pinned to `tests/fixtures/ledger-run/cases.json`.
 
 use chrono::{DateTime, Utc};
+use ratatui::style::Style;
 
-use super::usage_overlay::format_duration_short;
+use super::usage_overlay::{format_duration_short, OverlayRow};
 use crate::ledger_run::{Change, LedgerRunView};
+use crate::tui::styles::Theme;
 
 /// Skills named on the drift line before the rest become `+N more`.
 const MAX_SKILLS: usize = 6;
@@ -149,6 +151,30 @@ pub(crate) fn headroom_line(view: &LedgerRunView) -> Option<String> {
     Some(line)
 }
 
+pub(crate) fn drift_rows(
+    view: &LedgerRunView,
+    now: DateTime<Utc>,
+    theme: &Theme,
+) -> Vec<OverlayRow> {
+    drift_line(view, now)
+        .map(|line| OverlayRow {
+            style: Style::default().fg(if line.dim { theme.dimmed } else { theme.text }),
+            text: line.text,
+        })
+        .into_iter()
+        .collect()
+}
+
+pub(crate) fn headroom_rows(view: &LedgerRunView, theme: &Theme) -> Vec<OverlayRow> {
+    headroom_line(view)
+        .map(|text| OverlayRow {
+            text,
+            style: Style::default().fg(theme.text),
+        })
+        .into_iter()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +227,29 @@ mod tests {
         ];
         for (n, want) in cases {
             assert_eq!(compact_count(n), want);
+        }
+    }
+
+    #[test]
+    fn rows_use_dim_ink_only_for_errors() {
+        let theme = crate::tui::styles::Theme::default();
+        for case in cases() {
+            let drift = drift_rows(&case.view, case.now, &theme);
+            if let Some(row) = drift.first() {
+                let want = if case.view.error.is_some() {
+                    theme.dimmed
+                } else {
+                    theme.text
+                };
+                assert_eq!(row.style.fg, Some(want), "{}", case.name);
+            }
+            let headroom = headroom_rows(&case.view, &theme);
+            assert_eq!(
+                headroom.len(),
+                headroom_line(&case.view).iter().count(),
+                "{}",
+                case.name
+            );
         }
     }
 }

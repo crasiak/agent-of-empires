@@ -86,7 +86,39 @@ pub(crate) fn overlay_lines(
     ]
 }
 
-/// Draws nothing when the pane cannot fit the box with room to spare.
+/// One right-aligned row of the overlay stack.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OverlayRow {
+    pub text: String,
+    pub style: Style,
+}
+
+/// The reset counter section: big digits, then the breakdown.
+pub(crate) fn usage_rows(
+    summary: &UsageSummary,
+    created_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    theme: &Theme,
+) -> Vec<OverlayRow> {
+    let number = Style::default().fg(theme.error).bold();
+    let detail = Style::default().fg(theme.text);
+    big_digits(summary.resets)
+        .into_iter()
+        .map(|text| OverlayRow {
+            text,
+            style: number,
+        })
+        .chain(
+            overlay_lines(summary, created_at, now)
+                .into_iter()
+                .map(|text| OverlayRow {
+                    text,
+                    style: detail,
+                }),
+        )
+        .collect()
+}
+
 pub(crate) fn render_usage_overlay(
     frame: &mut Frame,
     pane: Rect,
@@ -95,30 +127,54 @@ pub(crate) fn render_usage_overlay(
     now: DateTime<Utc>,
     theme: &Theme,
 ) {
-    let digits = big_digits(summary.resets);
-    let lines = overlay_lines(summary, created_at, now);
-    let width = digits
-        .iter()
-        .chain(lines.iter())
-        .map(|line| line.width())
-        .max()
-        .unwrap_or(0) as u16;
-    let height = (digits.len() + lines.len()) as u16;
-    if pane.width < width + 10 || pane.height < height + 2 {
+    render_overlay_sections(
+        frame,
+        pane,
+        &[usage_rows(summary, created_at, now, theme)],
+        theme,
+    );
+}
+
+/// Stacks sections top-down in the pane's top-right corner. A section joins
+/// only while the stack still fits with room to spare; the first that does
+/// not fit ends the stack, so nothing draws when the first section is cramped.
+pub(crate) fn render_overlay_sections(
+    frame: &mut Frame,
+    pane: Rect,
+    sections: &[Vec<OverlayRow>],
+    theme: &Theme,
+) {
+    let mut rows: Vec<&OverlayRow> = Vec::new();
+    let mut width = 0usize;
+    for section in sections.iter().filter(|section| !section.is_empty()) {
+        let section_width = section
+            .iter()
+            .map(|row| row.text.width())
+            .max()
+            .unwrap_or(0);
+        let stacked_width = width.max(section_width);
+        if (pane.width as usize) < stacked_width + 10
+            || (pane.height as usize) < rows.len() + section.len() + 2
+        {
+            break;
+        }
+        width = stacked_width;
+        rows.extend(section.iter());
+    }
+    if rows.is_empty() {
         return;
     }
+    let width = width as u16;
+    let height = rows.len() as u16;
     let area = Rect {
         x: pane.right() - width - 1,
         y: pane.y,
         width,
         height,
     };
-    let number = Style::default().fg(theme.error).bold();
-    let detail = Style::default().fg(theme.text);
-    let text: Vec<Line> = digits
-        .into_iter()
-        .map(|row| Line::styled(row, number))
-        .chain(lines.into_iter().map(|row| Line::styled(row, detail)))
+    let text: Vec<Line> = rows
+        .iter()
+        .map(|row| Line::styled(row.text.clone(), row.style))
         .collect();
 
     // Terminals can't alpha-composite, so render the overlay into a scratch
@@ -324,5 +380,56 @@ mod tests {
             .expect("a digit glyph cell should be drawn");
         assert_eq!(digit.bg, Color::Reset);
         assert_eq!(digit.fg, blend(theme.background, theme.error, INK_ALPHA));
+    }
+
+    fn row(text: &str) -> OverlayRow {
+        OverlayRow {
+            text: text.to_string(),
+            style: Style::default(),
+        }
+    }
+
+    fn draw_sections(w: u16, h: u16, sections: &[Vec<OverlayRow>]) -> Buffer {
+        use ratatui::backend::TestBackend;
+        let theme = Theme::default();
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| render_overlay_sections(f, f.area(), sections, &theme))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn line_at(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn sections_stack_right_aligned_and_skip_empty_ones() {
+        let buf = draw_sections(
+            60,
+            10,
+            &[
+                vec![],
+                vec![row("ledger d861 current")],
+                vec![row("hr 2.0k saved")],
+            ],
+        );
+        assert!(line_at(&buf, 0).trim_end().ends_with("ledger d861 current"));
+        assert!(line_at(&buf, 1).trim_end().ends_with("hr 2.0k saved"));
+    }
+
+    #[test]
+    fn a_section_too_wide_for_the_pane_is_dropped_with_the_rest() {
+        let wide = "x".repeat(55);
+        let buf = draw_sections(
+            40,
+            10,
+            &[vec![row("first")], vec![row(&wide)], vec![row("third")]],
+        );
+        assert!(line_at(&buf, 0).contains("first"));
+        assert!(!line_at(&buf, 1).contains('x'));
+        assert!(!(0..10).any(|y| line_at(&buf, y).contains("third")));
     }
 }
