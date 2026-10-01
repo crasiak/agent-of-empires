@@ -15,8 +15,8 @@ const FAILURE_BACKOFF: Duration = Duration::from_secs(60);
 pub(crate) struct ShowCache {
     finished: HashMap<String, RunShow>,
     missing_until: Option<Instant>,
-    /// A `Failed` or `Timeout` outcome and when calls resume.
-    failed_until: Option<(Instant, ShowOutcome)>,
+    /// Per run: a `Failed` or `Timeout` outcome and when calls resume.
+    failed: HashMap<String, (Instant, ShowOutcome)>,
 }
 
 impl ShowCache {
@@ -24,7 +24,7 @@ impl ShowCache {
         Self {
             finished: HashMap::new(),
             missing_until: None,
-            failed_until: None,
+            failed: HashMap::new(),
         }
     }
 
@@ -40,7 +40,7 @@ impl ShowCache {
         if self.missing_until.is_some_and(|until| now < until) {
             return ShowOutcome::Missing;
         }
-        if let Some((until, outcome)) = &self.failed_until {
+        if let Some((until, outcome)) = self.failed.get(run_id) {
             if now < *until {
                 return outcome.clone();
             }
@@ -52,9 +52,13 @@ impl ShowCache {
             }
             ShowOutcome::Missing => self.missing_until = Some(now + MISSING_BACKOFF),
             ShowOutcome::Failed | ShowOutcome::Timeout => {
-                self.failed_until = Some((now + FAILURE_BACKOFF, outcome.clone()));
+                self.failed
+                    .insert(run_id.to_string(), (now + FAILURE_BACKOFF, outcome.clone()));
             }
             _ => {}
+        }
+        if matches!(outcome, ShowOutcome::Ok(_)) {
+            self.failed.remove(run_id);
         }
         outcome
     }
@@ -162,12 +166,15 @@ mod tests {
             ShowOutcome::Failed
         );
         assert_eq!(
-            cache.show("run_b", start + Duration::from_secs(59), &mut failing),
+            cache.show("run_a", start + Duration::from_secs(59), &mut failing),
             ShowOutcome::Failed
         );
         assert_eq!(calls.get(), 1);
-        cache.show("run_a", start + Duration::from_secs(61), &mut failing);
+        // A different run is still asked during run_a's back-off.
+        cache.show("run_b", start + Duration::from_secs(59), &mut failing);
         assert_eq!(calls.get(), 2);
+        cache.show("run_a", start + Duration::from_secs(61), &mut failing);
+        assert_eq!(calls.get(), 3);
     }
 
     #[test]

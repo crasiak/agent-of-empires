@@ -33,8 +33,8 @@ from a worker thread. The web asks every 30 s through
 `GET /api/sessions/{id}/ledger-run` (`null` for non-Ledger sessions).
 Each `ledger` call has a 2 s deadline and a 64 KiB output cap.
 Finished runs are cached for the process lifetime. A missing `ledger`
-binary pauses calls for 5 minutes, and a `ledger` error or timeout pauses
-them for 60 s. An earlier run whose `ledger run show` fails is left out of
+binary pauses calls for 5 minutes, and a run whose `ledger` call errors or
+times out pauses its own calls for 60 s. An earlier run whose `ledger run show` fails is left out of
 the Headroom total, so the total can read lower until it succeeds. Errors render as a dimmed
 `ledger ? <reason>` (`no ledger`, `timeout`, `unknown run`, `ledger
 error`), and the Headroom line is hidden.
