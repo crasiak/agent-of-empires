@@ -157,6 +157,11 @@ fn owned_prior(instance: &super::Instance) -> Option<(LaunchReport, LedgerLaunch
     decode_prior(std::str::from_utf8(&output).ok()?, &instance.id)
 }
 
+/// The Ledger run the session's agent pane reported, when Ledger launched it.
+pub fn current_ledger_run(instance: &super::Instance) -> Option<String> {
+    owned_prior(instance).map(|(_, ledger)| ledger.run_id)
+}
+
 pub(crate) fn seal_before_failed_resume_cleanup(instance: &super::Instance) {
     let seal = || {
         let (_, ledger) = owned_prior(instance)?;
