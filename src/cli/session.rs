@@ -51,8 +51,6 @@ fn report_ledger_launch(args: ReportLedgerLaunchArgs) -> Result<()> {
         restart_intent: args.restart_intent,
     };
     let encoded = report.encode()?;
-    // Before publishing: the supervised path below never returns.
-    record_ledger_run(&report.instance_id, &report.run_id);
     let mut command = std::process::Command::new("tmux");
     command.args([
         "-S",
@@ -67,10 +65,19 @@ fn report_ledger_launch(args: ReportLedgerLaunchArgs) -> Result<()> {
     if args.supervised_exec {
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
-            // Retain the outer supervisor's process group: there is no nested
-            // helper to orphan if that supervisor reaches its deadline.
-            return Err(command.exec()).context("publishing supervised Ledger launch attribution");
+            // Run tmux as a plain child in the supervisor's process group (no
+            // private group): a deadline kill of that group still reaches it, so
+            // nothing is orphaned, and a deadline hit while recording below only
+            // loses the best-effort usage row, never the attribution.
+            let status = command
+                .status()
+                .context("publishing supervised Ledger launch attribution")?;
+            anyhow::ensure!(
+                status.success(),
+                "publishing supervised Ledger launch attribution"
+            );
+            record_ledger_run(&report.instance_id, &report.run_id);
+            return Ok(());
         }
         #[cfg(not(unix))]
         anyhow::bail!("supervised report exec is unavailable on this platform");
@@ -86,6 +93,7 @@ fn report_ledger_launch(args: ReportLedgerLaunchArgs) -> Result<()> {
         output.status.success(),
         "tmux rejected Ledger launch attribution"
     );
+    record_ledger_run(&report.instance_id, &report.run_id);
     Ok(())
 }
 
