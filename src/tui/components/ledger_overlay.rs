@@ -130,11 +130,9 @@ pub(crate) fn headroom_line(view: &LedgerRunView) -> Option<String> {
         return None;
     }
     let total = view.headroom_total.as_ref()?;
-    let percent = if total.input_tokens_before == 0 {
-        0
-    } else {
-        total.saved_tokens * 100 / total.input_tokens_before
-    };
+    let percent = (total.saved_tokens * 100)
+        .checked_div(total.input_tokens_before)
+        .unwrap_or(0);
     let mut parts = vec![
         format!("hr {} saved", compact_count(total.saved_tokens)),
         format!("{percent}%"),

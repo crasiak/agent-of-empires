@@ -5,7 +5,7 @@
 // setting is off.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 
 import type { UsageSummary } from "../../lib/usage";
 import { makeSession } from "./fixtures";
@@ -158,5 +158,17 @@ describe("UsageOverlay Ledger lines", () => {
     renderOverlay({ ledger: false, headroom: false });
     await screen.findByText("7");
     expect(vi.mocked(fetchSessionLedgerRun)).not.toHaveBeenCalled();
+  });
+
+  it("reloads the Ledger view when the tab becomes visible", async () => {
+    mockFetch.mockResolvedValue(summary({ tracked: false }));
+    vi.mocked(fetchSessionLedgerRun).mockResolvedValue(ledgerView);
+    renderOverlay();
+    await screen.findByTestId("ledger-drift-line");
+    const before = vi.mocked(fetchSessionLedgerRun).mock.calls.length;
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(vi.mocked(fetchSessionLedgerRun).mock.calls.length).toBe(before + 1);
   });
 });

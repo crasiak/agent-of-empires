@@ -61,9 +61,11 @@ export function UsageOverlay({ session }: { session: SessionResponse }) {
     };
     load();
     const timer = window.setInterval(load, LEDGER_POLL_MS);
+    document.addEventListener("visibilitychange", load);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", load);
     };
   }, [ledgerWanted, session.id]);
 

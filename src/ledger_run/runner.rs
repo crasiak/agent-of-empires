@@ -10,10 +10,13 @@ use super::{LedgerRunView, RunShow, ShowOutcome};
 const SHOW_TIMEOUT: Duration = Duration::from_secs(2);
 const SHOW_MAX_BYTES: usize = 64 * 1024;
 const MISSING_BACKOFF: Duration = Duration::from_secs(5 * 60);
+const FAILURE_BACKOFF: Duration = Duration::from_secs(60);
 
 pub(crate) struct ShowCache {
     finished: HashMap<String, RunShow>,
     missing_until: Option<Instant>,
+    /// A `Failed` or `Timeout` outcome and when calls resume.
+    failed_until: Option<(Instant, ShowOutcome)>,
 }
 
 impl ShowCache {
@@ -21,6 +24,7 @@ impl ShowCache {
         Self {
             finished: HashMap::new(),
             missing_until: None,
+            failed_until: None,
         }
     }
 
@@ -36,12 +40,20 @@ impl ShowCache {
         if self.missing_until.is_some_and(|until| now < until) {
             return ShowOutcome::Missing;
         }
+        if let Some((until, outcome)) = &self.failed_until {
+            if now < *until {
+                return outcome.clone();
+            }
+        }
         let outcome = run(run_id);
         match &outcome {
             ShowOutcome::Ok(show) if show.finished_at.is_some() => {
                 self.finished.insert(run_id.to_string(), show.clone());
             }
             ShowOutcome::Missing => self.missing_until = Some(now + MISSING_BACKOFF),
+            ShowOutcome::Failed | ShowOutcome::Timeout => {
+                self.failed_until = Some((now + FAILURE_BACKOFF, outcome.clone()));
+            }
             _ => {}
         }
         outcome
@@ -134,5 +146,44 @@ mod tests {
         assert_eq!(calls.get(), 1);
         cache.show("run_a", start + Duration::from_secs(301), &mut missing);
         assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn a_failing_ledger_is_not_retried_for_a_minute() {
+        let mut cache = ShowCache::new();
+        let calls = std::cell::Cell::new(0);
+        let start = Instant::now();
+        let mut failing = |_: &str| {
+            calls.set(calls.get() + 1);
+            ShowOutcome::Failed
+        };
+        assert_eq!(
+            cache.show("run_a", start, &mut failing),
+            ShowOutcome::Failed
+        );
+        assert_eq!(
+            cache.show("run_b", start + Duration::from_secs(59), &mut failing),
+            ShowOutcome::Failed
+        );
+        assert_eq!(calls.get(), 1);
+        cache.show("run_a", start + Duration::from_secs(61), &mut failing);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn a_timeout_also_pauses_calls() {
+        let mut cache = ShowCache::new();
+        let calls = std::cell::Cell::new(0);
+        let start = Instant::now();
+        let mut slow = |_: &str| {
+            calls.set(calls.get() + 1);
+            ShowOutcome::Timeout
+        };
+        cache.show("run_a", start, &mut slow);
+        assert_eq!(
+            cache.show("run_a", start + Duration::from_secs(10), &mut slow),
+            ShowOutcome::Timeout
+        );
+        assert_eq!(calls.get(), 1);
     }
 }

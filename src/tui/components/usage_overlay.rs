@@ -119,22 +119,6 @@ pub(crate) fn usage_rows(
         .collect()
 }
 
-pub(crate) fn render_usage_overlay(
-    frame: &mut Frame,
-    pane: Rect,
-    summary: &UsageSummary,
-    created_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-    theme: &Theme,
-) {
-    render_overlay_sections(
-        frame,
-        pane,
-        &[usage_rows(summary, created_at, now, theme)],
-        theme,
-    );
-}
-
 /// Stacks sections top-down in the pane's top-right corner. A section joins
 /// only while the stack still fits with room to spare; the first that does
 /// not fit ends the stack, so nothing draws when the first section is cramped.
@@ -174,7 +158,7 @@ pub(crate) fn render_overlay_sections(
     };
     let text: Vec<Line> = rows
         .iter()
-        .map(|row| Line::styled(row.text.clone(), row.style))
+        .map(|row| Line::styled(row.text.as_str(), row.style))
         .collect();
 
     // Terminals can't alpha-composite, so render the overlay into a scratch
@@ -286,7 +270,14 @@ mod tests {
         let draw = |w: u16, h: u16| {
             let mut terminal = ratatui::Terminal::new(TestBackend::new(w, h)).unwrap();
             terminal
-                .draw(|f| render_usage_overlay(f, f.area(), &summary, now, now, &theme))
+                .draw(|f| {
+                    render_overlay_sections(
+                        f,
+                        f.area(),
+                        &[usage_rows(&summary, now, now, &theme)],
+                        &theme,
+                    )
+                })
                 .unwrap();
             terminal.backend().buffer().clone()
         };
@@ -322,7 +313,7 @@ mod tests {
                         .bg(Color::Rgb(0, 0, 0)),
                 );
                 f.render_widget(fill, area);
-                render_usage_overlay(f, area, &summary, now, now, &theme);
+                render_overlay_sections(f, area, &[usage_rows(&summary, now, now, &theme)], &theme);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -356,7 +347,14 @@ mod tests {
         };
         let mut terminal = ratatui::Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal
-            .draw(|f| render_usage_overlay(f, f.area(), &summary, now, now, &theme))
+            .draw(|f| {
+                render_overlay_sections(
+                    f,
+                    f.area(),
+                    &[usage_rows(&summary, now, now, &theme)],
+                    &theme,
+                )
+            })
             .unwrap();
         let buf = terminal.backend().buffer();
         // A padding cell over the terminal's own (non-Rgb) background: bg must

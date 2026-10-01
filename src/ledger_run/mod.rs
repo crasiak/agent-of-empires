@@ -79,13 +79,17 @@ impl HeadroomTotals {
     fn plus(self, later: &Self) -> Self {
         let estimated_cents = match (self.estimated_cents, later.estimated_cents) {
             (None, None) => None,
-            (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+            (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
         };
         Self {
-            requests: self.requests + later.requests,
-            input_tokens_before: self.input_tokens_before + later.input_tokens_before,
-            input_tokens_after: self.input_tokens_after + later.input_tokens_after,
-            saved_tokens: self.saved_tokens + later.saved_tokens,
+            requests: self.requests.saturating_add(later.requests),
+            input_tokens_before: self
+                .input_tokens_before
+                .saturating_add(later.input_tokens_before),
+            input_tokens_after: self
+                .input_tokens_after
+                .saturating_add(later.input_tokens_after),
+            saved_tokens: self.saved_tokens.saturating_add(later.saved_tokens),
             model: later.model.clone(),
             estimated_cents,
         }
@@ -104,6 +108,8 @@ pub struct LedgerRunView {
     pub error: Option<String>,
 }
 
+// Boxing `RunShow` would touch every arm that matches on it, for no gain.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShowOutcome {
     Ok(RunShow),

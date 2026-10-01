@@ -21,7 +21,7 @@ pub fn estimate_cents(saved_tokens: u64, model: &str) -> Option<u64> {
     INPUT_CENTS_PER_MTOK
         .iter()
         .find(|(id, _)| model.contains(id))
-        .map(|(_, cents)| saved_tokens * cents / 1_000_000)
+        .map(|(_, cents)| saved_tokens.saturating_mul(*cents) / 1_000_000)
 }
 
 #[cfg(test)]
