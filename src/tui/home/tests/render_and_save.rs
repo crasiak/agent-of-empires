@@ -216,6 +216,29 @@ fn test_row_tag_agent_maps_known_terminal_tools() {
             "Agent mode should render [{code}] for {tool}: {text:?}"
         );
     }
+    let (_temp, _guard) = test_home();
+    let mut inst = Instance::new("my-session", "/tmp/a");
+    inst.tool = "pi".into();
+    let id = inst.id.clone();
+    seed_profile("alpha", &[inst]);
+    let mut view = test_view(None);
+    view.group_by = crate::session::config::GroupByMode::Manual;
+    view.row_tag_mode = crate::session::config::RowTagMode::Agent;
+    view.instances.get_mut(&id).unwrap().launch_identity =
+        Some(crate::session::launch_identity::LaunchIdentity {
+            agent: "pi".into(),
+            account: crate::session::launch_identity::LaunchAccount::Personal,
+            launcher: crate::session::launch_identity::Launcher::LedgerHeadroom,
+            profile: "personal-oss".into(),
+        });
+    view.flat_items = view.build_flat_items();
+    let item = view
+        .flat_items
+        .iter()
+        .find(|item| matches!(item, Item::Session { .. }))
+        .unwrap();
+    let text = rendered_row_text(&view, item);
+    assert!(text.contains("[pi:p:lh:oss] my-session"), "{text:?}");
 }
 
 /// In a single-profile view Auto omits the profile tag (the list title already names it);

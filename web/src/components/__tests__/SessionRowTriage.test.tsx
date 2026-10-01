@@ -90,6 +90,24 @@ describe("SessionRow row tags", () => {
     expect(tag.getAttribute("title")).toBe("claude / personal / Ledger + Headroom (profile: personal)");
   });
 
+  it("renders the Pi OSS profile with its account and backend", () => {
+    renderRow(
+      ws({
+        tool: "pi",
+        launch_identity: {
+          agent: "pi",
+          account: "personal",
+          launcher: "ledger-headroom",
+          profile: "personal-oss",
+        },
+      }),
+      { rowTagMode: "agent" },
+    );
+    const tag = testId("sidebar-session-row-tag")!;
+    expect(tag.textContent).toBe("[pi:p:lh:oss]");
+    expect(tag.getAttribute("title")).toBe("pi / personal / Ledger + Headroom (profile: personal-oss)");
+  });
+
   it("keeps repo chips beside a multi-repo branch tag", () => {
     renderRow(
       ws({

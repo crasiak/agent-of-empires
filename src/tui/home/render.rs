@@ -667,7 +667,11 @@ fn agent_row_tag(inst: &crate::session::Instance) -> Option<RowTag> {
             .current_launch_identity()
             .map(|identity| identity.codes())
             .unwrap_or(("?", "?"));
-        format!("{code}:{account}:{launcher}")
+        let suffix = inst
+            .current_launch_identity()
+            .map(|identity| identity.profile_suffix())
+            .unwrap_or("");
+        format!("{code}:{account}:{launcher}{suffix}")
     } else {
         code
     };
@@ -4933,6 +4937,28 @@ mod tests {
                     assert!(compute_row_tag(&instance, RowTagMode::Auto, false).is_none());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn pi_oss_badge_preserves_account_and_launcher() {
+        use crate::session::launch_identity::{LaunchAccount, LaunchIdentity, Launcher};
+        let mut instance = crate::session::Instance::new("test", "/tmp");
+        instance.tool = "pi".into();
+        assert_eq!(agent_row_tag(&instance).unwrap().rendered(), "[pi:?:?]");
+        for (profile, expected) in [
+            ("oss", "[pi:p:lh:oss]"),
+            ("personal-oss", "[pi:p:lh:oss]"),
+            ("personal_oss", "[pi:p:lh:oss]"),
+            ("blossom", "[pi:p:lh]"),
+        ] {
+            instance.launch_identity = Some(LaunchIdentity {
+                agent: "pi".into(),
+                account: LaunchAccount::Personal,
+                launcher: Launcher::LedgerHeadroom,
+                profile: profile.into(),
+            });
+            assert_eq!(agent_row_tag(&instance).unwrap().rendered(), expected);
         }
     }
 

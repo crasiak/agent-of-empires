@@ -57,6 +57,14 @@ impl LaunchIdentity {
         (account, launcher)
     }
 
+    pub fn profile_suffix(&self) -> &'static str {
+        if self.agent == "pi" && self.profile.split(['-', '_']).any(|part| part == "oss") {
+            ":oss"
+        } else {
+            ""
+        }
+    }
+
     pub fn description(&self) -> String {
         let account = match self.account {
             LaunchAccount::Personal => "personal",

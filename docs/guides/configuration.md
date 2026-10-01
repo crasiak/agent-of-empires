@@ -86,7 +86,7 @@ sidebar_position = "left" # left | right; TUI session list
 | `prevent_sleep_when_active` | `false` | Have the `aoe serve` daemon hold an OS sleep inhibitor (`caffeinate -i`, `systemd-inhibit`) while any session is active. Global only; a TUI without a daemon gets nothing. |
 | `prevent_sleep_idle_grace_minutes` | `15` | Minutes (0 to 240) every session must stay idle before the inhibitor is released. A session that never reaches `Idle` (`Waiting` on a prompt, `Creating` forever) holds it indefinitely. |
 | `session_id_poller_max_threads` | `50` | Ceiling on concurrent session-id pollers per process. Past the ceiling, an overflow session's id is not refreshed until it gets a poller; starting one is retried on a 5 s to 60 s backoff. Global only, applied at process start. |
-| `row_tag` | `"branch"` | Metadata next to a session title in the TUI and web sidebar: `none`, `auto` (profile code in all-profiles view), `profile`, `sandbox`, `agent` ([launch identity](#launch-identity-badges) for Claude/Codex, agent codes for other tools), or `branch`. |
+| `row_tag` | `"branch"` | Metadata next to a session title in the TUI and web sidebar: `none`, `auto` (profile code in all-profiles view), `profile`, `sandbox`, `agent` ([launch identity](#launch-identity-badges) for Claude/Codex/Pi, agent codes for other tools), or `branch`. |
 | `sidebar_position` | `"left"` | TUI session sidebar position: `left` or `right`. Global only. Narrow terminals keep the stacked layout. |
 | `tie_workdir_to_name` | `true` | Keep a managed worktree session's directory named after its title. See [Worktrees](worktrees.md#naming). |
 | `pre_trust_agent_folders` | `false` | Pre-trust each host session's worktree in the agent's own config (Claude Code, Codex, Gemini) so it does not open on a folder-trust prompt. Config-dir overrides are honored, and an `agent_config_dir` entry wins over them. Trust also activates the repo's `.claude/settings.json`, hooks included, so enable it only for directories you would have trusted by hand. Sandboxed sessions always pre-trust their own staged config. |
@@ -121,12 +121,14 @@ The rest of `[acp]` tunes the structured view globally; see [Structured View Int
 
 ### Launch identity badges
 
-With `session.row_tag = "agent"`, Claude/Codex rows show
+With `session.row_tag = "agent"`, Claude/Codex/Pi rows show
 `[agent:account:launcher]` in both the TUI sidebar and the web dashboard.
-Agent codes are `cc` and `cx`; account codes are `p` (personal) and `w`
+Agent codes are `cc`, `cx`, and `pi`; account codes are `p` (personal) and `w`
 (work, including company). Launcher codes are `d` (direct/simple wrapper),
 `h` (Headroom), `l` (Ledger only), and `lh` (Ledger + Headroom). Unknown
-fields use `?`. Very narrow rows omit the badge to leave room for the title.
+fields use `?`. Pi profiles with an `oss` segment, including `personal-oss`,
+append `:oss`, for example `[pi:p:lh:oss]`. The web tooltip includes the full
+reported profile name. Very narrow rows omit the badge to leave room for the title.
 
 AoE exports the reporting contract into every agent pane alongside its hook
 variables: `AOE_REPORT_BIN` (absolute path of the launching `aoe`),
