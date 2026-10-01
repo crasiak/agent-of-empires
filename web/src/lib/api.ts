@@ -19,6 +19,7 @@ import type {
 import type { ConfigOptionDescriptor } from "./acpTypes";
 import type { ResolvedTheme } from "./theme";
 import type { UsageSummary } from "./usage";
+import type { LedgerRunView } from "./ledgerRun";
 import { clearDeviceBindingSecret, getOrCreateDeviceBindingSecret } from "./deviceBinding";
 
 // --- Request helpers ---
@@ -288,6 +289,10 @@ export function fetchSystemHealth(): Promise<SystemHealth | null> {
 
 export function fetchSessionUsage(id: string): Promise<UsageSummary | null> {
   return fetchJson<UsageSummary>(`/api/sessions/${encodeURIComponent(id)}/usage`);
+}
+
+export function fetchSessionLedgerRun(id: string): Promise<LedgerRunView | null> {
+  return fetchJson<LedgerRunView | null>(`/api/sessions/${encodeURIComponent(id)}/ledger-run`);
 }
 
 export function fetchSettings(profile?: string): Promise<SettingsResponse | null> {

@@ -25,3 +25,22 @@ fn load_summary(instance_id: &str) -> crate::usage::UsageSummary {
         .and_then(|store| store.summary_for(instance_id))
         .unwrap_or_default()
 }
+
+/// The session's Ledger run view for the web overlay; `null` when Ledger did
+/// not launch the session's agent.
+pub async fn session_ledger_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    if let Some(resp) = crate::server::api::cityhall_block(&state) {
+        return resp;
+    }
+    let Some(instance) = find_instance(&state, &id).await else {
+        return bare_not_found();
+    };
+    let view = tokio::task::spawn_blocking(move || crate::ledger_run::load_view(&instance))
+        .await
+        .ok()
+        .flatten();
+    Json(view).into_response()
+}
