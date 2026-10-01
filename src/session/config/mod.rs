@@ -981,6 +981,18 @@ pub struct SessionConfig {
     #[setting(label = "Show usage overlay", widget = "toggle")]
     pub show_usage_overlay: bool,
 
+    /// Under the usage overlay, show which Ledger generation a Ledger-launched
+    /// session runs on and how it differs from what a new launch would get.
+    #[serde(default = "default_true")]
+    #[setting(label = "Show Ledger drift overlay", widget = "toggle")]
+    pub show_ledger_overlay: bool,
+
+    /// Under the usage overlay, show the input tokens Headroom compression
+    /// saved for a Ledger-launched Headroom session, with a dollar estimate.
+    #[serde(default = "default_true")]
+    #[setting(label = "Show Headroom savings overlay", widget = "toggle")]
+    pub show_headroom_overlay: bool,
+
     /// Side of the TUI session list. Narrow terminals keep the list above the preview.
     #[serde(default)]
     #[setting(
@@ -1802,6 +1814,8 @@ impl Default for SessionConfig {
             show_diagnostics_pane: false,
             usage_tracking: true,
             show_usage_overlay: true,
+            show_ledger_overlay: true,
+            show_headroom_overlay: true,
             sidebar_position: SidebarPosition::default(),
             daemon_sidebar: true,
             inherit_host_environment: false,
@@ -4461,5 +4475,22 @@ mod tests {
 
         update_app_state(|state| state.has_seen_welcome = true).unwrap();
         assert!(Config::load().unwrap().app_state.has_seen_welcome);
+    }
+
+    #[test]
+    fn ledger_overlay_settings_default_on_and_reach_every_surface() {
+        let session = SessionConfig::default();
+        assert!(session.show_ledger_overlay && session.show_headroom_overlay);
+        let fields: Vec<String> = crate::session::config::settings_schema::schema()
+            .into_iter()
+            .filter(|field| field.section == "session")
+            .map(|field| field.field)
+            .collect();
+        for name in ["show_ledger_overlay", "show_headroom_overlay"] {
+            assert!(
+                fields.iter().any(|field| field == name),
+                "{name} missing from schema"
+            );
+        }
     }
 }
