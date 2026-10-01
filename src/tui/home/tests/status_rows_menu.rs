@@ -1957,3 +1957,37 @@ fn apply_one_usage_update_requests_a_refresh_when_the_selection_has_moved_on() {
          not wait for the next tick"
     );
 }
+
+/// A Ledger view that lands after the selection moved on must not leave the
+/// new selection's overlay waiting for the next 30 s tick.
+#[test]
+#[serial]
+fn apply_one_ledger_update_requests_a_refresh_when_the_selection_has_moved_on() {
+    let mut env = create_test_env_with_sessions(2);
+    let first = session_id_at(&env.view, 0).unwrap();
+    let second = session_id_at(&env.view, 1).unwrap();
+
+    env.view.selected_session = Some(first.clone());
+    env.view.request_ledger_refresh();
+    assert!(env.view.pending_ledger_refresh);
+    env.view.selected_session = Some(second.clone());
+    env.view.request_ledger_refresh();
+
+    env.view.pending_ledger_refresh = false;
+    env.view
+        .apply_one_ledger_update(first, Some(crate::ledger_run::LedgerRunView::default()));
+    assert!(env.view.pending_ledger_refresh);
+}
+
+#[test]
+#[serial]
+fn ledger_refresh_is_idle_while_both_ledger_lines_are_off() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.selected_session = session_id_at(&env.view, 0);
+    env.view.show_ledger_overlay = false;
+    env.view.show_headroom_overlay = false;
+    // Building the env already selected a session, which fired a refresh.
+    env.view.pending_ledger_refresh = false;
+    env.view.request_ledger_refresh();
+    assert!(!env.view.pending_ledger_refresh);
+}

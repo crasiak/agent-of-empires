@@ -165,6 +165,59 @@ impl HomeView {
         changed
     }
 
+    /// Request the selected session's Ledger run view while either Ledger line is on.
+    pub fn request_ledger_refresh(&mut self) {
+        if !(self.show_ledger_overlay || self.show_headroom_overlay) || self.pending_ledger_refresh
+        {
+            return;
+        }
+        let Some(instance) = self
+            .selected_session
+            .as_deref()
+            .and_then(|id| self.get_instance(id))
+            .cloned()
+        else {
+            return;
+        };
+        self.ledger_poller.request_refresh(instance);
+        self.pending_ledger_refresh = true;
+    }
+
+    /// Apply a loaded Ledger run view; true when the overlay needs a repaint.
+    pub fn apply_ledger_updates(&mut self) -> bool {
+        use std::sync::mpsc::TryRecvError;
+
+        match self.ledger_poller.try_recv_updates() {
+            Ok((id, view)) => {
+                self.pending_ledger_refresh = false;
+                self.apply_one_ledger_update(id, view)
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                tracing::error!(target: "tui.home", "ledger poller worker gone; respawning");
+                self.ledger_poller = crate::tui::ledger_poller::LedgerPoller::new();
+                self.pending_ledger_refresh = false;
+                false
+            }
+        }
+    }
+
+    /// Store a fetched view; true when the overlay needs a repaint. Split out
+    /// so tests can drive it without a background thread.
+    pub(in crate::tui) fn apply_one_ledger_update(
+        &mut self,
+        id: String,
+        view: Option<crate::ledger_run::LedgerRunView>,
+    ) -> bool {
+        if self.selected_session.as_deref() != Some(id.as_str()) {
+            self.request_ledger_refresh();
+        }
+        let next = view.map(|view| (id, view));
+        let changed = next != self.ledger_view;
+        self.ledger_view = next;
+        changed
+    }
+
     /// Toggle the diagnostics strip and persist the new state to
     /// `session.show_diagnostics_pane` so it survives restarts.
     pub fn toggle_diagnostics(&mut self) {
