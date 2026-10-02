@@ -4,10 +4,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   compactCount,
+  DRIFT_WRAP_COLUMNS,
   driftLine,
   headroomLine,
   parseHeadroomOverlayEnabled,
   parseLedgerOverlayEnabled,
+  wrapSegments,
   type LedgerRunView,
 } from "./ledgerRun";
 
@@ -22,6 +24,24 @@ interface Case {
 const cases: Case[] = JSON.parse(
   readFileSync(new URL("../../../tests/fixtures/ledger-run/cases.json", import.meta.url), "utf8"),
 );
+
+describe("drift wrapping", () => {
+  // Same cases as the TUI's long_drift_lines_wrap_at_segment_boundaries.
+  const text = "ledger behind d861↔f00d 3h0m  +caveman -dataviz ↓tdd  ↓2 settings ↓renderer";
+
+  it("packs segments into rows of at most 48 columns", () => {
+    expect(wrapSegments(text, DRIFT_WRAP_COLUMNS)).toEqual([
+      "ledger behind d861↔f00d 3h0m",
+      "+caveman -dataviz ↓tdd  ↓2 settings ↓renderer",
+    ]);
+    expect(wrapSegments("ledger d861 current", DRIFT_WRAP_COLUMNS)).toEqual(["ledger d861 current"]);
+    expect(wrapSegments("a  b  c", 4)).toEqual(["a  b", "c"]);
+  });
+
+  it("never loses or reorders a segment", () => {
+    expect(wrapSegments(text, DRIFT_WRAP_COLUMNS).join("  ")).toBe(text);
+  });
+});
 
 describe("ledger overlay text", () => {
   it.each(cases.map((c) => [c.name, c] as const))("matches the TUI for %s", (_name, c) => {
@@ -54,6 +74,10 @@ describe("ledger overlay text", () => {
     expect(parseLedgerOverlayEnabled(null)).toBe(true);
     expect(parseHeadroomOverlayEnabled(null)).toBe(true);
     expect(parseLedgerOverlayEnabled({ session: { show_ledger_overlay: false } })).toBe(false);
-    expect(parseHeadroomOverlayEnabled({ session: { show_headroom_overlay: false } })).toBe(false);
+    expect(
+      parseHeadroomOverlayEnabled({
+        session: { show_headroom_overlay: false },
+      }),
+    ).toBe(false);
   });
 });

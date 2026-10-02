@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import type { SessionResponse } from "../lib/types";
 import {
+  DRIFT_WRAP_COLUMNS,
   driftLine,
   fetchSessionLedgerRun,
   headroomLine,
   useHeadroomOverlayEnabled,
   useLedgerOverlayEnabled,
   type LedgerRunView,
+  wrapSegments,
 } from "../lib/ledgerRun";
 import { fetchSessionUsage, usageLines, useUsageOverlayEnabled, type UsageSummary } from "../lib/usage";
 
@@ -75,7 +77,7 @@ export function UsageOverlay({ session }: { session: SessionResponse }) {
   if (!showUsage && !drift && !headroom) return null;
   return (
     <div
-      className="pointer-events-none absolute top-2 right-3 z-10 hidden rounded-md bg-surface-900/25 px-2 py-1 text-right sm:block"
+      className="pointer-events-none absolute top-2 right-3 z-10 hidden rounded-md bg-surface-900/60 px-2 py-1 text-right sm:block"
       data-testid="usage-overlay"
       title={showUsage ? "Context resets: clears + compactions + resumes" : "Ledger run"}
     >
@@ -96,7 +98,7 @@ export function UsageOverlay({ session }: { session: SessionResponse }) {
           data-testid="ledger-drift-line"
           className={`mt-1 whitespace-pre font-mono text-[10px] opacity-90 ${drift.dim ? "text-text-dim" : "text-text-secondary"}`}
         >
-          {drift.text}
+          {wrapSegments(drift.text, DRIFT_WRAP_COLUMNS).join("\n")}
         </div>
       )}
       {headroom && (

@@ -11,7 +11,7 @@ use crate::tui::styles::{blend, Theme};
 use crate::usage::UsageSummary;
 
 /// Opacity of the overlay's own panel color over whatever sits underneath.
-const BACKDROP_ALPHA: f32 = 0.25;
+const BACKDROP_ALPHA: f32 = 0.6;
 /// Opacity of overlay glyph ink over the blended backdrop.
 const INK_ALPHA: f32 = 0.9;
 
