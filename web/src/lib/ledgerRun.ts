@@ -110,6 +110,24 @@ export function compactCount(n: number): string {
   return `${Math.floor(tenths / 10)}.${tenths % 10}M`;
 }
 
+/** Columns a drift row may take before its segments wrap; matches the TUI. */
+export const DRIFT_WRAP_COLUMNS = 48;
+
+/** Mirrors the TUI's `wrap_segments`: packs the drift line's segments (joined
+ *  by two spaces) into rows of at most `max` columns, never splitting one. */
+export function wrapSegments(text: string, max: number): string[] {
+  const rows: string[] = [];
+  for (const segment of text.split("  ")) {
+    const last = rows.at(-1);
+    if (last !== undefined && [...last].length + 2 + [...segment].length <= max) {
+      rows[rows.length - 1] = `${last}  ${segment}`;
+    } else {
+      rows.push(segment);
+    }
+  }
+  return rows;
+}
+
 /** Mirrors the TUI's `headroom_line`. */
 export function headroomLine(view: LedgerRunView): string | null {
   if (view.error !== null) return null;

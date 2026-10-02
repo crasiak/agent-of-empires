@@ -149,17 +149,38 @@ pub(crate) fn headroom_line(view: &LedgerRunView) -> Option<String> {
     Some(line)
 }
 
+/// Columns a drift row may take before its segments wrap onto another row.
+const DRIFT_WRAP_COLUMNS: usize = 48;
+
+/// Packs the drift line's segments (joined by two spaces) into rows of at
+/// most `max` columns. A segment is never split, so one longer than `max`
+/// gets a row of its own. `web/src/lib/ledgerRun.ts` mirrors this.
+pub(crate) fn wrap_segments(text: &str, max: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    for segment in text.split("  ") {
+        match rows.last_mut() {
+            Some(row) if row.chars().count() + 2 + segment.chars().count() <= max => {
+                row.push_str("  ");
+                row.push_str(segment);
+            }
+            _ => rows.push(segment.to_string()),
+        }
+    }
+    rows
+}
+
 pub(crate) fn drift_rows(
     view: &LedgerRunView,
     now: DateTime<Utc>,
     theme: &Theme,
 ) -> Vec<OverlayRow> {
-    drift_line(view, now)
-        .map(|line| OverlayRow {
-            style: Style::default().fg(if line.dim { theme.dimmed } else { theme.text }),
-            text: line.text,
-        })
+    let Some(line) = drift_line(view, now) else {
+        return Vec::new();
+    };
+    let style = Style::default().fg(if line.dim { theme.dimmed } else { theme.text });
+    wrap_segments(&line.text, DRIFT_WRAP_COLUMNS)
         .into_iter()
+        .map(|text| OverlayRow { text, style })
         .collect()
 }
 
@@ -226,6 +247,32 @@ mod tests {
         for (n, want) in cases {
             assert_eq!(compact_count(n), want);
         }
+    }
+
+    #[test]
+    fn long_drift_lines_wrap_at_segment_boundaries() {
+        let text = "ledger behind d861↔f00d 3h0m  +caveman -dataviz ↓tdd  ↓2 settings ↓renderer";
+        assert_eq!(
+            wrap_segments(text, 48),
+            vec![
+                "ledger behind d861↔f00d 3h0m",
+                "+caveman -dataviz ↓tdd  ↓2 settings ↓renderer",
+            ]
+        );
+        assert_eq!(
+            wrap_segments("ledger d861 current", 48),
+            vec!["ledger d861 current"]
+        );
+        assert_eq!(wrap_segments("a  b  c", 4), vec!["a  b", "c"]);
+        let wrapped = wrap_segments(text, 48);
+        assert_eq!(
+            wrapped.join("  "),
+            text,
+            "wrapping must not lose or reorder segments"
+        );
+        assert!(wrapped
+            .iter()
+            .all(|row| row.chars().count() <= 48 || !row.contains("  ")));
     }
 
     #[test]
