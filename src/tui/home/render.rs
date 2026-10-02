@@ -2757,32 +2757,45 @@ impl HomeView {
         self.active_preview_cache().captured_lines
     }
 
-    /// Draws the reset counter over the preview's top-right corner while a
-    /// summary for the selected session is loaded.
+    /// Draws the overlay stack over the preview's top-right corner: the reset
+    /// counter, then the Ledger drift and Headroom lines, each only when it is
+    /// switched on and loaded for the selected session.
     fn render_usage_overlay(&self, frame: &mut Frame, theme: &Theme) {
-        if !self.show_usage_overlay || self.system_health_open {
+        use crate::tui::components::{ledger_overlay, usage_overlay};
+        if self.system_health_open {
             return;
         }
         let Some(selected) = self.selected_session.as_deref() else {
             return;
         };
-        let Some((id, summary)) = &self.usage_summary else {
-            return;
-        };
-        if id != selected || !summary.tracked {
-            return;
-        }
         let Some(instance) = self.get_instance(selected) else {
             return;
         };
-        crate::tui::components::usage_overlay::render_usage_overlay(
-            frame,
-            self.preview_pane_area,
-            summary,
-            instance.created_at,
-            chrono::Utc::now(),
-            theme,
-        );
+        let now = chrono::Utc::now();
+        let mut sections = Vec::new();
+        if self.show_usage_overlay {
+            if let Some((id, summary)) = &self.usage_summary {
+                if id == selected && summary.tracked {
+                    sections.push(usage_overlay::usage_rows(
+                        summary,
+                        instance.created_at,
+                        now,
+                        theme,
+                    ));
+                }
+            }
+        }
+        if let Some((id, view)) = &self.ledger_view {
+            if id == selected {
+                if self.show_ledger_overlay {
+                    sections.push(ledger_overlay::drift_rows(view, now, theme));
+                }
+                if self.show_headroom_overlay {
+                    sections.push(ledger_overlay::headroom_rows(view, theme));
+                }
+            }
+        }
+        usage_overlay::render_overlay_sections(frame, self.preview_pane_area, &sections, theme);
     }
 
     /// Paint the preview and refresh geometry used by selection and live-send.

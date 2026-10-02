@@ -3478,3 +3478,36 @@ async fn session_usage_is_blocked_in_cityhall_mode() {
     let resp = session_usage(State(state), Path(id)).await.into_response();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
+
+// GET /api/sessions/{id}/ledger-run is null for a session Ledger did not
+// launch, 404 for an unknown id, and closed in CityHall like /usage.
+#[tokio::test]
+#[serial_test::serial]
+async fn session_ledger_run_is_null_without_a_ledger_launch() {
+    use axum::body::to_bytes;
+
+    let _home = crate::session::test_support::isolate_app_dir();
+    let inst = Instance::new("ledger-run-overlay", "/tmp/ledger-run-overlay");
+    let id = inst.id.clone();
+    let state = crate::server::test_support::build_test_app_state(vec![inst]);
+
+    let resp = session_ledger_run(State(state.clone()), Path(id))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    assert_eq!(&body[..], b"null");
+
+    let resp = session_ledger_run(State(state), Path("does-not-exist".to_string()))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let inst = Instance::new("ledger-run-cityhall", "/tmp/ledger-run-cityhall");
+    let id = inst.id.clone();
+    let state = crate::server::test_support::build_test_app_state_cityhall(vec![inst]);
+    let resp = session_ledger_run(State(state), Path(id))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}

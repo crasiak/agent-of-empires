@@ -101,6 +101,12 @@ import { parseSessionColorsEnabled, SessionColorsContext } from "./lib/sessionCo
 import { fetchActiveProfileSettings } from "./lib/appSettings";
 import { parseSystemHealthEnabled, SystemHealthEnabledContext } from "./lib/systemHealth";
 import { parseUsageOverlayEnabled, UsageOverlayEnabledContext } from "./lib/usage";
+import {
+  parseLedgerOverlayEnabled,
+  LedgerOverlayEnabledContext,
+  parseHeadroomOverlayEnabled,
+  HeadroomOverlayEnabledContext,
+} from "./lib/ledgerRun";
 import { toastBus, reportError } from "./lib/toastBus";
 import { isAbsolutePath, resolveToRepoRelative, type FileRef } from "./lib/fileRef";
 import { NAVIGATE_EVENT, OPEN_SESSION_EVENT } from "./lib/sessionRoute";
@@ -191,6 +197,8 @@ export default function App() {
   const [sessionColorsEnabled, setSessionColorsEnabled] = useState(true);
   const [systemHealthEnabled, setSystemHealthEnabled] = useState(false);
   const [usageOverlayEnabled, setUsageOverlayEnabled] = useState(true);
+  const [ledgerOverlayEnabled, setLedgerOverlayEnabled] = useState(true);
+  const [headroomOverlayEnabled, setHeadroomOverlayEnabled] = useState(true);
 
   const applyAppSettings = useCallback((settings: Record<string, unknown> | null | undefined) => {
     setIdleDecayWindowMs(parseIdleDecayWindowMs(settings));
@@ -199,6 +207,8 @@ export default function App() {
     setSessionColorsEnabled(parseSessionColorsEnabled(settings));
     setSystemHealthEnabled(parseSystemHealthEnabled(settings));
     setUsageOverlayEnabled(parseUsageOverlayEnabled(settings));
+    setLedgerOverlayEnabled(parseLedgerOverlayEnabled(settings));
+    setHeadroomOverlayEnabled(parseHeadroomOverlayEnabled(settings));
   }, []);
 
   const refreshAppSettings = useCallback(async () => {
@@ -286,18 +296,22 @@ export default function App() {
           <SessionColorsContext.Provider value={sessionColorsEnabled}>
             <SystemHealthEnabledContext.Provider value={systemHealthEnabled}>
               <UsageOverlayEnabledContext.Provider value={usageOverlayEnabled}>
-                {/* PluginUiProvider must sit above AppContent: AppContent itself reads
-                  the plugin UI snapshot (usePluginPanes), so the provider can't live
-                  inside its own return. */}
-                <PluginUiProvider>
-                  <AppContent
-                    loginRequired={loginRequired}
-                    onLogout={handleLogout}
-                    onSettingsRefresh={refreshAppSettings}
-                    resolvedTheme={resolvedTheme}
-                  />
-                </PluginUiProvider>
-                <ElevationPrompt />
+                <LedgerOverlayEnabledContext.Provider value={ledgerOverlayEnabled}>
+                  <HeadroomOverlayEnabledContext.Provider value={headroomOverlayEnabled}>
+                    {/* PluginUiProvider must sit above AppContent: AppContent itself reads
+                      the plugin UI snapshot (usePluginPanes), so the provider can't live
+                      inside its own return. */}
+                    <PluginUiProvider>
+                      <AppContent
+                        loginRequired={loginRequired}
+                        onLogout={handleLogout}
+                        onSettingsRefresh={refreshAppSettings}
+                        resolvedTheme={resolvedTheme}
+                      />
+                    </PluginUiProvider>
+                    <ElevationPrompt />
+                  </HeadroomOverlayEnabledContext.Provider>
+                </LedgerOverlayEnabledContext.Provider>
               </UsageOverlayEnabledContext.Provider>
             </SystemHealthEnabledContext.Provider>
           </SessionColorsContext.Provider>

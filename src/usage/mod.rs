@@ -3,6 +3,7 @@
 //! format are the Ledger contract in `docs/development/usage-events.md`.
 
 mod normalize;
+pub mod prices;
 mod report;
 mod store;
 mod summary;
@@ -15,7 +16,7 @@ use serde::Serialize;
 pub use normalize::{normalize, Normalized};
 pub use report::{build_report, UsageReport};
 pub use store::UsageStore;
-pub use summary::{is_context_boundary, summarize, UsageSummary};
+pub use summary::{is_context_boundary, ledger_runs, summarize, UsageSummary};
 
 const DB_FILE: &str = "usage.db";
 
@@ -30,10 +31,11 @@ pub enum UsageKind {
     InstanceCreated,
     InstanceRestarted,
     InstanceDeleted,
+    LedgerRun,
 }
 
 impl UsageKind {
-    const ALL: [UsageKind; 8] = [
+    const ALL: [UsageKind; 9] = [
         UsageKind::ContextStart,
         UsageKind::ContextEnd,
         UsageKind::Compact,
@@ -42,6 +44,7 @@ impl UsageKind {
         UsageKind::InstanceCreated,
         UsageKind::InstanceRestarted,
         UsageKind::InstanceDeleted,
+        UsageKind::LedgerRun,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -54,6 +57,7 @@ impl UsageKind {
             UsageKind::InstanceCreated => "instance_created",
             UsageKind::InstanceRestarted => "instance_restarted",
             UsageKind::InstanceDeleted => "instance_deleted",
+            UsageKind::LedgerRun => "ledger_run",
         }
     }
 
@@ -92,6 +96,18 @@ fn serialize_occurred_at<S: serde::Serializer>(
 
 pub fn db_path() -> anyhow::Result<PathBuf> {
     Ok(crate::session::get_app_dir()?.join(DB_FILE))
+}
+
+/// A Ledger run id as a `ledger_run` detail: Ledger ids are `run_` plus 32
+/// lowercase hex, which fits the detail contract once the prefix is gone.
+pub fn ledger_run_detail(run_id: &str) -> Option<String> {
+    let hex = run_id.strip_prefix("run_")?;
+    (hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .then(|| hex.to_string())
+}
+
+pub fn ledger_run_id(detail: &str) -> String {
+    format!("run_{detail}")
 }
 
 /// Best-effort: a lifecycle row never fails the operation that produced it.
@@ -186,5 +202,22 @@ mod tests {
             events[0].profile.as_deref(),
             Some("lifecycle-busy-reservation")
         );
+    }
+
+    #[test]
+    fn ledger_run_ids_fit_the_detail_contract() {
+        let id = "run_605c696f0a75d2c76a3d3bb982c50025";
+        let detail = ledger_run_detail(id).unwrap();
+        assert_eq!(detail, "605c696f0a75d2c76a3d3bb982c50025");
+        assert_eq!(ledger_run_id(&detail), id);
+        for bad in [
+            "run-prior",
+            "605c696f0a75d2c76a3d3bb982c50025",
+            "run_605C696F0A75D2C76A3D3BB982C50025",
+            "run_605c696f",
+            "run_605c696f0a75d2c76a3d3bb982c50025ff",
+        ] {
+            assert_eq!(ledger_run_detail(bad), None, "{bad}");
+        }
     }
 }

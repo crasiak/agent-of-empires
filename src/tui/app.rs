@@ -48,6 +48,8 @@ fn clear_reported_session_creates(reported: u32, outcome: crate::telemetry::Send
         return;
     }
     use std::sync::atomic::Ordering;
+    // `try_update` needs Rust 1.99; this keeps the 1.85 MSRV and the Nix toolchain building.
+    #[allow(deprecated)]
     let _ = TUI_SESSION_CREATES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_sub(reported))
     });
@@ -590,6 +592,7 @@ impl App {
         let mut last_status_refresh = std::time::Instant::now();
         let mut last_metrics_sample = std::time::Instant::now();
         let mut last_usage_refresh = std::time::Instant::now();
+        let mut last_ledger_refresh: Option<std::time::Instant> = None;
         let mut last_session_feed_refresh = std::time::Instant::now();
         let mut last_disk_refresh = std::time::Instant::now();
         let mut full_heartbeat_deferred = false;
@@ -604,6 +607,7 @@ impl App {
         const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
         const METRICS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
         const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+        const LEDGER_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
         // Fastest spinner (breathe) changes every 180ms.
         const SPINNER_REDRAW_INTERVAL: Duration = Duration::from_millis(120);
         const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
@@ -1232,6 +1236,12 @@ impl App {
                 last_usage_refresh = std::time::Instant::now();
             }
             refresh_needed |= self.home.apply_usage_updates();
+
+            if last_ledger_refresh.is_none_or(|at| at.elapsed() >= LEDGER_REFRESH_INTERVAL) {
+                self.home.request_ledger_refresh();
+                last_ledger_refresh = Some(std::time::Instant::now());
+            }
+            refresh_needed |= self.home.apply_ledger_updates();
 
             if last_session_feed_refresh.elapsed() >= SESSION_FEED_REFRESH_INTERVAL {
                 self.home.request_session_feed_refresh();

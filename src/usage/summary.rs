@@ -89,12 +89,30 @@ pub fn summarize(events: &[UsageEvent]) -> UsageSummary {
             UsageKind::ContextEnd
             | UsageKind::InstanceCreated
             | UsageKind::InstanceRestarted
-            | UsageKind::InstanceDeleted => {}
+            | UsageKind::InstanceDeleted
+            | UsageKind::LedgerRun => {}
         }
     }
     summary.resumes = starts.saturating_sub(1);
     summary.resets = summary.clears + summary.compactions + summary.resumes;
     summary
+}
+
+/// The session's Ledger runs, oldest first; the last is the current one.
+pub fn ledger_runs(events: &[UsageEvent]) -> Vec<String> {
+    let mut runs: Vec<String> = Vec::new();
+    for event in events {
+        if event.kind != UsageKind::LedgerRun {
+            continue;
+        }
+        if let Some(detail) = event.detail.as_deref() {
+            let id = super::ledger_run_id(detail);
+            if !runs.contains(&id) {
+                runs.push(id);
+            }
+        }
+    }
+    runs
 }
 
 #[cfg(test)]
@@ -191,5 +209,26 @@ pub(crate) mod tests {
         assert_eq!((s.resumes, s.resets), (0, 0));
         assert_eq!(s.context_prompts, 2);
         assert_eq!(s.context_started_at, Some(events[0].occurred_at));
+    }
+
+    #[test]
+    fn ledger_runs_are_lifecycle_events_in_launch_order() {
+        use UsageKind::*;
+        let a = "0123456789abcdef0123456789abcdef";
+        let b = "fedcba9876543210fedcba9876543210";
+        let events = vec![
+            ev(0, InstanceCreated, None),
+            ev(1, LedgerRun, Some(a)),
+            ev(2, InstanceRestarted, None),
+            ev(3, LedgerRun, Some(b)),
+            ev(4, LedgerRun, Some(b)),
+            ev(5, LedgerRun, None),
+        ];
+        assert!(!summarize(&events).tracked);
+        assert_eq!(summarize(&events).resets, 0);
+        assert_eq!(
+            ledger_runs(&events),
+            vec![format!("run_{a}"), format!("run_{b}")]
+        );
     }
 }

@@ -1,0 +1,25 @@
+{
+  "schema": "ledger.run.v1",
+  "run_id": "run_00000000000000000000000000000005",
+  "harness": "claude-code",
+  "profile": "personal",
+  "started_at": "2026-10-01T08:00:00Z",
+  "finished_at": "2026-10-01T10:05:00Z",
+  "generation": {
+    "state": "current",
+    "launched": "d861a7c0e5f1",
+    "current": "d861a7c0e5f1",
+    "current_since": "2026-10-01T08:00:00Z",
+    "drift": [],
+    "runtime_drift": []
+  },
+  "headroom": {
+    "source": "finished",
+    "requests": 100,
+    "input_tokens_before": 1000000,
+    "input_tokens_after": 700000,
+    "saved_tokens": 300000,
+    "model": "claude-sonnet-4-6",
+    "updated_at": "2026-10-01T10:00:00Z"
+  }
+}

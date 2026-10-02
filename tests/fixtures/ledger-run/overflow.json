@@ -1,0 +1,58 @@
+{
+  "schema": "ledger.run.v1",
+  "run_id": "run_00000000000000000000000000000004",
+  "harness": "claude-code",
+  "profile": "personal",
+  "started_at": "2026-10-01T08:00:00Z",
+  "finished_at": null,
+  "generation": {
+    "state": "behind",
+    "launched": "111122223333",
+    "current": "222233334444",
+    "current_since": "2026-10-01T11:18:00Z",
+    "drift": [
+      {
+        "kind": "skill",
+        "name": "alpha",
+        "change": "missing"
+      },
+      {
+        "kind": "skill",
+        "name": "bravo",
+        "change": "missing"
+      },
+      {
+        "kind": "skill",
+        "name": "charlie",
+        "change": "missing"
+      },
+      {
+        "kind": "skill",
+        "name": "delta",
+        "change": "missing"
+      },
+      {
+        "kind": "skill",
+        "name": "echo",
+        "change": "missing"
+      },
+      {
+        "kind": "skill",
+        "name": "foxtrot",
+        "change": "missing"
+      },
+      {
+        "kind": "skill",
+        "name": "golf",
+        "change": "missing"
+      },
+      {
+        "kind": "skill",
+        "name": "hotel",
+        "change": "missing"
+      }
+    ],
+    "runtime_drift": []
+  },
+  "headroom": null
+}

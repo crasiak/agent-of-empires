@@ -15,6 +15,7 @@ pub mod file_watch;
 pub mod git;
 pub mod github;
 pub mod hooks;
+pub mod ledger_run;
 pub mod logging;
 pub mod migrations;
 pub mod plugin;
