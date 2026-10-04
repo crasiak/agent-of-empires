@@ -1,0 +1,25 @@
+{
+  "schema": "ledger.run.v1",
+  "run_id": "run_00000000000000000000000000000007",
+  "harness": "claude-code",
+  "profile": "personal",
+  "started_at": "2026-10-01T08:00:00Z",
+  "finished_at": null,
+  "generation": {
+    "state": "current",
+    "launched": "d861a7c0e5f1",
+    "current": "d861a7c0e5f1",
+    "current_since": "2026-10-01T08:00:00Z",
+    "drift": [],
+    "runtime_drift": []
+  },
+  "headroom": {
+    "source": "live",
+    "requests": 3,
+    "input_tokens_before": 10000,
+    "input_tokens_after": 8000,
+    "saved_tokens": 2000,
+    "model": "gpt-6-astra",
+    "updated_at": "2026-10-01T11:58:00Z"
+  }
+}

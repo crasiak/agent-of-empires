@@ -264,6 +264,12 @@ pub struct HomeView {
     /// Summary for one instance id; drawn only while that id is selected.
     pub(super) usage_summary: Option<(String, crate::usage::UsageSummary)>,
     pub(super) show_usage_overlay: bool,
+    pub(super) ledger_poller: super::ledger_poller::LedgerPoller,
+    pub(super) pending_ledger_refresh: bool,
+    /// Ledger run view for one instance id; drawn only while that id is selected.
+    pub(super) ledger_view: Option<(String, crate::ledger_run::LedgerRunView)>,
+    pub(super) show_ledger_overlay: bool,
+    pub(super) show_headroom_overlay: bool,
     pub(super) system_health_open: bool,
     pub(super) system_health_scroll: usize,
     pub(super) diagnostics_area: Rect,

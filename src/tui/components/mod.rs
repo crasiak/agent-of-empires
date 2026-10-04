@@ -8,6 +8,7 @@ mod dir_picker;
 mod help;
 pub(crate) mod hint_buttons;
 pub(crate) mod hover;
+pub(crate) mod ledger_overlay;
 mod list_picker;
 pub(crate) mod preview;
 pub(crate) mod scroll;

@@ -65,10 +65,19 @@ fn report_ledger_launch(args: ReportLedgerLaunchArgs) -> Result<()> {
     if args.supervised_exec {
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
-            // Retain the outer supervisor's process group: there is no nested
-            // helper to orphan if that supervisor reaches its deadline.
-            return Err(command.exec()).context("publishing supervised Ledger launch attribution");
+            // Run tmux as a plain child in the supervisor's process group (no
+            // private group): a deadline kill of that group still reaches it, so
+            // nothing is orphaned, and a deadline hit while recording below only
+            // loses the best-effort usage row, never the attribution.
+            let status = command
+                .status()
+                .context("publishing supervised Ledger launch attribution")?;
+            anyhow::ensure!(
+                status.success(),
+                "publishing supervised Ledger launch attribution"
+            );
+            record_ledger_run(&report.instance_id, &report.run_id);
+            return Ok(());
         }
         #[cfg(not(unix))]
         anyhow::bail!("supervised report exec is unavailable on this platform");
@@ -84,7 +93,62 @@ fn report_ledger_launch(args: ReportLedgerLaunchArgs) -> Result<()> {
         output.status.success(),
         "tmux rejected Ledger launch attribution"
     );
+    record_ledger_run(&report.instance_id, &report.run_id);
     Ok(())
+}
+
+/// Best effort: the usage log keeps a session's Ledger runs so the overlay
+/// can still sum an earlier run's Headroom savings after a restart.
+fn record_ledger_run(instance_id: &str, run_id: &str) {
+    let env = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
+    let profile = env("AOE_PROFILE");
+    let enabled = profile.as_deref().is_none_or(|profile| {
+        crate::session::config::profile_config::resolve_config_or_warn(profile)
+            .session
+            .usage_tracking
+    });
+    let agent = env("AOE_REPORT_AGENT");
+    let result = crate::usage::db_path().and_then(|db| {
+        record_ledger_run_at(
+            &db,
+            instance_id,
+            run_id,
+            profile.as_deref(),
+            agent.as_deref(),
+            enabled,
+        )
+    });
+    if let Err(e) = result {
+        tracing::debug!(target: "usage", "ledger run event dropped: {e}");
+    }
+}
+
+/// Returns whether a row was written.
+fn record_ledger_run_at(
+    db: &std::path::Path,
+    instance_id: &str,
+    run_id: &str,
+    profile: Option<&str>,
+    agent: Option<&str>,
+    enabled: bool,
+) -> Result<bool> {
+    let Some(detail) = crate::usage::ledger_run_detail(run_id) else {
+        return Ok(false);
+    };
+    if !enabled {
+        return Ok(false);
+    }
+    crate::usage::UsageStore::open(db)?.insert(&crate::usage::UsageEvent {
+        id: 0,
+        occurred_at: chrono::Utc::now(),
+        instance_id: instance_id.to_string(),
+        profile: profile.map(str::to_string),
+        agent: agent.map(str::to_string),
+        kind: crate::usage::UsageKind::LedgerRun,
+        detail: Some(detail),
+        agent_session_id: None,
+    })?;
+    Ok(true)
 }
 
 fn report_launch(args: ReportLaunchArgs) -> Result<()> {
@@ -3732,5 +3796,33 @@ mod show_json_tests {
             active["snoozed_until"],
             serde_json::to_value(future).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod ledger_run_event_tests {
+    use super::record_ledger_run_at;
+
+    #[test]
+    fn records_a_ledger_run_once_per_report_and_respects_the_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("usage.db");
+        let id = "run_605c696f0a75d2c76a3d3bb982c50025";
+        assert!(record_ledger_run_at(&db, "inst", id, Some("work"), Some("claude"), true).unwrap());
+        assert!(!record_ledger_run_at(&db, "inst", "run-prior", None, None, true).unwrap());
+        assert!(!record_ledger_run_at(&db, "inst", id, None, None, false).unwrap());
+        let events = crate::usage::UsageStore::open(&db)
+            .unwrap()
+            .events_for_instance("inst")
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, crate::usage::UsageKind::LedgerRun);
+        assert_eq!(
+            events[0].detail.as_deref(),
+            Some("605c696f0a75d2c76a3d3bb982c50025")
+        );
+        assert_eq!(events[0].profile.as_deref(), Some("work"));
+        assert_eq!(events[0].agent.as_deref(), Some("claude"));
+        assert_eq!(crate::usage::ledger_runs(&events), vec![id.to_string()]);
     }
 }

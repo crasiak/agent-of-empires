@@ -1,0 +1,28 @@
+{
+  "schema": "ledger.run.v1",
+  "run_id": "run_00000000000000000000000000000003",
+  "harness": "claude-code",
+  "profile": "personal",
+  "started_at": "2026-10-01T08:00:00Z",
+  "finished_at": null,
+  "generation": {
+    "state": "diverged",
+    "launched": "beef01234567",
+    "current": "cafe01234567",
+    "current_since": "2026-09-29T12:00:00Z",
+    "drift": [
+      {
+        "kind": "skill",
+        "name": "grill-me",
+        "change": "newer"
+      },
+      {
+        "kind": "skill",
+        "name": "tdd",
+        "change": "older"
+      }
+    ],
+    "runtime_drift": []
+  },
+  "headroom": null
+}

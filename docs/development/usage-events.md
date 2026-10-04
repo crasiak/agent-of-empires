@@ -39,10 +39,14 @@ additive only: new kinds, new detail values, new nullable columns.
 | `instance_created` | none | AoE created the session |
 | `instance_restarted` | none | AoE restarted the session's agent |
 | `instance_deleted` | none | AoE deleted the session |
+| `ledger_run` | the Ledger run id without its `run_` prefix (32 lowercase hex) | `aoe session report-ledger-launch`, once per Ledger launch of the session's agent |
 
 A compaction logs both `compact` and `context_start` with detail `compact`.
 Count compactions and context boundaries from `compact` only.
 A `context_start` with detail `reload` (Pi reloading the same conversation) is not a new context.
+
+`ledger_run` is a lifecycle kind: it does not count toward resets. Ledger
+run ids of any other shape are not recorded.
 
 Sandboxed sessions record lifecycle events only. Sessions launched through a
 launcher that renders its own agent settings (for example Harness Ledger

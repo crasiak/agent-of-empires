@@ -1,0 +1,301 @@
+[
+  {
+    "name": "current",
+    "shows": [
+      "current.json"
+    ],
+    "now": "2026-10-01T12:00:00Z",
+    "view": {
+      "run_id": "run_00000000000000000000000000000001",
+      "runs": 1,
+      "generation": {
+        "state": "current",
+        "launched": "d861a7c0e5f1",
+        "current": "d861a7c0e5f1",
+        "current_since": "2026-10-01T08:00:00Z",
+        "drift": [],
+        "runtime_drift": []
+      },
+      "headroom_total": null,
+      "headroom_now": null,
+      "error": null
+    },
+    "lines": [
+      "ledger d861 current"
+    ]
+  },
+  {
+    "name": "behind with every change kind",
+    "shows": [
+      "behind.json"
+    ],
+    "now": "2026-10-01T12:00:00Z",
+    "view": {
+      "run_id": "run_00000000000000000000000000000002",
+      "runs": 1,
+      "generation": {
+        "state": "behind",
+        "launched": "d861a7c0e5f1",
+        "current": "f00d3b9a2c44",
+        "current_since": "2026-10-01T09:00:00Z",
+        "drift": [
+          {
+            "kind": "settings",
+            "name": "claude-settings",
+            "change": "older"
+          },
+          {
+            "kind": "settings",
+            "name": "codex-settings",
+            "change": "older"
+          },
+          {
+            "kind": "skill",
+            "name": "caveman",
+            "change": "extra"
+          },
+          {
+            "kind": "skill",
+            "name": "dataviz",
+            "change": "missing"
+          },
+          {
+            "kind": "skill",
+            "name": "tdd",
+            "change": "older"
+          }
+        ],
+        "runtime_drift": [
+          {
+            "kind": "renderer",
+            "change": "older"
+          }
+        ]
+      },
+      "headroom_total": {
+        "requests": 42,
+        "input_tokens_before": 3912000,
+        "input_tokens_after": 2780000,
+        "saved_tokens": 1132000,
+        "model": "global.anthropic.claude-opus-5",
+        "estimated_cents": 566
+      },
+      "headroom_now": {
+        "requests": 42,
+        "input_tokens_before": 3912000,
+        "input_tokens_after": 2780000,
+        "saved_tokens": 1132000,
+        "model": "global.anthropic.claude-opus-5",
+        "estimated_cents": 566
+      },
+      "error": null
+    },
+    "lines": [
+      "ledger behind d861↔f00d 3h0m  +caveman -dataviz ↓tdd  ↓2 settings ↓renderer",
+      "hr 1.1M saved · 28% · ~$5.66"
+    ]
+  },
+  {
+    "name": "diverged",
+    "shows": [
+      "diverged.json"
+    ],
+    "now": "2026-10-01T12:00:00Z",
+    "view": {
+      "run_id": "run_00000000000000000000000000000003",
+      "runs": 1,
+      "generation": {
+        "state": "diverged",
+        "launched": "beef01234567",
+        "current": "cafe01234567",
+        "current_since": "2026-09-29T12:00:00Z",
+        "drift": [
+          {
+            "kind": "skill",
+            "name": "grill-me",
+            "change": "newer"
+          },
+          {
+            "kind": "skill",
+            "name": "tdd",
+            "change": "older"
+          }
+        ],
+        "runtime_drift": []
+      },
+      "headroom_total": null,
+      "headroom_now": null,
+      "error": null
+    },
+    "lines": [
+      "ledger diverged beef↔cafe 2d0h  ↑grill-me ↓tdd"
+    ]
+  },
+  {
+    "name": "overflow",
+    "shows": [
+      "overflow.json"
+    ],
+    "now": "2026-10-01T12:00:00Z",
+    "view": {
+      "run_id": "run_00000000000000000000000000000004",
+      "runs": 1,
+      "generation": {
+        "state": "behind",
+        "launched": "111122223333",
+        "current": "222233334444",
+        "current_since": "2026-10-01T11:18:00Z",
+        "drift": [
+          {
+            "kind": "skill",
+            "name": "alpha",
+            "change": "missing"
+          },
+          {
+            "kind": "skill",
+            "name": "bravo",
+            "change": "missing"
+          },
+          {
+            "kind": "skill",
+            "name": "charlie",
+            "change": "missing"
+          },
+          {
+            "kind": "skill",
+            "name": "delta",
+            "change": "missing"
+          },
+          {
+            "kind": "skill",
+            "name": "echo",
+            "change": "missing"
+          },
+          {
+            "kind": "skill",
+            "name": "foxtrot",
+            "change": "missing"
+          },
+          {
+            "kind": "skill",
+            "name": "golf",
+            "change": "missing"
+          },
+          {
+            "kind": "skill",
+            "name": "hotel",
+            "change": "missing"
+          }
+        ],
+        "runtime_drift": []
+      },
+      "headroom_total": null,
+      "headroom_now": null,
+      "error": null
+    },
+    "lines": [
+      "ledger behind 1111↔2222 42m  -alpha -bravo -charlie -delta -echo -foxtrot +2 more"
+    ]
+  },
+  {
+    "name": "restarted session sums both runs",
+    "shows": [
+      "finished.json",
+      "live-now.json"
+    ],
+    "now": "2026-10-01T12:00:00Z",
+    "view": {
+      "run_id": "run_00000000000000000000000000000006",
+      "runs": 2,
+      "generation": {
+        "state": "current",
+        "launched": "d861a7c0e5f1",
+        "current": "d861a7c0e5f1",
+        "current_since": "2026-10-01T08:00:00Z",
+        "drift": [],
+        "runtime_drift": []
+      },
+      "headroom_total": {
+        "requests": 105,
+        "input_tokens_before": 1100000,
+        "input_tokens_after": 773500,
+        "saved_tokens": 326500,
+        "model": "claude-opus-5-5",
+        "estimated_cents": 100
+      },
+      "headroom_now": {
+        "requests": 5,
+        "input_tokens_before": 100000,
+        "input_tokens_after": 73500,
+        "saved_tokens": 26500,
+        "model": "claude-opus-5-5",
+        "estimated_cents": 10
+      },
+      "error": null
+    },
+    "lines": [
+      "ledger d861 current",
+      "hr 326.5k saved · 29% · ~$1.00  (now 26.5k)"
+    ]
+  },
+  {
+    "name": "unpriced model",
+    "shows": [
+      "unpriced.json"
+    ],
+    "now": "2026-10-01T12:00:00Z",
+    "view": {
+      "run_id": "run_00000000000000000000000000000007",
+      "runs": 1,
+      "generation": {
+        "state": "current",
+        "launched": "d861a7c0e5f1",
+        "current": "d861a7c0e5f1",
+        "current_since": "2026-10-01T08:00:00Z",
+        "drift": [],
+        "runtime_drift": []
+      },
+      "headroom_total": {
+        "requests": 3,
+        "input_tokens_before": 10000,
+        "input_tokens_after": 8000,
+        "saved_tokens": 2000,
+        "model": "gpt-6-astra",
+        "estimated_cents": null
+      },
+      "headroom_now": {
+        "requests": 3,
+        "input_tokens_before": 10000,
+        "input_tokens_after": 8000,
+        "saved_tokens": 2000,
+        "model": "gpt-6-astra",
+        "estimated_cents": null
+      },
+      "error": null
+    },
+    "lines": [
+      "ledger d861 current",
+      "hr 2.0k saved · 20%"
+    ]
+  },
+  {
+    "name": "ledger timed out",
+    "shows": [],
+    "run_ids": [
+      "run_00000000000000000000000000000008"
+    ],
+    "outcome": "timeout",
+    "now": "2026-10-01T12:00:00Z",
+    "view": {
+      "run_id": "run_00000000000000000000000000000008",
+      "runs": 1,
+      "generation": null,
+      "headroom_total": null,
+      "headroom_now": null,
+      "error": "timeout"
+    },
+    "lines": [
+      "ledger ? timeout"
+    ]
+  }
+]

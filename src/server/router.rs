@@ -83,6 +83,10 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{id}/output", get(api::read_output))
         .route("/api/sessions/{id}/usage", get(api::session_usage))
         .route(
+            "/api/sessions/{id}/ledger-run",
+            get(api::session_ledger_run),
+        )
+        .route(
             "/api/sessions/{id}/notifications",
             patch(api::update_session_notifications),
         )

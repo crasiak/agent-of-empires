@@ -4041,6 +4041,7 @@ impl HomeView {
             }
             if self.selected_session != prev_session {
                 self.request_usage_refresh();
+                self.request_ledger_refresh();
                 self.system_health_open = false;
                 self.preview_scroll_offset = 0;
                 // A finalized preview selection pins to the previous pane's cells, so

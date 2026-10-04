@@ -1,0 +1,56 @@
+{
+  "schema": "ledger.run.v1",
+  "run_id": "run_00000000000000000000000000000002",
+  "harness": "claude-code",
+  "profile": "personal",
+  "started_at": "2026-10-01T08:00:00Z",
+  "finished_at": null,
+  "generation": {
+    "state": "behind",
+    "launched": "d861a7c0e5f1",
+    "current": "f00d3b9a2c44",
+    "current_since": "2026-10-01T09:00:00Z",
+    "drift": [
+      {
+        "kind": "settings",
+        "name": "claude-settings",
+        "change": "older"
+      },
+      {
+        "kind": "settings",
+        "name": "codex-settings",
+        "change": "older"
+      },
+      {
+        "kind": "skill",
+        "name": "caveman",
+        "change": "extra"
+      },
+      {
+        "kind": "skill",
+        "name": "dataviz",
+        "change": "missing"
+      },
+      {
+        "kind": "skill",
+        "name": "tdd",
+        "change": "older"
+      }
+    ],
+    "runtime_drift": [
+      {
+        "kind": "renderer",
+        "change": "older"
+      }
+    ]
+  },
+  "headroom": {
+    "source": "live",
+    "requests": 42,
+    "input_tokens_before": 3912000,
+    "input_tokens_after": 2780000,
+    "saved_tokens": 1132000,
+    "model": "global.anthropic.claude-opus-5",
+    "updated_at": "2026-10-01T11:59:30.752Z"
+  }
+}
