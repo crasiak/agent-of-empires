@@ -233,6 +233,9 @@ pub(crate) fn host_hook_disclosure(
                     crate::hooks::identity_publisher_arg(event.publisher),
                 ));
             }
+            if event.usage {
+                effects.push("runs aoe __usage-event".to_string());
+            }
             if let Some(status) = event.status {
                 status_events += 1;
                 effects.push(format!("writes \"{status}\""));
@@ -1386,26 +1389,26 @@ mod tests {
                 .flat_map(|(_, effect)| effect.split(", and ").map(str::to_string))
                 .collect::<Vec<_>>();
 
-            // Every disclosed effect names one command, an identity effect and a
+            // Every disclosed effect names one command: an identity, usage or
             // status effect per written entry.
-            let identity_written = written
-                .iter()
-                .filter(|c| c.contains("__extract-session-id"))
-                .count();
-            let status_written = written.len() - identity_written;
-            let identity_disclosed = disclosure
-                .hook_commands
-                .iter()
-                .filter(|(_, effect)| effect.contains("__extract-session-id"))
-                .count();
-            let status_disclosed = disclosure
-                .hook_commands
-                .iter()
-                .filter(|(_, effect)| effect.contains("writes \""))
-                .count();
+            let count_written =
+                |needle: &str| written.iter().filter(|c| c.contains(needle)).count();
+            let identity_written = count_written("__extract-session-id");
+            let usage_written = count_written("__usage-event");
+            let status_written = written.len() - identity_written - usage_written;
+            let count_disclosed = |needle: &str| {
+                disclosed
+                    .iter()
+                    .filter(|effect| effect.contains(needle))
+                    .count()
+            };
             assert_eq!(
-                (identity_disclosed, status_disclosed),
-                (identity_written, status_written),
+                (
+                    count_disclosed("__extract-session-id"),
+                    count_disclosed("__usage-event"),
+                    count_disclosed("writes \""),
+                ),
+                (identity_written, usage_written, status_written),
                 "{tool}: the disclosure must account for every installed command"
             );
             assert_eq!(
