@@ -220,6 +220,7 @@ impl HomeView {
             group_by,
             row_tag_mode: resolved.session.row_tag,
             show_session_colors: resolved.session.show_session_colors,
+            show_activity_age: resolved.session.show_activity_age,
             sidebar_position: user_config
                 .as_ref()
                 .map(|c| c.session.sidebar_position)
@@ -334,6 +335,7 @@ impl HomeView {
             pending_daemon_start_session: None,
             structured_preview: None,
             structured_preview_pending: false,
+            structured_transcript_painted: false,
             pending_force_remove_session: None,
             pending_trash_session: None,
             pending_dialog_click_action: None,
@@ -392,7 +394,7 @@ impl HomeView {
             attach_project_poller: crate::tui::attach_project_poller::AttachProjectPoller::new(),
             attach_project_in_flight: std::collections::HashSet::new(),
             creation_poller: CreationPoller::new(),
-            creation_cancelled: false,
+            creation_cancel: None,
             on_launch_hooks_ran: HashSet::new(),
             creating_hook_progress: HashMap::new(),
             creating_stub_id: None,

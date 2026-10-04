@@ -309,7 +309,6 @@ async fn run(
             };
         }
         Some(Commands::Settings { command }) => return cli::settings::run(command),
-        Some(Commands::Telemetry { command }) => return cli::telemetry::run(command),
         Some(Commands::Mcp { command }) => {
             let profile = cli.profile.clone().unwrap_or_default();
             return cli::mcp::run(&profile, command).await;
@@ -370,9 +369,16 @@ async fn run(
         Some(Commands::Worktree { command }) => cli::worktree::run(&profile, command).await,
         // Runs after migrations because `apply` writes the project registry.
         Some(Commands::Cityhall { command }) => cli::cityhall::run(command),
+        // After migrations: enable/disable rewrite config.toml through the
+        // current schema, which drops any key a pending migration would carry.
+        Some(Commands::Telemetry { command }) => cli::telemetry::run(command),
         Some(Commands::Serve(args)) => cli::serve::run(&profile, args).await,
         Some(Commands::Url(args)) => cli::url::run(args),
         Some(Commands::Sandbox { command }) => cli::sandbox::run(command),
+        // Runs after migrations, which run for every command: `approve` writes
+        // state.toml, and on a pre-v021 install v021 strips [app_state] from
+        // config.toml without copying it, dropping every other key.
+        Some(Commands::Hooks { command }) => cli::hooks::run(&profile, command),
         Some(Commands::Acp { command }) => cli::acp::run(command).await,
         Some(Commands::AcpRunner(args)) => agent_of_empires::process::runner::run(*args).await,
         None => {

@@ -5,12 +5,15 @@ use std::io::Read;
 use anyhow::{anyhow, Result};
 use clap::Args;
 
-use super::hook_input::{fired_by_pane_agent, read_json};
+use super::hook_input::{fired_by_pane_agent, publisher_is_pane_agent, read_json};
 
 #[derive(Args)]
 pub struct ExtractSessionIdArgs {
     #[arg(long, value_enum, default_value = "session-id")]
     field: crate::agents::HookIdentityField,
+    /// Binary of the agent whose hook fired this. Refused when the pane runs a different agent.
+    #[arg(long)]
+    agent: Option<String>,
 }
 
 pub async fn run(args: ExtractSessionIdArgs) -> Result<()> {
@@ -21,6 +24,16 @@ pub async fn run(args: ExtractSessionIdArgs) -> Result<()> {
         tracing::debug!(
             target: "hooks.session_id",
             "rejecting unsafe AOE_INSTANCE_ID: {e}"
+        );
+        return Ok(());
+    }
+    if !publisher_is_pane_agent(
+        args.agent.as_deref(),
+        std::env::var("AOE_AGENT_BIN").ok().as_deref(),
+    ) {
+        tracing::debug!(
+            target: "hooks.session_id",
+            "ignoring hook from an agent other than the pane's"
         );
         return Ok(());
     }
@@ -77,6 +90,26 @@ fn run_inner<R: Read>(
 mod tests {
     use super::*;
     use crate::hooks::test_support::BaseGuard;
+
+    #[test]
+    fn a_named_publisher_only_writes_from_its_own_agents_pane() {
+        for (publisher, pane_agent, accepted) in [
+            (Some("codex"), Some("codex"), true),
+            // `codex exec` under a Claude pane, and `claude -p` under a Codex pane.
+            (Some("codex"), Some("claude"), false),
+            (Some("claude"), Some("codex"), false),
+            // Panes launched before `AOE_AGENT_BIN`, and installs predating `--agent`.
+            (Some("codex"), None, true),
+            (Some("codex"), Some(""), true),
+            (None, Some("claude"), true),
+        ] {
+            assert_eq!(
+                publisher_is_pane_agent(publisher, pane_agent),
+                accepted,
+                "{publisher:?} in {pane_agent:?}"
+            );
+        }
+    }
     use std::os::unix::fs::PermissionsExt;
 
     const UUID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";

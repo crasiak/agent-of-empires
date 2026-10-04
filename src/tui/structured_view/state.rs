@@ -2,20 +2,21 @@
 //! and the websocket handle. Side effects run in the async loop in [`super`],
 //! so this state stays freely borrowable by the render layer.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use ratatui::layout::Rect;
 use ratatui_textarea::TextArea;
 
-use super::input::Focus;
+use super::input::{Focus, Intent};
 use super::queue::QueueMirror;
 use super::reducer::AcpTranscript;
 use super::slash;
 use crate::acp::client::{DaemonEndpoint, HttpClient, PluginCommandView, WsHandle};
 use crate::acp::session_paths::SessionPathRoots;
-use crate::acp::state::AvailableCommand;
+use crate::acp::state::{AvailableCommand, SessionNotice};
 use crate::daemon::QueuedPromptEntry;
 use crate::plugin::ui_state::{Notification, UiSnapshot};
+use crate::tui::components::hover::HoverState;
 use crate::tui::plugin_ui;
 
 /// Most plugin notifications buffered awaiting a free toast slot. The daemon
@@ -39,6 +40,10 @@ pub struct StructuredViewState {
     /// Toast banner that appears briefly above the composer, e.g.
     /// "prompt sent" or an HTTP error.
     pub toast: Option<ToastBanner>,
+    /// Ids of session notices dismissed here. Local on purpose: the daemon's
+    /// list is shared, and dismissing in this view must not clear the web's
+    /// banner. Pruned by [`Self::prune_dismissed_notices`].
+    pub dismissed_notices: HashSet<String>,
     /// Mirror of the daemon-owned prompt queue (drained server-side at the turn
     /// edge). Refreshed from `/queue` on connect and at each turn edge, with
     /// optimistic edits in between.
@@ -91,6 +96,11 @@ pub struct StructuredViewState {
     /// Pane rectangles of the most recent draw, so mouse events hit-test against
     /// what is on screen. `None` until the first frame renders.
     pub layout: Option<ViewLayout>,
+    /// Clickable popup rows and buttons painted by the most recent draw.
+    /// Interior-mutable because the render borrows the state immutably.
+    pub mouse_targets: std::cell::RefCell<MouseTargets>,
+    /// The button under the pointer. Visual only; never moves keyboard focus.
+    pub hover: HoverState,
     /// Floating single-choice picker: the permission-mode picker (Shift+Tab), or
     /// the auto-opened answer menu for a pending single-select question. While
     /// open it owns Up/Down/Enter/Esc, whatever the focus.
@@ -160,8 +170,36 @@ pub struct ViewLayout {
     pub transcript: Rect,
     pub status: Rect,
     pub approval: Rect,
+    pub notices: Rect,
     pub queue: Rect,
     pub composer: Rect,
+}
+
+/// Which floating picker a [`PickerTarget`] belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerKind {
+    Choice,
+    Slash,
+    Mention,
+}
+
+/// A floating picker as last drawn: `area` is the whole popup (a click there
+/// never falls through to the pane under it) and `rows` covers the item rows,
+/// whose top row shows item `first`.
+#[derive(Debug, Clone, Copy)]
+pub struct PickerTarget {
+    pub kind: PickerKind,
+    pub area: Rect,
+    pub rows: Rect,
+    pub first: usize,
+}
+
+/// Mouse targets captured during render, topmost first: the floating picker,
+/// then buttons, each firing the intent of its keyboard equivalent.
+#[derive(Debug, Clone, Default)]
+pub struct MouseTargets {
+    pub picker: Option<PickerTarget>,
+    pub buttons: Vec<(Rect, Intent)>,
 }
 
 /// Tracks which plugin notifications have been shown and buffers any awaiting a
@@ -225,6 +263,22 @@ pub enum ToastKind {
 }
 
 impl StructuredViewState {
+    /// Notices the daemon still reports and the user has not dismissed here.
+    pub fn visible_notices(&self) -> impl Iterator<Item = &SessionNotice> {
+        self.transcript
+            .session_notices
+            .iter()
+            .filter(|n| !self.dismissed_notices.contains(&n.id))
+    }
+
+    /// Drops dismissal ids the daemon no longer reports, so the set cannot grow
+    /// across a long session. Call after adopting a `reduced_state` frame.
+    pub fn prune_dismissed_notices(&mut self) {
+        let live = &self.transcript.session_notices;
+        self.dismissed_notices
+            .retain(|id| live.iter().any(|n| &n.id == id));
+    }
+
     pub fn new(
         session_id: String,
         endpoint: DaemonEndpoint,
@@ -242,6 +296,7 @@ impl StructuredViewState {
             selected_approval: None,
             ws,
             toast: None,
+            dismissed_notices: HashSet::new(),
             queue: QueueMirror::default(),
             in_flight: false,
             slash_selected: 0,
@@ -261,6 +316,8 @@ impl StructuredViewState {
             pane_scroll: 0,
             last_pane_scroll_max: std::cell::Cell::new(0),
             layout: None,
+            mouse_targets: Default::default(),
+            hover: HoverState::default(),
             choice: None,
             auto_presented_elicitation: None,
             last_scroll_max: std::cell::Cell::new(0),

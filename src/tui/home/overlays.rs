@@ -65,15 +65,19 @@ impl HomeView {
     /// text worth copying (native drag-to-select), or it is the send-message
     /// textarea, where a fragmented SGR mouse report could leak into the message.
     /// Only add surfaces for those reasons, since it also disables wheel scroll.
+    ///
+    /// Upstream dropped this in #4200 (hover/click for every modal); the fork
+    /// keeps it because releasing capture is what stops a fragmented SGR report
+    /// from landing in the message textarea.
+    /// The intro is listed on every page: its URLs are the point, and #4200
+    /// dropped the dialog's own `wants_text_selection` (which answered `true`
+    /// unconditionally) along with this method.
     pub fn wants_text_selection(&self) -> bool {
         self.serve_view.is_some()
             || self.info_dialog.is_some()
             || self.changelog_dialog.is_some()
             || self.send_message_dialog.is_some()
-            || self
-                .intro_dialog
-                .as_ref()
-                .is_some_and(|d| d.wants_text_selection())
+            || self.intro_dialog.is_some()
     }
 
     /// `has_dialog()` minus live-send. List clicks must keep working in live
@@ -134,6 +138,19 @@ impl HomeView {
     /// Show `text` in the status bar for a few seconds.
     pub(in crate::tui) fn flash_status(&mut self, text: impl Into<String>) {
         self.status_flash = Some((text.into(), Instant::now() + FLASH_WINDOW));
+    }
+
+    /// Open `url` in the browser. aoe captures the mouse, so the host terminal
+    /// can't; over SSH no browser opens, so the URL is copied via OSC 52 instead.
+    pub(in crate::tui) fn open_link(&mut self, url: &str) {
+        let status = match crate::tui::open_url::open_url(url) {
+            Ok(()) => format!("opened {url}"),
+            Err(e) => {
+                crate::tui::clipboard::copy_to_clipboard(url);
+                format!("{e}; copied {url}")
+            }
+        };
+        self.flash_status(status);
     }
 
     pub(in crate::tui) fn status_flash_text(&self) -> Option<&str> {

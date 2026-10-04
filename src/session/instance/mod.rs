@@ -66,14 +66,14 @@ pub(crate) const SESSION_IDENTITY_EXTENSION: &str =
     include_str!("../../../assets/session/aoe-session-id.js");
 
 pub(crate) use accessors::resolved_agent_for;
-pub use flags::{is_valid_session_color, SessionBucket, SESSION_COLORS};
+pub use flags::{is_valid_session_color, SessionBucket, StartBlocked, SESSION_COLORS};
 #[cfg(test)]
 pub(crate) use identity_sidecar::FAIL_PI_PATH_WRITES;
 pub(crate) use lifecycle::NEWER_GENERATION_BUSY_REASON;
 pub use lifecycle::{LifecycleOperation, LifecycleReservation, LifecycleReservationError};
 
 pub use polling::PollerStart;
-pub use ready::{EnsureReadyError, EnsureReadyOutcome};
+pub use ready::{EnsureReadyError, EnsureReadyOutcome, SessionGone};
 pub(crate) use resume::ResumeAttemptPolicy;
 pub(crate) use sid_persist::{persist_session_to_storage, SidPersistOutcome, SidWrite};
 pub use start::{LaunchSidOutcome, StartOutcome};
@@ -117,7 +117,10 @@ pub(crate) use types::{
 
 // Sibling items the submodules reach through `use super::*`.
 use hooks::status_hook_env_prefix;
-pub(crate) use hooks::{generic_host_config_path_for, sidecar_host_config_path_for};
+pub(crate) use hooks::{
+    host_hook_agent, host_hook_disclosure, host_hook_disclosure_config_with_repo,
+    host_hook_post_install_notes,
+};
 use launch_command::{
     append_resume_flags, build_fork_flags, parse_launch_command, shell_stdin_command,
     splice_subcommand_or_append, PreparedLaunch,
@@ -218,6 +221,13 @@ pub struct Instance {
     pub created_by_plugin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_create_idempotency: Option<PluginCreateIdempotency>,
+    /// Set by a plugin's `sessions.turn.send` right before waking a resting session, under the
+    /// same `instances` write lock that decides to revive it, so the plugin active-session cap
+    /// treats it as occupying a slot immediately rather than waiting for a status to land.
+    /// Cleared by the next real status transition this session gets, whatever it turns out to
+    /// be (`Running`, `Error`, ...); never persisted.
+    #[serde(skip)]
+    pub(crate) plugin_revival_pending: bool,
 
     /// A turn persisted with the session and not yet delivered to the agent:
     /// either the initial prompt from session create (#2897), or a
@@ -312,6 +322,9 @@ pub struct Instance {
     pub base_branch_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Position within its group under `SortOrder::Custom`. `None` sorts last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_index: Option<u32>,
     #[serde(default, skip_serializing_if = "View::is_terminal")]
     pub view: View,
     #[serde(default, skip_serializing_if = "Option::is_none")]

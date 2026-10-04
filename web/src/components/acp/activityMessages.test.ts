@@ -136,6 +136,29 @@ describe("tool-call grouping", () => {
     expect(toolParts(four)[0]!.toolCallId).toBe(id);
   });
 
+  it("splits a long run into chunks of at most 10 whose ids hold as the run grows", () => {
+    const shape = (n: number) =>
+      toolParts(readRun("t", n)).map((p) =>
+        p.toolName === TOOL_GROUP_NAME
+          ? [
+              p.toolCallId,
+              payload(p)
+                .children.map((c: Part) => c.toolCallId)
+                .join(),
+            ]
+          : [p.toolCallId],
+      );
+    const ids = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => `t${from + i}`).join();
+    expect(shape(10)).toEqual([["group-t1", ids(1, 10)]]);
+    // A tail below the fold threshold stays inline until it grows into a group.
+    expect(shape(22)).toEqual([["group-t1", ids(1, 10)], ["group-t11", ids(11, 20)], ["t21"], ["t22"]]);
+    expect(shape(25)).toEqual([
+      ["group-t1", ids(1, 10)],
+      ["group-t11", ids(11, 20)],
+      ["group-t21", ids(21, 25)],
+    ]);
+  });
+
   it("gives text-split runs distinct ids", () => {
     const parts = toolParts([...readRun("a", 3), message("Found it."), ...readRun("b", 3)]);
     expect(parts.map((p) => p.toolCallId)).toEqual(["group-a1", "group-b1"]);
@@ -304,6 +327,22 @@ describe("user and callout rows", () => {
     const parts = assistantParts([row("sum-1", "summary", "- fixed the login bug\n- next: wire the UI")]);
     expect(parts[0]!.text).toBe(
       "> 📝 **Summary of conversation so far**\n>\n> - fixed the login bug\n> - next: wire the UI",
+    );
+  });
+
+  it("keeps an advisory in the timeline after its banner is dismissed", () => {
+    const advisory: TranscriptRow = {
+      id: "notice-7",
+      group_id: "g-7",
+      kind: "advisory",
+      at: AT,
+      text: "warning: Model fallback: Switched to Sonnet.",
+    };
+    const action = transcriptDeltaAction({ Append: advisory }, "s");
+    let state = reducer(emptyAcpState(), action!);
+    state = reducer(state, { kind: "dismiss_session_notice", id: "notice-7" });
+    expect(assistantParts(state.activity)[0]!.text).toBe(
+      "> ℹ️ **Notice**; warning: Model fallback: Switched to Sonnet.",
     );
   });
 });

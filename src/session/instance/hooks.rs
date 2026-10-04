@@ -3,11 +3,16 @@
 use super::*;
 use anyhow::bail;
 
+/// `program` is the basename of the executable the launch runs. A bare-token wrapper such as
+/// `company-codex` can be the agent itself under another name (a symlink or copy), so the identity
+/// hook's ancestor walk must count that name too: otherwise a nested `codex exec` is the only
+/// process named like the agent and passes as the pane's own.
 pub(super) fn status_hook_env_prefix(
     profile: &str,
     instance_id: &str,
     agent: Option<&crate::agents::AgentDef>,
     usage_enabled: bool,
+    program: Option<&str>,
 ) -> String {
     let has_hooks = agent.is_some_and(|a| a.hook_config.is_some() || a.sidecar_hooks.is_some());
 
@@ -15,17 +20,23 @@ pub(super) fn status_hook_env_prefix(
         let hook_bin = std::env::current_exe()
             .expect("current executable is required for host identity hooks");
         let hook_bin = shell_escape(&hook_bin.to_string_lossy());
+        let agent_bin = agent.map_or("", |agent| agent.binary);
+        let program = program
+            .filter(|name| !name.is_empty() && *name != agent_bin)
+            .map_or_else(String::new, |name| {
+                format!("AOE_AGENT_PROGRAM={} ", shell_escape(name))
+            });
         // `$$` is the launch shell, which `exec`s into the agent.
         // Shared hook settings must not enable usage for a profile that opted out.
         let usage_env = if usage_enabled { "AOE_USAGE=1 " } else { "" };
         format!(
             "AOE_PROFILE={profile} AOE_INSTANCE_ID={instance_id} AOE_HOOK_BIN={hook_bin} \
-             AOE_AGENT_PID=$$ AOE_AGENT_BIN={agent_bin} \
+             AOE_AGENT_PID=$$ AOE_AGENT_BIN={agent_bin} {program}\
              AOE_REPORT_BIN={hook_bin} AOE_REPORT_AGENT={agent_name} AOE_REPORT_PROFILE={profile} \
              {usage_env}",
             profile = shell_escape(profile),
             instance_id = shell_escape(instance_id),
-            agent_bin = shell_escape(agent.map_or("", |agent| agent.binary)),
+            agent_bin = shell_escape(agent_bin),
             agent_name = shell_escape(agent.map_or("", |agent| agent.name)),
         )
     } else if agent.is_some_and(|agent| agent.name == "pi") {
@@ -44,7 +55,7 @@ pub(super) fn status_hook_env_prefix(
     }
 }
 
-pub(crate) fn generic_host_config_path_for(
+fn generic_host_config_path_for(
     tool_name: &str,
     hook_cfg: &crate::agents::AgentHookConfig,
     home: &Path,
@@ -66,7 +77,7 @@ pub(crate) fn generic_host_config_path_for(
     }
 }
 
-pub(crate) fn sidecar_host_config_path_for(
+fn sidecar_host_config_path_for(
     tool_name: &str,
     agent: &crate::agents::AgentDef,
     sidecar: &crate::agents::SidecarHooks,
@@ -92,6 +103,176 @@ pub(crate) fn sidecar_host_config_path_for(
         }
     }
     home.join(sidecar.host_config_subpath)
+}
+
+/// What a launch would write into one agent's own host config, and what each
+/// hook does. Shared by the TUI approval dialog and `aoe hooks approve`, so
+/// both describe the same install from the same resolution.
+pub(crate) struct HostHookDisclosure {
+    pub settings_paths: Vec<String>,
+    pub hook_commands: Vec<(String, String)>,
+    pub needs_codex_trust_note: bool,
+    /// Files the installer writes beside `settings_paths`, as
+    /// `(what it holds, path)`. A consent covers a write, so a file the
+    /// installer creates belongs here even when no event lands in it.
+    pub extra_settings_paths: Vec<(String, String)>,
+
+    /// False when the resolved events carry no status, which is what
+    /// `agent_status_hooks = false` leaves behind, and what an agent that
+    /// declares no status event leaves behind too.
+    pub status_hooks_enabled: bool,
+    /// The agent's own config that turns its hooks off, naming it so the
+    /// the disclosure can say which file decides.
+    pub disabled_by_agent: Option<std::path::PathBuf>,
+}
+
+/// The built-in agent a launch resolves for `tool_name` running `command`.
+/// Delegates to `execution_agent_for` rather than repeating its precedence,
+/// which matches the command's first word against the built-in binaries
+/// before it reads `agent_execution_as`; a copy that cannot see the command
+/// misses that. The fallbacks are `Instance::status_agent`'s, and the last of
+/// them reads the session's stored alias, which can have drifted from the
+/// config this reads.
+pub(crate) fn host_hook_agent(
+    tool_name: &str,
+    command: &str,
+    session: &crate::session::config::SessionConfig,
+) -> Option<&'static crate::agents::AgentDef> {
+    Instance::execution_agent_for(tool_name, command, session)
+        .ok()
+        .or_else(|| crate::agents::get_agent(tool_name))
+        .or_else(|| {
+            session
+                .agent_detect_as
+                .get(tool_name)
+                .and_then(|alias| crate::agents::get_agent(alias))
+        })
+}
+
+/// The repo-merged config the creation dialog's disclosure must read. A repo
+/// can move `agent_detect_as`, which is where the launcher's agent comes from;
+/// the other fields the disclosure reads are repo-denied, so merging costs
+/// the paths nothing. `aoe hooks status` has no project and cannot use this.
+pub(crate) fn host_hook_disclosure_config_with_repo(
+    profile: &str,
+    project_path: &Path,
+) -> crate::session::config::Config {
+    crate::session::resolve_config_with_repo_or_warn(profile, project_path)
+}
+
+/// Resolve the disclosure for `tool_name`, which a launch runs as `agent`.
+/// `config` is the profile-merged config whose environment and session config
+/// decide the paths.
+pub(crate) fn host_hook_disclosure(
+    tool_name: &str,
+    agent: &'static crate::agents::AgentDef,
+    config: &crate::session::config::Config,
+) -> HostHookDisclosure {
+    let mut disclosure = HostHookDisclosure {
+        settings_paths: Vec::new(),
+        hook_commands: Vec::new(),
+        needs_codex_trust_note: false,
+        status_hooks_enabled: false,
+        disabled_by_agent: None,
+        extra_settings_paths: Vec::new(),
+    };
+    let host_env = config.environment.as_slice();
+    let home = host_home(host_env).unwrap_or_else(|| std::path::PathBuf::from("~"));
+    let session_config = &config.session;
+
+    // The installer picks the target through this function, sidecar first, so
+    // the disclosure cannot name a different file than the one written.
+    let Some(path) = host_hook_config_path(tool_name, agent, &home, session_config, host_env)
+    else {
+        return disclosure;
+    };
+    let is_codex_json = agent
+        .hook_config
+        .as_ref()
+        .is_some_and(|hook_cfg| hook_cfg.format == crate::agents::HookFormat::CodexJson);
+    disclosure.needs_codex_trust_note = is_codex_json;
+    disclosure
+        .settings_paths
+        .push(path.to_string_lossy().into_owned());
+    // An installer can write more than its config: Hermes pre-approves its
+    // shell hooks in a sibling allowlist under the same lock. Resolved from
+    // the same path, so a rerouted HOME or a declared config dir moves both.
+    if let (Some(sidecar), Some(dir)) = (agent.sidecar_hooks.as_ref(), path.parent()) {
+        disclosure
+            .extra_settings_paths
+            .extend(sidecar.sibling_settings.iter().map(|extra| {
+                (
+                    extra.label.to_string(),
+                    dir.join(extra.file).to_string_lossy().into_owned(),
+                )
+            }));
+    }
+    // Only Codex reads a feature flag, and only beside its hooks.json. Kimi
+    // and settl name their own `config.toml` but install their hooks whatever
+    // it says, so probing them would drop events a launch still writes.
+    disclosure.disabled_by_agent = is_codex_json
+        .then(|| crate::hooks::codex_hooks_disabled_at(&path))
+        .flatten();
+
+    // Resolved through the installer's own resolver, so status_map overrides
+    // apply and the status events drop out with the setting. An event can
+    // install both an identity extractor and a status writer, so both effects
+    // are disclosed; an event with neither installs nothing and is not listed.
+    let mut status_events = 0;
+    // A Codex that turned its hooks off installs none, so none is listed; the
+    // target stays because the installer still opens the file.
+    if disclosure.disabled_by_agent.is_none() {
+        for event in resolved_host_hook_events(agent, config, config.session.agent_status_hooks)
+            .unwrap_or_default()
+        {
+            let mut effects = Vec::new();
+            if let Some(field) = event.identity_field {
+                effects.push(format!(
+                    "runs aoe __extract-session-id --field {}{}",
+                    crate::hooks::identity_field_name(field),
+                    crate::hooks::identity_publisher_arg(event.publisher),
+                ));
+            }
+            if event.usage {
+                effects.push("runs aoe __usage-event".to_string());
+            }
+            if let Some(status) = event.status {
+                status_events += 1;
+                effects.push(format!("writes \"{status}\""));
+            }
+            if !effects.is_empty() {
+                // The matcher is part of what the installed entry contains, and
+                // it is what separates two entries sharing an event name.
+                let label = match &event.matcher {
+                    Some(matcher) => format!("{} ({matcher})", event.name),
+                    None => event.name.clone(),
+                };
+                disclosure
+                    .hook_commands
+                    .push((label, effects.join(", and ")));
+            }
+        }
+    }
+    // What survives the setting is what this install runs, and that is what
+    // both surfaces say.
+    disclosure.status_hooks_enabled = status_events > 0;
+    disclosure
+}
+
+/// Every agent in the registry whose post-install hook changes something the
+/// consent has to name. Registry-wide rather than per-agent: the approval is
+/// install-wide, so accepting while creating a Claude session already covers a
+/// later Kiro one. Reads no agent config and runs no process, because the binary
+/// and the current setting can change between the approval and that launch, so
+/// the surfaces state what is permitted rather than what happened today.
+pub(crate) fn host_hook_post_install_notes() -> Vec<(String, &'static str)> {
+    crate::agents::AGENTS
+        .iter()
+        .filter_map(|agent| {
+            let note = agent.sidecar_hooks.as_ref()?.post_install_note?;
+            Some((agent.name.to_string(), note))
+        })
+        .collect()
 }
 
 impl Instance {
@@ -240,7 +421,8 @@ impl Instance {
         }
         if !host_hooks_acknowledged() {
             bail!(
-                "agent hook paths have not been acknowledged; approve them in the AoE TUI before launching this host session"
+                "agent hook paths have not been approved; run `aoe hooks approve` \
+                 before launching this host session"
             );
         }
         let profile_environment = self.profile_host_environment();
@@ -266,7 +448,7 @@ impl Instance {
         if let (Some(disclosed), Some(resolved)) = (disclosed, resolved) {
             if !same_hook_target(&disclosed, &resolved) {
                 bail!(
-                    "before_session changed the agent hook path from {} to {}; declare the override in the profile environment before consenting",
+                    "before_session changed the agent hook path from {} to {}; declare the override in the profile environment before approving",
                     disclosed.display(),
                     resolved.display()
                 );
@@ -296,7 +478,7 @@ impl Instance {
             tracing::warn!(
                 target: "hooks.install",
                 instance = %self.id,
-                "skipping host hook installation until the user acknowledges the hook paths"
+                "skipping host hook installation until the user approves the hook paths"
             );
             return;
         }
@@ -379,7 +561,7 @@ impl Instance {
                     events,
                     crate::hooks::HookInstallTarget::Host,
                 ) {
-                    Ok(()) => true,
+                    Ok(installed) => installed,
                     Err(error) => {
                         tracing::warn!(target: "session.store", "Failed to install Codex hooks: {}", error);
                         false
@@ -632,7 +814,7 @@ fn hook_target_identity(path: &std::path::Path) -> std::path::PathBuf {
     })
 }
 
-/// Whether the consented hook path and the resolved one name the same file.
+/// Whether the disclosed hook path and the resolved one name the same file.
 ///
 /// Compared by resolved target rather than by literal path: an account
 /// switcher driven from `before_session` points `CLAUDE_CONFIG_DIR` (or
@@ -643,7 +825,7 @@ fn hook_target_identity(path: &std::path::Path) -> std::path::PathBuf {
 ///
 /// A `before_session` that redirects the install into a genuinely different
 /// file still resolves differently and is still refused, which is the property
-/// the consent gate exists for.
+/// the approval check exists for.
 fn same_hook_target(disclosed: &std::path::Path, resolved: &std::path::Path) -> bool {
     disclosed == resolved || hook_target_identity(disclosed) == hook_target_identity(resolved)
 }
@@ -712,11 +894,11 @@ mod tests {
         .unwrap();
     }
 
-    /// The consent gate compares which FILE gets written, not which string
+    /// The approval check compares which FILE gets written, not which string
     /// names it. An account switcher driven from `before_session` points the
     /// agent's config dir at a per-account directory whose settings file is a
     /// symlink back to the shared one; those two paths differ as strings and
-    /// must still count as consented. A redirect onto a genuinely different
+    /// must still count as the same. A redirect onto a genuinely different
     /// file must still be refused, which is the whole point of the gate.
     #[test]
     fn same_hook_target_follows_symlinks_but_not_distinct_files() {
@@ -966,10 +1148,8 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn codex_hook_installer_follows_detect_as_and_profile_hook_setting() {
-        // Codex has no identity hooks to tether usage hooks to, so status off
-        // means no AoE hooks at all: (tool, profile config, global hooks
-        // off, expect full status hooks).
-        for (tool, profile, global_off, full) in [
+        // (tool, profile config, global hooks off, expect status hooks)
+        for (tool, profile, global_off, status_hooks) in [
             ("my-codex-wrapper", None, false, true),
             (
                 "codex",
@@ -1003,10 +1183,29 @@ mod tests {
             inst.install_agent_status_hooks(crate::agents::get_agent(&inst.detect_as), None);
 
             let hooks = tmp.path().join(".codex").join("hooks.json");
-            if full {
+            // The publisher names Codex, the pane's `AOE_AGENT_BIN`, even under a wrapper.
+            assert!(
+                std::fs::read_to_string(&hooks)
+                    .unwrap()
+                    .contains("__extract-session-id --field session-id --agent codex"),
+                "{tool} {profile:?}"
+            );
+            if status_hooks {
                 assert_aoe_codex_hooks(&hooks);
             } else {
-                assert!(!hooks.exists(), "{tool} {profile:?}");
+                // The `SessionStart` identity publisher is not optional; only it remains.
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+                assert!(
+                    parsed["hooks"]["PreToolUse"].is_null(),
+                    "{tool} {profile:?}"
+                );
+                assert!(
+                    parsed["hooks"]["SessionStart"]
+                        .to_string()
+                        .contains("__extract-session-id"),
+                    "{tool} {profile:?}"
+                );
             }
             assert!(!tmp.path().join(".codex").join("config.toml").exists());
         }
@@ -1149,6 +1348,270 @@ mod tests {
         assert_eq!(writes, [false, false, true]);
     }
 
+    /// #4159: an event can install both an identity extractor and a status
+    /// writer. The disclosure must account for every command the installer
+    /// writes, so the counts are compared against the installed file rather
+    /// than against a list maintained here.
+    #[test]
+    #[serial_test::serial]
+    fn disclosure_accounts_for_every_command_an_install_writes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(&tmp.path().join("app"));
+        let _home_guard = crate::session::test_support::isolate_home(tmp.path());
+        let _env = EnvGuard::unset(&["CODEX_HOME", "CLAUDE_CONFIG_DIR"]);
+        let config = crate::session::config::Config::default();
+
+        for tool in ["claude", "codex", "cursor"] {
+            let agent = crate::agents::get_agent(tool).unwrap();
+            let disclosure = host_hook_disclosure(tool, agent, &config);
+            let events =
+                resolved_host_hook_events(agent, &config, config.session.agent_status_hooks)
+                    .unwrap_or_default();
+            let path = tmp.path().join(tool).join("hooks.json");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let installed =
+                crate::hooks::install_hooks(&path, &events, crate::hooks::HookInstallTarget::Host)
+                    .is_ok();
+            assert!(
+                installed,
+                "{tool}: hooks must install for the counts to mean anything"
+            );
+
+            let written: Vec<String> = std::fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains("aoe-hooks"))
+                .map(str::to_string)
+                .collect();
+            let disclosed = disclosure
+                .hook_commands
+                .iter()
+                .flat_map(|(_, effect)| effect.split(", and ").map(str::to_string))
+                .collect::<Vec<_>>();
+
+            // Every disclosed effect names one command: an identity, usage or
+            // status effect per written entry.
+            let count_written =
+                |needle: &str| written.iter().filter(|c| c.contains(needle)).count();
+            let identity_written = count_written("__extract-session-id");
+            let usage_written = count_written("__usage-event");
+            let status_written = written.len() - identity_written - usage_written;
+            let count_disclosed = |needle: &str| {
+                disclosed
+                    .iter()
+                    .filter(|effect| effect.contains(needle))
+                    .count()
+            };
+            assert_eq!(
+                (
+                    count_disclosed("__extract-session-id"),
+                    count_disclosed("__usage-event"),
+                    count_disclosed("writes \""),
+                ),
+                (identity_written, usage_written, status_written),
+                "{tool}: the disclosure must account for every installed command"
+            );
+            assert_eq!(
+                disclosed.len(),
+                written.len(),
+                "{tool}: one disclosed effect per installed command"
+            );
+        }
+    }
+
+    /// A consent covers a write. Hermes pre-approves its shell hooks in a
+    /// sibling allowlist under the same lock, so naming only `config.yaml`
+    /// would under-disclose the install.
+    #[test]
+    #[serial_test::serial]
+    fn a_sibling_file_the_installer_writes_is_disclosed_too() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(&tmp.path().join("app"));
+        let _home = crate::session::test_support::isolate_home(tmp.path());
+        let _env = EnvGuard::unset(&["CODEX_HOME", "CLAUDE_CONFIG_DIR"]);
+        let config = crate::session::config::Config::default();
+        let agent = crate::agents::get_agent("hermes").unwrap();
+
+        let disclosure = host_hook_disclosure("hermes", agent, &config);
+        assert_eq!(disclosure.extra_settings_paths.len(), 1);
+        let (label, allowlist) = &disclosure.extra_settings_paths[0];
+        assert!(label.contains("allowlist"), "{label}");
+        let allowlist = std::path::PathBuf::from(allowlist);
+        assert_eq!(
+            allowlist.file_name().unwrap(),
+            crate::hooks::HERMES_ALLOWLIST_FILE,
+        );
+        assert_eq!(
+            allowlist.parent().unwrap(),
+            std::path::Path::new(&disclosure.settings_paths[0])
+                .parent()
+                .unwrap(),
+            "the allowlist sits beside the config, so both move together"
+        );
+
+        let events = resolved_host_hook_events(agent, &config, config.session.agent_status_hooks)
+            .unwrap_or_default();
+        // Install where the disclosure says, so the two paths are compared.
+        let config_path = std::path::PathBuf::from(&disclosure.settings_paths[0]);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        crate::hooks::install_hermes_hooks_with_events(
+            &config_path,
+            crate::hooks::HookInstallTarget::Host,
+            &events,
+        )
+        .expect("hermes hooks install");
+        assert!(
+            allowlist.exists(),
+            "the installer must write the file the disclosure names: {}",
+            allowlist.display()
+        );
+    }
+
+    /// Only Codex reads a feature flag, and only beside its own hooks.json.
+    /// Kimi and settl name a `config.toml` too, so a probe that reads it for
+    /// every agent drops events their installer still writes.
+    #[test]
+    #[serial_test::serial]
+    fn only_codex_reads_a_feature_flag_beside_its_hooks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(&tmp.path().join("app"));
+        let _home = crate::session::test_support::isolate_home(tmp.path());
+        let _env = EnvGuard::unset(&["CODEX_HOME", "CLAUDE_CONFIG_DIR"]);
+        let config = crate::session::config::Config::default();
+
+        for (tool, file) in [
+            ("codex", ".codex/hooks.json"),
+            ("kimi", ".kimi-code/config.toml"),
+            ("settl", ".settl/config.toml"),
+        ] {
+            let host = tmp.path().join(file).parent().unwrap().to_path_buf();
+            std::fs::create_dir_all(&host).unwrap();
+            std::fs::write(host.join("config.toml"), "[features]\nhooks = false\n").unwrap();
+
+            let agent = crate::agents::get_agent(tool).unwrap();
+            let disclosure = host_hook_disclosure(tool, agent, &config);
+            assert_eq!(
+                disclosure.disabled_by_agent.is_some(),
+                tool == "codex",
+                "{tool}: only codex honours a feature flag beside its hooks"
+            );
+            assert!(
+                !disclosure.hook_commands.is_empty() || tool == "codex",
+                "{tool}: its events must stay listed"
+            );
+        }
+    }
+
+    /// Checked against the agent the resolver names and the file that
+    /// resolver's own rules pick, never against `status_agent`, which routes
+    /// through the same function and would stay green if the direct lookup
+    /// were removed.
+    #[test]
+    #[serial_test::serial]
+    fn disclosed_agent_follows_the_resolver_that_picks_the_launch_agent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(&tmp.path().join("app"));
+        let _home_guard = crate::session::test_support::isolate_home(tmp.path());
+        let corpdir = tmp.path().join("corpdir");
+
+        // (label, custom command, extra session config, expected agent, expected file)
+        let cases = [
+            (
+                "a command that is a built-in binary resolves to that binary, not the alias",
+                "claude",
+                "",
+                "claude",
+                ".claude/settings.json",
+            ),
+            (
+                "a declared contract the launch rejects falls through to the alias",
+                "acme-wrapper",
+                "[session.agent_execution_as]\ncorp = \"claude\"\n",
+                "codex",
+                ".codex/hooks.json",
+            ),
+            (
+                "a namespaced wrapper honors the declared contract",
+                "acme-wrapper",
+                "[session.agent_execution_as]\ncorp = \"claude\"\n\
+                 [session.agent_config_dir]\ncorp = \"CORPDIR\"\n",
+                "claude",
+                "CORPDIR/settings.json",
+            ),
+        ];
+
+        for (label, command, extra, expected_agent, expected_file) in cases {
+            write_profile(
+                "disclosed-agent",
+                &format!(
+                    "[session.custom_agents]\ncorp = \"{command}\"\n\n\
+                     [session.agent_detect_as]\ncorp = \"codex\"\n\n{extra}"
+                )
+                .replace("CORPDIR", &corpdir.display().to_string()),
+            );
+            let config =
+                crate::session::config::profile_config::resolve_config_or_warn("disclosed-agent");
+            let session = &config.session;
+            let agent = host_hook_agent("corp", &session.launch_command_for("corp"), session);
+            assert_eq!(
+                agent.map(|agent| agent.name),
+                Some(expected_agent),
+                "{label}"
+            );
+
+            let disclosure = host_hook_disclosure("corp", agent.expect("resolved"), &config);
+            let disclosed = disclosure.settings_paths.join(" ");
+            let expected = expected_file.replace("CORPDIR", &corpdir.display().to_string());
+            assert!(
+                disclosed.ends_with(&expected),
+                "{label}: disclosed {disclosed}"
+            );
+        }
+    }
+
+    /// A repository may set `session.agent_detect_as`, and the launcher's
+    /// agent comes from the repo-merged config. The disclosure must read
+    /// the same layer, or it describes a different agent than the one that
+    /// installs. The two assertions are the two layers, so a gate that
+    /// reverted to the profile alone would name the wrong one.
+    #[test]
+    #[serial_test::serial]
+    fn the_gate_reads_the_same_repo_layer_the_launcher_does() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(&tmp.path().join("app"));
+        let _home_guard = crate::session::test_support::isolate_home(tmp.path());
+        let _env = EnvGuard::unset(&["CODEX_HOME", "CLAUDE_CONFIG_DIR"]);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".agent-of-empires")).unwrap();
+        std::fs::write(
+            repo.join(".agent-of-empires").join("config.toml"),
+            "[session]\nagent_detect_as = { corp = \"codex\" }\n",
+        )
+        .unwrap();
+        write_profile(
+            "repo-alias",
+            "[session.custom_agents]\ncorp = \"acme-wrapper\"\n\n\
+             [session.agent_detect_as]\ncorp = \"claude\"\n",
+        );
+
+        let profile_only =
+            crate::session::config::profile_config::resolve_config_or_warn("repo-alias");
+        let with_repo = host_hook_disclosure_config_with_repo("repo-alias", &repo);
+
+        let by_profile = host_hook_agent(
+            "corp",
+            &profile_only.session.launch_command_for("corp"),
+            &profile_only.session,
+        );
+        let by_repo = host_hook_agent(
+            "corp",
+            &with_repo.session.launch_command_for("corp"),
+            &with_repo.session,
+        );
+        assert_eq!(by_profile.map(|a| a.name), Some("claude"));
+        assert_eq!(by_repo.map(|a| a.name), Some("codex"));
+    }
+
     #[test]
     #[serial_test::serial]
     fn host_hook_disclosure_gate_requires_ack_only_for_host_hooks_it_will_write() {
@@ -1170,6 +1633,7 @@ mod tests {
             let tmp = tempfile::TempDir::new().unwrap();
             let _app = crate::session::test_support::isolate_app_dir_at(&tmp.path().join("app"));
             let _home_guard = crate::session::test_support::isolate_home(tmp.path());
+            let _env = EnvGuard::unset(&["CODEX_HOME", "CLAUDE_CONFIG_DIR"]);
             let mut inst = hook_inst(tool);
             if sandboxed {
                 inst.sandbox_info = Some(crate::session::instance::test_helpers::test_sandbox(
@@ -1188,7 +1652,7 @@ mod tests {
             inst.install_agent_status_hooks(agent, None);
 
             let gate_ok = match &gate {
-                Err(error) => refused && error.to_string().contains("have not been acknowledged"),
+                Err(error) => refused && error.to_string().contains("have not been approved"),
                 Ok(()) => !refused,
             };
             if !gate_ok || tmp.path().join(hooks_file).exists() || inst.identity_publisher_launched
@@ -1387,6 +1851,103 @@ mod tests {
         }
     }
 
+    /// #4116: a peer that archives or trashes the row while a pre-launch hook runs
+    /// (the hook runs without the lifecycle flock) still stops both launch funnels.
+    #[test]
+    #[serial_test::serial]
+    fn launch_refuses_a_row_shelved_while_hooks_run() {
+        use crate::session::{StartBlocked, Status};
+        if !crate::tmux::tmux_command()
+            .arg("-V")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(temp.path());
+        acknowledge_hooks();
+
+        let shelves: [(fn(&mut Instance), StartBlocked); 2] = [
+            (Instance::archive, StartBlocked::Archived),
+            (Instance::trash, StartBlocked::Trashed),
+        ];
+        for (shelve, want) in shelves {
+            for restart in [false, true] {
+                let label = format!("{want:?}-{}", if restart { "restart" } else { "start" });
+                let profile = format!("shelved-hook-{label}");
+                let ready = temp.path().join(format!("{label}-ready"));
+                let release = temp.path().join(format!("{label}-release"));
+                let hook = format!(
+                    ": > {}; while [ ! -e {} ]; do sleep 0.01; done",
+                    super::shell_escape(&ready.to_string_lossy()),
+                    super::shell_escape(&release.to_string_lossy()),
+                );
+                crate::session::config::update_config(|global| {
+                    global.hooks.on_launch = vec![hook];
+                })
+                .unwrap();
+
+                let storage = crate::session::storage::Storage::new_unwatched(&profile).unwrap();
+                let mut instance = Instance::new(&label, temp.path().to_str().unwrap());
+                instance.source_profile = profile.clone();
+                instance.command = "sleep 30".to_string();
+                storage
+                    .update(|instances, _groups| {
+                        instances.push(instance.clone());
+                        Ok(())
+                    })
+                    .unwrap();
+                let session = instance.tmux_session().unwrap();
+                if restart {
+                    session
+                        .create(temp.path().to_str().unwrap(), Some("sleep 30"), &profile)
+                        .unwrap();
+                }
+
+                let launch = std::thread::spawn(move || {
+                    if restart {
+                        instance.restart_with_size_opts(None, false).map(|_| ())
+                    } else {
+                        instance.start_with_size_opts(None, false).map(|_| ())
+                    }
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                while !ready.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                let hook_started = ready.exists();
+                if hook_started {
+                    storage
+                        .update(|instances, _groups| {
+                            shelve(&mut instances[0]);
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+                std::fs::write(&release, b"release").unwrap();
+                let result = launch.join().unwrap();
+                let spawned = !restart && session.exists();
+                let _ = session.kill();
+
+                assert!(hook_started, "{label}: hook did not start");
+                let err = result.expect_err(&label);
+                assert_eq!(err.downcast_ref::<StartBlocked>(), Some(&want), "{label}");
+                assert!(!spawned, "{label}: launched a shelved session");
+                let stored = storage.load().unwrap().remove(0);
+                assert!(stored.ensure_startable() == Err(want), "{label}");
+                assert_eq!(stored.lifecycle_reservation, None, "{label}");
+                assert_eq!(stored.last_error, None, "{label}");
+                let parked = if restart {
+                    Status::Idle
+                } else {
+                    Status::Stopped
+                };
+                assert_eq!(stored.status, parked, "{label}");
+            }
+        }
+    }
+
     #[test]
     fn pi_launch_reporting_does_not_enable_status_or_usage_hooks() {
         let agent = crate::agents::get_agent("pi").unwrap();
@@ -1394,7 +1955,8 @@ mod tests {
         let reporter = shell_escape(&std::env::current_exe().unwrap().to_string_lossy());
         let profile = "personal oss's";
         for usage_enabled in [true, false] {
-            let prefix = status_hook_env_prefix(profile, "abc123", Some(agent), usage_enabled);
+            let prefix =
+                status_hook_env_prefix(profile, "abc123", Some(agent), usage_enabled, None);
             assert_eq!(
                 prefix,
                 format!(
@@ -1404,28 +1966,62 @@ mod tests {
                 )
             );
         }
-        assert_eq!(status_hook_env_prefix("work", "abc123", None, true), "");
+        assert_eq!(
+            status_hook_env_prefix("work", "abc123", None, true, None),
+            ""
+        );
     }
 
     #[test]
     fn status_hook_env_prefix_is_set_for_hook_agents_only() {
         for agent in ["codex", "hermes", "settl", "claude", "kiro", "kimi"] {
-            for usage_enabled in [true, false] {
-                assert_eq!(
-                    status_hook_env_prefix(
-                        "work",
-                        "abc123",
-                        crate::agents::get_agent(agent),
-                        usage_enabled
-                    ),
-                    expected_status_prefix("work", "abc123", agent, usage_enabled)
-                );
+            let binary = crate::agents::get_agent(agent).unwrap().binary;
+            // A launch whose program is the agent's own binary adds nothing.
+            for program in [None, Some(binary)] {
+                for usage_enabled in [true, false] {
+                    assert_eq!(
+                        status_hook_env_prefix(
+                            "work",
+                            "abc123",
+                            crate::agents::get_agent(agent),
+                            usage_enabled,
+                            program
+                        ),
+                        expected_status_prefix("work", "abc123", agent, usage_enabled)
+                    );
+                }
             }
         }
         assert_eq!(
-            status_hook_env_prefix("work", "abc123", crate::agents::get_agent("opencode"), true),
+            status_hook_env_prefix(
+                "work",
+                "abc123",
+                crate::agents::get_agent("opencode"),
+                true,
+                None
+            ),
             ""
         );
+    }
+
+    /// A renamed launch (`company-codex` running Codex) tells the identity hook its name, so the
+    /// hook's ancestor walk counts the outer agent and refuses a nested `codex exec`.
+    #[test]
+    fn status_hook_env_prefix_names_a_renamed_launched_program() {
+        let prefix = status_hook_env_prefix(
+            "work",
+            "abc123",
+            crate::agents::get_agent("codex"),
+            true,
+            Some("company-codex"),
+        );
+        let expected = format!(
+            "AOE_AGENT_BIN={} AOE_AGENT_PROGRAM={} ",
+            shell_escape("codex"),
+            shell_escape("company-codex")
+        );
+        // `contains`, not `ends_with`: the report and usage vars follow.
+        assert!(prefix.contains(&expected), "{prefix}");
     }
 
     #[test]

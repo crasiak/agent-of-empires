@@ -96,6 +96,25 @@ pub struct SessionCaptureSpec {
     pub sandbox: SessionCaptureContext,
 }
 
+impl SessionCaptureSpec {
+    /// Whether, in `context`, the pane's conversation id is published into the AoE hook sidecar
+    /// under this pane's own `AOE_INSTANCE_ID`.
+    ///
+    /// The single decision every sidecar consumer (poller, retroactive capture, reconciliation,
+    /// sidecar cleanup, wrapper attribution) goes through, so none of them can disagree about
+    /// where an id comes from. Codex is context-dependent: a host pane publishes from its
+    /// `SessionStart` hook, which Codex fires when the conversation starts at the first turn
+    /// (not at launch), while a sandboxed one keeps the isolated managed-store scan, so it reads
+    /// the sidecar only when `PaneScoped`.
+    pub(crate) fn reads_hook_sidecar(&self, context: SessionCaptureContext) -> bool {
+        match self.backend {
+            SessionCaptureBackend::Claude | SessionCaptureBackend::HookSidecar => true,
+            SessionCaptureBackend::Codex => context == SessionCaptureContext::PaneScoped,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionSupport {
     pub resume: ResumeStrategy,
@@ -182,6 +201,9 @@ pub struct ResolvedHookEvent {
     pub identity_field: Option<HookIdentityField>,
     pub waiting_tools: Vec<String>,
     pub usage: bool,
+    /// Binary of the agent whose config declares this event. The identity publisher carries it
+    /// so a nested agent of another kind cannot publish into the pane's sidecar.
+    pub publisher: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,12 +242,28 @@ pub struct SidecarHooks {
     pub selected_agent_hooks: Option<SelectedAgentHooks>,
     pub format: SidecarFormat,
     pub events: &'static [SidecarHookEvent],
+    /// Files this agent writes beside its host config, beyond `host_config_subpath`.
+    pub sibling_settings: &'static [SiblingSettings],
+    /// What [`Self::post_install_host`] does beyond the files, in the words of
+    /// whoever wrote it. A post-install hook can change launcher state, which is
+    /// not a file AoE resolves, so the consent surfaces have to name it.
+    pub post_install_note: Option<&'static str>,
 }
 
 #[derive(Debug)]
 pub struct SelectedAgentHooks {
     pub flag: &'static str,
     pub resolve_config_file: fn(&std::path::Path, &str) -> std::path::PathBuf,
+}
+
+/// A file an installer writes beside its host config. The consent disclosure
+/// cannot derive these, so the installer names them.
+#[derive(Debug)]
+pub struct SiblingSettings {
+    /// What the file holds, for the disclosure line.
+    pub label: &'static str,
+    /// File name, resolved against the config path's parent.
+    pub file: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,7 +407,17 @@ const QWEN_HOOK_EVENTS: &[HookEvent] = &[
 ];
 
 const CODEX_HOOK_EVENTS: &[HookEvent] = &[
-    usage_hook("SessionStart", Some(HookStatus::Idle)),
+    // Codex's SessionStart payload carries a top-level string `session_id`
+    // (alongside `transcript_path`, `cwd`, `hook_event_name`), so the pane can
+    // publish its own conversation the way Claude's does instead of leaving
+    // host capture to a shared-store scan. Codex fires it when the
+    // conversation starts, at the first turn rather than at launch, so the id
+    // appears once the user has sent a prompt. The existing idle status writer
+    // and the usage record on this event are kept alongside the publisher.
+    HookEvent {
+        identity_field: Some(HookIdentityField::SessionId),
+        ..usage_hook("SessionStart", Some(HookStatus::Idle))
+    },
     usage_hook("UserPromptSubmit", Some(HookStatus::Running)),
     hook("PreToolUse", HookStatus::Running),
     hook("PermissionRequest", HookStatus::Waiting),
@@ -571,7 +619,9 @@ pub const AGENTS: &[AgentDef] = &[
         session_support: session_support(
             ResumeStrategy::Subcommand("resume"),
             SessionCaptureBackend::Codex,
-            SessionCaptureContext::Unsupported,
+            // Host: the `SessionStart` hook publishes into the pane's sidecar.
+            // Sandbox: the isolated managed store, as before.
+            SessionCaptureContext::PaneScoped,
             SessionCaptureContext::ManagedExclusiveStore,
         ),
         fork_strategy: ForkStrategy::CodexFork,
@@ -620,6 +670,8 @@ pub const AGENTS: &[AgentDef] = &[
             selected_agent_hooks: None,
             format: SidecarFormat::KiroJson,
             events: CURSOR_HOOK_EVENTS,
+            sibling_settings: &[],
+            post_install_note: None,
         }),
         session_support: session_support(
             ResumeStrategy::Flag("--resume"),
@@ -680,6 +732,8 @@ pub const AGENTS: &[AgentDef] = &[
             selected_agent_hooks: None,
             format: SidecarFormat::SettlToml,
             events: SETTL_SIDECAR_EVENTS,
+            sibling_settings: &[],
+            post_install_note: None,
         }),
         host_only: true,
         ..agent(
@@ -701,6 +755,11 @@ pub const AGENTS: &[AgentDef] = &[
             selected_agent_hooks: None,
             format: SidecarFormat::HermesYaml,
             events: HERMES_SIDECAR_EVENTS,
+            sibling_settings: &[SiblingSettings {
+                label: "Hermes shell-hook consent allowlist",
+                file: crate::hooks::HERMES_ALLOWLIST_FILE,
+            }],
+            post_install_note: None,
         }),
         session_support: session_support(
             ResumeStrategy::Flag("--resume"),
@@ -731,6 +790,8 @@ pub const AGENTS: &[AgentDef] = &[
             }),
             format: SidecarFormat::KiroJson,
             events: KIRO_SIDECAR_EVENTS,
+            sibling_settings: &[],
+            post_install_note: Some(crate::hooks::KIRO_DEFAULT_AGENT_NOTE),
         }),
         ..agent(
             "kiro",
@@ -773,6 +834,8 @@ pub const AGENTS: &[AgentDef] = &[
             selected_agent_hooks: None,
             format: SidecarFormat::KimiToml,
             events: KIMI_SIDECAR_EVENTS,
+            sibling_settings: &[],
+            post_install_note: None,
         }),
         session_support: session_support(
             ResumeStrategy::Flag("--session"),
@@ -1053,6 +1116,7 @@ fn append_configured_status_events(
                 identity_field: None,
                 waiting_tools: Vec::new(),
                 usage: false,
+                publisher: None,
             });
         }
     }
@@ -1094,6 +1158,7 @@ pub fn resolved_hook_events(
             identity_field: event.identity_field,
             waiting_tools: event.waiting_tools.iter().map(|t| t.to_string()).collect(),
             usage: event.usage && config.session.usage_tracking,
+            publisher: Some(agent.binary),
         })
         .collect();
     append_configured_status_events(&mut events, overrides);
@@ -1122,6 +1187,7 @@ pub fn resolved_sidecar_hook_events(
             identity_field: event.identity_field,
             waiting_tools: Vec::new(),
             usage: false,
+            publisher: Some(agent.binary),
         })
         .collect();
     append_configured_status_events(&mut events, overrides);
@@ -1274,7 +1340,7 @@ mod tests {
             assert_eq!(agent.oneshot_cheap_model().is_some(), name == "claude");
 
             let expected = match agent.name {
-                "claude" => Some(HookIdentityField::SessionId),
+                "claude" | "codex" => Some(HookIdentityField::SessionId),
                 "cursor" => Some(HookIdentityField::ConversationIdOrSessionId),
                 _ => None,
             };
@@ -1479,6 +1545,37 @@ mod tests {
         let config = config_with_status("vertex", "session.idle", HookStatus::Idle);
         let map = effective_status_map(&config, "vertex").unwrap();
         assert_eq!(map.get("session.idle"), Some(&HookStatus::Idle));
+    }
+
+    /// Codex publishes a top-level string `session_id` on `SessionStart`, so
+    /// the pane can name its own conversation instead of leaving host capture
+    /// to a shared-store scan. Adding the publisher must not drop the idle
+    /// status writer the event already carried, unlike Claude's `SessionStart`,
+    /// which is identity-only.
+    #[test]
+    fn codex_session_start_publishes_identity_and_still_writes_status() {
+        let codex = get_agent("codex").unwrap();
+        let events = resolved_hook_events(codex, &crate::session::config::Config::default())
+            .expect("codex hook events resolve");
+        let start = events
+            .iter()
+            .find(|event| event.name == "SessionStart")
+            .expect("codex declares SessionStart");
+
+        assert_eq!(
+            start.identity_field,
+            Some(HookIdentityField::SessionId),
+            "host capture reads the payload's top-level session_id"
+        );
+        assert_eq!(
+            start.status,
+            Some(HookStatus::Idle),
+            "dropping the status writer would leave a launched pane with no idle signal"
+        );
+
+        // Identity hooks are mandatory for a resume-capable agent, so turning
+        // status hooks off must not stop the install.
+        assert!(hook_install_required(codex, false));
     }
 
     #[test]

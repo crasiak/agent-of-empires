@@ -19,8 +19,8 @@ const SCHEMA = [
   { section: "session", field: "confirm_delete", label: "Confirm Before Delete", widget: { kind: "toggle" } },
   {
     section: "session",
-    field: "trash_retention_days",
-    label: "Trash Retention (days)",
+    field: "trash_retention_minutes",
+    label: "Trash Retention (minutes)",
     widget: { kind: "number" },
   },
   { section: "session", field: "idle_auto_stop", label: "Idle auto-stop", widget: { kind: "toggle" } },
@@ -39,7 +39,7 @@ async function installCityHallMocks(page: Page) {
   await mockSettingsApis(page, {
     about: () => ({ cityhall_mode: true }),
     schema: SCHEMA,
-    settings: () => ({ theme: { name: "dark" }, session: { delete_to_trash: true, trash_retention_days: 30 } }),
+    settings: () => ({ theme: { name: "dark" }, session: { delete_to_trash: true, trash_retention_minutes: 43200 } }),
   });
   await page.route(
     (url) => url.pathname === "/api/projects",
@@ -138,7 +138,7 @@ test("Settings, its tabs, and settings search are curated to the CityHall subset
   await page.goto("/settings/session");
   await expect(page.getByText("Delete to Trash")).toBeVisible();
   await expect(page.getByText("Confirm Before Delete")).toBeVisible();
-  await expect(page.getByText("Trash Retention (days)")).toBeVisible();
+  await expect(page.getByText("Trash Retention (minutes)")).toBeVisible();
   await expect(page.getByText("Idle auto-stop")).toHaveCount(0);
   await expect(page.getByText("Default profile")).toHaveCount(0);
 
@@ -173,8 +173,8 @@ test("new-session wizard is name-only in CityHall mode", async ({ page }) => {
   await openWizard(page);
 
   await expect(wizard(page).getByPlaceholder("Auto-generated if empty")).toBeVisible();
-  await expect(wizard(page).getByText("Which AI agent?")).toHaveCount(0);
-  await expect(wizard(page).getByRole("button", { name: "More options" })).toHaveCount(0);
+  for (const row of ["wizard-project-row", "wizard-agent-row", "wizard-worktree-row"])
+    await expect(wizard(page).getByTestId(row)).toHaveCount(0);
 
   await expect(wizard(page).getByRole("button", { name: /Launch session/ })).toBeEnabled();
 });

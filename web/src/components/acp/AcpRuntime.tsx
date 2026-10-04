@@ -25,7 +25,7 @@ interface Props {
   sessionId: string;
   /** Parks the queue drain while the reconciler resumes the worker. */
   acpWorkerState?: "absent" | "resuming" | "running" | "stopping";
-  /** Archived and snoozed sessions auto-wake on send. */
+  /** Snoozed sessions auto-wake on send; archived ones refuse it. */
   archivedAt?: string | null;
   snoozedUntil?: string | null;
   /** Render rows before the latest `/clear` instead of folding them. */
@@ -62,6 +62,7 @@ export interface AcpContext {
   sendNowInterruptsTurn: boolean;
   dismissRejectedPrompt: (id: string) => void;
   dismissModeSwitchFailed: () => void;
+  dismissSessionNotice: (id: string) => void;
   setConfigOption: (configId: string, value: string) => Promise<void>;
   dismissConfigOptionSwitchFailed: () => void;
   /** Older rows exist above the window, loaded or still on the server. */
@@ -215,6 +216,7 @@ export function AcpRuntime({
         sendNowInterruptsTurn: acp.sendNowInterruptsTurn,
         dismissRejectedPrompt: acp.dismissRejectedPrompt,
         dismissModeSwitchFailed: acp.dismissModeSwitchFailed,
+        dismissSessionNotice: acp.dismissSessionNotice,
         setConfigOption: acp.setConfigOption,
         dismissConfigOptionSwitchFailed: acp.dismissConfigOptionSwitchFailed,
         canLoadEarlierHistory: canOfferEarlier(canLoadEarlier, hasMoreOlder),

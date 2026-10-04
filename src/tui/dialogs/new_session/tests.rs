@@ -1,6 +1,7 @@
 use super::*;
-use crate::session::{merge_configs, Config, ProfileConfig};
+use crate::session::{merge_configs, Config, Instance, ProfileConfig, SandboxInfo, View};
 use crate::tui::dialogs::test_keys::{alt_key, ctrl_key, key, shift_key};
+use crate::tui::dialogs::test_render::find;
 use std::fs;
 
 const TEST_PATH: &str = ".";
@@ -62,6 +63,10 @@ fn screen_of(dialog: &mut NewSessionDialog, width: u16, height: u16) -> String {
         .iter()
         .map(|cell| cell.symbol())
         .collect()
+}
+
+fn draw(dialog: &mut NewSessionDialog) -> ratatui::buffer::Buffer {
+    crate::tui::dialogs::test_render::draw(100, 40, |f, theme| dialog.render(f, f.area(), theme))
 }
 
 #[test]
@@ -314,6 +319,16 @@ fn the_tool_row_cycles_and_submits_the_picked_tool() {
         assert_eq!(dialog.tool_index, expected);
     }
 
+    // Digits jump straight to a tool; out-of-range digits are ignored.
+    for (c, expected) in [('3', 2), ('1', 0), ('9', 0), ('2', 1)] {
+        dialog.handle_key(key(KeyCode::Char(c)));
+        assert_eq!(dialog.tool_index, expected);
+    }
+    assert_eq!(
+        submitted(dialog.handle_key(key(KeyCode::Enter))).tool,
+        "opencode"
+    );
+
     let mut dialog = multi_tool_dialog();
     dialog.focused_field = 2;
     dialog.handle_key(key(KeyCode::Char(' ')));
@@ -323,17 +338,45 @@ fn the_tool_row_cycles_and_submits_the_picked_tool() {
         "opencode"
     );
 
-    // Space is ordinary text on a text field, and a lone tool never cycles.
+    // Space and digits are ordinary text on a text field, and a lone tool never cycles.
     let mut dialog = multi_tool_dialog();
     dialog.focused_field = 1;
     dialog.handle_key(key(KeyCode::Char(' ')));
-    assert_eq!(dialog.title.value(), " ");
+    dialog.handle_key(key(KeyCode::Char('2')));
+    assert_eq!(dialog.title.value(), " 2");
     assert_eq!(dialog.tool_index, 0);
 
     let mut dialog = single_tool_dialog();
     dialog.focused_field = 2;
     dialog.handle_key(key(KeyCode::Left));
     assert_eq!(dialog.tool_index, 0);
+}
+
+#[test]
+#[serial_test::serial]
+fn reselecting_the_current_tool_keeps_its_edits() {
+    let mut dialog = NewSessionDialog::new_with_tools(
+        vec!["claude", "opencode", "codex"],
+        TEST_PATH.to_string(),
+    );
+    dialog.focused_field = 2;
+    dialog.handle_key(key(KeyCode::Char('2')));
+    dialog.extra_args = Input::new("--model fast".to_string());
+    dialog.command_override = Input::new("wrapper".to_string());
+    dialog.yolo_mode = !dialog.yolo_mode_default;
+
+    dialog.handle_key(key(KeyCode::Char('2')));
+    // Alt+digit is not a pick.
+    dialog.handle_key(alt_key(KeyCode::Char('3')));
+    assert_eq!(dialog.tool_index, 1);
+    assert_eq!(dialog.extra_args.value(), "--model fast");
+    assert_eq!(dialog.command_override.value(), "wrapper");
+    assert_ne!(dialog.yolo_mode, dialog.yolo_mode_default);
+
+    // The footer and row advertise the digits while the Tool row has focus.
+    let screen = screen_of(&mut dialog, 100, 40);
+    assert!(screen.contains("[2] opencode  →"), "{screen}");
+    assert!(screen.contains("1-3 pick"), "{screen}");
 }
 
 #[test]
@@ -825,62 +868,193 @@ fn the_structured_row_appears_only_for_an_acp_capable_tool() {
 
 #[test]
 #[serial_test::serial]
-fn clicks_focus_a_row_and_act_on_it_while_hover_does_neither() {
+fn clicks_focus_and_act_on_a_row_while_hover_only_tints_it() {
     assert!(single_tool_dialog().handle_click(5, 5).is_none());
 
-    // A checkbox row toggles on click.
-    let mut dialog = single_tool_dialog();
-    dialog
-        .focusable_rects
-        .push((2, ratatui::layout::Rect::new(0, 5, 30, 1)));
-    let before = dialog.yolo_mode;
-    assert!(matches!(
-        dialog.handle_click(10, 5),
-        Some(DialogResult::Continue)
-    ));
-    assert_eq!(dialog.focused_field, 2);
-    assert_eq!(dialog.yolo_mode, !before);
+    // (dialog, clicked field): a checkbox toggles, a text row only takes
+    // focus, a cycler advances.
+    let cases: [(fn() -> NewSessionDialog, usize); 3] = [
+        (single_tool_dialog, 2),
+        (single_tool_dialog, 0),
+        (multi_tool_dialog, 2),
+    ];
+    for (make, field) in cases {
+        let mut dialog = make();
+        dialog.focused_field = 1;
+        let rect = ratatui::layout::Rect::new(0, 5, 30, 1);
+        dialog.focusable_rects.push((field, rect));
+        let (yolo, tool, path) = (
+            dialog.yolo_mode,
+            dialog.tool_index,
+            dialog.path.value().to_string(),
+        );
+        assert!(matches!(
+            dialog.handle_click(10, 5),
+            Some(DialogResult::Continue)
+        ));
+        assert_eq!(dialog.focused_field, field);
+        assert_eq!(dialog.path.value(), path);
+        let tools = dialog.available_tools.len();
+        let toggled = field == 2 && tools == 1;
+        assert_eq!(dialog.yolo_mode, yolo != toggled);
+        let cycled = if field == 2 && tools > 1 {
+            (tool + 1) % tools
+        } else {
+            tool
+        };
+        assert_eq!(dialog.tool_index, cycled);
+    }
 
-    // A text row only takes focus.
+    // Hover tints the row but never steals focus from the field being typed
+    // into, nor toggles anything.
     let mut dialog = single_tool_dialog();
-    dialog
-        .focusable_rects
-        .push((0, ratatui::layout::Rect::new(0, 3, 30, 1)));
-    dialog.focused_field = 1;
-    let path = dialog.path.value().to_string();
-    assert!(matches!(
-        dialog.handle_click(10, 3),
-        Some(DialogResult::Continue)
-    ));
-    assert_eq!(dialog.focused_field, 0);
-    assert_eq!(dialog.path.value(), path);
-
-    // A cycler row advances.
-    let mut dialog = multi_tool_dialog();
-    dialog
-        .focusable_rects
-        .push((2, ratatui::layout::Rect::new(0, 5, 30, 1)));
-    let before = dialog.tool_index;
-    dialog.handle_click(10, 5);
-    assert_eq!(
-        dialog.tool_index,
-        (before + 1) % dialog.available_tools.len()
-    );
-    assert_eq!(dialog.focused_field, 2);
-
-    // Hover must never steal focus from the field being typed into, nor
-    // toggle anything, on or off the rects.
-    let mut dialog = single_tool_dialog();
-    dialog
-        .focusable_rects
-        .push((2, ratatui::layout::Rect::new(0, 5, 30, 1)));
     let yolo = dialog.yolo_mode;
-    let focus = dialog.focused_field;
-    assert_ne!(focus, 2);
-    assert!(!dialog.handle_hover(10, 5));
-    assert!(!dialog.handle_hover(80, 80));
-    assert_eq!(dialog.focused_field, focus);
+    let (col, row) = find(&draw(&mut dialog), "YOLO Mode:");
+    assert!(dialog.handle_hover(col, row));
+    assert!(!dialog.handle_hover(col + 3, row), "same row, no change");
+    let buffer = draw(&mut dialog);
+    let theme = crate::tui::styles::Theme::default();
+    assert_eq!(buffer[(col, row)].bg, theme.selection);
+    assert_ne!(
+        buffer[(col, row + 1)].bg,
+        theme.selection,
+        "spacer untinted"
+    );
+    assert_eq!(dialog.focused_field, 0);
     assert_eq!(dialog.yolo_mode, yolo);
+    assert!(dialog.handle_hover(0, 0));
+    assert_eq!(dialog.hover.current(), None);
+}
+
+#[test]
+fn the_create_directory_prompt_choices_are_clickable() {
+    // Each answer acts like its key: `[y]es` creates and submits, `[N]o`
+    // backs out to the path field.
+    for (choice, creates) in [("[y]es", true), ("[N]o", false)] {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let path = tmp.path().join("new/project");
+        let mut dialog =
+            NewSessionDialog::new_with_tools(vec!["claude"], path.to_string_lossy().to_string());
+        dialog.focused_field = 1;
+        dialog.confirm_create_dir = Some(false);
+        let (col, row) = find(&draw(&mut dialog), choice);
+        let result = dialog.handle_click(col, row);
+        assert_eq!(
+            matches!(result, Some(DialogResult::Submit(_))),
+            creates,
+            "{choice}"
+        );
+        assert_eq!(path.exists(), creates, "{choice}");
+        assert!(dialog.confirm_create_dir.is_none());
+        if !creates {
+            assert_eq!(dialog.focused_field, dialog.path_field());
+        }
+    }
+}
+
+#[test]
+fn config_overlay_clicks_act_like_their_keys() {
+    // Sandbox: a collapsed list expands like Enter, an entry row selects it,
+    // and leaving the list collapses it like Esc would.
+    let mut dialog = sandboxed_dialog();
+    dialog.sandbox_config_mode = true;
+    dialog.extra_env = vec!["ALPHA=1".into(), "BETA=2".into()];
+    let (col, row) = find(&draw(&mut dialog), "Environment:");
+    dialog.handle_click(col, row);
+    assert_eq!(dialog.sandbox_focused_field, SANDBOX_ENV_FIELD);
+    assert!(dialog.env_list_expanded);
+    let (col, row) = find(&draw(&mut dialog), "BETA=2");
+    dialog.handle_click(col, row);
+    assert_eq!(dialog.env_selected_index, 1);
+    let (col, row) = find(&draw(&mut dialog), "Image:");
+    dialog.handle_click(col, row);
+    assert_eq!(dialog.sandbox_focused_field, SANDBOX_IMAGE_FIELD);
+    assert!(!dialog.env_list_expanded);
+
+    // Worktree: the checkbox toggles, text rows only focus, and while an
+    // entry is being typed every click waits for Enter or Esc.
+    let mut dialog = worktree_config_dialog(TEST_PATH.to_string());
+    dialog.workspace_repos = vec!["/repo/one".into(), "/repo/two".into()];
+    let before = dialog.create_new_branch;
+    let (col, row) = find(&draw(&mut dialog), "New Branch:");
+    dialog.handle_click(col, row);
+    assert_eq!(dialog.worktree_config_focused_field, WT_NEW_BRANCH_FIELD);
+    assert_eq!(dialog.create_new_branch, !before);
+    let (col, row) = find(&draw(&mut dialog), "Base:");
+    dialog.handle_click(col, row);
+    assert_eq!(dialog.worktree_config_focused_field, WT_BASE_BRANCH_FIELD);
+    assert_eq!(dialog.create_new_branch, !before);
+    let (col, row) = find(&draw(&mut dialog), "Extra Repos:");
+    dialog.handle_click(col, row);
+    assert!(dialog.workspace_repos_expanded);
+    let (col, row) = find(&draw(&mut dialog), "/repo/two");
+    dialog.handle_click(col, row);
+    assert_eq!(dialog.workspace_repo_selected_index, 1);
+
+    dialog.handle_key(key(KeyCode::Enter));
+    assert!(dialog.workspace_repo_editing_input.is_some());
+    let (col, row) = find(&draw(&mut dialog), "Name:");
+    assert!(!dialog.handle_hover(col, row), "nothing hoverable mid-edit");
+    dialog.handle_click(col, row);
+    assert_eq!(dialog.worktree_config_focused_field, WT_EXTRA_REPOS_FIELD);
+    assert!(dialog.workspace_repo_editing_input.is_some());
+
+    // Hover tints an overlay row without moving its focus.
+    let mut dialog = worktree_config_dialog(TEST_PATH.to_string());
+    let (col, row) = find(&draw(&mut dialog), "Base:");
+    assert!(dialog.handle_hover(col, row));
+    assert!(dialog.hover.current().is_some());
+    assert_eq!(dialog.worktree_config_focused_field, WT_NAME_FIELD);
+}
+
+#[test]
+#[serial_test::serial]
+fn the_directory_browser_takes_clicks_in_both_of_its_hosts() {
+    // `isolate_home` keeps `persist_last_browse_dir` off the real config.
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _home = crate::session::test_support::isolate_home(temp_home.path());
+    let base = temp_home.path().join("projects");
+    fs::create_dir_all(base.join("alpha")).unwrap();
+    let alpha = base.join("alpha").to_string_lossy().to_string();
+
+    // From the path field: navigate into a row, then pick it with `./`.
+    let mut dialog = single_tool_dialog();
+    dialog.path = Input::new(base.to_string_lossy().to_string());
+    dialog.handle_key(ctrl_key(KeyCode::Char('p')));
+    let (col, row) = find(&draw(&mut dialog), "alpha/");
+    assert!(dialog.handle_hover(col, row));
+    dialog.handle_click(col, row);
+    let (col, row) = find(&draw(&mut dialog), "> ./");
+    dialog.handle_click(col, row);
+    assert!(!dialog.dir_picker.is_active());
+    assert_eq!(dialog.path.value(), alpha);
+
+    // From an extra-repo entry, opened over the worktree overlay. Keys must
+    // reach the browser too, not the entry being typed underneath it.
+    for by_click in [true, false] {
+        let mut dialog = worktree_config_dialog(TEST_PATH.to_string());
+        dialog.worktree_config_focused_field = WT_EXTRA_REPOS_FIELD;
+        dialog.workspace_repos_expanded = true;
+        dialog.workspace_repo_adding_new = true;
+        dialog.workspace_repo_editing_input = Some(Input::new(alpha.clone()));
+        dialog.handle_key(ctrl_key(KeyCode::Char('p')));
+        assert!(dialog.dir_picker.is_active());
+        if by_click {
+            let (col, row) = find(&draw(&mut dialog), "> ./");
+            dialog.handle_click(col, row);
+        } else {
+            dialog.handle_key(key(KeyCode::Enter));
+        }
+        assert!(!dialog.dir_picker.is_active(), "click={by_click}");
+        assert!(!dialog.workspace_repo_dir_picker_active);
+        assert!(dialog.worktree_config_mode);
+        let editing = dialog
+            .workspace_repo_editing_input
+            .as_ref()
+            .map(Input::value);
+        assert_eq!(editing, Some(alpha.as_str()), "click={by_click}");
+        assert!(dialog.workspace_repos.is_empty(), "click={by_click}");
+    }
 }
 
 #[test]
@@ -1043,8 +1217,6 @@ fn branch_picker_mouse_selection_routes_to_the_focused_field() {
     // A branch picked with the mouse lands in the field a keyboard pick would,
     // so opening from Base and clicking a row must not overwrite Name. Needs a
     // real render: the picker learns its clickable area while drawing.
-    use ratatui::{backend::TestBackend, Terminal};
-
     let temp_home = tempfile::tempdir().expect("temp home");
     let _home = crate::session::test_support::isolate_home(temp_home.path());
     let repo = branch_picker_repo_in(temp_home.path());
@@ -1054,27 +1226,14 @@ fn branch_picker_mouse_selection_routes_to_the_focused_field() {
     dialog.handle_key(ctrl_key(KeyCode::Char('p')));
     assert!(dialog.branch_picker.is_active());
 
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
-    let theme = crate::tui::styles::Theme::default();
-    terminal
-        .draw(|frame| dialog.render(frame, frame.area(), &theme))
-        .expect("render");
-
+    let buffer = draw(&mut dialog);
     let branch = dialog
         .branch_picker
         .filtered_items()
         .first()
         .map(|s| (*s).clone())
         .expect("repo should expose a branch");
-    let buffer = terminal.backend().buffer().clone();
-    let (col, row) = (0..buffer.area.height)
-        .find_map(|row| {
-            let line: String = (0..buffer.area.width)
-                .map(|col| buffer[(col, row)].symbol())
-                .collect();
-            line.find(&branch).map(|idx| (idx as u16, row))
-        })
-        .expect("branch row should be rendered");
+    let (col, row) = find(&buffer, &format!("> {branch}"));
 
     dialog.handle_click(col, row);
 
@@ -1182,16 +1341,196 @@ fn terminal_fork_hides_structured_despite_structured_default() {
                 agent: "claude".into(),
                 stores: vec!["/store".into()],
                 configuration: Vec::new(),
-                exported_default_store: false,
                 cwd: TEST_PATH.into(),
                 cwd_filesystem: "host".into(),
                 filesystem: "host".into(),
+                exported_default_store: None,
             }),
             provenance: crate::session::ConversationProvenance::Observed,
             transcript_path: None,
         }),
         child_session_id: "child".into(),
+        unattributed_parent_agent: None,
     });
     assert!(!dialog.structured_capable);
     assert!(!dialog.structured_enabled);
+}
+
+/// A session on `tool`, sandboxed and in yolo as asked.
+fn source_session(tool: &str, sandboxed: bool, yolo: bool) -> Instance {
+    let mut inst = Instance::new("source", TEST_PATH);
+    inst.tool = tool.to_string();
+    inst.yolo_mode = yolo;
+    if sandboxed {
+        inst.sandbox_info = Some(SandboxInfo {
+            enabled: true,
+            container_id: None,
+            image: "ubuntu:latest".to_string(),
+            container_name: "source".to_string(),
+            extra_env: None,
+            custom_instruction: None,
+            before_start_env: Vec::new(),
+            container_workdir: None,
+        });
+    }
+    inst
+}
+
+/// "New from selection" on a session carries its agent and sandbox into the form. Yolo
+/// follows the configured default whatever the source ran with.
+#[test]
+#[serial_test::serial]
+fn a_selected_session_carries_its_agent_and_modes() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _home = crate::session::test_support::isolate_home(temp_home.path());
+    let mut dialog = multi_tool_dialog();
+    dialog.docker_available = true;
+    assert_eq!(dialog.selected_tool(), "claude");
+    assert!(!dialog.sandbox_enabled);
+
+    dialog.inherit_session(&source_session("opencode", true, true));
+    assert_eq!(dialog.selected_tool(), "opencode");
+    assert!(dialog.sandbox_enabled);
+    assert!(!dialog.yolo_mode, "a yolo source does not turn yolo on");
+
+    // An unsandboxed source never switches a profile's sandbox off: with yolo on by
+    // default that would launch an unsandboxed yolo agent on the host.
+    let mut dialog = multi_tool_dialog();
+    dialog.docker_available = true;
+    dialog.sandbox_enabled = true;
+    dialog.yolo_mode_default = true;
+    dialog.inherit_session(&source_session("opencode", false, false));
+    assert_eq!(dialog.selected_tool(), "opencode");
+    assert!(dialog.sandbox_enabled, "the sandbox default stays on");
+    assert!(
+        dialog.yolo_mode,
+        "nor does a cautious source turn the yolo default off"
+    );
+}
+
+/// The view follows the source session where the agent can back a structured one, over the
+/// configured default in either direction.
+#[test]
+#[serial_test::serial]
+fn a_selected_session_carries_its_view() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _home = crate::session::test_support::isolate_home(temp_home.path());
+    let app_dir = crate::session::get_app_dir().expect("app dir");
+    fs::create_dir_all(app_dir.join("profiles").join("default")).expect("default profile");
+    fs::write(
+        app_dir.join("config.toml"),
+        "[acp]\noffer_structured_in_new_session = true\n",
+    )
+    .expect("global config");
+
+    for (default_structured, source_view) in [(true, View::Terminal), (false, View::Structured)] {
+        let mut dialog = multi_tool_dialog();
+        dialog.reload_tool_config();
+        dialog.structured_default = default_structured;
+        let mut source = source_session("claude", false, false);
+        source.view = source_view;
+        dialog.inherit_session(&source);
+        assert!(
+            dialog.structured_capable,
+            "claude can back a structured view"
+        );
+        let structured = source_view == View::Structured;
+        assert_eq!(dialog.structured_enabled, structured, "{source_view:?}");
+        assert_eq!(
+            dialog.structured_choice,
+            Some(structured),
+            "{source_view:?}"
+        );
+    }
+}
+
+/// The carried agent's structured capability comes from the repo config at the form's path,
+/// as it does for the agent the form opened on, so a repo's `agent_detect_as` still counts.
+#[test]
+#[serial_test::serial]
+fn a_carried_agent_is_judged_by_the_repo_config() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _home = crate::session::test_support::isolate_home(temp_home.path());
+    let app_dir = crate::session::get_app_dir().expect("app dir");
+    fs::create_dir_all(app_dir.join("profiles").join("default")).expect("default profile");
+    fs::write(
+        app_dir.join("config.toml"),
+        "[acp]\noffer_structured_in_new_session = true\n",
+    )
+    .expect("global config");
+    let repo = tempfile::tempdir().expect("repo");
+    fs::create_dir_all(repo.path().join(".agent-of-empires")).expect("repo config dir");
+    fs::write(
+        repo.path().join(".agent-of-empires").join("config.toml"),
+        "[session]\nagent_detect_as = { my-agent = \"claude\" }\n",
+    )
+    .expect("repo config");
+
+    let mut dialog =
+        NewSessionDialog::new_with_tools(vec!["claude", "my-agent"], TEST_PATH.to_string());
+    dialog.set_path(repo.path().to_string_lossy().to_string());
+    let mut source = source_session("my-agent", false, false);
+    source.view = View::Structured;
+    dialog.inherit_session(&source);
+
+    assert_eq!(dialog.selected_tool(), "my-agent");
+    assert!(
+        dialog.structured_capable,
+        "the repo maps my-agent onto claude"
+    );
+    assert!(dialog.structured_enabled);
+}
+
+/// A session whose agent is not offered here leaves the form on its defaults: its modes
+/// belong to that agent.
+#[test]
+#[serial_test::serial]
+fn a_session_on_an_agent_not_offered_here_carries_nothing() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _home = crate::session::test_support::isolate_home(temp_home.path());
+    let mut dialog = multi_tool_dialog();
+    dialog.docker_available = true;
+
+    dialog.inherit_session(&source_session("codex", true, false));
+    assert_eq!(dialog.selected_tool(), "claude");
+    assert!(!dialog.sandbox_enabled);
+}
+
+/// Each mode lands only as the form would let the user pick it.
+#[test]
+#[serial_test::serial]
+fn inherited_modes_stop_where_the_form_does() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _home = crate::session::test_support::isolate_home(temp_home.path());
+
+    let mut dialog = multi_tool_dialog();
+    dialog.set_structured_capable(true);
+    dialog.inherit_modes(true, false);
+    assert!(dialog.structured_enabled);
+    assert_eq!(dialog.structured_choice, Some(true));
+    dialog.set_structured_capable(false);
+    dialog.inherit_modes(true, false);
+    assert!(
+        !dialog.structured_enabled,
+        "no structured view for this agent"
+    );
+
+    let mut dialog =
+        NewSessionDialog::new_with_tools(vec!["claude", "settl"], TEST_PATH.to_string());
+    dialog.docker_available = true;
+    dialog.inherit_session(&source_session("settl", true, false));
+    assert_eq!(dialog.selected_tool(), "settl");
+    assert!(
+        !dialog.sandbox_enabled,
+        "a host-only agent is never sandboxed"
+    );
+
+    let mut dialog = multi_tool_dialog();
+    dialog.docker_available = false;
+    dialog.inherit_session(&source_session("opencode", true, false));
+    assert_eq!(dialog.selected_tool(), "opencode");
+    assert!(
+        !dialog.sandbox_enabled,
+        "no container runtime to sandbox in"
+    );
 }

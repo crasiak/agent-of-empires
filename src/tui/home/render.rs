@@ -10,8 +10,8 @@ use rattles::presets::prelude as spinners;
 
 use super::{
     live_send, HomeView, TerminalMode, ViewMode, ICON_ARCHIVED_SECTION, ICON_COLLAPSED,
-    ICON_DELETING, ICON_DORMANT, ICON_ERROR, ICON_EXPANDED, ICON_IDLE, ICON_PINNED, ICON_STOPPED,
-    ICON_TRASH_SECTION, ICON_UNKNOWN, ICON_UNREAD,
+    ICON_DELETING, ICON_DORMANT, ICON_ERROR, ICON_EXPANDED, ICON_FAVORITE, ICON_IDLE, ICON_PINNED,
+    ICON_STOPPED, ICON_TRASH_SECTION, ICON_UNKNOWN, ICON_UNREAD,
 };
 use crate::containers::image_update::ImageUpdate;
 use crate::session::config::{GroupByMode, RowTagMode, SidebarPosition, SortOrder};
@@ -129,29 +129,41 @@ fn live_resize_retry_due(
 /// Matches tmux's default `history-limit` and the VT grid's `SCROLLBACK_LINES`.
 const READING_CAPTURE_LINES: u16 = 2000;
 
-/// Map a tmux pane cursor onto the preview's output rect for live-send.
-///
-/// `cursor.x`/`y` are pane relative; on a composite, add the pane origin from
-/// [`crate::tmux::PaneCursor::composite_pane0`]. The renderer bottom-anchors captures that
-/// overflow `output`, so the row is `output.y + min(line_count, visible_rows) -
-/// pane_height + top + cursor.y`, while a short capture anchors at the top. That keeps the
-/// cursor on the same text row for the status-row offset (#3515) and the shorter-pane case
-/// (#2742). A hidden or out-of-bounds cursor yields `None`.
+/// Screen cell showing the input pane's `(0, 0)`, unclipped and possibly outside
+/// `view.pane`. On a composite this is pane 0's origin from
+/// [`crate::tmux::PaneCursor::composite_pane0`]. The pane is the capture's last
+/// `pane_height` lines and row `k` paints line `first_line + k`, so this holds at the live
+/// tail and scrolled back alike. Shared by the cursor painter and pointer mapping so a
+/// click on a painted cell reaches the same pane cell.
+pub(super) fn live_pane_origin(
+    view: super::PreviewTextView,
+    cursor: &crate::tmux::PaneCursor,
+) -> (i32, i32) {
+    let pane_top = view.total_lines as i32 - cursor.pane_height as i32 - view.first_line as i32;
+    let (left, top) = cursor
+        .composite_pane0
+        .map_or((0, 0), |rect| (rect.left as i32, rect.top as i32));
+    (
+        view.pane.x as i32 + left,
+        view.pane.y as i32 + pane_top + top,
+    )
+}
+
+/// Map a tmux pane cursor onto the painted preview for live-send, from
+/// [`live_pane_origin`]. That keeps the cursor on the same text row for the status-row
+/// offset (#3515) and the shorter-pane case (#2742). A hidden or out-of-bounds cursor
+/// yields `None`.
 pub(super) fn map_live_preview_cursor(
-    output: Rect,
-    visible_rows: usize,
-    line_count: usize,
+    view: super::PreviewTextView,
     cursor: crate::tmux::PaneCursor,
 ) -> Option<Position> {
     if !cursor.visible {
         return None;
     }
-    let anchor = line_count.min(visible_rows) as i32;
-    let (left, top) = cursor
-        .composite_pane0
-        .map_or((0, 0), |rect| (rect.left as i32, rect.top as i32));
-    let row = output.y as i32 + (anchor - cursor.pane_height as i32) + top + cursor.y as i32;
-    let col = output.x as i32 + left + cursor.x as i32;
+    let output = view.pane;
+    let (x, y) = live_pane_origin(view, &cursor);
+    let row = y + cursor.y as i32;
+    let col = x + cursor.x as i32;
     if row < output.y as i32
         || row >= output.y as i32 + output.height as i32
         || col < output.x as i32
@@ -421,13 +433,12 @@ enum SunkRow {
     Pane,
 }
 
-/// The archive/trash, snooze, urgent and favorite overlays every view mode paints on top
-/// of its [`RowSeed`], plus the matching title prefix. `sunk` says how this view resolves
-/// a sunk row; see [`SunkRow`].
+/// The archive/trash, snooze and urgent overlays every view mode paints on top of its
+/// [`RowSeed`], plus the matching title prefix. `sunk` says how this view resolves a sunk
+/// row; see [`SunkRow`].
 fn decorate_row(
     inst: &crate::session::Instance,
     in_attention: bool,
-    show_favorite: bool,
     seed: RowSeed,
     sunk: SunkRow,
     theme: &Theme,
@@ -466,24 +477,16 @@ fn decorate_row(
             .fg(theme.error)
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::RAPID_BLINK);
-    } else if show_favorite && crate::session::is_live_favorite(inst) {
-        style = style
-            .add_modifier(Modifier::BOLD)
-            .add_modifier(Modifier::UNDERLINED);
     }
 
-    // Prefix priority: archive (none) > snooze (`z `) > urgent (`! `) > favorite (`* `).
-    // Snooze and urgent are Attention-only so other sorts show no decoration for state the
-    // user did not opt into; the star also shows elsewhere because favorites-first pins
-    // the row there too.
+    // Prefix priority: archive (none) > snooze (`z `) > urgent (`! `). Both are
+    // Attention-only so other sorts show no decoration for state the user did not opt into.
     let title_text = if inst.is_archived() || inst.is_trashed() {
         Cow::Owned(inst.title.clone())
     } else if in_attention && inst.is_snoozed() {
         Cow::Owned(format!("z {}", inst.title))
     } else if in_attention && inst.is_urgent() {
         Cow::Owned(format!("! {}", inst.title))
-    } else if show_favorite && crate::session::is_live_favorite(inst) {
-        Cow::Owned(format!("* {}", inst.title))
     } else {
         Cow::Owned(inst.title.clone())
     };
@@ -830,11 +833,6 @@ fn format_snooze_remaining(delta: chrono::Duration) -> String {
     format!("{}d", days)
 }
 
-/// Minimum list width for the last-activity column; below it the column is hidden.
-/// Compared against `inner.width` (the pane minus its border), so 30 lets the column
-/// appear for `home_list_width` in the common 35-45 range and on tight mobile panes, where
-/// the 6-char age slot plus ~24 chars of title/branch still fits.
-///
 /// Width reserved for the right-aligned column: 5 for the label (`"<1m"`, `"30mo"`) plus
 /// one of left padding.
 const LAST_ACTIVITY_SLOT: usize = 6;
@@ -933,22 +931,61 @@ fn session_color_background(color: Color, theme: &Theme) -> Option<Color> {
 /// Where the right-aligned activity column lives on a session row.
 ///
 /// `prefix_width` is the display width of the spans already pushed, `list_width` the inner
-/// width of the list pane, `badge_width` 0 when no terminal-mode badge follows. `Some(pad)`
-/// is the padding to push between prefix and column when it fits with
-/// `LAST_ACTIVITY_SLOT`, the badge and `LAST_ACTIVITY_RIGHT_MARGIN`; `None` means the row
-/// is too wide and the title wins.
+/// width of the list pane, `slot_width` 0 when the age is hidden, `badge_width` 0 when no
+/// terminal-mode badge follows. `Some(pad)` is the padding to push between prefix and
+/// column when it fits with the slot, the badge and `LAST_ACTIVITY_RIGHT_MARGIN`; `None`
+/// means the row is too wide and the title wins.
 fn activity_column_padding(
     prefix_width: usize,
     list_width: u16,
+    slot_width: usize,
     badge_width: usize,
 ) -> Option<usize> {
-    let trailing = LAST_ACTIVITY_SLOT + badge_width + LAST_ACTIVITY_RIGHT_MARGIN;
+    let trailing = slot_width + badge_width + LAST_ACTIVITY_RIGHT_MARGIN;
     let total = prefix_width.checked_add(trailing)?;
     if total <= list_width as usize {
         Some(list_width as usize - total)
     } else {
         None
     }
+}
+
+/// Fewest title cells kept before a row gives up its right-edge column.
+const MIN_TITLE_CELLS: usize = 8;
+
+/// Cells the title gets on a session row, and whether the row tag stays. `room` is what
+/// is left after the prefix, `trailing` the right-edge column (age slot, badge, margin).
+/// Space runs out in this order: the tag goes first, then the title shortens down to
+/// `MIN_TITLE_CELLS`, then the column goes and the title takes all of `room`.
+fn title_width_for_column(
+    title_width: usize,
+    room: usize,
+    tag_width: usize,
+    trailing: usize,
+) -> (usize, bool) {
+    if title_width + tag_width + trailing <= room {
+        return (title_width, true);
+    }
+    let beside_column = room.saturating_sub(trailing);
+    let budget = if beside_column >= MIN_TITLE_CELLS {
+        beside_column
+    } else {
+        room
+    };
+    (title_width.min(budget), false)
+}
+
+/// The activity column's text: remaining snooze under Attention sort, else the age of a
+/// resting (Idle or Unknown) row, else blank. `last_accessed_at` is only a fallback for a
+/// missing `idle_entered_at`; on an active row it reads as idle time.
+fn row_age(inst: &crate::session::Instance, in_attention: bool) -> String {
+    if let Some(remaining) = in_attention.then(|| inst.snooze_remaining()).flatten() {
+        return format_snooze_remaining(remaining);
+    }
+    if !matches!(inst.status, Status::Idle | Status::Unknown) {
+        return String::new();
+    }
+    format_relative_age(inst.idle_entered_at.or(inst.last_accessed_at))
 }
 
 impl HomeView {
@@ -1426,6 +1463,7 @@ impl HomeView {
         self.shelf_inner_area = shelf_region;
 
         let hover_idx = self.hovered_index();
+        let favorite_gutter = self.favorite_gutter();
 
         // --- Workspace list (every row before the shelf) ---
         let list_visible_height = if self.search_bar_visible() {
@@ -1460,7 +1498,8 @@ impl HomeView {
             } else {
                 inner.width
             };
-            let mut line = self.render_item_line(item, is_selected, is_match, theme, width);
+            let mut line =
+                self.render_item_line(item, is_selected, is_match, theme, width, favorite_gutter);
             if let Some(bg) = self.sidebar_row_background(item, is_selected, is_hovered, theme) {
                 line = paint_sidebar_row_background(line, width, bg);
             }
@@ -1527,8 +1566,14 @@ impl HomeView {
                 let is_hovered = !is_selected && Some(abs_idx) == hover_idx;
                 let is_match =
                     !self.search_matches.is_empty() && self.search_matches.contains(&abs_idx);
-                let mut line =
-                    self.render_item_line(item, is_selected, is_match, theme, inner.width);
+                let mut line = self.render_item_line(
+                    item,
+                    is_selected,
+                    is_match,
+                    theme,
+                    inner.width,
+                    favorite_gutter,
+                );
                 if let Some(bg) = self.sidebar_row_background(item, is_selected, is_hovered, theme)
                 {
                     line = paint_sidebar_row_background(line, inner.width, bg);
@@ -1635,6 +1680,18 @@ impl HomeView {
             || serve_open
     }
 
+    /// Reserve the favorite gutter on every row while any session is a pinned favorite,
+    /// so titles stay aligned and collapsing a group does not shift the list. Favorite
+    /// pins under Attention sort, or in any sort with favorites-first on (the
+    /// `Context::FavoritesUsable` predicate).
+    pub(super) fn favorite_gutter(&self) -> bool {
+        (self.sort_order == SortOrder::Attention || crate::session::favorites_first())
+            && self
+                .instances
+                .values()
+                .any(crate::session::is_live_favorite)
+    }
+
     pub(super) fn render_item_line(
         &self,
         item: &Item,
@@ -1642,18 +1699,15 @@ impl HomeView {
         is_match: bool,
         theme: &Theme,
         list_width: u16,
+        favorite_gutter: bool,
     ) -> Line<'static> {
         let indent = " ".repeat(item.depth().min(9));
 
-        // Favorite, snooze and urgent visuals render only under Attention sort, so the
-        // sidebar stays clean for users who don't run a triage workflow. Archive is
-        // universal: it is a lifecycle action and its rows live in the pinned Archived
-        // section in every sort mode.
+        // Snooze and urgent visuals render only under Attention sort, so the sidebar
+        // stays clean for users who don't run a triage workflow. Archive is universal:
+        // it is a lifecycle action and its rows live in the pinned Archived section in
+        // every sort mode.
         let in_attention = self.sort_order == SortOrder::Attention;
-        // Favorite is a pin in every sort order once favorites-first is on, so its
-        // decoration follows the keybinding's predicate (`Context::FavoritesUsable`).
-        // Snooze and urgent stay Attention-only, tied to the tier model.
-        let show_favorite = in_attention || crate::session::favorites_first();
 
         use std::borrow::Cow;
 
@@ -1848,7 +1902,7 @@ impl HomeView {
                                 )
                             }
                         };
-                    decorate_row(inst, in_attention, show_favorite, seed, sunk, theme)
+                    decorate_row(inst, in_attention, seed, sunk, theme)
                 } else {
                     (
                         "?",
@@ -1859,7 +1913,24 @@ impl HomeView {
             }
         };
 
-        let mut line_spans = Vec::with_capacity(5);
+        let mut line_spans = Vec::with_capacity(6);
+        if favorite_gutter {
+            let favorited = matches!(item, Item::Session { id, .. }
+                if self.get_instance(id).is_some_and(crate::session::is_live_favorite));
+            line_spans.push(if favorited {
+                let star_style = Style::default().fg(theme.favorite);
+                Span::styled(
+                    format!("{ICON_FAVORITE} "),
+                    if is_selected {
+                        selected_row_style(star_style, theme)
+                    } else {
+                        star_style
+                    },
+                )
+            } else {
+                Span::raw("  ")
+            });
+        }
         line_spans.push(Span::raw(indent));
         // A search match highlights with weight only: recoloring to `theme.search` (amber
         // in most themes) turned a running match's spinner amber and read as "waiting"
@@ -1912,120 +1983,122 @@ impl HomeView {
                 ));
             }
         }
-        line_spans.push(Span::styled(text.into_owned(), text_style));
+        let prefix_width: usize = line_spans.iter().map(|s| s.width()).sum();
+        let room = (list_width as usize).saturating_sub(prefix_width);
 
-        if let Item::Session { id, .. } = item {
-            if let Some(inst) = self.get_instance(id) {
-                // Agent tags precede the title; other tags remain suffixes.
-                if self.row_tag_mode != RowTagMode::Agent {
-                    if let Some(tag) = row_tag.as_ref() {
-                        let tag_style =
-                            Style::default().fg(if self.row_tag_mode == RowTagMode::Branch {
-                                theme.branch
-                            } else {
-                                theme.dimmed
-                            });
-                        line_spans.push(Span::styled(
-                            format!("  {}", tag.rendered()),
-                            if is_selected {
-                                selected_row_style(tag_style, theme)
-                            } else {
-                                tag_style
-                            },
-                        ));
-                    }
-                }
+        let inst = match item {
+            Item::Session { id, .. } => self.get_instance(id).map(|inst| (id, inst)),
+            _ => None,
+        };
+        let Some((id, inst)) = inst else {
+            line_spans.push(Span::styled(truncate_to_width(&text, room), text_style));
+            return Line::from(line_spans);
+        };
 
-                // Right edge of the row: an optional terminal-mode badge and the
-                // activity column, both pinned to the pane's right edge so the column
-                // lines up down the list. The column shows only if the prefix plus the
-                // slot and badge fit inside `list_width`; on a narrow pane the row drops
-                // the column rather than mangling the title.
-                //
-                // Idle rows drive off `idle_entered_at`, not `last_accessed_at`, which
-                // user interaction bumps and would lie about how long the agent has been
-                // stopped.
-                //
-                // Acp-mode sessions get a badge because Enter opens an info dialog rather
-                // than attaching to a pane that doesn't exist; it takes precedence over
-                // the container/host badge in Structured view, while Terminal view keeps
-                // its own badging since the host terminal still works.
-                let badge_text: Option<&'static str> =
-                    if inst.is_structured() && self.view_mode != ViewMode::Terminal {
-                        // `[structured]` rather than `[web]`: the TUI renders these
-                        // sessions natively now, so the badge marks the view.
-                        Some(" [structured]")
-                    } else if self.view_mode == ViewMode::Terminal && inst.is_sandboxed() {
-                        Some(match self.get_terminal_mode(id) {
-                            TerminalMode::Container => " [container]",
-                            TerminalMode::Host => " [host]",
-                        })
-                    } else if inst.is_structured() {
-                        // Terminal view, non-sandboxed: the container/host badge does
-                        // not apply, but structured rows still need marking or Enter
-                        // opening the structured view surprises the user.
-                        Some(" [structured]")
+        // Config-driven suffix next to the title; it owns the branch/profile/sandbox
+        // slot, so `None` means no suffix. Agent tags precede the title instead.
+        let tag_span = row_tag
+            .filter(|_| self.row_tag_mode != RowTagMode::Agent)
+            .map(|tag| {
+                let tag_style = Style::default().fg(if self.row_tag_mode == RowTagMode::Branch {
+                    theme.branch
+                } else {
+                    theme.dimmed
+                });
+                Span::styled(
+                    format!("  {}", tag.rendered()),
+                    if is_selected {
+                        selected_row_style(tag_style, theme)
                     } else {
-                        None
-                    };
-                let badge_width = badge_text.map_or(0, |s| s.len());
+                        tag_style
+                    },
+                )
+            });
 
-                let used_width: usize = line_spans.iter().map(|s| s.width()).sum();
-                let column_pad = activity_column_padding(used_width, list_width, badge_width);
-                let column_fits = column_pad.is_some();
-                if let Some(pad_len) = column_pad {
-                    if pad_len > 0 {
-                        line_spans.push(Span::raw(" ".repeat(pad_len)));
-                    }
-                    // Snoozed rows show remaining sleep time under Attention sort; in
-                    // other sorts snooze is invisible and the column falls through to the
-                    // normal age. Idle rows show time-since-stop (`idle_entered_at`),
-                    // falling back to `last_accessed_at` when it is missing, which would
-                    // otherwise lie after an attach or send.
-                    let snooze_remaining = if in_attention {
-                        inst.snooze_remaining()
-                    } else {
-                        None
-                    };
-                    let age = if let Some(remaining) = snooze_remaining {
-                        format_snooze_remaining(remaining)
-                    } else {
-                        let age_ts = if inst.status == Status::Idle {
-                            inst.idle_entered_at.or(inst.last_accessed_at)
-                        } else {
-                            inst.last_accessed_at
-                        };
-                        format_relative_age(age_ts)
-                    };
-                    let padded = format!("{:>width$}", age, width = LAST_ACTIVITY_SLOT);
-                    let activity_style = Style::default().fg(theme.dimmed);
-                    line_spans.push(Span::styled(
-                        padded,
-                        if is_selected {
-                            selected_row_style(activity_style, theme)
-                        } else {
-                            activity_style
-                        },
-                    ));
-                }
+        // Right edge of the row: an optional terminal-mode badge and the activity column,
+        // both pinned to the pane's right edge so the column lines up down the list.
+        //
+        // Acp-mode sessions get a badge because Enter opens an info dialog rather than
+        // attaching to a pane that doesn't exist; it takes precedence over the
+        // container/host badge in Structured view, while Terminal view keeps its own
+        // badging since the host terminal still works.
+        let badge_text: Option<&'static str> =
+            if inst.is_structured() && self.view_mode != ViewMode::Terminal {
+                // `[structured]` rather than `[web]`: the TUI renders these sessions
+                // natively now, so the badge marks the view.
+                Some(" [structured]")
+            } else if self.view_mode == ViewMode::Terminal && inst.is_sandboxed() {
+                Some(match self.get_terminal_mode(id) {
+                    TerminalMode::Container => " [container]",
+                    TerminalMode::Host => " [host]",
+                })
+            } else if inst.is_structured() {
+                // Terminal view, non-sandboxed: the container/host badge does not apply,
+                // but structured rows still need marking or Enter opening the structured
+                // view surprises the user.
+                Some(" [structured]")
+            } else {
+                None
+            };
+        let badge_width = badge_text.map_or(0, |s| s.len());
+        let age = if self.show_activity_age {
+            row_age(inst, in_attention)
+        } else {
+            String::new()
+        };
+        // A blank age keeps its slot only to line the badge up with the rows around it.
+        let slot_width = if self.show_activity_age && (!age.is_empty() || badge_text.is_some()) {
+            LAST_ACTIVITY_SLOT
+        } else {
+            0
+        };
 
-                if let Some(badge) = badge_text {
-                    let badge_style = Style::default().fg(theme.sandbox);
-                    line_spans.push(Span::styled(
-                        badge,
-                        if is_selected {
-                            selected_row_style(badge_style, theme)
-                        } else {
-                            badge_style
-                        },
-                    ));
-                }
-                if column_fits {
-                    let trailing_margin: String =
-                        std::iter::repeat_n(' ', LAST_ACTIVITY_RIGHT_MARGIN).collect();
-                    line_spans.push(Span::raw(trailing_margin));
-                }
-            }
+        let (title_width, keep_tag) = title_width_for_column(
+            rendered_width(&text),
+            room,
+            tag_span.as_ref().map_or(0, |s| s.width()),
+            slot_width + badge_width + LAST_ACTIVITY_RIGHT_MARGIN,
+        );
+        line_spans.push(Span::styled(
+            truncate_to_width(&text, title_width),
+            text_style,
+        ));
+        line_spans.extend(tag_span.filter(|_| keep_tag));
+
+        let used_width: usize = line_spans.iter().map(|s| s.width()).sum();
+        let column_pad = activity_column_padding(used_width, list_width, slot_width, badge_width);
+        let column_fits = column_pad.is_some();
+        if let Some(pad_len) = column_pad.filter(|&p| p > 0) {
+            line_spans.push(Span::raw(" ".repeat(pad_len)));
+        }
+        if column_fits && slot_width > 0 {
+            let padded = format!("{:>width$}", age, width = LAST_ACTIVITY_SLOT);
+            let activity_style = Style::default().fg(theme.dimmed);
+            line_spans.push(Span::styled(
+                padded,
+                if is_selected {
+                    selected_row_style(activity_style, theme)
+                } else {
+                    activity_style
+                },
+            ));
+        }
+
+        if let Some(badge) = badge_text {
+            let badge_style = Style::default().fg(theme.sandbox);
+            line_spans.push(Span::styled(
+                badge,
+                if is_selected {
+                    selected_row_style(badge_style, theme)
+                } else {
+                    badge_style
+                },
+            ));
+        }
+        if column_fits {
+            let trailing_margin: String =
+                std::iter::repeat_n(' ', LAST_ACTIVITY_RIGHT_MARGIN).collect();
+            line_spans.push(Span::raw(trailing_margin));
         }
 
         Line::from(line_spans)
@@ -2800,6 +2873,7 @@ impl HomeView {
 
     /// Paint the preview and refresh geometry used by selection and live-send.
     fn render_preview(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        self.structured_transcript_painted = false;
         if self.system_health_open {
             self.preview_outer_area = area;
             self.preview_area = area;
@@ -3088,6 +3162,7 @@ impl HomeView {
                     .as_mut()
                     .and_then(|v| v.render(frame, layout.output, theme));
                 self.structured_preview = view;
+                self.structured_transcript_painted = true;
                 self.preview_pane_area = layout.output;
                 if let Some(g) = geometry {
                     self.preview_visible_rows = g.text_area.height as usize;
@@ -3389,10 +3464,11 @@ impl HomeView {
     /// underline a link whose text is not itself a URL is indistinguishable from the
     /// output around it. It is the affordance for `preview_link_at`.
     pub(super) fn paint_preview_links(&self, buf: &mut Buffer) {
-        // Same guard as `preview_link_at`: an overlay swallows the click, so underlining
-        // behind it would advertise nothing, and the dialog paints over these cells,
-        // leaving the backend to wrap its own text in OSC 8.
-        if self.has_non_live_send_overlay() {
+        // Same guards as `preview_link_at`, so an underline always marks a clickable
+        // link: an overlay swallows the click (and paints over these cells, leaving the
+        // backend to wrap its own text in OSC 8), and transcript rows are not the
+        // capture's links.
+        if self.has_non_live_send_overlay() || self.structured_transcript_painted {
             return;
         }
         let view = self.preview_text_view;
@@ -3451,14 +3527,9 @@ impl HomeView {
         if !cursor.position_reliable {
             return None;
         }
-        // `total_lines` is the parsed line count of the capture painted this frame (set
-        // by `set_preview_text_view` just above), so the cursor anchors as the text did.
-        map_live_preview_cursor(
-            self.preview_pane_area,
-            self.preview_visible_rows,
-            self.preview_text_view.total_lines,
-            cursor,
-        )
+        // Set by `set_preview_text_view` for the capture painted this frame, so the
+        // cursor anchors as the text did.
+        map_live_preview_cursor(self.preview_text_view, cursor)
     }
 
     /// Apply the drag-select highlight to cells inside the preview pane, reversing
@@ -4288,13 +4359,13 @@ impl HomeView {
             match key {
                 Some(key) => {
                     self.footer_buttons.push((
+                        key,
                         Rect {
                             x: col,
                             y: area.y,
                             width,
                             height: area.height,
                         },
-                        key,
                     ));
                     if self.footer_hover == Some(key) {
                         for s in group {
@@ -4422,6 +4493,15 @@ mod tests {
             (true, Some((7, t0)))
         );
     }
+    /// `output` painting the last rows of a `lines`-line capture.
+    fn tail_view(output: Rect, lines: usize) -> crate::tui::home::PreviewTextView {
+        crate::tui::home::PreviewTextView {
+            pane: output,
+            first_line: preview::compute_scroll(lines, output.height as usize, 0) as usize,
+            total_lines: lines,
+        }
+    }
+
     fn pane_cursor(x: u16, y: u16, visible: bool, pane_height: u16) -> crate::tmux::PaneCursor {
         crate::tmux::PaneCursor {
             x,
@@ -4538,7 +4618,7 @@ mod tests {
         let output = Rect::new(40, 5, 80, 24);
 
         // Steady-state single pane: the origin and anchoring delta are zero.
-        let single = map_live_preview_cursor(output, 24, 200, pane_cursor(3, 2, true, 24));
+        let single = map_live_preview_cursor(tail_view(output, 200), pane_cursor(3, 2, true, 24));
         assert_eq!(single, Some(Position::new(43, 7)));
 
         // A top border row makes the composite one row taller than the visible output and
@@ -4551,7 +4631,7 @@ mod tests {
             width: 79,
             height: 24,
         });
-        let composited = map_live_preview_cursor(output, 24, 200, split);
+        let composited = map_live_preview_cursor(tail_view(output, 200), split);
         assert_eq!(composited, Some(Position::new(44, 7)));
     }
 
@@ -4562,11 +4642,11 @@ mod tests {
         // row, and one in the clipped top maps out and drops.
         let output = Rect::new(0, 0, 80, 10);
         assert_eq!(
-            map_live_preview_cursor(output, 10, 100, pane_cursor(0, 23, true, 24)),
+            map_live_preview_cursor(tail_view(output, 100), pane_cursor(0, 23, true, 24)),
             Some(Position::new(0, 9)),
         );
         assert_eq!(
-            map_live_preview_cursor(output, 10, 100, pane_cursor(0, 5, true, 24)),
+            map_live_preview_cursor(tail_view(output, 100), pane_cursor(0, 5, true, 24)),
             None,
         );
     }
@@ -4581,19 +4661,19 @@ mod tests {
         // to overflow the 24-row output). Cursor on the pane's last row (y=22).
         let short = pane_cursor(5, 22, true, 23);
         assert_eq!(
-            map_live_preview_cursor(output, 24, 23, short),
+            map_live_preview_cursor(tail_view(output, 23), short),
             Some(Position::new(5, 22)),
             "top-anchored capture must not drift the cursor down a row",
         );
         // The buggy formula (`visible_rows - pane_height`) would place it at
         // row 23; assert the fix does not.
         assert_ne!(
-            map_live_preview_cursor(output, 24, 23, short),
+            map_live_preview_cursor(tail_view(output, 23), short),
             Some(Position::new(5, 23)),
         );
         // Cursor on the pane's top row lands on the output's top row.
         assert_eq!(
-            map_live_preview_cursor(output, 24, 23, pane_cursor(0, 0, true, 23)),
+            map_live_preview_cursor(tail_view(output, 23), pane_cursor(0, 0, true, 23)),
             Some(Position::new(0, 0)),
         );
     }
@@ -4603,12 +4683,12 @@ mod tests {
         let output = Rect::new(0, 0, 80, 24);
         // DECTCEM-hidden cursor: nothing to paint.
         assert_eq!(
-            map_live_preview_cursor(output, 24, 200, pane_cursor(3, 2, false, 24)),
+            map_live_preview_cursor(tail_view(output, 200), pane_cursor(3, 2, false, 24)),
             None,
         );
         // Column past the output width is dropped rather than clamped.
         assert_eq!(
-            map_live_preview_cursor(output, 24, 200, pane_cursor(80, 2, true, 24)),
+            map_live_preview_cursor(tail_view(output, 200), pane_cursor(80, 2, true, 24)),
             None,
         );
     }
@@ -4892,22 +4972,24 @@ mod tests {
 
     #[test]
     fn activity_column_padding_cases() {
-        // Trailing block = SLOT(6) + badge + MARGIN(1). A badge that fits alone does not
+        // Trailing block = slot + badge + MARGIN(1). A badge that fits alone does not
         // keep the column: the badge has its own unconditional render path.
         let cases = [
-            ("room to spare", 12, 35, 0, Some(16)),
-            ("exact fit", 13, 20, 0, Some(0)),
-            ("one column over", 14, 20, 0, None),
+            ("room to spare", 12, 35, 6, 0, Some(16)),
+            ("exact fit", 13, 20, 6, 0, Some(0)),
+            ("one column over", 14, 20, 6, 0, None),
             // No fixed 30-column floor: a narrow pane with room keeps the column.
-            ("narrow pane", 8, 25, 0, Some(10)),
-            ("host badge", 10, 35, 7, Some(11)),
-            ("container badge", 10, 35, 12, Some(6)),
-            ("long title with badge", 20, 35, 12, None),
-            ("prefix overflow saturates", usize::MAX, 1000, 0, None),
+            ("narrow pane", 8, 25, 6, 0, Some(10)),
+            ("host badge", 10, 35, 6, 7, Some(11)),
+            ("container badge", 10, 35, 6, 12, Some(6)),
+            ("long title with badge", 20, 35, 6, 12, None),
+            // Hidden age: the badge alone sits against the margin.
+            ("hidden age with badge", 20, 35, 0, 12, Some(2)),
+            ("prefix overflow saturates", usize::MAX, 1000, 6, 0, None),
         ];
-        for (name, prefix, width, badge, expected) in cases {
+        for (name, prefix, width, slot, badge, expected) in cases {
             assert_eq!(
-                activity_column_padding(prefix, width, badge),
+                activity_column_padding(prefix, width, slot, badge),
                 expected,
                 "{name}"
             );
@@ -4973,6 +5055,71 @@ mod tests {
             });
             assert_eq!(agent_row_tag(&instance).unwrap().rendered(), expected);
         }
+    }
+
+    #[test]
+    fn title_width_for_column_cases() {
+        // (name, title, room, tag, trailing, expected); MIN_TITLE_CELLS is 8.
+        let cases = [
+            ("fits beside column", 10, 25, 0, 7, (10, true)),
+            ("shortened to keep column", 20, 25, 0, 7, (18, false)),
+            ("too narrow, column dropped", 20, 14, 0, 7, (14, false)),
+            ("short title keeps column", 5, 12, 0, 7, (5, true)),
+            ("no room", 5, 0, 0, 7, (0, false)),
+            ("fits beside tag and column", 10, 40, 16, 7, (10, true)),
+            (
+                "tag dropped before title shortens",
+                20,
+                30,
+                16,
+                7,
+                (20, false),
+            ),
+            (
+                "tag dropped, then title shortened",
+                30,
+                30,
+                16,
+                7,
+                (23, false),
+            ),
+        ];
+        for (name, title, room, tag, trailing, expected) in cases {
+            assert_eq!(
+                title_width_for_column(title, room, tag, trailing),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn row_age_only_on_resting_or_snoozed_rows() {
+        let five_min_ago = Some(Utc::now() - chrono::Duration::minutes(5));
+        let mut inst = crate::session::Instance::new("a", "/tmp/a");
+        inst.idle_entered_at = five_min_ago;
+        inst.last_accessed_at = five_min_ago;
+        for (status, expected) in [
+            (Status::Idle, "5m"),
+            (Status::Unknown, "5m"),
+            (Status::Running, ""),
+            (Status::Waiting, ""),
+            (Status::Error, ""),
+        ] {
+            inst.status = status;
+            assert_eq!(row_age(&inst, false), expected, "{status:?}");
+        }
+        inst.idle_entered_at = None;
+        inst.status = Status::Idle;
+        assert_eq!(row_age(&inst, false), "5m", "falls back to last access");
+
+        inst.status = Status::Running;
+        inst.snooze(30);
+        assert_eq!(row_age(&inst, false), "", "snooze hidden outside Attention");
+        assert!(
+            !row_age(&inst, true).is_empty(),
+            "snooze shown under Attention"
+        );
     }
 
     /// The bracketed tag must occupy `max_width + 2` cells as the renderer paints them:

@@ -38,15 +38,13 @@ impl Instance {
             disk.last_error_check = self.last_error_check;
             disk.last_error = self.last_error.take();
         }
-        if self.active_execution != disk.active_execution {
+        if !self.poller_serves(&disk.tool, disk.active_execution.as_ref()) {
             self.stop_poller();
             self.session_id_poller = None;
         }
         disk.last_start_time = self.last_start_time;
         disk.session_id_poller = self.session_id_poller.take();
-        disk.session_id_poller_retry_after = self.session_id_poller_retry_after;
-        // Preserve the serde-skipped backoff so reloads cannot trigger an early retry.
-        disk.poller_repair = self.poller_repair.clone();
+        disk.adopt_poller_repair(self);
         disk.pane_dead_observed = self.pane_dead_observed;
         disk.force_fresh_next_launch = self.force_fresh_next_launch;
         disk.pending_host_env = std::mem::take(&mut self.pending_host_env);
@@ -71,13 +69,7 @@ impl Instance {
             self.absorb_published_pi_session();
             return;
         }
-        if !matches!(
-            self.source_capture_backend(),
-            Some(
-                crate::agents::SessionCaptureBackend::Claude
-                    | crate::agents::SessionCaptureBackend::HookSidecar
-            )
-        ) {
+        if !self.capture_reads_hook_sidecar() {
             return;
         }
         if !matches!(self.resume_intent, ResumeIntent::Default) {
@@ -95,7 +87,7 @@ impl Instance {
         if Some(fresh) == self.agent_session_id.as_ref() && self.agent_session_binding == binding {
             return;
         }
-        if self.is_capture_excluded(fresh, observation.source.as_ref()) {
+        if self.is_capture_excluded(fresh, observation.source()) {
             return;
         }
         let profile = self.effective_profile();
@@ -110,10 +102,10 @@ impl Instance {
             SidWrite::Applied => {
                 self.set_agent_conversation(Some(observation.sid), binding, None);
             }
-            // A pinned-foreign publication is a deliberate non-write; like a
-            // divergence skip, it carries no update worth reconciling.
-            SidWrite::Skipped | SidWrite::PinnedForeign => {
-                // Peer wrote between reconcile and CAS; reload to converge.
+            // Nothing was written in any of these arms: a peer wrote between
+            // reconcile and CAS, a peer durably owns the sid, or the row pins
+            // another conversation. Reloading converges on all three.
+            SidWrite::Skipped | SidWrite::OwnershipConflict | SidWrite::PinnedForeign => {
                 self.reconcile_from_disk();
             }
             SidWrite::Failed => {}

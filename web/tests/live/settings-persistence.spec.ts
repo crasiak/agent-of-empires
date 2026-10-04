@@ -203,10 +203,11 @@ test("global settings migrate from profiles and reject stale profile writes", as
     },
   });
   const profile = await defaultProfile(serve);
-  const globalUrl = `${serve.baseUrl}/api/settings`;
+  const settingsUrl = `${serve.baseUrl}/api/settings`;
+  const machineUrl = `${settingsUrl}?layer=machine`;
   const profileUrl = `${serve.baseUrl}/api/profiles/${encodeURIComponent(profile)}/settings`;
-  const effectiveUrl = `${globalUrl}?profile=${encodeURIComponent(profile)}`;
-  const migrated = await getJson(globalUrl);
+  const effectiveUrl = `${settingsUrl}?profile=${encodeURIComponent(profile)}`;
+  const migrated = await getJson(machineUrl);
   expect(migrated.theme.name).toBe("dracula");
   expect(migrated.session.confirm_before_quit).toBe(false);
   expect(migrated.session.session_id_poller_max_threads).toBe(12);
@@ -232,15 +233,20 @@ test("global settings migrate from profiles and reject stale profile writes", as
   const { current: temporaryFilter } = await runtimeLog.json();
 
   await page.goto(`${serve.baseUrl}/settings/session`);
+  // Sidebar Position is TUI-only, so it sits in the Terminal UI fold.
+  await page.getByRole("button", { name: /Terminal UI/ }).click();
   const position = labelledSelect(page, /^Sidebar Position$/);
   await expect(position).toHaveValue("left");
   const [saveResponse] = await Promise.all([
-    page.waitForResponse((response) => response.url() === globalUrl && response.request().method() === "PATCH"),
+    page.waitForResponse(
+      (response) => response.url().startsWith(settingsUrl) && response.request().method() === "PATCH",
+    ),
     position.selectOption("right"),
   ]);
   expect(saveResponse.ok()).toBe(true);
 
-  for (const url of [globalUrl, effectiveUrl]) {
+  // A global-only field lands machine-wide even though the save names the profile.
+  for (const url of [machineUrl, effectiveUrl]) {
     const saved = await fetch(url).then((r) => r.json());
     expect(saved.session.sidebar_position).toBe("right");
   }
@@ -253,8 +259,9 @@ test("global settings migrate from profiles and reject stale profile writes", as
 
   await serve.restart();
   await page.reload();
+  await page.getByRole("button", { name: /Terminal UI/ }).click();
   await expect(position).toHaveValue("right");
-  const persisted = await fetch(globalUrl).then((r) => r.json());
+  const persisted = await fetch(machineUrl).then((r) => r.json());
   expect(persisted.session.sidebar_position).toBe("right");
 });
 

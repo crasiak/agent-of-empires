@@ -10,6 +10,7 @@ import { useMobileKeyboard } from "../../hooks/useMobileKeyboard";
 import { useRespawnSession } from "../../hooks/useRespawnSession";
 import { useWebSettings } from "../../hooks/useWebSettings";
 import { lastClearIndex } from "../../lib/acpHistoryWindow";
+import { visibleSessionNotices } from "../../lib/acpTypes";
 import { AgentProfileProvider } from "../../lib/agentProfileContext";
 import { conversationFontSizeRem } from "../../lib/conversationFontSize";
 import type { FileRef, FileRefSession } from "../../lib/fileRef";
@@ -24,7 +25,7 @@ import { CompactionReminderBanner } from "./CompactionReminderBanner";
 import { Composer } from "./Composer";
 import { ContextPrimerBanner } from "./ContextPrimerBanner";
 import { PlanStrip } from "./PlanStrip";
-import { ModeSwitchFailedNotice, QueuedPromptsStrip, RejectedPromptsStrip } from "./PromptStrips";
+import { ModeSwitchFailedNotice, QueuedPromptsStrip, RejectedPromptsStrip, SessionNoticesStrip } from "./PromptStrips";
 import { SessionBanners } from "./SessionBanners";
 import { ConfigOptionSwitchFailedNotice } from "./SessionConfigControls";
 import { StartupErrorScreen } from "./StartupErrorScreen";
@@ -152,6 +153,8 @@ function AcpChrome({
 }: ChromeProps) {
   const { sessionId, acpWorkerState, acpAgent } = view;
   const { state, status } = ctx;
+  // Neither can start until restored or unarchived, so nothing here may send (#4116).
+  const readOnly = !!view.trashedAt || !!view.archivedAt;
   // Rows before the latest `/clear` divider are the hidden history.
   const hiddenCount = lastClearIndex(state.activity);
   const [primerPrefill, setPrimerPrefill] = useState<Prefill>(null);
@@ -247,9 +250,11 @@ function AcpChrome({
             className="flex-1 overflow-x-hidden overflow-y-auto [overflow-anchor:none]"
           >
             <div ref={messagesContentRef} className="mx-auto max-w-3xl xl:max-w-4xl 2xl:max-w-5xl px-4 py-6">
-              <ThreadPrimitive.Empty>
-                <EmptyState onPick={ctx.sendPrompt} />
-              </ThreadPrimitive.Empty>
+              {!readOnly && (
+                <ThreadPrimitive.Empty>
+                  <EmptyState onPick={ctx.sendPrompt} />
+                </ThreadPrimitive.Empty>
+              )}
 
               {state.activity.length > 0 && (
                 <div className="mb-2 flex">
@@ -330,9 +335,9 @@ function AcpChrome({
           )}
         </div>
 
-        {/* Always mounted: the scroll observers need it even for a read-only trashed session. */}
+        {/* Always mounted: the scroll observers need it even for a read-only session. */}
         <div ref={belowViewportRef}>
-          {!view.trashedAt && (
+          {!readOnly && (
             <ComposerDock
               view={view}
               ctx={ctx}
@@ -392,6 +397,8 @@ function ComposerDock({
         disabled={state.workerRestarting || state.workerStopped || Boolean(state.startupError)}
       />
 
+      <SessionNoticesStrip notices={visibleSessionNotices(state)} onDismiss={ctx.dismissSessionNotice} />
+
       <ModeSwitchFailedNotice failure={state.modeSwitchFailed} onDismiss={ctx.dismissModeSwitchFailed} />
 
       <ConfigOptionSwitchFailedNotice
@@ -438,6 +445,7 @@ function ComposerDock({
           pendingConfigOption={state.pendingConfigOption}
           setConfigOption={ctx.setConfigOption}
           sessionUsage={state.sessionUsage}
+          authStatus={state.authStatus}
           availableCommands={state.availableCommands}
           connected={status === "open" && !state.workerStopped && !state.workerRestarting}
           turnActive={state.turnActive}

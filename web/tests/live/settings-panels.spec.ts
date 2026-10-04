@@ -161,7 +161,7 @@ test("per-profile setting override leaves global state untouched", async ({ serv
   expect(createRes.ok).toBeTruthy();
 
   const sentinel = "claude-code-override-test";
-  const globalBefore = await getSettings("/api/settings");
+  const globalBefore = await getSettings("/api/settings?layer=machine");
   expect(globalBefore?.session?.default_tool).not.toBe(sentinel);
   expect((await getSettings("/api/profiles/work/settings"))?.session?.default_tool).not.toBe(sentinel);
 
@@ -170,11 +170,8 @@ test("per-profile setting override leaves global state untouched", async ({ serv
     if (req.method() === "PATCH" && req.url().includes("/api/")) patches.push(req.url());
   });
   await page.goto(`${serve.baseUrl}/settings/session`);
-  await expect(page.getByTestId("settings-header").getByText("Profile", { exact: true })).toBeVisible();
-  const profileSelect = page
-    .locator("label", { hasText: /^Profile$/ })
-    .locator("..")
-    .locator("select");
+  const profileSelect = page.getByTestId("settings-profile-picker").locator("select");
+  await expect(profileSelect).toBeVisible();
   await profileSelect.selectOption("work");
   await expect(profileSelect).toHaveValue("work");
 
@@ -190,9 +187,10 @@ test("per-profile setting override leaves global state untouched", async ({ serv
   }).toPass({ timeout: 5_000 });
 
   // The server omits unset fields, so compare as null.
-  const globalAfter = await getSettings("/api/settings");
+  const globalAfter = await getSettings("/api/settings?layer=machine");
   expect(globalAfter?.session?.default_tool ?? null).toBe(globalBefore?.session?.default_tool ?? null);
   expect(globalAfter?.session?.default_tool ?? null).not.toBe(sentinel);
-  expect(patches.some((url) => url.endsWith("/api/profiles/work/settings"))).toBe(true);
-  expect(patches.some((url) => url.endsWith("/api/settings"))).toBe(false);
+  // One save naming the profile; the server routes the field to it.
+  expect(patches.some((url) => url.endsWith("/api/settings?profile=work"))).toBe(true);
+  expect(patches.some((url) => url.endsWith("/api/settings") || url.includes("layer=machine"))).toBe(false);
 });

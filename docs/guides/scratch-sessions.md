@@ -12,7 +12,7 @@ aoe add --scratch -t "Quick question" -c claude
 
 You pass no project path; it is provisioned for you, and the summary prints the resolved `Path:` and `Scratch: yes`. Passing a path alongside `--scratch` is rejected, as is combining it with any worktree flag (`-w`, `--new-branch`, `--base-branch`, `--repo`, `--project`, `--no-submodules`), which fails at parse time.
 
-**Web**: the wizard's Project step has a **Skip project folder** toggle above the Recent / Browse / Clone tabs; picking a real project turns it back off, so the wizard never submits both. `Cmd/Ctrl+Shift+N` opens the wizard with scratch already on, and `Cmd/Ctrl+Enter` launches, so two keystrokes is enough. The command palette has "New scratch session" too. Scratch sessions are bucketed into one synthetic **Scratch** group at the bottom of the sidebar rather than one group per directory.
+**Web**: the wizard's Project panel has a **Scratch** tab beside Recent / Browse / Clone; picking a real project turns scratch back off, so the wizard never submits both. `Cmd/Ctrl+Shift+N` opens the wizard with scratch already on, and `Cmd/Ctrl+Enter` launches, so two keystrokes is enough. The command palette has "New scratch session" too. Scratch sessions are bucketed into one synthetic **Scratch** group at the bottom of the sidebar rather than one group per directory.
 
 **TUI**: press `Ctrl+T` from any field in the new-session dialog. The Path input becomes a `(scratch directory)` marker and the worktree toggle is forced off; `Ctrl+T` again reverts.
 
@@ -28,3 +28,4 @@ If a process dies before you delete the session, the directory is left on disk. 
 - **Sandboxes**: supported; the container mounts the scratch directory like any project path.
 - **Worktrees**: not supported, since a scratch directory is not a git repo. Use a real project path with `-w`.
 - **Hooks**: a scratch directory has no `.agent-of-empires/config.toml`, so the repo trust prompt never fires. Global and profile `on_create` hooks still run, with the scratch directory as their `cwd`.
+- **Per-project settings**: each scratch directory is unique, so scratch sessions can't key a per-project override the way a registered repo does. Smart session rename still gets a dedicated override, `Smart Session Rename (Scratch)` beside the regular toggle in Settings > Agents (global and per-profile, like any other setting). The web dashboard's Scratch sidebar group also has an "Edit settings" entry that opens the same setting directly. Worktree-default has no equivalent here; see Worktrees above.

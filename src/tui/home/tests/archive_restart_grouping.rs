@@ -589,6 +589,17 @@ fn restart_selected_session_tool_swap_resolves_detect_as_for_the_row_profile() {
     env.view
         .restart_selected_session(None, Some("gjc"), None, None)
         .unwrap();
+    // The restart worker re-resolves the profile's config, reinstalling its registry
+    // entries; it must finish before the guards restore them.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while let Err(error) = env.view.restart_poller.try_recv_result() {
+        assert_eq!(error, std::sync::mpsc::TryRecvError::Empty);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "restart worker did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 
     let disk = Storage::new_unwatched("test").unwrap().load().unwrap();
     let row = disk.iter().find(|i| i.id == id).unwrap();
@@ -676,10 +687,10 @@ fn restart_tool_swap_refuses_a_foreign_pending_fork() {
             agent: "claude".into(),
             stores: vec![temp.path().join(".claude")],
             configuration: Vec::new(),
-            exported_default_store: false,
             cwd: temp.path().canonicalize().unwrap(),
             cwd_filesystem: "host".into(),
             filesystem: "host".into(),
+            exported_default_store: None,
         }),
         transcript_path: None,
     });
@@ -2344,121 +2355,105 @@ fn profile_move_group_metadata_survives_reload() {
     assert!(target_groups.iter().any(|group| group.path == "work"));
 }
 
-/// Favorite and snooze decorations render only in Attention sort, except that with
-/// `session.favorites_first` on the star follows the pin into other sorts (a snoozed favorite is
-/// not pinned, so it is not decorated).
+/// The favorite mark sits in a left gutter that shows only where favorites pin (Attention
+/// sort, or any sort with `session.favorites_first`) and only while a visible row is a live
+/// favorite. Every row reserves it so titles stay aligned. Snooze stays Attention-only.
 #[test]
 #[serial]
-fn favorite_decoration_gated_to_attention_sort() {
-    // Favorites-first off: star is Attention-only.
-    {
-        use crate::session::config::SortOrder;
+fn favorite_gutter_follows_pin_predicate() {
+    use crate::session::config::SortOrder;
+    use crate::tui::home::ICON_FAVORITE;
 
-        let original = crate::session::favorites_first();
-
-        let mut env = create_test_env_with_sessions(1);
-        let id = env.view.instance_at(0).id.clone();
-        let title = env.view.instance_at(0).title.clone();
-        env.view.mutate_instance(&id, |inst| inst.favorite());
-
-        // After the env is built: constructing it applies config, which resets the
-        // process-wide flag to the shipped default (on).
-        crate::session::set_favorites_first(false);
-
-        // In Newest: row should NOT have the `* ` prefix or the bold/
-        // underlined favorite styling.
-        env.view.sort_order = SortOrder::Newest;
-        env.view.flat_items = env.view.build_flat_items();
-        let item = env
-            .view
+    let original = crate::session::favorites_first();
+    let mut env = create_test_env_with_sessions(2);
+    let fav = env.view.instance_at(0).id.clone();
+    let other = env.view.instance_at(1).id.clone();
+    let theme = crate::tui::styles::Theme::default();
+    let line = |view: &HomeView, id: &str| {
+        let item = view
             .flat_items
             .iter()
-            .find(|i| matches!(i, Item::Session { id: sid, .. } if *sid == id))
+            .find(|i| matches!(i, Item::Session { id: sid, .. } if sid == id))
             .cloned()
-            .expect("session item present in Newest sort");
-        let text_newest = rendered_row_text(&env.view, &item);
-        assert!(
-            !text_newest.contains("* "),
-            "favorite prefix must be hidden outside Attention sort; got: {:?}",
-            text_newest
-        );
-        assert!(
-            text_newest.contains(&title),
-            "row title must still render; got: {:?}",
-            text_newest
-        );
-
-        // Flip to Attention: the prefix returns.
-        env.view.sort_order = SortOrder::Attention;
-        env.view.flat_items = env.view.build_flat_items();
-        let item_attention = env
-            .view
-            .flat_items
+            .expect("session item present");
+        view.render_item_line(&item, false, false, &theme, 200, view.favorite_gutter())
+    };
+    let text = |view: &HomeView, id: &str| -> String {
+        line(view, id)
+            .spans
             .iter()
-            .find(|i| matches!(i, Item::Session { id: sid, .. } if *sid == id))
-            .cloned()
-            .expect("session item present in Attention sort");
-        let text_attention = rendered_row_text(&env.view, &item_attention);
-        assert!(
-            text_attention.contains("* "),
-            "favorite prefix must surface in Attention sort; got: {:?}",
-            text_attention
-        );
+            .map(|s| s.content.as_ref())
+            .collect()
+    };
+    let star = format!("{ICON_FAVORITE} ");
 
-        crate::session::set_favorites_first(original);
-    }
-    // Favorites-first on: star shows in Newest.
-    {
-        use crate::session::config::SortOrder;
-
-        let original = crate::session::favorites_first();
-
-        let mut env = create_test_env_with_sessions(1);
-        let id = env.view.instance_at(0).id.clone();
-        let title = env.view.instance_at(0).title.clone();
-        env.view.mutate_instance(&id, |inst| inst.favorite());
-
-        // Set after the env is built: constructing it applies config, which would
-        // overwrite the flag.
-        crate::session::set_favorites_first(true);
-
-        env.view.sort_order = SortOrder::Newest;
+    // (sort, favorites_first, favorited, snoozed, gutter expected)
+    for (sort, first, favorited, snoozed, gutter) in [
+        (SortOrder::Newest, false, true, false, false),
+        (SortOrder::Attention, false, true, false, true),
+        (SortOrder::Newest, true, true, false, true),
+        (SortOrder::Newest, true, false, false, false),
+        // A snoozed favorite is not pinned, so it is not marked.
+        (SortOrder::Newest, true, true, true, false),
+    ] {
+        env.view.mutate_instance(&fav, |inst| {
+            inst.unsnooze();
+            inst.unfavorite();
+            if favorited {
+                inst.favorite();
+            }
+            if snoozed {
+                inst.snooze(30);
+            }
+        });
+        // After the env is built: constructing it applies config, which resets the flag.
+        crate::session::set_favorites_first(first);
+        env.view.sort_order = sort;
         env.view.flat_items = env.view.build_flat_items();
-        let row = |view: &HomeView, id: &str| {
-            let item = view
-                .flat_items
-                .iter()
-                .find(|i| matches!(i, Item::Session { id: sid, .. } if sid == id))
-                .cloned()
-                .expect("session item present");
-            rendered_row_text(view, &item)
-        };
+        let case = format!("{sort:?} first={first} fav={favorited} snoozed={snoozed}");
 
-        let text = row(&env.view, &id);
-        assert!(
-            text.contains("* "),
-            "favorite prefix must show in Newest when favorites-first is on; got: {:?}",
-            text
+        let (fav_text, other_text) = (text(&env.view, &fav), text(&env.view, &other));
+        assert!(!fav_text.contains("* "), "{case}: old prefix: {fav_text:?}");
+        assert_eq!(fav_text.starts_with(&star), gutter, "{case}: {fav_text:?}");
+        assert_eq!(
+            other_text.starts_with("  "),
+            gutter,
+            "{case}: {other_text:?}"
         );
-        assert!(
-            text.contains(&title),
-            "row title must still render; got: {:?}",
-            text
-        );
-
-        // Snooze outranks the star: the row is no longer pinned, so it must not
-        // be decorated as a favorite either.
-        env.view.mutate_instance(&id, |inst| inst.snooze(30));
-        env.view.flat_items = env.view.build_flat_items();
-        let text_snoozed = row(&env.view, &id);
-        assert!(
-            !text_snoozed.contains("* "),
-            "a snoozed favorite is not pinned, so it must not show the star; got: {:?}",
-            text_snoozed
-        );
-
-        crate::session::set_favorites_first(original);
+        if gutter {
+            let spans = line(&env.view, &fav).spans;
+            assert_eq!(spans[0].style.fg, Some(theme.favorite), "{case}");
+            assert!(
+                spans.iter().all(|s| !s
+                    .style
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::UNDERLINED)),
+                "{case}: favorite rows are not underlined"
+            );
+        }
     }
+
+    // A selected star that would vanish on the selection background falls back to text.
+    let mut low_contrast = theme.clone();
+    low_contrast.favorite = low_contrast.session_selection;
+    let item = env
+        .view
+        .flat_items
+        .iter()
+        .find(|i| matches!(i, Item::Session { id: sid, .. } if *sid == fav))
+        .cloned()
+        .expect("session item present");
+    env.view.mutate_instance(&fav, |inst| {
+        inst.unsnooze();
+        inst.favorite();
+    });
+    let selected = env
+        .view
+        .render_item_line(&item, true, false, &low_contrast, 200, true);
+    assert_eq!(selected.spans[0].style.fg, Some(low_contrast.text));
+
+    crate::session::set_favorites_first(original);
+
     // Snooze prefix is Attention-only.
     {
         use crate::session::config::SortOrder;
@@ -2937,7 +2932,9 @@ fn every_view_mode_paints_the_same_sunk_row_decoration() {
             inst.archived_at = None;
             inst.snoozed_until = None;
         });
-        let live = env.view.render_item_line(&item, false, false, &theme, 120);
+        let live = env
+            .view
+            .render_item_line(&item, false, false, &theme, 120, false);
         assert_ne!(
             live.spans[1].style.fg,
             Some(theme.dimmed),
@@ -2956,7 +2953,9 @@ fn every_view_mode_paints_the_same_sunk_row_decoration() {
                     snoozed.then(|| chrono::Utc::now() + chrono::Duration::minutes(15));
             });
 
-            let line = env.view.render_item_line(&item, false, false, &theme, 120);
+            let line = env
+                .view
+                .render_item_line(&item, false, false, &theme, 120, false);
             let icon = line.spans[1].content.trim().to_string();
             let rendered = line.spans[2].content.to_string();
 
@@ -2993,7 +2992,9 @@ fn every_view_mode_paints_the_same_sunk_row_decoration() {
                 inst.archived_at = Some(chrono::Utc::now());
                 inst.snoozed_until = None;
             });
-            let line = env.view.render_item_line(&item, false, false, &theme, 120);
+            let line = env
+                .view
+                .render_item_line(&item, false, false, &theme, 120, false);
             let sunk = line.spans[1].style.fg == Some(theme.dimmed);
             assert_eq!(
                 sunk,
@@ -3687,5 +3688,167 @@ fn a_failed_reload_keeps_the_repair_pending_and_the_gate_shut() {
         assert!(view.apply_reconcile_results(), "the retry must land");
         assert!(view.reconcile_reload_retry_at.is_none());
         assert!(!view.pending_reconcile_reload);
+    }
+}
+
+/// #4116: TUI archive, single and group, persists while holding each session's lifecycle lock,
+/// which `aoe send` takes to relaunch or type, so no send lands between teardown and archive.
+#[test]
+#[serial]
+fn archive_persists_under_the_lifecycle_lock() {
+    fn held_at_every_write(env: &mut TestEnv, ids: Vec<String>, archive: fn(&mut HomeView)) {
+        let held = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let observed = std::rc::Rc::clone(&held);
+        let observer = crate::session::observe_updates_for_test(move |storage| {
+            observed.borrow_mut().push(
+                ids.iter()
+                    .all(|id| storage.instance_lifecycle_lock_is_held_for_test(id)),
+            );
+        });
+        archive(&mut env.view);
+        drop(observer);
+        let held = held.borrow();
+        assert!(!held.is_empty(), "the archive must persist");
+        assert!(held.iter().all(|h| *h), "writes and lock held: {held:?}");
+    }
+
+    let mut env = create_test_env_with_sessions(1);
+    env.view.cursor = 0;
+    env.view.update_selected();
+    let id = env.view.selected_session.clone().unwrap();
+    held_at_every_write(&mut env, vec![id.clone()], |view| {
+        view.toggle_archive_at_cursor().unwrap();
+    });
+    assert!(env.view.get_instance(&id).unwrap().is_archived());
+
+    let mut env = create_test_env_with_group_sessions();
+    let group_row = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { path, .. } if path == "work"))
+        .expect("work group row");
+    env.view.cursor = group_row;
+    env.view.update_selected();
+    let ids = env.view.active_sessions_in_selected_group();
+    assert_eq!(ids.len(), 3);
+    held_at_every_write(&mut env, ids.clone(), |view| {
+        view.archive_selected_group().unwrap();
+    });
+    for id in &ids {
+        assert!(env.view.get_instance(id).unwrap().is_archived());
+    }
+}
+
+/// Group archive takes lifecycle locks in sorted id order, so against startup cleanup (which
+/// holds the lowest id and waits for the rest) it blocks holding nothing, whatever the stored
+/// order. The peer holds the lowest id and, once the archive contends on it, records whether
+/// the archive already holds a higher one.
+#[test]
+#[serial]
+fn group_archive_takes_lifecycle_locks_in_sorted_order() {
+    let mut env = create_test_env_with_group_sessions();
+    env.view.instances.sort_by(|a, _, b, _| b.cmp(a));
+    let group_row = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { path, .. } if path == "work"))
+        .expect("work group row");
+    env.view.cursor = group_row;
+    env.view.update_selected();
+    let mut ids = env.view.active_sessions_in_selected_group();
+    assert!(ids.len() >= 2 && !ids.is_sorted(), "stored order: {ids:?}");
+    ids.sort();
+    let profile = env.view.get_instance(&ids[0]).unwrap().effective_profile();
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (contended_tx, contended_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    let peer = std::thread::spawn(move || {
+        let storage = Storage::new_unwatched(&profile).unwrap();
+        let lowest = storage.acquire_instance_lifecycle_lock(&ids[0]).unwrap();
+        held_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let contended = loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match contended_rx.recv_timeout(remaining) {
+                Ok(path) if path.to_string_lossy().contains(&ids[0]) => break true,
+                Ok(_) => continue,
+                Err(_) => break false,
+            }
+        };
+        let held_higher: Vec<String> = ids[1..]
+            .iter()
+            .filter(|id| storage.instance_lifecycle_lock_is_held_for_test(id))
+            .cloned()
+            .collect();
+        drop(lowest);
+        (contended, held_higher)
+    });
+    held_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let observer = crate::session::observe_lock_contention_for_test(contended_tx);
+    env.view.archive_selected_group().unwrap();
+    drop(observer);
+
+    let (contended, held_higher) = peer.join().unwrap();
+    assert!(contended, "the archive must wait on the lowest id's lock");
+    assert!(
+        held_higher.is_empty(),
+        "archive held {held_higher:?} while waiting for a lower id"
+    );
+}
+
+/// #4116: the send dialog and live-send entry refuse an archived or trashed agent, even with its
+/// pane still live, with the CLI and web wording, and leave the session shelved.
+#[test]
+#[serial]
+fn tui_send_refuses_a_shelved_live_pane() {
+    if crate::tmux::tmux_command().arg("-V").output().is_err() {
+        eprintln!("tmux not available; skipping");
+        return;
+    }
+    let shelves: [(fn(&mut Instance), &str); 2] = [
+        (Instance::archive, "session is archived; unarchive it first"),
+        (Instance::trash, "session is in trash; restore it first"),
+    ];
+    for (shelve, message) in shelves {
+        for live_send in [false, true] {
+            let mut env = create_test_env_with_sessions(1);
+            let inst = env.view.instance_at(0).clone();
+            env.view.apply_user_action(&inst.id, shelve).unwrap();
+            let pane = crate::tmux::Session::generate_name(&inst.id, &inst.title);
+            let created = crate::tmux::tmux_command()
+                .args(["new-session", "-d", "-s", &pane, "sleep", "60"])
+                .status();
+            if !created.map(|s| s.success()).unwrap_or(false) {
+                eprintln!("tmux new-session failed; skipping");
+                return;
+            }
+            crate::tmux::refresh_session_cache();
+
+            let title = if live_send {
+                assert!(env.view.prepare_live_send(&inst.id).is_err());
+                "Live send failed"
+            } else {
+                env.view.execute_send_message(&inst.id, "hello");
+                "Send Failed"
+            };
+            let _ = crate::tmux::tmux_command()
+                .args(["kill-session", "-t", &pane])
+                .output();
+            let dialog = env.view.info_dialog.as_ref().expect("refusal dialog");
+            assert_eq!(dialog.title(), title);
+            assert_eq!(dialog.message(), message, "live_send={live_send}");
+            assert!(
+                env.view
+                    .get_instance(&inst.id)
+                    .unwrap()
+                    .ensure_startable()
+                    .is_err(),
+                "live_send={live_send}: the session must stay shelved"
+            );
+        }
     }
 }

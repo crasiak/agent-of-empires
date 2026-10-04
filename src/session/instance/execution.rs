@@ -30,43 +30,10 @@ pub struct ExecutionBinding {
     pub cwd: PathBuf,
     pub cwd_filesystem: String,
     pub filesystem: String,
-    /// The launch exported the store's routing variable although the store is the
-    /// agent's implicit default, so later launches keep exporting it (Claude, #4119).
-    /// Routing only: equality and hashing ignore it, so it never makes a binding
-    /// name a different conversation.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub exported_default_store: bool,
-}
-
-impl ExecutionBinding {
-    fn identity(
-        &self,
-    ) -> (
-        &str,
-        &[PathBuf],
-        &[ExecutionLocation],
-        &std::path::Path,
-        &str,
-        &str,
-    ) {
-        let Self {
-            agent,
-            stores,
-            configuration,
-            cwd,
-            cwd_filesystem,
-            filesystem,
-            exported_default_store: _,
-        } = self;
-        (
-            agent,
-            stores,
-            configuration,
-            cwd,
-            cwd_filesystem,
-            filesystem,
-        )
-    }
+    /// Whether the launch explicitly exported Claude's implicit default store.
+    /// `None` identifies bindings written before routing provenance existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exported_default_store: Option<bool>,
 }
 
 impl PartialEq for ExecutionBinding {
@@ -84,6 +51,26 @@ impl std::hash::Hash for ExecutionBinding {
 }
 
 impl ExecutionBinding {
+    fn identity(
+        &self,
+    ) -> (
+        &str,
+        &[PathBuf],
+        &[ExecutionLocation],
+        &std::path::Path,
+        &str,
+        &str,
+    ) {
+        (
+            &self.agent,
+            &self.stores,
+            &self.configuration,
+            &self.cwd,
+            &self.cwd_filesystem,
+            &self.filesystem,
+        )
+    }
+
     pub(crate) fn key<'a>(&'a self, sid: &'a str) -> ConversationKey<'a> {
         ConversationKey {
             session_id: sid,
@@ -124,6 +111,10 @@ impl ConversationBinding {
             )
     }
 
+    pub fn is_unattributed(&self) -> bool {
+        self.execution.is_none() && self.provenance == ConversationProvenance::Unknown
+    }
+
     pub(crate) fn excludes_capture(&self, sid: &str, source: Option<&ExecutionBinding>) -> bool {
         if self.session_id != sid {
             return false;
@@ -147,6 +138,74 @@ impl ConversationBinding {
             stores: &execution.stores,
             filesystem: &execution.filesystem,
         })
+    }
+}
+
+/// Attest the default-store route a launch observed onto a binding written
+/// before routing provenance existed (#4127).
+///
+/// The marker records what a worker was actually launched with, so only an
+/// observed launch may write it: a request never persists a guess about the
+/// configuration as it stands, and a marker already written is never
+/// overwritten. The observation must be a single-store host Claude launch
+/// carrying its own marker, and it must name the same store as the target, so
+/// a different agent, filesystem, or store attests nothing. Stores are compared
+/// canonically because two spellings of one directory are one store.
+///
+/// Nothing else about the binding moves — not the session id, the provenance,
+/// the transcript path, the store, the cwd — which is what keeps the
+/// conversation identity stable: `identity()` excludes the marker, so stamping
+/// it cannot reclassify the conversation it describes.
+pub(crate) fn attest_observed_default_store(
+    binding: &mut ConversationBinding,
+    observed: Option<&ExecutionBinding>,
+) -> bool {
+    let Some(observed) = observed.filter(|o| o.agent == "claude" && o.filesystem == "host") else {
+        return false;
+    };
+    let Some(observed_store) = single_store(&observed.stores) else {
+        return false;
+    };
+    let Some(observed_marker) = observed.exported_default_store else {
+        return false;
+    };
+    if !binding.is_known() {
+        return false;
+    }
+    let Some(execution) = binding.execution.as_mut() else {
+        return false;
+    };
+    if execution.exported_default_store.is_some() {
+        return false;
+    }
+    if execution.agent != observed.agent || execution.filesystem != observed.filesystem {
+        return false;
+    }
+    let same_store = match single_store(&execution.stores) {
+        Some(target) => same_canonical_store(target, observed_store),
+        None => false,
+    };
+    if !same_store {
+        return false;
+    }
+    execution.exported_default_store = Some(observed_marker);
+    true
+}
+
+fn single_store(stores: &[PathBuf]) -> Option<&std::path::Path> {
+    match stores {
+        [store] => Some(store.as_path()),
+        _ => None,
+    }
+}
+
+fn same_canonical_store(left: &std::path::Path, right: &std::path::Path) -> bool {
+    match (
+        crate::session::capture::canonicalize_allowing_missing_leaf(left),
+        crate::session::capture::canonicalize_allowing_missing_leaf(right),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -175,6 +234,8 @@ pub(crate) enum CaptureContext {
     },
     Pi {
         source: super::SessionSidecarSource,
+        /// Canonical, as the launch builds it: readers compare the published transcript path
+        /// against it, and a differently spelled root silently drops every observation.
         root: PathBuf,
     },
     Omp(super::OmpCaptureMetadata),
@@ -186,6 +247,7 @@ pub(crate) enum CaptureContext {
 
 use super::{Instance, ResumeIntent};
 use crate::agents::{AgentDef, AGENTS};
+use crate::session::fork::ForkParentRef;
 use anyhow::{bail, Context, Result};
 
 #[cfg(test)]
@@ -218,6 +280,9 @@ pub(super) struct NativeExecution {
     pub(super) resolved_target_session_id: Option<String>,
     pub(super) pi_pinnable: bool,
     pub(super) opencode_preassign: bool,
+    /// A recorded store outranks the store a new session would use here, as
+    /// `(launch, new_session, source)`. The launch reports it once.
+    pub(super) store_override: Option<(PathBuf, PathBuf, &'static str)>,
 }
 pub(super) struct NativeLaunchInputs {
     pub(super) launch_id: String,
@@ -948,7 +1013,7 @@ pub(super) fn hook_session_observation(
     }
     let mut observation = crate::session::poller::SessionIdObservation::instance_sidecar(sid, None);
     observation.execution = Some(active.clone());
-    observation.source = Some(active.binding.clone());
+    observation.scope_to(active.binding.clone());
     Some(observation)
 }
 
@@ -1107,16 +1172,41 @@ impl Instance {
 }
 
 impl Instance {
-    pub(crate) fn fork_parent_binding(&self) -> Option<&ConversationBinding> {
+    /// The conversation an explicit fork would carry, with the evidence for it:
+    /// `Bound` when a binding qualifies the recorded id, `Unattributed` when a
+    /// migration left the binding without an execution, `Recorded` when the id
+    /// stands alone, so an unqualified parent reaches `terminal_fork_seed` and
+    /// is refused as such rather than as a session with no conversation, and
+    /// `Unlaunched` for a fork whose launch has not happened. The row's own
+    /// native agent is resolved to decide a fork's capability, so a wrapper
+    /// whose identity cannot be resolved fails instead of forking.
+    pub(crate) fn fork_parent_ref(&self) -> Result<Option<ForkParentRef<'_>>> {
         let (sid, binding) = match &self.resume_intent {
-            ResumeIntent::Fork { .. } => return None,
+            ResumeIntent::Fork { .. } => return Ok(Some(ForkParentRef::Unlaunched)),
             ResumeIntent::Use(sid) => (Some(sid), self.resume_binding.as_ref()),
             _ => (
                 self.agent_session_id.as_ref(),
                 self.agent_session_binding.as_ref(),
             ),
         };
-        binding.filter(|binding| Some(&binding.session_id) == sid && binding.is_known())
+        let Some(sid) = sid else {
+            return Ok(None);
+        };
+        match binding {
+            Some(binding) if binding.session_id == *sid && binding.is_unattributed() => {
+                // The row's own agent decides the fork capability; the store comes
+                // from the context the child's launch resolves.
+                Ok(Some(ForkParentRef::Unattributed {
+                    binding,
+                    agent: self.execution_agent()?.name,
+                }))
+            }
+            Some(binding) if binding.session_id == *sid => Ok(Some(ForkParentRef::Bound(binding))),
+            // A binding naming a different conversation is an inconsistency,
+            // not a recorded id awaiting proof.
+            Some(_) => Ok(None),
+            None => Ok(Some(ForkParentRef::Recorded(sid))),
+        }
     }
 
     pub(super) fn execution_agent(&self) -> Result<&'static AgentDef> {
@@ -1229,11 +1319,17 @@ impl Instance {
                 inputs.cwd.join(path)
             })
         };
-        let declared = config
+        // A container routes to an isolated store, so the declaration does not
+        // select its root and is filtered out below. It still names a store
+        // otherwise, though, and the default-store route rule reads the
+        // declaration whether or not a container is in play.
+        let declared_store = config
             .session
             .agent_config_dir_for(&self.tool, &home)
-            .filter(|_| inputs.container.is_none())
             .map(absolute);
+        let declared = declared_store
+            .clone()
+            .filter(|_| inputs.container.is_none());
         let config_home = absolute(
             value("XDG_CONFIG_HOME")
                 .filter(|value| !value.is_empty())
@@ -1249,17 +1345,14 @@ impl Instance {
         let mut routing = Vec::new();
         let mut case_insensitive_routing: &'static [&'static str] = &[];
         let mut configuration = Vec::new();
+        let mut exported_default_store = None;
         let mut pi_root = None;
         let mut pi_transcript_path = None;
         let mut namespace_arguments = Vec::new();
-        let mut exported_default_store = false;
+        let mut store_override = None;
         let mut roots = match agent.name {
             "claude" => {
-                // The recorded binding names the store this conversation
-                // actually lives in, whether it was asserted with `--store`
-                // or captured by a validated launch; assertions must survive
-                // the qualified publication that relabels them Observed.
-                let recorded = (inputs.container.is_none())
+                let recorded_execution = (inputs.container.is_none())
                     .then(|| {
                         target
                             .and_then(|(_, binding, _)| binding)
@@ -1268,33 +1361,64 @@ impl Instance {
                             .filter(|execution| !execution.stores.is_empty())
                     })
                     .flatten();
-                let exported = value("CLAUDE_CONFIG_DIR")
-                    .filter(|value| !value.is_empty())
-                    .map(|value| absolute(PathBuf::from(value)));
-                // `~/.claude` spelled out selects nothing beyond Claude's own default.
-                let selected = declared
+                let recorded = recorded_execution.and_then(|execution| execution.stores.first().cloned());
+                // The same root is exported here and recorded on the binding
+                // below, and the binding canonicalizes it either way: resolve
+                // it now so the routed value and the stored one name one path,
+                // as the sibling namespaces already do. A new session takes
+                // that chain without the recorded store, and the difference
+                // between the two is a diagnostic, never what decides.
+                let ambient_raw = value("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty());
+                let declared_spelling = absolute(declared
                     .clone()
-                    .filter(|declared| *declared != crate::git::template::lexical_normalize(&home.join(".claude")));
-                // Only an implicit default store leaves `CLAUDE_CONFIG_DIR` unset (#4119). A
-                // recorded store stays explicit when its launch exported it or a selector names it.
-                let explicit = match recorded {
-                    Some(execution) => {
-                        execution.exported_default_store
-                            || [&exported, &selected].into_iter().flatten().any(|dir| {
-                                inputs.canonical_path(dir).ok().as_ref() == Some(&execution.stores[0])
-                            })
-                    }
-                    None => selected.is_some() || exported.is_some(),
-                };
-                let root = absolute(recorded
-                    .map(|execution| execution.stores[0].clone())
-                    .or_else(|| declared.clone())
-                    .or(exported)
+                    .or_else(|| ambient_raw.clone().map(PathBuf::from))
                     .unwrap_or_else(|| home.join(".claude")));
-                let pinned = root.to_str().context("native store is not UTF-8")?.to_owned();
+                let resolved = inputs.canonical_path(&declared_spelling);
+                let root = match recorded.as_ref() {
+                    Some(recorded) => {
+                        let root = inputs.canonical_path(&absolute(recorded.clone()))?;
+                        // A selector that cannot be resolved still differs
+                        // from where this launch runs, and that is the one
+                        // case a user can act on, so report the spelling they
+                        // wrote rather than dropping the line.
+                        let new_session = resolved
+                            .as_ref()
+                            .ok()
+                            .cloned()
+                            .unwrap_or_else(|| declared_spelling.clone());
+                        let source = if declared.is_some() {
+                            "agent_config_dir"
+                        } else if ambient_raw.is_some() {
+                            "environment"
+                        } else {
+                            "default"
+                        };
+                        store_override =
+                            (root != new_session).then_some((root.clone(), new_session, source));
+                        root
+                    }
+                    None => resolved
+                        .context("the configured Claude store cannot be resolved")?,
+                };
                 let default = crate::session::capture::is_default_claude_store(&root, &home);
+                let explicit = recorded_execution
+                    .and_then(|execution| execution.exported_default_store)
+                    .unwrap_or_else(|| {
+                        let ambient = value("CLAUDE_CONFIG_DIR")
+                            .filter(|value| !value.is_empty())
+                            .and_then(|value| {
+                                inputs.canonical_path(&absolute(PathBuf::from(value))).ok()
+                            });
+                        crate::session::capture::is_explicit_claude_store_route(
+                            &root,
+                            &home,
+                            declared_store.as_deref(),
+                            ambient.as_deref(),
+                        )
+                    });
                 let export = inputs.container.is_some() || explicit || !default;
-                exported_default_store = export && default && inputs.container.is_none();
+                exported_default_store = Some(export && default);
+                let pinned = root.to_str().context("native store is not UTF-8")?.to_owned();
                 routing.push(("CLAUDE_CONFIG_DIR".into(), export.then_some(pinned)));
                 vec![root]
             }
@@ -1341,11 +1465,13 @@ impl Instance {
                     configuration.push(file);
                 }
                 let auth_file = root.join("auth.json");
-                let bytes = inputs.read_native_file(&auth_file)?.context("Codex login may select cloud-managed requirements; a local API-key authentication contract is required")?;
+                let Some(bytes) = inputs.read_native_file(&auth_file)? else {
+                    bail!("Codex has no auth.json in its resolved configuration directory (session.agent_config_dir on a host launch, else CODEX_HOME, else ~/.codex); sign in with an OpenAI API key and re-run");
+                };
                 let auth: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&bytes)?;
                 anyhow::ensure!(["tokens", "agent_identity", "personal_access_token"].iter().all(|key| auth.get(*key).is_none_or(serde_json::Value::is_null))
                     && auth.get("auth_mode").is_none_or(|mode| mode.is_null() || mode.as_str() == Some("apikey"))
-                    && auth.get("OPENAI_API_KEY").and_then(serde_json::Value::as_str).is_some_and(|key| !key.trim().is_empty()), "Codex authentication may select cloud-managed requirements; its namespace is unproven");
+                    && auth.get("OPENAI_API_KEY").and_then(serde_json::Value::as_str).is_some_and(|key| !key.trim().is_empty()), "Codex is not authenticated with a local OpenAI API key; set OPENAI_API_KEY in the auth.json of its resolved configuration directory (session.agent_config_dir on a host launch, else CODEX_HOME, else ~/.codex) and re-run");
                 configuration.push(auth_file);
                 let sqlite = inputs.canonical_path(&sqlite)?;
                 routing.push(("CODEX_HOME".into(), Some(root.to_str().context("Codex home is not UTF-8")?.into())));
@@ -1698,17 +1824,17 @@ impl Instance {
             inputs.cwd.clone()
         };
         let cwd = inputs.physical_location(&cwd);
-        let capture = if matches!(
-            agent
-                .session_support
-                .as_ref()
-                .and_then(|support| support.capture.as_ref())
-                .map(|capture| capture.backend),
-            Some(
-                crate::agents::SessionCaptureBackend::Claude
-                    | crate::agents::SessionCaptureBackend::HookSidecar
-            )
-        ) {
+        let capture = if agent
+            .session_support
+            .as_ref()
+            .and_then(|support| support.capture.as_ref())
+            .is_some_and(|capture| {
+                capture.reads_hook_sidecar(if inputs.container.is_some() {
+                    capture.sandbox
+                } else {
+                    capture.host
+                })
+            }) {
             inputs.hook_capture_context(&self.id)?
         } else if let Some(plan) = prime
             .take()
@@ -1800,6 +1926,7 @@ impl Instance {
             resolved_target_session_id,
             pi_pinnable,
             opencode_preassign,
+            store_override,
         })
     }
 
@@ -1874,10 +2001,9 @@ impl Instance {
         );
         let binding = binding.filter(|binding| binding.session_id == sid)
             .context("conversation provenance is unknown; use aoe session set-session-id with an explicitly configured execution identity and store before resuming or forking")?;
-        anyhow::ensure!(binding.is_known() || (!explicit && binding.provenance == ConversationProvenance::Preallocated),
+        anyhow::ensure!(binding.is_known() || binding.is_unattributed() || (!explicit && binding.provenance == ConversationProvenance::Preallocated),
             "conversation has not been observed or explicitly asserted; a preallocated ID is not a forkable conversation");
-        // Default may try a known ID after an external context move; only a qualified
-        // observation can rebind its historical execution identity. Explicit operations stay strict.
+        // Default may adopt a known ID after a context move when agent and filesystem agree.
         anyhow::ensure!(
             binding
                 .execution
@@ -2207,16 +2333,32 @@ impl Instance {
         })
     }
 
+    /// A sidecar observation that named no transcript may refresh the SID without
+    /// erasing the path already published for that same conversation.
+    pub(super) fn observed_pi_session_path(
+        &self,
+        observation: &crate::session::poller::SessionIdObservation,
+    ) -> Option<String> {
+        observation.pi_session_path.clone().or_else(|| {
+            let id_only_sidecar = observation.source().is_none()
+                && matches!(
+                    &observation.guard,
+                    crate::session::poller::SessionIdGuard::InstanceSidecar { transcript: None }
+                )
+                && self.agent_session_id.as_deref() == Some(observation.sid.as_str());
+            id_only_sidecar
+                .then(|| self.pi_session_path.clone())
+                .flatten()
+        })
+    }
+
     pub(crate) fn apply_conversation_observation(
         &mut self,
         observation: &crate::session::poller::SessionIdObservation,
     ) {
         let binding = self.observed_binding(observation);
-        self.set_agent_conversation(
-            Some(observation.sid.clone()),
-            binding,
-            observation.pi_session_path.clone(),
-        );
+        let pi_session_path = self.observed_pi_session_path(observation);
+        self.set_agent_conversation(Some(observation.sid.clone()), binding, pi_session_path);
     }
 
     pub(crate) fn asserted_resume_binding(
@@ -2239,6 +2381,7 @@ impl Instance {
         .unwrap_or_else(|| {
             self.resolve_native_execution(None)
                 .map(|execution| execution.binding)
+                .context("aoe session set-session-id cannot resolve the native execution identity for this context")
         })?;
         anyhow::ensure!(
             crate::agents::get_agent(&execution.agent)
@@ -2292,12 +2435,13 @@ impl Instance {
             *primary = crate::session::capture::canonicalize_or_raw(
                 store.to_str().context("store path must be UTF-8")?,
             );
-            // A store named other than `~/.claude` is exported even when it aliases the default.
-            let home = super::hooks::host_home(&self.resolved_host_environment())
+            let selected_home = super::hooks::host_home(&self.resolved_host_environment())
                 .context("native HOME is unavailable")?;
-            execution.exported_default_store = crate::git::template::lexical_normalize(store)
-                != crate::git::template::lexical_normalize(&home.join(".claude"))
-                && crate::session::capture::is_default_claude_store(primary, &home);
+            execution.exported_default_store = Some(
+                crate::git::template::lexical_normalize(store)
+                    != crate::git::template::lexical_normalize(&selected_home.join(".claude"))
+                    && crate::session::capture::is_default_claude_store(primary, &selected_home),
+            );
         }
         Ok(ConversationBinding {
             session_id: sid.into(),
@@ -2308,14 +2452,22 @@ impl Instance {
     }
 
     pub(crate) fn adopt_conversation_state(&mut self, state: ConversationState) {
-        if self.active_execution != state.active {
-            self.stop_poller();
-            self.session_id_poller = None;
-        }
+        self.settle_poller_for(state.active.as_ref());
         self.set_agent_conversation(state.session_id, state.binding, state.pi_session_path);
         self.resume_intent = state.intent;
         self.resume_binding = state.resume_binding;
         self.active_execution = state.active;
+    }
+
+    /// Take on the execution `src` launched, settling the session-id poller with it.
+    ///
+    /// A poller is only usable by a row holding the execution it was installed for: the drain
+    /// erases an observation that names another execution, and a launch-scoped one reads the
+    /// other launch's file. A poller for another execution is stopped here; the repair walk
+    /// installs one for this pane once the relaunch that stamped it says the pane is new.
+    pub(crate) fn adopt_active_execution(&mut self, src: &Self) {
+        self.settle_poller_for(src.active_execution.as_ref());
+        self.active_execution = src.active_execution.clone();
     }
 
     pub(super) fn capture_store_dir(&self) -> Option<PathBuf> {
@@ -2361,17 +2513,19 @@ mod tests {
             cwd: root.join("cwd"),
             cwd_filesystem: "host".into(),
             filesystem: "host".into(),
-            exported_default_store: false,
+            exported_default_store: None,
         };
         let host = binding(&real);
         let host_alias = binding(&alias);
         assert!(Instance::execution_identity_matches(&host, &host_alias));
-        // Store routing does not change which conversation a binding names.
-        let exported = ExecutionBinding {
-            exported_default_store: true,
-            ..host_alias.clone()
-        };
-        assert!(Instance::execution_identity_matches(&host, &exported));
+        // Identity is the whole location, not its last component: two distinct
+        // directories that happen to share a leaf name are different contexts.
+        let twin = temp.path().join("twin");
+        std::fs::create_dir_all(twin.join("store")).unwrap();
+        assert!(
+            !Instance::execution_identity_matches(&host, &binding(&twin)),
+            "a same-named directory elsewhere is a different execution context"
+        );
 
         let mut runtime_cwd = host.clone();
         runtime_cwd.cwd_filesystem = "runtime:docker:test".into();
@@ -2399,6 +2553,160 @@ mod tests {
             &container_store,
             &container_store_alias
         ));
+    }
+
+    #[test]
+    fn legacy_binding_routing_marker_is_optional_and_not_identity() {
+        use std::hash::{Hash, Hasher};
+
+        let legacy: ExecutionBinding = serde_json::from_value(serde_json::json!({
+            "agent": "claude",
+            "stores": ["/tmp/claude"],
+            "cwd": "/tmp",
+            "cwd_filesystem": "host",
+            "filesystem": "host"
+        }))
+        .unwrap();
+        assert_eq!(legacy.exported_default_store, None);
+        let mut exported = legacy.clone();
+        exported.exported_default_store = Some(true);
+        assert_eq!(legacy, exported);
+        // The predicate handoff, validation and carry compare on is its own
+        // thing: it ignores the routing marker, so a legacy row and its
+        // attested counterpart stay the same execution.
+        assert!(Instance::execution_identity_matches(&legacy, &exported));
+
+        let digest = |binding: &ExecutionBinding| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            binding.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(digest(&legacy), digest(&exported));
+    }
+
+    /// #4127: a binding written before routing provenance existed adopts the
+    /// route a launch attested, and nothing else about it moves.
+    #[cfg(unix)]
+    #[test]
+    fn attest_observed_default_store_stamps_only_the_attested_route() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("claude");
+        std::fs::create_dir_all(&store).unwrap();
+        let observed = ExecutionBinding {
+            agent: "claude".into(),
+            stores: vec![store.clone()],
+            configuration: Vec::new(),
+            cwd: temp.path().to_path_buf(),
+            cwd_filesystem: "host".into(),
+            filesystem: "host".into(),
+            exported_default_store: Some(true),
+        };
+        let legacy = |agent: &str, filesystem: &str, store: PathBuf| ConversationBinding {
+            session_id: "sid-1".into(),
+            execution: Some(ExecutionBinding {
+                agent: agent.into(),
+                stores: vec![store],
+                configuration: Vec::new(),
+                cwd: temp.path().to_path_buf(),
+                cwd_filesystem: "host".into(),
+                filesystem: filesystem.into(),
+                exported_default_store: None,
+            }),
+            provenance: ConversationProvenance::Observed,
+            transcript_path: Some(temp.path().join("transcript.jsonl")),
+        };
+        let marker = |binding: &ConversationBinding| {
+            binding
+                .execution
+                .as_ref()
+                .and_then(|execution| execution.exported_default_store)
+        };
+        let without_marker = |binding: &ConversationBinding| {
+            let mut execution = binding.execution.clone().unwrap();
+            execution.exported_default_store = None;
+            (
+                binding.session_id.clone(),
+                binding.provenance.clone(),
+                binding.transcript_path.clone(),
+                execution,
+            )
+        };
+
+        // Two spellings of one store are one store, so the marker is written.
+        let mut binding = legacy("claude", "host", temp.path().join("claude/"));
+        let before = binding.clone();
+        assert!(attest_observed_default_store(&mut binding, Some(&observed)));
+        assert_eq!(marker(&binding), Some(true));
+        assert_eq!(without_marker(&binding), without_marker(&before));
+        assert_eq!(binding, before, "the marker is not part of the identity");
+
+        // Idempotent, and a marker already attested is never overwritten.
+        assert!(!attest_observed_default_store(
+            &mut binding,
+            Some(&observed)
+        ));
+        let mut attested = binding.clone();
+        attested.execution.as_mut().unwrap().exported_default_store = Some(false);
+        let downgrade = ExecutionBinding {
+            exported_default_store: Some(false),
+            ..observed.clone()
+        };
+        assert!(!attest_observed_default_store(
+            &mut attested,
+            Some(&downgrade)
+        ));
+        assert_eq!(marker(&attested), Some(false));
+
+        let other_store = temp.path().join("other");
+        let refusals = [
+            ("codex", "host", store.clone(), observed.clone()),
+            (
+                "claude",
+                "container:session",
+                store.clone(),
+                observed.clone(),
+            ),
+            ("claude", "host", other_store, observed.clone()),
+            (
+                "claude",
+                "host",
+                store.clone(),
+                ExecutionBinding {
+                    stores: vec![store.clone(), temp.path().join("second")],
+                    ..observed.clone()
+                },
+            ),
+            (
+                "claude",
+                "host",
+                store.clone(),
+                ExecutionBinding {
+                    exported_default_store: None,
+                    ..observed.clone()
+                },
+            ),
+        ];
+        for (agent, filesystem, store, observed) in refusals {
+            let mut binding = legacy(agent, filesystem, store);
+            assert!(
+                !attest_observed_default_store(&mut binding, Some(&observed)),
+                "agent={agent} filesystem={filesystem} stores={:?}",
+                observed.stores
+            );
+            assert_eq!(marker(&binding), None);
+        }
+
+        // A binding no observation qualified, and an observation nobody
+        // reported, attest nothing.
+        let mut unknown = legacy("claude", "host", store.clone());
+        unknown.provenance = ConversationProvenance::Unknown;
+        assert!(!attest_observed_default_store(
+            &mut unknown,
+            Some(&observed)
+        ));
+        let mut binding = legacy("claude", "host", store);
+        assert!(!attest_observed_default_store(&mut binding, None));
+        assert_eq!(marker(&binding), None);
     }
 
     fn hermes_fixture() -> (tempfile::TempDir, NativeLaunchInputs, rusqlite::Connection) {
@@ -2579,5 +2887,127 @@ mod tests {
                 "{name} must refuse a valued verbosity override"
             );
         }
+    }
+
+    /// A recorded id must reach `terminal_fork_seed` whatever evidence stands
+    /// behind it: a binding a migration left unattributed forks on the row's
+    /// own agent, while a binding a degraded launch dropped is still refused as
+    /// unqualified, because nothing proves what it names.
+    #[test]
+    #[serial_test::serial]
+    fn fork_parent_ref_keeps_a_recorded_but_unqualified_conversation() {
+        let root = tempfile::tempdir().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(root.path());
+        let _claude = crate::session::test_support::install_login_shell_path_command(
+            root.path(),
+            "claude",
+            "#!/bin/sh\nexit 0\n",
+        );
+        let mut instance = Instance::new("parent", root.path().to_str().unwrap());
+        instance.tool = "claude".into();
+        instance.agent_session_id = Some("legacy-uuid".into());
+
+        instance.agent_session_binding = Some(ConversationBinding::unknown("legacy-uuid"));
+        assert!(matches!(
+            crate::session::fork::terminal_fork_seed(
+                instance.fork_parent_ref().unwrap(),
+                "child-uuid".into()
+            ),
+            Ok(crate::session::ForkSeed::Terminal { .. })
+        ));
+
+        instance.agent_session_binding = None;
+        assert_eq!(
+            crate::session::fork::terminal_fork_seed(
+                instance.fork_parent_ref().unwrap(),
+                "child-uuid".into()
+            ),
+            Err(crate::session::ForkDenied::UnqualifiedParent {
+                preallocated: false,
+                recorded: "legacy-uuid".into(),
+            })
+        );
+    }
+
+    /// A row whose own fork intent has not launched holds the parent's
+    /// conversation, not one of its own, so it is refused as the fork it is.
+    #[test]
+    fn fork_parent_ref_reports_a_child_whose_fork_has_not_launched() {
+        let mut instance = Instance::new("child", "/tmp");
+        instance.agent_session_id = Some("parent-uuid".into());
+        instance.agent_session_binding = Some(ConversationBinding {
+            session_id: "parent-uuid".into(),
+            execution: Some(ExecutionBinding {
+                agent: "claude".into(),
+                stores: vec!["/store".into()],
+                configuration: Vec::new(),
+                cwd: "/work".into(),
+                cwd_filesystem: "host".into(),
+                filesystem: "host".into(),
+                exported_default_store: None,
+            }),
+            provenance: ConversationProvenance::Observed,
+            transcript_path: None,
+        });
+        instance.resume_intent = ResumeIntent::Fork {
+            from: "parent-uuid".into(),
+        };
+
+        assert_eq!(
+            crate::session::fork::terminal_fork_seed(
+                instance.fork_parent_ref().unwrap(),
+                "child-uuid".into()
+            ),
+            Err(crate::session::ForkDenied::UnlaunchedFork)
+        );
+    }
+
+    /// The exported `CLAUDE_CONFIG_DIR` and the store recorded on the binding
+    /// must name one identity: a symlinked declaration would otherwise route
+    /// the agent through the alias while persisting the resolved path.
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn claude_store_route_and_binding_share_one_canonical_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let _config_dir = crate::session::test_support::EnvGuard::unset(&["CLAUDE_CONFIG_DIR"]);
+        let _claude = crate::session::test_support::install_login_shell_path_command(
+            temp.path(),
+            "claude",
+            "#!/bin/sh\nexit 0\n",
+        );
+        let real = temp.path().join("real-store");
+        let alias = temp.path().join("alias-store");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let profile = "claude-store-route-identity";
+        let path =
+            crate::session::config::profile_config::get_profile_config_path(profile).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "[session.agent_config_dir]\nclaude = {:?}\n",
+                alias.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let _registry = crate::tmux::status_rules::ProfileRegistryGuard::take(profile);
+        let mut inst = Instance::new("claude-route-identity", temp.path().to_str().unwrap());
+        inst.source_profile = profile.into();
+        inst.tool = "claude".into();
+        inst.view = crate::session::View::Structured;
+
+        let native = inst.resolve_native_execution(None).unwrap();
+
+        let resolved = real.canonicalize().unwrap();
+        assert_eq!(native.binding.stores, vec![resolved.clone()]);
+        let routed = native
+            .routing
+            .iter()
+            .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+            .map(|(_, value)| value.as_deref());
+        assert_eq!(routed, Some(resolved.to_str()));
     }
 }

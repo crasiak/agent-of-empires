@@ -40,6 +40,8 @@ mod v030_global_only_profile_settings;
 mod v031_conversation_provenance;
 mod v032_bound_capture_exclusions;
 pub(crate) mod v033_isolate_sandbox_content;
+mod v034_trash_retention_minutes;
+mod v035_custom_sort_order;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -85,7 +87,7 @@ use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 33;
+const CURRENT_VERSION: u32 = 35;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -209,6 +211,12 @@ const MIGRATIONS: &[Migration] = &[
         "isolate_sandbox_content",
         v033_isolate_sandbox_content::run,
     ),
+    (
+        34,
+        "trash_retention_minutes",
+        v034_trash_retention_minutes::run,
+    ),
+    (35, "custom_sort_order", v035_custom_sort_order::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -373,6 +381,46 @@ mod tests {
         assert!(error.contains("refusing to downgrade"));
     }
 
+    /// v035 is a schema step and nothing more: an install on the previous version with a
+    /// non-default sort order comes out on a newer version with `state.toml` byte for byte
+    /// as it was, and running the migrations again changes neither.
+    #[test]
+    #[serial_test::serial]
+    fn schema_34_advances_and_keeps_its_sort_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let app = crate::session::get_app_dir().unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join(VERSION_FILE), "34").unwrap();
+        let state = "sort_order = \"oldest\"\n";
+        fs::write(app.join("state.toml"), state).unwrap();
+        assert_eq!(
+            crate::session::config::AppStateConfig::load()
+                .unwrap()
+                .sort_order,
+            Some(crate::session::config::SortOrder::Oldest),
+            "the fixture holds a non-default order the previous schema can read"
+        );
+
+        run_migrations().unwrap();
+        let advanced = get_current_version();
+        assert!(advanced > 34, "the version advances past 34, to {advanced}");
+        assert_eq!(advanced, CURRENT_VERSION);
+        assert_eq!(
+            fs::read_to_string(app.join("state.toml")).unwrap(),
+            state,
+            "the state is not rewritten"
+        );
+
+        run_migrations().unwrap();
+        assert_eq!(get_current_version(), advanced, "a second run stays put");
+        assert_eq!(
+            fs::read_to_string(app.join("state.toml")).unwrap(),
+            state,
+            "and leaves the state alone"
+        );
+    }
+
     #[test]
     #[serial_test::serial]
     fn schema_31_content_isolation_still_receives_upstream_provenance() {
@@ -400,5 +448,43 @@ mod tests {
             "old"
         );
         assert_eq!(get_current_version(), CURRENT_VERSION);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn oldest_migration_backup_of_an_upgrade_stays_readable_by_the_previous_release() {
+        // v1.16.1 typed both of these as plain strings.
+        #[derive(serde::Deserialize)]
+        struct Pre116 {
+            #[serde(default)]
+            retroactive_capture_excludes: std::collections::HashSet<String>,
+            pending_initial_turn: Option<String>,
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let app = crate::session::get_app_dir().unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join(VERSION_FILE), "28").unwrap();
+        fs::write(
+            app.join("sessions.json"),
+            r#"[{"retroactive_capture_excludes":["legacy-sid"],"pending_initial_turn":"go"}]"#,
+        )
+        .unwrap();
+
+        run_migrations().unwrap();
+
+        let backups = crate::session::migration_backups(&app.join("sessions.json")).unwrap();
+        assert!(
+            !backups.is_empty(),
+            "an upgrade that retypes a field must leave a migration backup"
+        );
+
+        let before: Vec<Pre116> =
+            serde_json::from_slice(&fs::read(&backups[0].1).unwrap()).unwrap();
+        assert!(before[0]
+            .retroactive_capture_excludes
+            .contains("legacy-sid"));
+        assert_eq!(before[0].pending_initial_turn.as_deref(), Some("go"));
     }
 }

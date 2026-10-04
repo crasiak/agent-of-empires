@@ -21,6 +21,7 @@ mod preview;
 mod profiles;
 mod projects;
 pub(crate) mod render;
+mod reorder;
 mod rows;
 mod selection;
 mod send;
@@ -64,8 +65,8 @@ use super::stop_poller::StopPoller;
 use self::creation::SessionMutationGuards;
 use self::icons::{
     ICON_ARCHIVED_SECTION, ICON_COLLAPSED, ICON_DELETING, ICON_DORMANT, ICON_ERROR, ICON_EXPANDED,
-    ICON_IDLE, ICON_PINNED, ICON_STOPPED, ICON_TRASH_SECTION, ICON_UNKNOWN, ICON_UNREAD,
-    UNREAD_DWELL,
+    ICON_FAVORITE, ICON_IDLE, ICON_PINNED, ICON_STOPPED, ICON_TRASH_SECTION, ICON_UNKNOWN,
+    ICON_UNREAD, UNREAD_DWELL,
 };
 use self::preview::{PreviewCache, PreviewSelection, PreviewTextView, PreviewTimings};
 use self::rows::project_group_key;
@@ -150,6 +151,7 @@ pub struct HomeView {
     /// Whether session color labels render in the sidebar and appear in the
     /// session context menu. Cached from `session.show_session_colors`.
     pub(super) show_session_colors: bool,
+    pub(super) show_activity_age: bool,
     pub(super) agent_clipboard_forward: bool,
     pub(super) hyperlink_cells: crate::tui::hyperlink::SharedHyperlinks,
     pub(super) vt_live_enabled: bool,
@@ -239,6 +241,9 @@ pub struct HomeView {
     pub(in crate::tui) structured_preview:
         Option<crate::tui::structured_view::embedded::EmbeddedView>,
     pub(in crate::tui) structured_preview_pending: bool,
+    /// The last frame painted the mounted structured transcript into the preview, so
+    /// `preview_text_view` maps transcript rows rather than the tmux capture.
+    pub(super) structured_transcript_painted: bool,
     pub(super) pending_force_remove_session: Option<String>,
     pub(super) pending_trash_session: Option<String>,
     pub(super) pending_dialog_click_action: Option<crate::tui::app::Action>,
@@ -305,7 +310,8 @@ pub struct HomeView {
     pub(super) attach_project_in_flight: std::collections::HashSet<String>,
 
     pub(super) creation_poller: CreationPoller,
-    pub(super) creation_cancelled: bool,
+    /// Cancels the request behind `creating_stub_id`.
+    pub(super) creation_cancel: Option<tokio_util::sync::CancellationToken>,
     pub(super) on_launch_hooks_ran: HashSet<String>,
 
     pub(super) creating_hook_progress: HashMap<String, CreatingHookProgress>,
@@ -331,7 +337,7 @@ pub struct HomeView {
     pub(super) shelf_inner_area: Rect,
     pub(super) collapse_button_area: Rect,
     pub(super) expand_strip_area: Rect,
-    pub(super) footer_buttons: Vec<(Rect, crossterm::event::KeyEvent)>,
+    pub(super) footer_buttons: Vec<(crossterm::event::KeyEvent, Rect)>,
     pub(super) footer_hover: Option<crossterm::event::KeyEvent>,
     pub(super) mouse_pos: Option<(u16, u16)>,
     pub(super) last_click: Option<(std::time::Instant, u16, u16)>,

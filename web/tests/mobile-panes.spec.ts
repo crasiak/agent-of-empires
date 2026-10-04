@@ -17,6 +17,29 @@ async function openPicker(page: Page) {
   await expect(picker(page)).toBeVisible({ timeout: 5_000 });
 }
 
+/** One-finger horizontal swipe dispatched on the window, where useDrawerSwipe listens. */
+async function swipe(page: Page, fromX: number, toX: number, y: number) {
+  await page.evaluate(
+    ({ fromX, toX, y }) => {
+      const fire = (type: string, x: number) => {
+        const touch = new Touch({ identifier: 0, target: document.body, clientX: x, clientY: y });
+        const lifted = type === "touchend";
+        document.body.dispatchEvent(
+          new TouchEvent(type, {
+            bubbles: true,
+            touches: lifted ? [] : [touch],
+            changedTouches: [touch],
+          }),
+        );
+      };
+      fire("touchstart", fromX);
+      for (let i = 1; i <= 5; i++) fire("touchmove", fromX + ((toX - fromX) * i) / 5);
+      fire("touchend", toX);
+    },
+    { fromX, toX, y },
+  );
+}
+
 /** Shrink `visualViewport` the way an on-screen keyboard does. */
 async function simulateKeyboardOpen(page: Page, keyboardPx: number) {
   await page.evaluate((keyboardPx) => {
@@ -32,7 +55,10 @@ async function simulateKeyboardOpen(page: Page, keyboardPx: number) {
 /** The picked pane must reserve the home-indicator inset the App root no longer
  *  does (moved per-surface; see index.css .safe-area-inset). */
 async function expectSafeAreaInset(page: Page, testId: string) {
-  const inset = await page.getByTestId(testId).evaluate((el) => (el as HTMLElement).style.paddingBottom);
+  const layer = page.getByTestId(testId);
+  // Terminal layers clear it through a class the mobile key row can turn off.
+  if (await layer.evaluate((el) => el.classList.contains("home-indicator-clearance"))) return;
+  const inset = await layer.evaluate((el) => (el as HTMLElement).style.paddingBottom);
   expect(inset).toContain("safe-area-inset-bottom");
 }
 
@@ -41,12 +67,48 @@ async function expectSafeAreaInset(page: Page, testId: string) {
 test.describe("Mobile right panel picker (#1452)", () => {
   test.use(iPhone13);
 
+  test("swipe left from mid-screen opens a right-anchored drawer with thumb-reachable options; swipe right closes it", async ({
+    page,
+  }) => {
+    await openLiveTerminal(page, { mobile: true, settings: null });
+    const viewport = page.viewportSize()!;
+    const y = viewport.height / 2;
+
+    await swipe(page, viewport.width / 2 + 80, viewport.width / 2 - 80, y);
+    await expect(picker(page)).toBeVisible();
+    // A full-height panel flush with the right edge, not a full-width bottom sheet.
+    await expect
+      .poll(async () => {
+        const box = await picker(page).boundingBox();
+        return box && { right: Math.round(box.x + box.width), top: box.y, narrow: box.width < viewport.width * 0.9 };
+      })
+      .toEqual({ right: viewport.width, top: 48, narrow: true });
+    // Tailwind v4 `translate-x-*` sets `translate`, so a transition on
+    // `transform` alone snaps the drawer instead of sliding it.
+    expect(await picker(page).evaluate((el) => getComputedStyle(el).transitionProperty)).toContain("translate");
+    // Options hug the bottom of the drawer, not its top.
+    const option = await page.getByTestId("mobile-right-panel-pick-agent").boundingBox();
+    expect(option!.y).toBeGreaterThan(viewport.height / 2);
+
+    await swipe(page, viewport.width / 2, viewport.width / 2 + 160, y);
+    await expect(picker(page)).toBeHidden();
+    // The same touchmove would have opened the sidebar, so it has committed by
+    // the time the picker hides.
+    await expect(page.locator('[data-tour="sidebar"]')).toHaveClass(/-translate-x-full/);
+
+    // The header stays reachable above the drawer; its sidebar toggle swaps drawers rather than stacking them.
+    await openPicker(page);
+    await page.getByRole("button", { name: "Toggle sidebar" }).click();
+    await expect(picker(page)).toBeHidden();
+    await expect(page.locator('[data-tour="sidebar"]')).not.toHaveClass(/-translate-x-full/);
+  });
+
   test("picker promotes the paired terminal and it survives the keyboard", async ({ page }) => {
     await openLiveTerminal(page, { mobile: true, settings: { mobileFontSize: 10 } });
     await openPicker(page);
 
     await page.getByTestId("mobile-right-panel-pick-paired").click();
-    await expect(picker(page)).toHaveCount(0);
+    await expect(picker(page)).toBeHidden();
     const paired = page.locator('[data-term="paired"]');
     await paired.waitFor({ state: "visible", timeout: 10_000 });
     await expectSafeAreaInset(page, "mobile-paired-layer");
@@ -74,7 +136,7 @@ test.describe("Mobile right panel picker (#1452)", () => {
     await openPicker(page);
 
     await page.getByTestId("mobile-right-panel-pick-paired").click();
-    await expect(picker(page)).toHaveCount(0);
+    await expect(picker(page)).toBeHidden();
     const paired = page.locator('[data-term="paired"]');
     await paired.waitFor({ state: "visible", timeout: 10_000 });
 
@@ -102,9 +164,9 @@ test.describe("Desktop right panel split is unchanged (#1452)", () => {
     await expect(page.getByTestId("content-split-resize-handle")).toBeVisible();
     await expect(page.getByTestId("activity-bar")).toBeVisible();
     await expect(page.getByRole("button", { name: "Toggle panels" })).toHaveCount(0);
-    await expect(picker(page)).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Arrow up" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Ctrl+C interrupt" })).toHaveCount(0);
+    await expect(picker(page)).toBeHidden();
+    await expect(page.getByRole("button", { name: "Compose", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("group", { name: "Arrow keys joystick" })).toHaveCount(0);
   });
 });
 
@@ -204,31 +266,29 @@ test.describe("Mobile fullscreen-agent layout", () => {
   });
 });
 
-// #1430: the old settings header crammed Back, the title and ProfileSelector
-// into one h-12 row, with the selector in a `flex-1 justify-center` wrapper
-// that squeezed the back affordance and title to the left edge at mobile
-// widths. The header now wraps the selector onto a second row below md.
-test.describe("Mobile settings header", () => {
+// #1430: Back and the title share a row, and nothing pushes the header past the
+// viewport. Settings opens on a grouped section list; a section's Back returns to it.
+test.describe("Mobile settings", () => {
   test.use(iPhone13);
 
-  test("Back and title sit on a row above the ProfileSelector and the header never overflows", async ({ page }) => {
+  test("opens on a grouped list, pushes a section, and Back returns to the list", async ({ page }) => {
     await page.goto("/settings");
+    const list = page.getByTestId("settings-section-list");
+    await expect(list.getByText("Dashboard", { exact: true })).toBeVisible();
     const backBtn = page.getByRole("button", { name: /Back/ });
-    const profileLabel = page.getByText("Profile", { exact: true });
-    await expect(backBtn).toBeVisible();
-    await expect(profileLabel).toBeVisible();
-
     const backBox = (await backBtn.boundingBox())!;
-    const profileBox = (await profileLabel.boundingBox())!;
     const titleBox = (await page.getByText("Settings", { exact: true }).first().boundingBox())!;
-    // The selector wraps onto its own row.
-    expect(profileBox.y).toBeGreaterThanOrEqual(backBox.y + backBox.height - 1);
-    // gap-x-3 on the header (12px); anything above 6px proves the
-    // cramped-against-left-edge regression is gone.
+    expect(Math.abs(titleBox.y - backBox.y)).toBeLessThan(backBox.height);
     expect(titleBox.x - (backBox.x + backBox.width)).toBeGreaterThan(6);
 
-    // Overflow inside the ProfileSelector row is allowed via overflow-x-auto,
-    // but the header container itself must not push past the viewport edge.
+    await list.getByRole("button", { name: /Notifications/ }).click();
+    await expect(page).toHaveURL(/\/settings\/notifications$/);
+    await expect(page.getByRole("heading", { name: "Notifications", level: 2 })).toBeVisible();
+    await expect(list).toHaveCount(0);
+    await page.getByRole("button", { name: /All settings/ }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+    await expect(list).toBeVisible();
+
     const header = page.getByTestId("settings-header");
     for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: 640 });
@@ -238,5 +298,14 @@ test.describe("Mobile settings header", () => {
         )
         .toBe(true);
     }
+
+    // Returning to the list pops the tab rather than stacking another entry.
+    await page.goBack();
+    await expect(page).not.toHaveURL(/\/settings/);
+    await page.goto("/settings/sandbox");
+    await page.getByRole("button", { name: /All settings/ }).click();
+    await expect(list).toBeVisible();
+    await page.goBack();
+    await expect(page).not.toHaveURL(/\/settings\/sandbox$/);
   });
 });

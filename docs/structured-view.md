@@ -13,7 +13,7 @@ It speaks the [Agent Client Protocol](https://agentclientprotocol.com/) (ACP), a
 
 ## Supported agents
 
-aoe ships an ACP registry entry for each tool whose ACP server we have verified. For those the web wizard shows a per-session **Use structured view** toggle (on by default) under **More options**.
+aoe ships an ACP registry entry for each tool whose ACP server we have verified. For those the web wizard shows a per-session **Structured** switch (on by default).
 
 | Agent | ACP adapter | Install | Auth |
 |-------|-------------|---------|------|
@@ -47,7 +47,7 @@ Each built-in adapter receives only the provider variables it is known to read, 
 | `aoe-agent` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `GOOGLE_GENERATIVE_AI_API_KEY` |
 | `prime-agent` | `PRIME_API_KEY`, `PRIME_TEAM_ID`, every provider key its model registry reads, and the Vertex, Bedrock, and AWS credential-chain variables (see `src/acp/agent_registry.rs`) |
 
-`vibe`, `pi`, `omp`, `kimi`, and custom adapters have no ambient allowlist yet: give them auth through the session's `extra_env`, the `environment` list, or `session.inherit_host_environment` for host sessions. In a sandboxed session the per-adapter keys above still cross the container boundary, but `inherit_host_environment` does not, so use `sandbox.environment` there. Allowlist entries naming a file or directory (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GOOGLE_APPLICATION_CREDENTIALS`, the AWS file variables) are host-only and never cross, since each agent's config dir is already bind-mounted at its canonical container location.
+`vibe`, `pi`, `omp`, `kimi`, and custom adapters have no ambient allowlist yet: give them auth through the session's `extra_env`, the `environment` list, or `session.inherit_host_environment` for host sessions. In a sandboxed session the per-adapter keys above still cross the container boundary, but `inherit_host_environment` does not, so use `sandbox.environment` there. Allowlist entries naming a file or directory (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GOOGLE_APPLICATION_CREDENTIALS`, the AWS file variables) are host-only and never cross, since each agent's config dir is already bind-mounted at its canonical container location; each drop is logged under the `acp` target with the key and the reason.
 
 ### Feature matrix
 

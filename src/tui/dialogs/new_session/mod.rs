@@ -20,6 +20,7 @@ use crate::session::config::{load_config, update_app_state, DefaultTerminalMode,
 #[cfg(test)]
 use crate::session::Config;
 use crate::tmux::AvailableTools;
+use crate::tui::components::hover::HoverState;
 use crate::tui::components::{
     DirPicker, DirPickerResult, GroupGhostCompletion, ListPicker, ListPickerResult,
 };
@@ -32,9 +33,13 @@ pub(super) struct FieldHelp {
 
 pub(super) const HELP_DIALOG_WIDTH: u16 = 85;
 
-/// Index of the Base field in the worktree config overlay; shared by the key
-/// and mouse handlers.
+// Field indices in the config overlays, shared by the key and mouse handlers.
+const WT_NAME_FIELD: usize = 0;
+const WT_NEW_BRANCH_FIELD: usize = 1;
 const WT_BASE_BRANCH_FIELD: usize = 2;
+const WT_EXTRA_REPOS_FIELD: usize = 3;
+const SANDBOX_IMAGE_FIELD: usize = 0;
+const SANDBOX_ENV_FIELD: usize = 1;
 
 pub(super) const FIELD_HELP: &[FieldHelp] = &[
     FieldHelp {
@@ -55,7 +60,8 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
     },
     FieldHelp {
         name: "Tool",
-        description: "Which AI tool to use (Ctrl+P to configure command and extra args)",
+        description:
+            "Which AI tool to use (1-9 to pick, Ctrl+P to configure command and extra args)",
     },
     FieldHelp {
         name: "Structured",
@@ -252,6 +258,14 @@ pub struct NewSessionDialog {
     pub(super) tool_config_rects: Vec<(usize, ratatui::layout::Rect)>,
     /// Rects keyed by `worktree_config_focused_field`.
     pub(super) worktree_config_rects: Vec<(usize, ratatui::layout::Rect)>,
+    /// Entry rows of the expanded, idle editable list in the open overlay,
+    /// keyed by entry index.
+    pub(super) list_entry_rects: Vec<(usize, ratatui::layout::Rect)>,
+    /// `[y]es` / `[N]o` of the create-directory prompt, keyed by the choice.
+    pub(super) confirm_create_rects: Vec<(bool, ratatui::layout::Rect)>,
+    /// Rows the pointer can highlight on the visible panel, rebuilt per frame.
+    pub(super) hover_rects: Vec<ratatui::layout::Rect>,
+    pub(super) hover: HoverState,
 }
 
 /// Key handling shared by the editable lists.
@@ -547,6 +561,10 @@ impl NewSessionDialog {
             sandbox_config_rects: Vec::new(),
             tool_config_rects: Vec::new(),
             worktree_config_rects: Vec::new(),
+            list_entry_rects: Vec::new(),
+            confirm_create_rects: Vec::new(),
+            hover_rects: Vec::new(),
+            hover: HoverState::default(),
         }
     }
 
@@ -582,12 +600,19 @@ impl NewSessionDialog {
         )
     }
 
-    /// Preselect a tool by name, applying the same per-tool side effects as
-    /// cycling the tool field. No-op when the tool is not available.
+    /// Preselect a tool by name. No-op when the tool is not available.
     pub fn set_tool(&mut self, tool: &str) {
-        let Some(index) = self.available_tools.iter().position(|t| t == tool) else {
+        if let Some(index) = self.available_tools.iter().position(|t| t == tool) {
+            self.select_tool_index(index);
+        }
+    }
+
+    /// Switch tools and reset the per-tool YOLO, sandbox and Ctrl+P fields.
+    /// Reselecting the current tool keeps the user's edits.
+    fn select_tool_index(&mut self, index: usize) {
+        if index == self.tool_index {
             return;
-        };
+        }
         self.tool_index = index;
         if self.selected_tool_always_yolo() {
             self.yolo_mode = true;
@@ -600,6 +625,44 @@ impl NewSessionDialog {
             self.worktree_branch.reset();
         }
         self.reload_tool_config();
+    }
+
+    /// Carry a session's agent, view and sandbox, each only as far as this form allows.
+    /// Yolo stays a choice made for each new session.
+    pub fn inherit_session(&mut self, source: &crate::session::Instance) {
+        if !self.available_tools.contains(&source.tool) {
+            return;
+        }
+        self.set_tool(&source.tool);
+        self.inherit_modes(source.is_structured(), source.is_sandboxed());
+    }
+
+    fn inherit_modes(&mut self, structured: bool, sandboxed: bool) {
+        if self.structured_capable {
+            self.structured_enabled = structured;
+            self.structured_choice = Some(structured);
+        }
+        if sandboxed && self.docker_available && !self.selected_tool_host_only() {
+            self.set_sandbox_enabled(true);
+        }
+    }
+
+    /// Switch the sandbox, loading or dropping the environment that goes with it.
+    fn set_sandbox_enabled(&mut self, enabled: bool) {
+        self.sandbox_enabled = enabled;
+        if enabled {
+            let config = self.resolve_config_for_path(&self.profile);
+            self.extra_env = config.sandbox.environment.clone();
+            self.inherited_settings = build_inherited_settings(&config.sandbox);
+            self.extra_env_overridden = false;
+        } else {
+            self.extra_env.clear();
+            self.extra_env_overridden = false;
+            self.env_list_expanded = false;
+            self.env_editing_input = None;
+            self.inherited_settings.clear();
+            self.sandbox_config_mode = false;
+        }
     }
 
     /// Move focus to the title field, for "new from selection" where the path
@@ -616,6 +679,11 @@ impl NewSessionDialog {
     #[cfg(test)]
     pub fn group_value(&self) -> &str {
         self.group.value()
+    }
+
+    #[cfg(test)]
+    pub fn yolo_value(&self) -> bool {
+        self.yolo_mode
     }
 
     #[cfg(test)]
@@ -938,6 +1006,10 @@ impl NewSessionDialog {
             sandbox_config_rects: Vec::new(),
             tool_config_rects: Vec::new(),
             worktree_config_rects: Vec::new(),
+            list_entry_rects: Vec::new(),
+            confirm_create_rects: Vec::new(),
+            hover_rects: Vec::new(),
+            hover: HoverState::default(),
         }
     }
 
@@ -1014,6 +1086,10 @@ impl NewSessionDialog {
             sandbox_config_rects: Vec::new(),
             tool_config_rects: Vec::new(),
             worktree_config_rects: Vec::new(),
+            list_entry_rects: Vec::new(),
+            confirm_create_rects: Vec::new(),
+            hover_rects: Vec::new(),
+            hover: HoverState::default(),
         }
     }
 
@@ -1028,105 +1104,67 @@ pub(crate) fn project_picker_label(p: &crate::session::Project) -> String {
     format!("{} [{}]  {}", p.name, p.scope.as_str(), p.path)
 }
 
+/// Key of the first rect containing `(col, row)`.
 impl NewSessionDialog {
-    /// Route a left-click on the main form. `Some(Continue)` when it landed
-    /// on a focusable field, moving focus and advancing checkbox / cycler rows
-    /// as Space would; `None` when it missed every rect. The config overlays
-    /// and pickers are keyboard-only, and leave `focusable_rects` empty.
+    /// Picker, then config overlay, then main form. Rows act as Space or Enter
+    /// would; text fields only take focus. `None` when nothing was hit.
     pub fn handle_click(&mut self, col: u16, row: u16) -> Option<DialogResult<NewSessionData>> {
-        let pos = ratatui::layout::Position::from((col, row));
+        if self.show_help {
+            self.show_help = false;
+            return Some(DialogResult::Continue);
+        }
 
         // Pickers float over the main form and the config overlays alike, so
         // they route first or the overlay below swallows their clicks.
+        if self.dir_picker.is_active() {
+            let result = self.dir_picker.handle_click(col, row);
+            self.apply_dir_picker_result(result);
+            return Some(DialogResult::Continue);
+        }
         if self.group_picker.is_active() {
-            match self.group_picker.handle_click(col, row) {
-                ListPickerResult::Continue | ListPickerResult::Cancelled => {
-                    return Some(DialogResult::Continue);
-                }
-                ListPickerResult::Selected(value) => {
-                    self.group = Input::new(value);
-                    self.clear_group_ghost();
-                    return Some(DialogResult::Continue);
-                }
+            if let ListPickerResult::Selected(value) = self.group_picker.handle_click(col, row) {
+                self.group = Input::new(value);
+                self.clear_group_ghost();
             }
+            return Some(DialogResult::Continue);
         }
         if self.branch_picker.is_active() {
-            match self.branch_picker.handle_click(col, row) {
-                ListPickerResult::Continue | ListPickerResult::Cancelled => {
-                    return Some(DialogResult::Continue);
-                }
-                ListPickerResult::Selected(value) => {
-                    self.apply_branch_selection(value);
-                    return Some(DialogResult::Continue);
-                }
+            if let ListPickerResult::Selected(value) = self.branch_picker.handle_click(col, row) {
+                self.apply_branch_selection(value);
             }
+            return Some(DialogResult::Continue);
         }
         if self.projects_picker.is_active() {
-            match self.projects_picker.handle_click(col, row) {
-                ListPickerResult::Continue | ListPickerResult::Cancelled => {
-                    return Some(DialogResult::Continue);
-                }
-                ListPickerResult::Selected(value) => {
-                    if let Some(project) = self
-                        .available_projects
-                        .iter()
-                        .find(|p| project_picker_label(p) == value)
-                    {
-                        let path = project.path.clone();
-                        if !self.workspace_repos.iter().any(|p| p == &path) {
-                            self.workspace_repos.push(path);
-                        }
-                    }
-                    return Some(DialogResult::Continue);
-                }
+            if let ListPickerResult::Selected(value) = self.projects_picker.handle_click(col, row) {
+                self.apply_picked_project(&value);
             }
+            return Some(DialogResult::Continue);
         }
 
         // Config overlays win over the main form; their rects are populated
         // only while their mode is active.
         if self.sandbox_config_mode {
-            if let Some(hit) = self
-                .sandbox_config_rects
-                .iter()
-                .find(|(_, rect)| rect.contains(pos))
-                .map(|(f, _)| *f)
-            {
-                self.sandbox_focused_field = hit;
-            }
+            self.click_sandbox_config(col, row);
             return Some(DialogResult::Continue);
         }
         if self.tool_config_mode {
-            if let Some(hit) = self
-                .tool_config_rects
-                .iter()
-                .find(|(_, rect)| rect.contains(pos))
-                .map(|(f, _)| *f)
-            {
-                self.tool_config_focused_field = hit;
+            if let Some(field) = super::hit(&self.tool_config_rects, col, row) {
+                self.tool_config_focused_field = field;
             }
             return Some(DialogResult::Continue);
         }
         if self.worktree_config_mode {
-            if let Some(hit) = self
-                .worktree_config_rects
-                .iter()
-                .find(|(_, rect)| rect.contains(pos))
-                .map(|(f, _)| *f)
-            {
-                self.worktree_config_focused_field = hit;
-                // Field 1 is the new-branch checkbox; a click toggles it.
-                if hit == 1 {
-                    self.create_new_branch = !self.create_new_branch;
-                }
-            }
+            self.click_worktree_config(col, row);
             return Some(DialogResult::Continue);
         }
 
-        let hit_field = self
-            .focusable_rects
-            .iter()
-            .find(|(_, rect)| rect.contains(pos))
-            .map(|(field, _)| *field)?;
+        // The prompt's answers act like their `y` / `n` keys.
+        if let Some(yes) = super::hit(&self.confirm_create_rects, col, row) {
+            let key = if yes { 'y' } else { 'n' };
+            return Some(self.handle_confirm_create_dir_key(KeyEvent::from(KeyCode::Char(key))));
+        }
+
+        let hit_field = super::hit(&self.focusable_rects, col, row)?;
         if self.focused_field == self.path_field() && hit_field != self.focused_field {
             self.seed_worktree_for_path();
         }
@@ -1135,20 +1173,65 @@ impl NewSessionDialog {
         Some(DialogResult::Continue)
     }
 
-    /// Hover only moves the active picker's row highlight, never form focus:
-    /// a cursor drifting across the dialog must not steal the field being
-    /// typed into. Click still sets focus.
+    /// While an entry is being typed the list owns every key, so clicks wait
+    /// for Enter or Esc rather than strand the edit.
+    fn click_sandbox_config(&mut self, col: u16, row: u16) {
+        if self.env_editing_input.is_some() {
+            return;
+        }
+        if let Some(entry) = super::hit(&self.list_entry_rects, col, row) {
+            self.sandbox_focused_field = SANDBOX_ENV_FIELD;
+            self.env_selected_index = entry;
+        } else if let Some(field) = super::hit(&self.sandbox_config_rects, col, row) {
+            if field != SANDBOX_ENV_FIELD {
+                self.env_list_expanded = false;
+            } else if !self.env_list_expanded {
+                self.env_list_expanded = true;
+                self.env_selected_index = 0;
+            }
+            self.sandbox_focused_field = field;
+        }
+    }
+
+    fn click_worktree_config(&mut self, col: u16, row: u16) {
+        if self.workspace_repo_editing_input.is_some() {
+            return;
+        }
+        if let Some(entry) = super::hit(&self.list_entry_rects, col, row) {
+            self.worktree_config_focused_field = WT_EXTRA_REPOS_FIELD;
+            self.workspace_repo_selected_index = entry;
+        } else if let Some(field) = super::hit(&self.worktree_config_rects, col, row) {
+            if field != WT_EXTRA_REPOS_FIELD {
+                self.workspace_repos_expanded = false;
+            } else if !self.workspace_repos_expanded {
+                self.workspace_repos_expanded = true;
+                self.workspace_repo_selected_index = 0;
+            }
+            if field == WT_NEW_BRANCH_FIELD {
+                self.create_new_branch = !self.create_new_branch;
+            }
+            self.worktree_config_focused_field = field;
+        }
+    }
+
+    /// Pickers move their highlight to the pointer; elsewhere hover only tints,
+    /// so a drifting cursor never steals the field being typed into.
     pub fn handle_hover(&mut self, col: u16, row: u16) -> bool {
-        if self.group_picker.is_active() {
-            return self.group_picker.handle_hover(col, row);
+        let picker_changed = if self.dir_picker.is_active() {
+            Some(self.dir_picker.handle_hover(col, row))
+        } else if self.group_picker.is_active() {
+            Some(self.group_picker.handle_hover(col, row))
+        } else if self.branch_picker.is_active() {
+            Some(self.branch_picker.handle_hover(col, row))
+        } else if self.projects_picker.is_active() {
+            Some(self.projects_picker.handle_hover(col, row))
+        } else {
+            None
+        };
+        match picker_changed {
+            Some(changed) => self.hover.update(col, row, &[]) | changed,
+            None => self.hover.update(col, row, &self.hover_rects),
         }
-        if self.branch_picker.is_active() {
-            return self.branch_picker.handle_hover(col, row);
-        }
-        if self.projects_picker.is_active() {
-            return self.projects_picker.handle_hover(col, row);
-        }
-        false
     }
 
     /// Toggle or cycle the focused field, mirroring `handle_key`'s Space /
@@ -1163,20 +1246,7 @@ impl NewSessionDialog {
                 self.reload_config_defaults();
             }
         } else if self.focused_field == fields.tool {
-            if self.available_tools.len() > 1 {
-                self.tool_index = (self.tool_index + 1) % self.available_tools.len();
-                if self.selected_tool_always_yolo() {
-                    self.yolo_mode = true;
-                } else {
-                    self.yolo_mode = self.yolo_mode_default;
-                }
-                if self.selected_tool_host_only() {
-                    self.sandbox_enabled = false;
-                    self.worktree_enabled = false;
-                    self.worktree_branch.reset();
-                }
-                self.reload_tool_config();
-            }
+            self.select_tool_index((self.tool_index + 1) % self.available_tools.len());
         } else if self.focused_field == fields.structured {
             self.structured_enabled = !self.structured_enabled;
             self.structured_choice = Some(self.structured_enabled);
@@ -1198,20 +1268,7 @@ impl NewSessionDialog {
                 }
             }
         } else if self.focused_field == fields.sandbox {
-            self.sandbox_enabled = !self.sandbox_enabled;
-            if self.sandbox_enabled {
-                let config = self.resolve_config_for_path(&self.profile);
-                self.extra_env = config.sandbox.environment.clone();
-                self.inherited_settings = build_inherited_settings(&config.sandbox);
-                self.extra_env_overridden = false;
-            } else {
-                self.extra_env.clear();
-                self.extra_env_overridden = false;
-                self.env_list_expanded = false;
-                self.env_editing_input = None;
-                self.inherited_settings.clear();
-                self.sandbox_config_mode = false;
-            }
+            self.set_sandbox_enabled(!self.sandbox_enabled);
         }
     }
 
@@ -1228,6 +1285,14 @@ impl NewSessionDialog {
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
                 self.show_help = false;
             }
+            return DialogResult::Continue;
+        }
+
+        // The workspace-repo browser opens over the worktree overlay, so it
+        // routes before the overlays.
+        if self.dir_picker.is_active() {
+            let result = self.dir_picker.handle_key(key);
+            self.apply_dir_picker_result(result);
             return DialogResult::Continue;
         }
 
@@ -1258,31 +1323,6 @@ impl NewSessionDialog {
         if self.branch_picker.is_active() {
             if let ListPickerResult::Selected(value) = self.branch_picker.handle_key(key) {
                 self.apply_branch_selection(value);
-            }
-            return DialogResult::Continue;
-        }
-
-        if self.dir_picker.is_active() {
-            match self.dir_picker.handle_key(key) {
-                DirPickerResult::Selected(path) => {
-                    persist_last_browse_dir(&path);
-                    if self.workspace_repo_dir_picker_active {
-                        self.workspace_repo_editing_input = Some(Input::new(path));
-                        self.workspace_repo_ghost = self
-                            .workspace_repo_editing_input
-                            .as_ref()
-                            .and_then(path_input::compute_path_ghost);
-                        self.workspace_repo_dir_picker_active = false;
-                    } else {
-                        self.path = Input::new(path);
-                        self.seed_worktree_for_path();
-                        self.recompute_path_ghost();
-                    }
-                }
-                DirPickerResult::Cancelled => {
-                    self.workspace_repo_dir_picker_active = false;
-                }
-                DirPickerResult::Continue => {}
             }
             return DialogResult::Continue;
         }
@@ -1431,26 +1471,22 @@ impl NewSessionDialog {
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
                 if self.focused_field == fields.tool =>
             {
-                if key.code == KeyCode::Left {
-                    self.tool_index = if self.tool_index == 0 {
-                        self.available_tools.len() - 1
-                    } else {
-                        self.tool_index - 1
-                    };
+                let len = self.available_tools.len();
+                let index = if key.code == KeyCode::Left {
+                    (self.tool_index + len - 1) % len
                 } else {
-                    self.tool_index = (self.tool_index + 1) % self.available_tools.len();
+                    (self.tool_index + 1) % len
+                };
+                self.select_tool_index(index);
+                DialogResult::Continue
+            }
+            KeyCode::Char(c @ '1'..='9')
+                if self.focused_field == fields.tool && key.modifiers.is_empty() =>
+            {
+                let index = c as usize - '1' as usize;
+                if index < self.available_tools.len() {
+                    self.select_tool_index(index);
                 }
-                if self.selected_tool_always_yolo() {
-                    self.yolo_mode = true;
-                } else {
-                    self.yolo_mode = self.yolo_mode_default;
-                }
-                if self.selected_tool_host_only() {
-                    self.sandbox_enabled = false;
-                    self.worktree_enabled = false;
-                    self.worktree_branch.reset();
-                }
-                self.reload_tool_config();
                 DialogResult::Continue
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
@@ -1474,20 +1510,7 @@ impl NewSessionDialog {
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
                 if self.focused_field == fields.sandbox =>
             {
-                self.sandbox_enabled = !self.sandbox_enabled;
-                if self.sandbox_enabled {
-                    let config = self.resolve_config_for_path(&self.profile);
-                    self.extra_env = config.sandbox.environment.clone();
-                    self.inherited_settings = build_inherited_settings(&config.sandbox);
-                    self.extra_env_overridden = false;
-                } else {
-                    self.extra_env.clear();
-                    self.extra_env_overridden = false;
-                    self.env_list_expanded = false;
-                    self.env_editing_input = None;
-                    self.inherited_settings.clear();
-                    self.sandbox_config_mode = false;
-                }
+                self.set_sandbox_enabled(!self.sandbox_enabled);
                 DialogResult::Continue
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
@@ -1528,12 +1551,10 @@ impl NewSessionDialog {
     }
 
     fn handle_sandbox_config_key(&mut self, key: KeyEvent) -> DialogResult<NewSessionData> {
-        // Fields: 0=image, 1=env. Inherited settings are not focusable.
-        const SANDBOX_IMAGE: usize = 0;
-        const SANDBOX_ENV: usize = 1;
+        // Inherited settings are not focusable.
         const SANDBOX_MAX: usize = 2;
 
-        if self.env_list_expanded && self.sandbox_focused_field == SANDBOX_ENV {
+        if self.env_list_expanded && self.sandbox_focused_field == SANDBOX_ENV_FIELD {
             return self.handle_env_list_key(key);
         }
 
@@ -1546,7 +1567,7 @@ impl NewSessionDialog {
                 self.show_help = true;
                 DialogResult::Continue
             }
-            KeyCode::Enter if self.sandbox_focused_field == SANDBOX_ENV => {
+            KeyCode::Enter if self.sandbox_focused_field == SANDBOX_ENV_FIELD => {
                 self.env_list_expanded = true;
                 self.env_selected_index = 0;
                 DialogResult::Continue
@@ -1568,7 +1589,7 @@ impl NewSessionDialog {
                 DialogResult::Continue
             }
             _ => {
-                if self.sandbox_focused_field == SANDBOX_IMAGE {
+                if self.sandbox_focused_field == SANDBOX_IMAGE_FIELD {
                     self.sandbox_image
                         .handle_event(&crossterm::event::Event::Key(key));
                 }
@@ -1594,6 +1615,31 @@ impl NewSessionDialog {
             crate::tui::components::ToolConfigOutcome::Continue => {}
         }
         DialogResult::Continue
+    }
+
+    /// Land a directory browser result in the field that opened it.
+    fn apply_dir_picker_result(&mut self, result: DirPickerResult) {
+        match result {
+            DirPickerResult::Selected(path) => {
+                persist_last_browse_dir(&path);
+                if self.workspace_repo_dir_picker_active {
+                    self.workspace_repo_editing_input = Some(Input::new(path));
+                    self.workspace_repo_ghost = self
+                        .workspace_repo_editing_input
+                        .as_ref()
+                        .and_then(path_input::compute_path_ghost);
+                    self.workspace_repo_dir_picker_active = false;
+                } else {
+                    self.path = Input::new(path);
+                    self.seed_worktree_for_path();
+                    self.recompute_path_ghost();
+                }
+            }
+            DirPickerResult::Cancelled => {
+                self.workspace_repo_dir_picker_active = false;
+            }
+            DirPickerResult::Continue => {}
+        }
     }
 
     /// Append the picked project's path to the workspace repos list.
@@ -1670,10 +1716,6 @@ impl NewSessionDialog {
     }
 
     fn handle_worktree_config_key(&mut self, key: KeyEvent) -> DialogResult<NewSessionData> {
-        // Fields: 0=name, 1=new_branch, 2=base_branch, 3=extra_repos.
-        const WT_NAME: usize = 0;
-        const WT_NEW_BRANCH: usize = 1;
-        const WT_EXTRA_REPOS: usize = 3;
         const WT_MAX: usize = 4;
 
         if self.branch_picker.is_active() {
@@ -1690,7 +1732,9 @@ impl NewSessionDialog {
             return DialogResult::Continue;
         }
 
-        if self.workspace_repos_expanded && self.worktree_config_focused_field == WT_EXTRA_REPOS {
+        if self.workspace_repos_expanded
+            && self.worktree_config_focused_field == WT_EXTRA_REPOS_FIELD
+        {
             return self.handle_workspace_repos_list_key(key);
         }
 
@@ -1710,7 +1754,7 @@ impl NewSessionDialog {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && matches!(
                         self.worktree_config_focused_field,
-                        WT_NAME | WT_NEW_BRANCH | WT_BASE_BRANCH_FIELD
+                        WT_NAME_FIELD | WT_NEW_BRANCH_FIELD | WT_BASE_BRANCH_FIELD
                     ) =>
             {
                 self.open_branch_picker();
@@ -1718,12 +1762,12 @@ impl NewSessionDialog {
             }
             KeyCode::Char('r')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.worktree_config_focused_field == WT_EXTRA_REPOS =>
+                    && self.worktree_config_focused_field == WT_EXTRA_REPOS_FIELD =>
             {
                 self.open_projects_picker();
                 DialogResult::Continue
             }
-            KeyCode::Enter if self.worktree_config_focused_field == WT_EXTRA_REPOS => {
+            KeyCode::Enter if self.worktree_config_focused_field == WT_EXTRA_REPOS_FIELD => {
                 self.workspace_repos_expanded = true;
                 self.workspace_repo_selected_index = 0;
                 DialogResult::Continue
@@ -1747,12 +1791,12 @@ impl NewSessionDialog {
                 DialogResult::Continue
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-                if self.worktree_config_focused_field == WT_NEW_BRANCH =>
+                if self.worktree_config_focused_field == WT_NEW_BRANCH_FIELD =>
             {
                 self.create_new_branch = !self.create_new_branch;
                 DialogResult::Continue
             }
-            _ if self.worktree_config_focused_field == WT_NAME => {
+            _ if self.worktree_config_focused_field == WT_NAME_FIELD => {
                 self.worktree_branch
                     .handle_event(&crossterm::event::Event::Key(key));
                 DialogResult::Continue
@@ -1906,7 +1950,7 @@ impl NewSessionDialog {
 
     fn reload_tool_config(&mut self) {
         let profile = self.selected_profile().to_string();
-        let config = resolve_config_or_warn(&profile);
+        let config = self.resolve_config_for_path(&profile);
         let tool = self
             .available_tools
             .get(self.tool_index)

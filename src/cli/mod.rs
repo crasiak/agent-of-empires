@@ -9,6 +9,7 @@ pub mod extract_session_id;
 pub mod graft;
 pub mod group;
 pub(crate) mod hook_input;
+pub mod hooks;
 pub mod init;
 pub mod killall;
 pub mod list;

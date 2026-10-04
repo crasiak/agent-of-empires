@@ -327,6 +327,25 @@ pub(super) async fn acp_event_listener(state: Arc<AppState>) {
                 };
                 inst.source_profile.clone()
             };
+            // #4127: the worker's own store is the only observation of the
+            // route this launch applied. Read it for the id the worker just
+            // assigned — the drain published the worker's handle before the
+            // frame reached here, so a fresh spawn and a respawn both
+            // answer, and a worker that never assigned an id attests nothing.
+            // A reattach answers nothing: `AcpClient::attach` has no native
+            // store to report, so such a session stays unattested until its
+            // next spawn. Read before the save so the closure and the
+            // in-memory mirror attest the same observation.
+            let observed = match acp_change.as_ref() {
+                Some(AcpSessionChange::Assigned(new_id)) => {
+                    state
+                        .acp_supervisor
+                        .native_handoff_store(&frame.session_id, new_id)
+                        .await
+                }
+                _ => None,
+            };
+            let observed_mirror = observed.clone();
             let session_id = frame.session_id.clone();
             let change = acp_change.clone();
             let file_watch = state.file_watch.clone();
@@ -339,6 +358,11 @@ pub(super) async fn acp_event_listener(state: Arc<AppState>) {
                     else {
                         return Ok(None);
                     };
+                    // Stamped before `apply_acp_session_change`, whose
+                    // same-id arm returns without touching the row: a first
+                    // `session/load` reattaching a legacy session must still
+                    // attest the route its launch observed.
+                    inst.attest_launch_default_store(observed.as_ref());
                     apply_acp_session_change(inst, &session_id, change.as_ref());
                     Ok(Some((
                         inst.acp_session_id.clone(),
@@ -363,6 +387,11 @@ pub(super) async fn acp_event_listener(state: Arc<AppState>) {
                         state
                             .mutation_epoch
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        // The saved row is the durable one; the in-memory row
+                        // must attest the same route or the next save would
+                        // write a binding whose marker the launch already
+                        // settled. Idempotent, so the mirror is safe.
+                        inst.attest_launch_default_store(observed_mirror.as_ref());
                     }
                 }
                 Ok(Ok(None)) => {}
@@ -468,6 +497,25 @@ pub(crate) async fn seed_acp_statuses(state: Arc<AppState>) {
     }
 }
 
+/// Whether reaching `status` should release a plugin's `sessions.turn.send` pending mark:
+/// either it is now genuinely counted (`Running`/`Waiting`/`Starting`/`Creating`), or it is a
+/// terminal outcome for this revival attempt (`Error`/`Stopped`/`Deleting`). `Idle` and
+/// `Unknown` are deliberately excluded: a `Stopped`/`Error` session's `HealError` heal passes
+/// through `Idle` before `Running`, and treating that hop as settled would release the mark
+/// before the session is actually counted.
+fn revival_pending_clears_on(status: Status) -> bool {
+    matches!(
+        status,
+        Status::Running
+            | Status::Waiting
+            | Status::Starting
+            | Status::Creating
+            | Status::Error
+            | Status::Stopped
+            | Status::Deleting
+    )
+}
+
 /// Fold a derived `StatusIntent` into an `Instance`.
 pub(crate) fn apply_status_intent(
     inst: &mut Instance,
@@ -511,6 +559,13 @@ pub(crate) fn apply_status_intent(
             Status::Idle
         }
     };
+    // A plugin's sessions.turn.send marks a resting session pending right before waking it, so
+    // the active-session cap counts it before this, its first real status report, lands.
+    // Checked against `target` ahead of the no-op return below (not gated by it): a redundant
+    // intent that resolves to a status the row is already in must still release a stale mark.
+    if revival_pending_clears_on(target) {
+        inst.plugin_revival_pending = false;
+    }
     if inst.status == target {
         return;
     }
@@ -1441,6 +1496,96 @@ mod tests {
         );
     }
 
+    /// #4127: a first `session/load` reattaching a legacy session re-assigns the
+    /// very id the row already carries, so `apply_acp_session_change` takes its
+    /// same-id arm and returns without persisting anything. The route the
+    /// launch applied must still be attested there — on disk and in memory — or
+    /// the legacy binding keeps deriving it from the configuration as it
+    /// stands, which is the guess #4127 forbids.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn acp_event_listener_attests_the_observed_store_on_a_reused_acp_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _app_dir = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let store = temp.path().join(".claude");
+        std::fs::create_dir_all(&store).expect("store");
+
+        let profile = "acp-listener-attested-store";
+        let sid = "11111111-1111-4111-8111-111111111111";
+        let binding = |marker: Option<bool>| crate::session::ConversationBinding {
+            session_id: sid.into(),
+            execution: Some(crate::session::ExecutionBinding {
+                agent: "claude".into(),
+                stores: vec![store.clone()],
+                configuration: Vec::new(),
+                cwd: temp.path().to_path_buf(),
+                cwd_filesystem: "host".into(),
+                filesystem: "host".into(),
+                exported_default_store: marker,
+            }),
+            provenance: crate::session::ConversationProvenance::Observed,
+            transcript_path: None,
+        };
+        let mut inst = Instance::new("acp-session", "/tmp/acp");
+        inst.view = crate::session::View::Structured;
+        inst.source_profile = profile.to_string();
+        inst.agent_session_id = Some(sid.into());
+        inst.acp_session_id = Some("attested-acp-id".to_string());
+        // Legacy: no routing marker at all.
+        inst.agent_session_binding = Some(binding(None));
+        let id = inst.id.clone();
+        seed_profile_store(profile, vec![inst.clone()]);
+        let state = test_support::build_test_app_state(vec![inst]);
+
+        // What the drain published before the frame: the assigned id, and the
+        // store route this launch actually applied.
+        let observed = binding(Some(true)).execution.unwrap();
+        state
+            .acp_supervisor
+            .test_insert_worker_with_native_handoff(&id, "attested-acp-id", Some(observed))
+            .await;
+
+        let listener = tokio::spawn(acp_event_listener(state.clone()));
+        await_subscribed(&state).await;
+
+        state
+            .acp_events_tx
+            .send(AcpBroadcastFrame {
+                session_id: id.clone(),
+                seq: 1,
+                event: Arc::new(crate::acp::Event::AcpSessionAssigned {
+                    acp_session_id: "attested-acp-id".to_string(),
+                }),
+                worker_generation: None,
+            })
+            .expect("listener is subscribed");
+
+        let row = await_row(
+            &state,
+            &id,
+            attested_marker,
+            "the reused acp session id returned before the attestation",
+        )
+        .await;
+        listener.abort();
+        let _ = listener.await;
+
+        assert_eq!(row.acp_session_id.as_deref(), Some("attested-acp-id"));
+        assert!(
+            attested_marker(&load_profile_row(profile, &id).expect("row")),
+            "the attestation must be durable, or the next reload derives the \
+             route from the configuration again"
+        );
+    }
+
+    /// Whether the row's own agent binding carries the attested route.
+    fn attested_marker(row: &Instance) -> bool {
+        row.agent_session_binding
+            .as_ref()
+            .and_then(|binding| binding.execution.as_ref())
+            .is_some_and(|execution| execution.exported_default_store == Some(true))
+    }
+
     /// #4001: after a daemon restart the control cache is cold, and the live
     /// listener's own reads of it never hydrate. A reattached worker's first
     /// live frame is either its sub-agent's completion with the main turn still
@@ -1972,6 +2117,48 @@ mod tests {
     fn apply(inst: &mut Instance, intent: StatusIntent) {
         let tx = broadcast::channel(8).0;
         apply_status_intent(inst, Some(intent), &tx);
+    }
+
+    /// A `sessions.turn.send` revival marks the row pending before the wake; `HealError`'s
+    /// `Idle` hop must not release that mark; only the `UserPromptSent` that actually drives
+    /// it to `Running` may.
+    #[test]
+    fn heal_error_does_not_clear_a_pending_plugin_revival() {
+        let mut inst = stopped_structured_instance();
+        inst.plugin_revival_pending = true;
+
+        apply(&mut inst, StatusIntent::HealError);
+        assert_eq!(inst.status, Status::Idle);
+        assert!(
+            inst.plugin_revival_pending,
+            "the heal's Idle hop must not release the mark early"
+        );
+
+        apply(&mut inst, StatusIntent::Set(Status::Running));
+        assert_eq!(inst.status, Status::Running);
+        assert!(
+            !inst.plugin_revival_pending,
+            "reaching a counted status must release the mark"
+        );
+    }
+
+    /// A redundant intent that resolves to the row's current status is a no-op for `status`
+    /// itself, but must still release a stale pending mark rather than being silently skipped
+    /// by the same early return.
+    #[test]
+    fn a_noop_transition_still_clears_a_pending_plugin_revival() {
+        let mut inst = Instance::new("s", "/tmp/s");
+        inst.view = crate::session::View::Structured;
+        inst.status = Status::Running;
+        inst.plugin_revival_pending = true;
+
+        apply(&mut inst, StatusIntent::Set(Status::Running));
+
+        assert_eq!(inst.status, Status::Running);
+        assert!(
+            !inst.plugin_revival_pending,
+            "a no-op transition to an already-counted status must still release a stale mark"
+        );
     }
 
     #[test]

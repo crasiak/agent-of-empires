@@ -36,7 +36,7 @@ impl Instance {
         storage: &crate::session::storage::Storage,
     ) -> Option<SidWrite> {
         let observation = self.final_publication_observation()?;
-        if self.is_capture_excluded(&observation.sid, observation.source.as_ref()) {
+        if self.is_capture_excluded(&observation.sid, observation.source()) {
             return None;
         }
         let outcome = super::sid_persist::persist_session_with_storage(
@@ -107,6 +107,9 @@ impl Instance {
     /// it.
     pub(super) fn kill_clean_locked(&self) -> Result<()> {
         let session = self.tmux_session()?;
+        // The poller watches this pane, so it goes before the pane does, whether or not the pane
+        // is still there to kill.
+        self.stop_poller();
         if !session.exists() {
             return Ok(());
         }
@@ -220,9 +223,15 @@ impl Instance {
                 return;
             }
         };
+        self.stop_all_tmux_sessions_locked(&storage);
+    }
+
+    /// [`Self::kill_all_tmux_sessions`] for a caller already holding this instance's lifecycle
+    /// lock, so it can commit its next state (an archive) before a peer launch or send gets in.
+    pub(crate) fn stop_all_tmux_sessions_locked(&self, storage: &crate::session::storage::Storage) {
         let mut lifecycle = self.clone();
         if let Err(error) =
-            lifecycle.acquire_lifecycle_reservation(&storage, LifecycleOperation::Stop, None)
+            lifecycle.acquire_lifecycle_reservation(storage, LifecycleOperation::Stop, None)
         {
             tracing::warn!(
                 target: "session.tmux_cleanup",
@@ -234,7 +243,7 @@ impl Instance {
         }
         self.kill_all_tmux_sessions_locked();
         if let Err(error) =
-            lifecycle.commit_lifecycle_status(&storage, LifecycleOperation::Stop, Status::Stopped)
+            lifecycle.commit_lifecycle_status(storage, LifecycleOperation::Stop, Status::Stopped)
         {
             tracing::warn!(
                 target: "session.tmux_cleanup",
@@ -353,17 +362,19 @@ impl Instance {
                 .context("session disappeared during stop")?;
             current.source_profile = profile.clone();
             let flushed = current.flush_published_conversation(&storage);
-            // A pinned-foreign publication is an explicit refusal, not a
-            // doubtful write: the user pinned another conversation and this
-            // pane's id must not overwrite it. Any other failure still keeps
-            // the hook evidence, but the sandbox container always stops: the
-            // store is a host bind, not container state.
+            // A pinned-foreign sid and a sid another row durably owns are both
+            // deliberate refusals rather than doubtful writes, so the teardown
+            // keeps no evidence to preserve. A real failure still keeps it, and
+            // the sandbox container always stops: the store is a host bind, not
+            // container state.
             let container_result = crate::session::worktree_edit::stop_sandbox_container(
                 &current.id,
                 current.is_sandboxed(),
             );
             match flushed {
-                Some(SidWrite::PinnedForeign) => container_result,
+                Some(SidWrite::PinnedForeign) | Some(SidWrite::OwnershipConflict) => {
+                    container_result
+                }
                 Some(SidWrite::Applied) | None => container_result,
                 Some(SidWrite::Failed) | Some(SidWrite::Skipped) => {
                     container_result?;
@@ -576,10 +587,10 @@ mod tests {
             agent: "claude".into(),
             stores: vec![home.path().join("store")],
             configuration: Vec::new(),
-            exported_default_store: false,
             cwd: home.path().into(),
             cwd_filesystem: "host".into(),
             filesystem: "host".into(),
+            exported_default_store: None,
         };
         inst.resume_intent = ResumeIntent::Use(sid.into());
         inst.resume_binding = Some(crate::session::ConversationBinding {
@@ -663,5 +674,70 @@ mod tests {
         assert_eq!(row.resume_intent, ResumeIntent::Use(pinned.into()));
         assert_eq!(row.status, Status::Stopped);
         assert!(!sidecar.exists());
+    }
+
+    /// A takeover relaunch can replace the row's pane while its old poller keeps the same agent and
+    /// the same absence of execution, so identity alone accepts it. The pane is what tells the two
+    /// apart, and the poller goes before the pane does.
+    #[test]
+    #[serial_test::serial]
+    fn tearing_down_a_pane_stops_the_poller_watching_it() {
+        if crate::tmux::tmux_command()
+            .arg("-V")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("tmux not available; skipping");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let profile = "pane-teardown-stops-poller";
+        let storage = crate::session::storage::Storage::new_unwatched(profile).unwrap();
+        let mut inst = Instance::new("pane-teardown", "/tmp/test");
+        inst.source_profile = profile.to_string();
+        storage
+            .update(|instances, _groups| {
+                instances.push(inst.clone());
+                Ok(())
+            })
+            .unwrap();
+
+        let name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
+        let _ = crate::tmux::tmux_command()
+            .args(["kill-session", "-t", &name])
+            .output();
+        let created = crate::tmux::tmux_command()
+            .args(["new-session", "-d", "-s", &name, "-x", "80", "-y", "24"])
+            .output()
+            .expect("tmux");
+        assert!(created.status.success(), "the test needs a real pane");
+
+        let mut poller = crate::session::poller::SessionPoller::new(
+            name.clone(),
+            inst.tool.clone(),
+            inst.active_execution.clone(),
+        );
+        assert_eq!(
+            poller.start(inst.id.clone(), Box::new(|| None), Box::new(|_| {}), None,),
+            crate::session::poller::PollerSpawn::Spawned
+        );
+        inst.session_id_poller = Some(std::sync::Arc::new(std::sync::Mutex::new(poller)));
+        assert!(
+            inst.session_id_poller_is_running(),
+            "fixture: it is running"
+        );
+        assert!(
+            inst.active_execution.is_none(),
+            "fixture: no execution on either side"
+        );
+
+        let _ = inst.kill_clean_locked();
+
+        assert!(
+            !inst.session_id_poller_is_running(),
+            "the poller stops before the pane it watches does"
+        );
     }
 }

@@ -53,6 +53,8 @@ pub(crate) struct StructuredSessionSpec {
     pub agent_effort: Option<String>,
     pub import_acp_session_id: Option<String>,
     pub fork_seed: Option<crate::session::ForkSeed>,
+    /// Where the web wizard polls this create's stage and hook output.
+    pub progress: Option<Arc<crate::server::create_progress::CreateProgress>>,
 }
 
 /// What the create core returns to its caller once the session exists in state.
@@ -129,6 +131,7 @@ pub(crate) async fn spawn_structured_session(
             agent_effort,
             import_acp_session_id,
             fork_seed,
+            progress,
         } = spec;
 
         let config = Config::load_or_warn();
@@ -320,6 +323,7 @@ pub(crate) async fn spawn_structured_session(
             &mut instance,
             &hook_plan,
             std::path::Path::new(&original_path),
+            progress.as_deref(),
         ) {
             builder::cleanup_instance(
                 &instance,
@@ -334,6 +338,10 @@ pub(crate) async fn spawn_structured_session(
                 .map(|hint| format!("\n{hint}"))
                 .unwrap_or_default();
             return Err(anyhow::anyhow!("on_create hook failed: {e:#}{hint}"));
+        }
+
+        if let Some(progress) = &progress {
+            progress.set_stage(crate::server::create_progress::CreateStage::Starting);
         }
 
         // Anything that fails between here and the final `Ok(..)` would otherwise orphan
@@ -675,6 +683,67 @@ mod tests {
         .expect("capacity-rejected startup finishes before app guard drops");
         assert!(!state.acp_supervisor.is_running(&id).await);
         state.acp_supervisor.test_remove_worker("occupant").await;
+    }
+
+    /// #4116: the detached spawn after a create runs once the row is persisted and published,
+    /// so an archive committed while its `before_session` hook runs must refuse the launch.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn create_spawn_refuses_a_row_archived_while_the_hook_runs() {
+        use crate::server::test_support as support;
+        use axum::extract::{Query, State};
+        use axum::response::IntoResponse;
+        use axum::Json;
+
+        let _home = crate::session::test_support::isolate_app_dir();
+        let barrier = tempfile::tempdir().unwrap();
+        let hook = support::install_blocking_before_session_hook(barrier.path(), "create");
+        support::seed_instances_on_disk_for_test("test", Vec::new());
+        let (launcher, launches) = support::counting_failing_launcher();
+        let state = support::build_test_app_state_with_launcher(Vec::new(), launcher);
+        let body = serde_json::from_value(serde_json::json!({
+            "title": "created-4116", "path": "", "tool": "claude",
+            "scratch": true, "view": "structured", "profile": "test",
+        }))
+        .unwrap();
+        let create = tokio::spawn({
+            let state = state.clone();
+            async move {
+                crate::server::api::sessions::create_session(
+                    State(state),
+                    Query(crate::server::api::sessions::CreateSessionQuery { wait: None }),
+                    Ok(Json(body)),
+                )
+                .await
+                .into_response()
+            }
+        });
+        let archived =
+            support::archive_while_hook_waits(&hook, "test", |row| row.title == "created-4116")
+                .await;
+        let response = create.await.unwrap();
+        assert!(archived, "before_session hook did not run");
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+        let id = support::load_instances_from_disk_for_test("test")
+            .into_iter()
+            .find(|inst| inst.title == "created-4116")
+            .expect("create persisted its row")
+            .id;
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !state
+                .acp_event_store
+                .replay_from(&id, 0)
+                .iter()
+                .any(|(_, event)| matches!(event, crate::acp::Event::AgentStartupError { .. }))
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the refused spawn reports a startup error");
+        assert_eq!(launches.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!state.acp_supervisor.is_running(&id).await);
     }
 
     /// The test above runs on a current-thread runtime, where an unlock moved above the

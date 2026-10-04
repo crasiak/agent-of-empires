@@ -622,6 +622,55 @@ fn cli_session_capture_honors_configured_status_rules() {
     );
 }
 
+#[test]
+#[parallel]
+fn cli_session_capture_reports_standard_omp_confirmation() {
+    require_tmux!();
+    let mut h = TuiTestHarness::new("cli_omp_confirmation");
+    let bin = h.install_path_command("omp");
+    let agent = bin.join("omp");
+    write_executable(
+        &agent,
+        "#!/bin/sh\ncat <<'PANEL'\n\
+╭─ Confirm workspace operation ───────────────────────────╮
+│  ❯ Yes                                                  │
+│    No                                                   │
+│ ↑/↓ navigate  ⏎ select  ⎋ cancel                        │
+╰─────────────────────────────────────────────────────────╯
+  ⎋ Waiting
+╭── ⠋ 16s > model status ─╮
+╰─
+PANEL
+exec sleep 60\n",
+    );
+    let project = h.project_path();
+    let session_id = h.add_session(&[
+        project.to_str().unwrap(),
+        "-t",
+        "OmpConfirm",
+        "--tool",
+        "omp",
+        "--cmd-override",
+        agent.to_str().unwrap(),
+    ]);
+    h.run_cli_ok(&["session", "start", &session_id]);
+    let json = wait_until(Duration::from_secs(10), Duration::from_millis(200), || {
+        let out = h.run_cli(&["session", "capture", &session_id, "--json"]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let parsed: Value = serde_json::from_str(&stdout).unwrap_or(Value::Null);
+        if parsed["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("Confirm workspace operation"))
+            && parsed["status"] == "waiting"
+        {
+            Ok(parsed)
+        } else {
+            Err(format!("OMP confirmation not Waiting: {stdout}"))
+        }
+    });
+    assert_eq!(json["status"], "waiting");
+}
+
 /// Renaming renames the agent's tmux session (#431) and removing kills it.
 #[test]
 #[parallel]
@@ -957,12 +1006,13 @@ fn cli_list_and_show_expose_lifecycle_state() {
 #[test]
 #[parallel]
 fn cli_acp_doctor_flags_adapters_below_the_version_floor() {
+    let at_floor = agent_of_empires::acp::agent_compat::CLAUDE_AGENT_ACP_MIN_VERSION;
     // (PATH adapter version, bundled adapter version, expected mark)
     let cases = [
         (Some("0.37.0"), None, "[!! ] claude"),
-        (Some("0.37.0"), Some("0.65.0"), "[OK] claude"),
+        (Some("0.37.0"), Some(at_floor), "[OK] claude"),
         (Some("0.37.0"), Some("0.44.0"), "[!! ] claude"),
-        (None, Some("0.65.0"), "[OK] claude"),
+        (None, Some(at_floor), "[OK] claude"),
         (None, Some("0.44.0"), "[!! ] claude"),
     ];
     for (path_version, bundle_version, expected) in cases {

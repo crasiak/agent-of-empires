@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { Puzzle } from "lucide-react";
-import { useMatch, useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useMatch, useNavigate, useSearchParams } from "react-router-dom";
 import { IDLE_DECAY_WINDOW_MS } from "./lib/session";
 import { diffSelectionStale } from "./lib/diffSelection";
 import { useSessions } from "./hooks/useSessions";
@@ -23,7 +23,7 @@ import { safeGetItem, safeRemoveItem } from "./lib/safeStorage";
 import { isAutomatedSession } from "./lib/onboarding";
 import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useLastSessionRestore } from "./hooks/useLastSessionRestore";
-import { useRepoGroups } from "./hooks/useRepoGroups";
+import { SCRATCH_GROUP_ID, useRepoGroups } from "./hooks/useRepoGroups";
 import { useSessionGroups } from "./hooks/useSessionGroups";
 import { useNestedSidebarGroups } from "./hooks/useNestedSidebarGroups";
 import { useOrgGroups } from "./hooks/useOrgGroups";
@@ -46,7 +46,7 @@ import { SendCommentsDialog } from "./components/diff/comments/SendCommentsDialo
 import { useCommandActions, buildConversationActions, type SessionStateAction } from "./hooks/useCommandActions";
 import { usePluginCommands } from "./hooks/usePluginCommands";
 import { useSettingsCommands } from "./hooks/useSettingsCommands";
-import { useEdgeSwipe } from "./hooks/useEdgeSwipe";
+import { useDrawerSwipe, type DrawerSwipeAction } from "./hooks/useDrawerSwipe";
 import { useIsCoarsePointer } from "./hooks/useIsCoarsePointer";
 import { useMobileViewportLock } from "./hooks/useMobileViewportLock";
 import { useIsWideViewport } from "./hooks/useIsWideViewport";
@@ -98,7 +98,7 @@ import { IdleDecayWindowContext, parseIdleDecayWindowMs } from "./lib/idleDecay"
 import { parseUnreadIndicatorEnabled, UnreadIndicatorContext, useUnreadIndicatorEnabled } from "./lib/unreadIndicator";
 import { parseSessionRowTagMode, SessionRowTagContext, type SessionRowTagMode } from "./lib/sessionRowTag";
 import { parseSessionColorsEnabled, SessionColorsContext } from "./lib/sessionColors";
-import { fetchActiveProfileSettings } from "./lib/appSettings";
+import { onSettingsChanged } from "./lib/settingsEvents";
 import { parseSystemHealthEnabled, SystemHealthEnabledContext } from "./lib/systemHealth";
 import { parseUsageOverlayEnabled, UsageOverlayEnabledContext } from "./lib/usage";
 import {
@@ -108,13 +108,14 @@ import {
   HeadroomOverlayEnabledContext,
 } from "./lib/ledgerRun";
 import { toastBus, reportError } from "./lib/toastBus";
+import { startPendingCreates } from "./lib/pendingCreates";
 import { isAbsolutePath, resolveToRepoRelative, type FileRef } from "./lib/fileRef";
 import { NAVIGATE_EVENT, OPEN_SESSION_EVENT } from "./lib/sessionRoute";
 import { dispatchFocusTerminal, requestSessionInputFocus, setPendingTerminalFocus } from "./lib/terminalFocus";
 import {
+  bindHiddenInput,
   clearMobileKeyboardProxyInput,
   deliverMobileKeyboardProxyInput,
-  forwardTerminalBeforeInput,
 } from "./lib/mobileKeyboardProxy";
 import { hydrateWebUiStateFromServer, initWebUiSync } from "./lib/webUiSync";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
@@ -153,6 +154,7 @@ import { ChromeCollapseHandle, CollapsibleRegion } from "./components/Collapsibl
 import { DiffFileViewer } from "./components/diff/DiffFileViewer";
 import { SettingsView } from "./components/SettingsView";
 import { ProjectFormModal } from "./components/ProjectFormModal";
+import { ScratchOverridesModal } from "./components/ScratchOverridesModal";
 import { HelpOverlay } from "./components/HelpOverlay";
 import { useTour } from "./hooks/useTour";
 import { useWelcomePhase } from "./hooks/useWelcomePhase";
@@ -175,6 +177,7 @@ import { DisconnectBanner } from "./components/DisconnectBanner";
 import { ElevationPrompt } from "./components/ElevationPrompt";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { DashboardUpdateBanner } from "./components/DashboardUpdateBanner";
+import { PushHealthBanner } from "./components/PushHealthBanner";
 
 // Pre-#1832 per-browser tour-seen flag. Read once on load to migrate users who
 // already dismissed the tour to the backend; no longer written.
@@ -211,9 +214,15 @@ export default function App() {
     setHeadroomOverlayEnabled(parseHeadroomOverlayEnabled(settings));
   }, []);
 
+  // A save can land while an earlier read is in flight; only the latest applies.
+  const settingsReadSeq = useRef(0);
   const refreshAppSettings = useCallback(async () => {
-    applyAppSettings(await fetchActiveProfileSettings());
+    const seq = ++settingsReadSeq.current;
+    const settings = await fetchSettings();
+    if (seq === settingsReadSeq.current) applyAppSettings(settings);
   }, [applyAppSettings]);
+
+  useEffect(() => onSettingsChanged(() => void refreshAppSettings()), [refreshAppSettings]);
 
   useEffect(() => {
     const onTokenExpired = () => setTokenExpired(true);
@@ -302,12 +311,7 @@ export default function App() {
                       the plugin UI snapshot (usePluginPanes), so the provider can't live
                       inside its own return. */}
                     <PluginUiProvider>
-                      <AppContent
-                        loginRequired={loginRequired}
-                        onLogout={handleLogout}
-                        onSettingsRefresh={refreshAppSettings}
-                        resolvedTheme={resolvedTheme}
-                      />
+                      <AppContent loginRequired={loginRequired} onLogout={handleLogout} resolvedTheme={resolvedTheme} />
                     </PluginUiProvider>
                     <ElevationPrompt />
                   </HeadroomOverlayEnabledContext.Provider>
@@ -340,12 +344,10 @@ function isInsideEditable(target: EventTarget | null): boolean {
 function AppContent({
   loginRequired,
   onLogout,
-  onSettingsRefresh,
   resolvedTheme,
 }: {
   loginRequired: boolean;
   onLogout: () => void;
-  onSettingsRefresh: () => Promise<void> | void;
   resolvedTheme: ResolvedTheme | null;
 }) {
   useDashboardPresence();
@@ -361,6 +363,7 @@ function AppContent({
     void hydrateWebUiStateFromServer();
   }, []);
 
+  const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { settings: webSettings } = useWebSettings();
@@ -384,6 +387,22 @@ function AppContent({
     applySession,
   } = useSessions();
   const workspaces = useWorkspaces(sessions);
+  // Creates whose outcome the wizard never learned keep reconciling here, past its unmount.
+  useEffect(() => {
+    startPendingCreates({
+      onCreated: (session) => {
+        if (!session) return;
+        injectSession(session);
+        toastBus.handler?.info(`"${session.title}" is ready`);
+      },
+      onFailed: (message) => toastBus.handler?.error(`Session was not created: ${message}`),
+      onUnknown: (message) => toastBus.handler?.error(message),
+      onUnsaved: () =>
+        toastBus.handler?.error(
+          "This browser could not save a session that is still being created; keep this tab open until it finishes.",
+        ),
+    });
+  }, [injectSession]);
   // Trash is a whole-workspace concern, so it is derived here from the
   // authoritative unsliced workspace list rather than reconstructed from the
   // sidebar's per-`group_path` slice views. A workspace is in Trash only when
@@ -827,17 +846,17 @@ function AppContent({
   const diffComments = useDiffComments(activeSessionId);
   const commentsEnabled = activeSession?.view === "structured";
   // Sending does not require a live worker: the diff-comments handler runs the
-  // same auto-wake as a plain composer prompt (touch_on_prompt_and_wake_if_sunk +
-  // trigger_resume_background, #1748), so an archived / snoozed / idle-dormant
-  // session respawns its worker on send instead of sinking the prompt. A
-  // trashed session is the one exception: the reconciler never resumes it, so
-  // there is nothing to drain into.
-  const commentSendEnabled = commentsEnabled && !activeSession?.trashed_at;
+  // same auto-wake as a plain composer prompt, so a snoozed or idle-dormant
+  // session respawns its worker on send. Archived and trashed sessions never
+  // start on a prompt (#4116); they must be unarchived or restored first.
+  const commentSendEnabled = commentsEnabled && !activeSession?.trashed_at && !activeSession?.archived_at;
   // Every disabled state names its cause and what the user can do about it: a
   // tooltip that only says "unavailable" leaves them staring at a dead button.
   const commentSendDisabledReason = !commentsEnabled
     ? "Diff comments can only be sent from the agent view. Switch this session to the agent view first."
-    : "This session is in the trash. Restore it to send comments to the agent.";
+    : activeSession?.trashed_at
+      ? "This session is in the trash. Restore it to send comments to the agent."
+      : "This session is archived. Unarchive it to send comments to the agent.";
   const commentsIsMultiRepo = (activeSession?.workspace_repos.length ?? 0) > 0;
   const [sendDialogOpen, setSendDialogOpen] = useState(false);
 
@@ -933,7 +952,6 @@ function AppContent({
     if (keyboardProxySessionIdRef.current === nextSessionId && keyboardProxyViewRef.current === nextView) return;
     keyboardProxySessionIdRef.current = nextSessionId;
     keyboardProxyViewRef.current = nextView;
-    if (keyboardProxyRef.current) keyboardProxyRef.current.value = "";
     clearMobileKeyboardProxyInput();
   }, []);
 
@@ -945,9 +963,7 @@ function AppContent({
   useEffect(() => {
     const proxy = keyboardProxy;
     if (!proxy) return;
-    const onBeforeInput = (e: InputEvent) => forwardTerminalBeforeInput(e, deliverMobileKeyboardProxyInput);
-    proxy.addEventListener("beforeinput", onBeforeInput);
-    return () => proxy.removeEventListener("beforeinput", onBeforeInput);
+    return bindHiddenInput(proxy, deliverMobileKeyboardProxyInput, "proxy");
   }, [keyboardProxy]);
 
   // Selecting a session in the sidebar should land focus on its canonical
@@ -1331,12 +1347,13 @@ function AppContent({
       // Optimistic Starting; the status poller reconciles to the real state.
       setSessionStatus(sessionId, "Starting");
       const result = await startSession(sessionId);
-      if (!result) {
-        setSessionStatus(sessionId, "Error");
-        toastBus.handler?.error("Failed to start session");
+      if (!result.ok) {
+        // A refused start (archived or trashed) left the session as it was.
+        setSessionStatus(sessionId, result.refused ? "Stopped" : "Error");
+        toastBus.handler?.error(result.message ?? "Failed to start session");
         return;
       }
-      toastBus.handler?.info(result.message ?? "Session started");
+      toastBus.handler?.info(result.session.message ?? "Session started");
     },
     [setSessionStatus],
   );
@@ -1415,9 +1432,17 @@ function AppContent({
   const handleAddProject = useCallback(() => setProjectForm({ editProject: null }), []);
   const handleEditProject = useCallback((project: ProjectInfo) => setProjectForm({ editProject: project }), []);
 
+  // The synthetic Scratch group has no repo path to register a project entry under, so it gets
+  // a dedicated settings modal instead of ProjectFormModal.
+  const [scratchSettingsOpen, setScratchSettingsOpen] = useState(false);
+
   // A group with live sessions may be unregistered; register it globally before editing.
   const handleEditProjectSettings = useCallback(
     async (group: SidebarGroup) => {
+      if (group.id === SCRATCH_GROUP_ID) {
+        setScratchSettingsOpen(true);
+        return;
+      }
       if (group.registeredProjects.length > 0) {
         setProjectForm({ editProject: group.registeredProjects[0]! });
         return;
@@ -1567,33 +1592,23 @@ function AppContent({
 
   const handleToggleSidebar = useCallback(() => {
     setSidebarOpen((o) => !o);
+    setPickerOpen(false);
   }, []);
 
-  const openSidebar = useCallback(() => setSidebarOpen(true), []);
-  const openDiff = useCallback(() => {
-    if (isMdUp) {
-      openTab("diff", "right");
-    } else {
-      setPickerOpen(true);
-    }
-  }, [isMdUp, openTab]);
-  useEdgeSwipe({
-    edge: "left",
-    // The swipe-right-to-open gesture only makes sense for a left-anchored
-    // drawer; with the sidebar on the right edge it would slide in from the
-    // opposite side of the drag, so disable it there (#2244).
-    enabled: !sidebarOpen && webSettings.sidebarSide !== "right",
-    onSwipe: openSidebar,
-    blurOnSwipe: true,
-    // A swipe-right anywhere on screen opens the sidebar, not just from the
-    // left edge. The right-edge (diff) swipe stays edge-only below.
-    anywhere: true,
-  });
-  useEdgeSwipe({
-    edge: "right",
-    enabled: rightDockCollapsed && !!activeSessionId,
-    onSwipe: openDiff,
-  });
+  const closePicker = useCallback(() => setPickerOpen(false), []);
+  const handleDrawerSwipe = useCallback((action: DrawerSwipeAction) => {
+    if (action === "open-sidebar" || action === "close-sidebar") setSidebarOpen(action === "open-sidebar");
+    else setPickerOpen(action === "open-panels");
+  }, []);
+  useDrawerSwipe(
+    {
+      sidebarOpen,
+      sidebarSide: webSettings.sidebarSide,
+      panelsOpen: pickerOpen,
+      panelsAvailable: !!activeWorkspace && !!activeSession,
+    },
+    handleDrawerSwipe,
+  );
 
   // Read-only mode hides mutation UI. Guard creation at the handler so every
   // caller (keyboard shortcut, command palette) is a no-op rather than opening
@@ -1846,10 +1861,20 @@ function AppContent({
           onClose={handleCloseSettings}
           onSelectTab={(t) => {
             const p = searchParams.get("profile");
-            navigate(`/settings/${t}${p ? `?profile=${encodeURIComponent(p)}` : ""}`);
+            // Marks a tab opened from the mobile section list, so its Back pops to it.
+            navigate(`/settings/${t}${p ? `?profile=${encodeURIComponent(p)}` : ""}`, {
+              state: { fromSettingsList: settingsTab === null },
+            });
+          }}
+          onShowList={() => {
+            if ((location.state as { fromSettingsList?: boolean } | null)?.fromSettingsList) {
+              navigate(-1);
+              return;
+            }
+            const p = searchParams.get("profile");
+            navigate(`/settings${p ? `?profile=${encodeURIComponent(p)}` : ""}`, { replace: true });
           }}
           onServerAboutRefresh={refreshServerAbout}
-          onSettingsRefresh={onSettingsRefresh}
           profile={searchParams.get("profile")}
           onSelectProfile={(p) => {
             const next = new URLSearchParams(searchParams);
@@ -2113,12 +2138,14 @@ function AppContent({
   const acpPrefs = useMemo(
     () => ({
       showToolDurations: serverAbout?.acp_show_tool_durations ?? true,
+      wrapToolOutput: serverAbout?.acp_wrap_tool_output ?? false,
       replayEvents: serverAbout?.acp_replay_events ?? 0,
       compactionReminder: serverAbout?.acp_compaction_reminder ?? false,
       compactionReminderPercent: serverAbout?.acp_compaction_reminder_percent ?? 75,
     }),
     [
       serverAbout?.acp_show_tool_durations,
+      serverAbout?.acp_wrap_tool_output,
       serverAbout?.acp_replay_events,
       serverAbout?.acp_compaction_reminder,
       serverAbout?.acp_compaction_reminder_percent,
@@ -2265,7 +2292,7 @@ function AppContent({
   // before caps.cityhall settles. Early return (matching the other loading
   // gates) rather than a wrapper so the shell markup stays unindented. See #7.
   if (!serverAboutLoaded) {
-    return <div className="h-dvh bg-surface-900 safe-area-inset" />;
+    return <div className="h-(--app-height) bg-surface-900 safe-area-inset" />;
   }
 
   // The header collapse is a phone affordance for the conversation view only:
@@ -2280,7 +2307,7 @@ function AppContent({
 
   return (
     <AcpPrefsProvider value={acpPrefs}>
-      <div className="h-dvh flex flex-col bg-surface-900 text-text-primary overflow-hidden safe-area-inset">
+      <div className="h-(--app-height) flex flex-col bg-surface-900 text-text-primary overflow-hidden safe-area-inset">
         {/* Wrapped unconditionally, not behind the `headerCollapsible`
             ternary: swapping the element type at this position would remount
             `TopBar` (and reset its overflow menu) every time the boundary
@@ -2318,6 +2345,7 @@ function AppContent({
         <DisconnectBanner />
         <UpdateBanner />
         <DashboardUpdateBanner />
+        <PushHealthBanner />
 
         {/* Below the banners, not directly under the bar: the handle is
             absolutely positioned at the top-right, and hanging it off the bar
@@ -2410,6 +2438,11 @@ function AppContent({
               setShowSessionWizard(false);
               setWizardPrefill(undefined);
             }}
+            onCreatedInBackground={(session?: SessionResponse) => {
+              if (!session) return;
+              injectSession(session);
+              toastBus.handler?.info(`"${session.title}" is ready`);
+            }}
             prefill={wizardPrefill}
             nameOnly={caps.nameOnlyWizard}
           />
@@ -2421,6 +2454,10 @@ function AppContent({
             onClose={() => setProjectForm(null)}
             onSaved={() => refreshProjects()}
           />
+        )}
+
+        {scratchSettingsOpen && (
+          <ScratchOverridesModal profile={serverAbout?.profile ?? ""} onClose={() => setScratchSettingsOpen(false)} />
         )}
 
         {welcome.showWelcome && <ThemeIntro onDone={welcome.dismissWelcome} />}
@@ -2510,14 +2547,15 @@ function AppContent({
           />
         )}
 
-        {activeWorkspace && activeSession && (
+        {singlePane && activeWorkspace && activeSession && (
           <MobileRightPanelPicker
-            open={pickerOpen && singlePane}
+            open={pickerOpen}
             active={rightPanelView}
-            pluginPanes={pluginPanes}
+            sessionTitle={activeSession.title}
             availablePanes={mobilePaneIds}
+            describePane={paneDescriptor}
             onSelect={handlePickView}
-            onClose={() => setPickerOpen(false)}
+            onClose={closePicker}
           />
         )}
 
@@ -2532,9 +2570,9 @@ function AppContent({
           // This matches the live terminal's hidden input geometry.
           className="fixed bottom-0 left-0 w-px h-px opacity-0 pointer-events-none"
           style={{ caretColor: "transparent", color: "transparent" }}
-          // Typed text now stays in this textarea as IME context (see
-          // forwardTerminalBeforeInput), so keep the OS from rewriting it
-          // the way the live terminal's own hidden input already does.
+          // Typed text stays in this textarea as IME context (see
+          // bindHiddenInput), so keep the OS from rewriting it the way the
+          // live terminal's own hidden input already does.
           autoCapitalize="off"
           autoCorrect="off"
           autoComplete="off"
