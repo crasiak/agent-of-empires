@@ -98,6 +98,8 @@ pub struct AppState {
     /// existing-instance check and both create a session.
     pub idempotency_locks:
         Arc<RwLock<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Hook progress of in-flight web creates, keyed by `idempotency_key`.
+    pub create_progress: super::create_progress::CreateProgressRegistry,
     /// Disk config resolutions performed by `list_sessions`, one per unique `(profile,
     /// project_path)` per request, accumulated monotonically.
     pub list_sessions_resolver_misses: std::sync::atomic::AtomicUsize,
@@ -118,8 +120,7 @@ pub struct AppState {
     pub summary_semaphore: tokio::sync::Semaphore,
     /// Suppression set for the startup-recovery cascade.
     pub recently_restarted: crate::session::recovery::RecentlyRestarted,
-    /// Bumped under the `instances` write lock by any change an earlier disk snapshot
-    /// would not carry, so a reload holding that snapshot drops itself.
+    /// Invalidates earlier disk snapshots at memory mutation and queue persistence completion.
     pub mutation_epoch: Arc<std::sync::atomic::AtomicU64>,
     /// Ids whose startup-recovery cascade is scheduled but not yet complete.
     pub recovery_pending: crate::session::recovery::RecoveryPending,

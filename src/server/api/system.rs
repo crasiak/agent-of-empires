@@ -1558,6 +1558,9 @@ pub struct ServerAbout {
     /// Resolved `acp.show_tool_durations`, driving the per-tool elapsed-time
     /// label in the web UI.
     pub acp_show_tool_durations: bool,
+    /// Resolved `acp.wrap_tool_output`: the initial line-wrap state of tool
+    /// output blocks in the web UI.
+    pub acp_wrap_tool_output: bool,
     /// Resolved `acp.replay_events`: per-session retention cap on the acp event
     /// log, 0 for unlimited. The web client mirrors it on its in-memory activity
     /// buffer instead of clipping at a hard-coded constant (#1111).
@@ -1578,6 +1581,9 @@ pub struct ServerAbout {
     pub web_build_id: Option<&'static str>,
     /// Read-only runtime state of the daemon's sleep-inhibit reconciler.
     pub sleep_inhibit: SleepInhibitStatus,
+    /// This daemon run's id, which the web client sends back as a create's
+    /// `retry_origin` so a restarted daemon never re-runs an attempt it cannot see.
+    pub create_boot_id: String,
 }
 
 pub async fn get_about(State(state): State<Arc<AppState>>) -> Json<ServerAbout> {
@@ -1588,6 +1594,7 @@ pub async fn get_about(State(state): State<Arc<AppState>>) -> Json<ServerAbout> 
     let acp_cfg =
         crate::session::config::profile_config::resolve_config_or_warn(&state.profile).acp;
     let acp_show_tool_durations = acp_cfg.show_tool_durations;
+    let acp_wrap_tool_output = acp_cfg.wrap_tool_output;
     let acp_replay_events = acp_cfg.replay_events;
     let acp_compaction_reminder = acp_cfg.compaction_reminder;
     let acp_compaction_reminder_percent = acp_cfg.compaction_reminder_percent;
@@ -1609,6 +1616,7 @@ pub async fn get_about(State(state): State<Arc<AppState>>) -> Json<ServerAbout> 
         cityhall_mode: state.cityhall_mode,
         profile: served_profile(&state),
         acp_show_tool_durations,
+        acp_wrap_tool_output,
         acp_replay_events,
         acp_compaction_reminder,
         acp_compaction_reminder_percent,
@@ -1619,6 +1627,7 @@ pub async fn get_about(State(state): State<Arc<AppState>>) -> Json<ServerAbout> 
         },
         web_build_id: crate::server::web_build_id(),
         sleep_inhibit,
+        create_boot_id: state.create_progress.boot_id().to_string(),
     })
 }
 

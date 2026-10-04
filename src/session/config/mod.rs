@@ -423,7 +423,11 @@ pub struct AcpConfig {
     /// always offers it. Opening already-structured sessions, and switching a
     /// structured session back to a terminal, are unaffected.
     #[serde(default)]
-    #[setting(label = "Offer structured view in the TUI", widget = "toggle")]
+    #[setting(
+        label = "Offer structured view in the TUI",
+        widget = "toggle",
+        tui_only
+    )]
     pub offer_structured_in_new_session: bool,
     /// Which view the new-session dialog starts on when the chosen agent can
     /// back a structured session. Auto keeps each surface's own default: the
@@ -505,6 +509,11 @@ pub struct AcpConfig {
     #[serde(default = "default_true")]
     #[setting(label = "Show tool-call durations", widget = "toggle")]
     pub show_tool_durations: bool,
+    /// Wrap long lines in tool-call input and output blocks by default. Each
+    /// block still has its own wrap toggle; this only sets where it starts.
+    #[serde(default)]
+    #[setting(label = "Wrap tool output", widget = "toggle")]
+    pub wrap_tool_output: bool,
     /// Show a dismissable reminder in the structured view once the agent's
     /// context window passes `compaction_reminder_percent`, suggesting
     /// `/compact`. Off by default: the composer's usage chip already
@@ -651,6 +660,7 @@ impl Default for AcpConfig {
             replay_events: default_replay_events(),
             node_path: String::new(),
             show_tool_durations: true,
+            wrap_tool_output: false,
             compaction_reminder: false,
             compaction_reminder_percent: default_compaction_reminder_percent(),
             silent_orphan_grace_secs: default_silent_orphan_grace_secs(),
@@ -691,6 +701,9 @@ pub enum SortOrder {
     Oldest,
     AZ,
     ZA,
+    /// User-defined order: rows keep the position the user moved them to
+    /// (`Instance::sort_index` for sessions, `groups.json` order for groups).
+    Custom,
 }
 
 impl SortOrder {
@@ -701,13 +714,15 @@ impl SortOrder {
             SortOrder::LastActivity => SortOrder::Oldest,
             SortOrder::Oldest => SortOrder::AZ,
             SortOrder::AZ => SortOrder::ZA,
-            SortOrder::ZA => SortOrder::Newest,
+            SortOrder::ZA => SortOrder::Custom,
+            SortOrder::Custom => SortOrder::Newest,
         }
     }
 
     pub fn cycle_reverse(self) -> Self {
         match self {
-            SortOrder::Newest => SortOrder::ZA,
+            SortOrder::Newest => SortOrder::Custom,
+            SortOrder::Custom => SortOrder::ZA,
             SortOrder::Attention => SortOrder::Newest,
             SortOrder::LastActivity => SortOrder::Attention,
             SortOrder::Oldest => SortOrder::LastActivity,
@@ -724,6 +739,21 @@ impl SortOrder {
             SortOrder::Oldest => "Oldest",
             SortOrder::AZ => "A-Z",
             SortOrder::ZA => "Z-A",
+            SortOrder::Custom => "Custom",
+        }
+    }
+
+    /// Letter that selects this order in the sort picker. Unique across the variants, so a
+    /// press applies one order rather than stepping through the ones sharing a first letter.
+    pub fn mnemonic(self) -> char {
+        match self {
+            SortOrder::Newest => 'n',
+            SortOrder::Attention => 't',
+            SortOrder::LastActivity => 'r',
+            SortOrder::Oldest => 'o',
+            SortOrder::AZ => 'a',
+            SortOrder::ZA => 'z',
+            SortOrder::Custom => 'c',
         }
     }
 }
@@ -752,6 +782,15 @@ impl GroupByMode {
             GroupByMode::Manual => "Manual",
             GroupByMode::Project => "Project",
             GroupByMode::Org => "Org",
+        }
+    }
+
+    /// Letter that selects this mode in the group-by picker. See [`SortOrder::mnemonic`].
+    pub fn mnemonic(self) -> char {
+        match self {
+            GroupByMode::Manual => 'm',
+            GroupByMode::Project => 'p',
+            GroupByMode::Org => 'g',
         }
     }
 }
@@ -1022,7 +1061,8 @@ pub struct SessionConfig {
         label = "Sidebar Position",
         widget = "select",
         options = "left:Left,right:Right",
-        global_only
+        global_only,
+        tui_only
     )]
     pub sidebar_position: SidebarPosition,
 
@@ -1036,7 +1076,8 @@ pub struct SessionConfig {
         label = "Daemon-sourced sidebar",
         widget = "toggle",
         global_only,
-        advanced
+        advanced,
+        tui_only
     )]
     pub daemon_sidebar: bool,
 
@@ -1204,13 +1245,23 @@ pub struct SessionConfig {
     /// The AOE_MOUSE_CAPTURE env var remains an opt-out backstop and can still
     /// force capture off when set.
     #[serde(default = "default_true")]
-    #[setting(label = "Mouse Capture", widget = "toggle", category = "Interaction")]
+    #[setting(
+        label = "Mouse Capture",
+        widget = "toggle",
+        category = "Interaction",
+        tui_only
+    )]
     pub mouse_capture: bool,
 
     /// Set the host terminal tab to `aoe: {session}` from the TUI
     /// selection via OSC 0. Disable to keep the terminal's own naming.
     #[serde(default = "default_true")]
-    #[setting(label = "Host Tab Title", widget = "toggle", category = "Interaction")]
+    #[setting(
+        label = "Host Tab Title",
+        widget = "toggle",
+        category = "Interaction",
+        tui_only
+    )]
     pub host_tab_title: bool,
 
     /// User-defined agents: name=command (e.g. lenovo-claude=ssh -t lenovo
@@ -1297,7 +1348,7 @@ pub struct SessionConfig {
     /// if so, rebind tmux's send-prefix or use the `D` key from the help overlay.
     /// Off by default; existing users keep the legacy single-letter UX.
     #[serde(default)]
-    #[setting(label = "Strict Hotkeys", widget = "toggle")]
+    #[setting(label = "Strict Hotkeys", widget = "toggle", tui_only)]
     pub strict_hotkeys: bool,
 
     /// Default snooze for `aoe session snooze` (1-43200 min, picker overrides).
@@ -1441,6 +1492,13 @@ pub struct SessionConfig {
     )]
     pub row_tag: RowTagMode,
 
+    /// Show the age column at the right edge of each session row: time since
+    /// the agent stopped on Idle rows, time since last access on Unknown rows,
+    /// and remaining snooze time under the Attention sort.
+    #[serde(default = "default_true")]
+    #[setting(label = "Show Session Age", widget = "toggle", tui_only)]
+    pub show_activity_age: bool,
+
     /// Comma-separated chord specs that exit live-send mode. Tmux-style: C-q,
     /// M-x, F12. The first chord in the list that matches an event ends live
     /// mode. Default `C-q` works in every terminal we ship to; add entries for
@@ -1449,7 +1507,8 @@ pub struct SessionConfig {
     #[setting(
         label = "Live-Send Exit Chord",
         widget = "text",
-        category = "Interaction"
+        category = "Interaction",
+        tui_only
     )]
     pub live_send_exit_chord: String,
 
@@ -1468,7 +1527,8 @@ pub struct SessionConfig {
     #[setting(
         label = "Live-Send Leader Chord",
         widget = "text",
-        category = "Interaction"
+        category = "Interaction",
+        tui_only
     )]
     pub live_send_leader: String,
 
@@ -1482,7 +1542,8 @@ pub struct SessionConfig {
         label = "Attach Mode",
         widget = "select",
         options = "tmux:Tmux,live_send:Live mode",
-        category = "Interaction"
+        category = "Interaction",
+        tui_only
     )]
     pub default_attach_mode: AttachMode,
 
@@ -1492,7 +1553,8 @@ pub struct SessionConfig {
         label = "New Session Mode",
         widget = "select",
         options = "match_default:Match default attach,tmux:Tmux,live_send:Live mode",
-        category = "Interaction"
+        category = "Interaction",
+        tui_only
     )]
     pub new_session_mode: NewSessionMode,
 
@@ -1502,7 +1564,8 @@ pub struct SessionConfig {
     #[setting(
         label = "Auto Live-Send On View Switch",
         widget = "toggle",
-        category = "Interaction"
+        category = "Interaction",
+        tui_only
     )]
     pub live_send_on_view_switch: bool,
 
@@ -1516,14 +1579,20 @@ pub struct SessionConfig {
         label = "Mouse Click Action",
         widget = "select",
         options = "live_send:Live mode,select_only:Select only",
-        category = "Interaction"
+        category = "Interaction",
+        tui_only
     )]
     pub click_action: ClickAction,
 
     /// Warn before quitting aoe when you press `q` on the home screen (the
     /// dialog can also turn this off). Ctrl+C always force-quits.
     #[serde(default = "default_true")]
-    #[setting(label = "Confirm Before Quit", widget = "toggle", global_only)]
+    #[setting(
+        label = "Confirm Before Quit",
+        widget = "toggle",
+        global_only,
+        tui_only
+    )]
     pub confirm_before_quit: bool,
 
     /// Show an unread indicator on sessions. When on (default), a session
@@ -1887,6 +1956,7 @@ impl Default for SessionConfig {
             prevent_sleep_idle_grace_minutes: default_prevent_sleep_idle_grace_minutes(),
             restart_wake_message: default_restart_wake_message(),
             row_tag: RowTagMode::default(),
+            show_activity_age: true,
             live_send_exit_chord: default_live_send_exit_chord(),
             live_send_leader: default_live_send_leader(),
             default_attach_mode: AttachMode::default(),
@@ -1977,6 +2047,21 @@ impl SessionConfig {
             .filter(|s| !s.is_empty())
             .or_else(|| self.custom_agents.get(tool))
             .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The command a launch runs for `tool` when the session carries no
+    /// per-session override: `agent_command_override`, else `custom_agents`,
+    /// else the built-in's binary, else empty. A surface with no session to
+    /// ask names the agent from this, so it describes the launch instead of a
+    /// second derivation of it.
+    pub fn launch_command_for(&self, tool: &str) -> String {
+        let resolved = self.resolve_tool_command(tool);
+        if !resolved.is_empty() {
+            return resolved;
+        }
+        crate::agents::get_agent(tool)
+            .map(|agent| agent.binary.to_string())
             .unwrap_or_default()
     }
 
@@ -2238,7 +2323,7 @@ pub struct ThemeConfig {
     /// Idle session keeps a fresh-idle tint and an animated breathe icon for
     /// this many minutes before snapping back to the static look, and is
     /// treated as actionable by the `w` keybind. The time-since-stop column
-    /// on Idle rows shows regardless of this setting.
+    /// is `session.show_activity_age`.
     #[serde(default = "default_idle_decay_minutes")]
     #[setting(label = "Idle Decay (minutes)", widget = "number", min = 0)]
     pub idle_decay_minutes: u64,

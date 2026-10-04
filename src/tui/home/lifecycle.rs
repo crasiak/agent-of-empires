@@ -220,6 +220,7 @@ impl HomeView {
             group_by,
             row_tag_mode: resolved.session.row_tag,
             show_session_colors: resolved.session.show_session_colors,
+            show_activity_age: resolved.session.show_activity_age,
             sidebar_position: user_config
                 .as_ref()
                 .map(|c| c.session.sidebar_position)

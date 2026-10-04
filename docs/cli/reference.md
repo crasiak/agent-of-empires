@@ -108,6 +108,9 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe skill adopt`↴](#aoe-skill-adopt)
 * [`aoe skill remove`↴](#aoe-skill-remove)
 * [`aoe skill sync`↴](#aoe-skill-sync)
+* [`aoe hooks`↴](#aoe-hooks)
+* [`aoe hooks status`↴](#aoe-hooks-status)
+* [`aoe hooks approve`↴](#aoe-hooks-approve)
 * [`aoe serve`↴](#aoe-serve)
 * [`aoe url`↴](#aoe-url)
 * [`aoe acp`↴](#aoe-acp)
@@ -167,6 +170,7 @@ Run without arguments to launch the TUI dashboard.
 * `telemetry` — Manage anonymous opt-in usage telemetry
 * `mcp` — Inspect the effective MCP server set (provenance, conflicts, drift)
 * `skill` — Query and manage agent skills
+* `hooks` — Let AoE write agent hooks into each agent's own config, for every agent and every profile
 * `serve` — Start the aoe daemon: REST/WebSocket API, plus the web dashboard in builds that embed it
 * `url` — Print the URL of a running `aoe serve` daemon
 * `acp` — Manage the ACP structured-view workers (doctor, ps, logs, prompt, approve, ...)
@@ -463,7 +467,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `set-base` — Set or clear the per-session diff base branch. The diff view compares the worktree against this ref instead of the auto-detected default. Useful when the PR target differs from the project default (stacked PRs, hotfix off `release/*`, renamed default branch). See #970
 * `snooze` — Snooze a session for a duration (temporary archive, auto wakes)
 * `unsnooze` — Wake a snoozed session immediately
-* `favorite` — Mark a session as a favorite. With `session.favorites_first` on (the default), favorited rows pin to the top of their sibling scope in every sort order; with it off, they pin within their status tier in the Attention sort only. Either way the row renders with a leading `*` marker plus bold and underline wherever the pin applies. Snoozing a favorite suspends the pin until it wakes
+* `favorite` — Mark a session as a favorite. With `session.favorites_first` on (the default), favorited rows pin to the top of their sibling scope in every sort order; with it off, they pin within their status tier in the Attention sort only. Either way the row shows a `✦` in the session list gutter wherever the pin applies. Snoozing a favorite suspends the pin until it wakes
 * `unfavorite` — Clear the favorite flag on a session
 * `color` — Set (or clear) a per-session color, rendered as a whole-row highlight in the web sidebar for at-a-glance signaling. Intended for a running agent to flag its own state, e.g. `aoe session color $(aoe session current -q) red`. Colors: `red` (needs attention), `amber` (working), `green` (done), `purple`, `teal`; `none` clears it
 * `archive` — Archive a session: sink it in the Attention sort and tear down its tmux sessions. Worktree, branch, container preserved. `--no-kill` skips tmux teardown. See #1868
@@ -736,7 +740,7 @@ Wake a snoozed session immediately
 
 ## `aoe session favorite`
 
-Mark a session as a favorite. With `session.favorites_first` on (the default), favorited rows pin to the top of their sibling scope in every sort order; with it off, they pin within their status tier in the Attention sort only. Either way the row renders with a leading `*` marker plus bold and underline wherever the pin applies. Snoozing a favorite suspends the pin until it wakes
+Mark a session as a favorite. With `session.favorites_first` on (the default), favorited rows pin to the top of their sibling scope in every sort order; with it off, they pin within their status tier in the Attention sort only. Either way the row shows a `✦` in the session list gutter wherever the pin applies. Snoozing a favorite suspends the pin until it wakes
 
 **Usage:** `aoe session favorite <IDENTIFIER>`
 
@@ -1658,6 +1662,35 @@ Copy AoE-managed skills into the agents' own skills directories
 * `--replace <DIRECTORY>` — Take over this skill in the agents' directories, overwriting a skill AoE does not manage or a propagated copy that was edited there. Repeatable. Without it a sync never overwrites anything it did not itself write
 * `--only <DIRECTORY>` — Reconcile only this skill. Repeatable. Defaults to every managed skill
 * `--json` — Output the per-skill outcomes as JSON
+
+
+
+## `aoe hooks`
+
+Let AoE write agent hooks into each agent's own config, for every agent and every profile
+
+**Usage:** `aoe hooks <COMMAND>`
+
+###### **Subcommands:**
+
+* `status` — Show whether AoE may write agent hooks, and what they resolve for a profile
+* `approve` — Let AoE write agent hooks for every agent, on every profile
+
+
+
+## `aoe hooks status`
+
+Show whether AoE may write agent hooks, and what they resolve for a profile
+
+**Usage:** `aoe hooks status`
+
+
+
+## `aoe hooks approve`
+
+Let AoE write agent hooks for every agent, on every profile
+
+**Usage:** `aoe hooks approve`
 
 
 

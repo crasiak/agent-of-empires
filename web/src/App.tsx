@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { Puzzle } from "lucide-react";
-import { useMatch, useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useMatch, useNavigate, useSearchParams } from "react-router-dom";
 import { IDLE_DECAY_WINDOW_MS } from "./lib/session";
 import { diffSelectionStale } from "./lib/diffSelection";
 import { useSessions } from "./hooks/useSessions";
@@ -46,7 +46,7 @@ import { SendCommentsDialog } from "./components/diff/comments/SendCommentsDialo
 import { useCommandActions, buildConversationActions, type SessionStateAction } from "./hooks/useCommandActions";
 import { usePluginCommands } from "./hooks/usePluginCommands";
 import { useSettingsCommands } from "./hooks/useSettingsCommands";
-import { useEdgeSwipe } from "./hooks/useEdgeSwipe";
+import { useDrawerSwipe, type DrawerSwipeAction } from "./hooks/useDrawerSwipe";
 import { useIsCoarsePointer } from "./hooks/useIsCoarsePointer";
 import { useMobileViewportLock } from "./hooks/useMobileViewportLock";
 import { useIsWideViewport } from "./hooks/useIsWideViewport";
@@ -108,6 +108,7 @@ import {
   HeadroomOverlayEnabledContext,
 } from "./lib/ledgerRun";
 import { toastBus, reportError } from "./lib/toastBus";
+import { startPendingCreates } from "./lib/pendingCreates";
 import { isAbsolutePath, resolveToRepoRelative, type FileRef } from "./lib/fileRef";
 import { NAVIGATE_EVENT, OPEN_SESSION_EVENT } from "./lib/sessionRoute";
 import { dispatchFocusTerminal, requestSessionInputFocus, setPendingTerminalFocus } from "./lib/terminalFocus";
@@ -362,6 +363,7 @@ function AppContent({
     void hydrateWebUiStateFromServer();
   }, []);
 
+  const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { settings: webSettings } = useWebSettings();
@@ -385,6 +387,22 @@ function AppContent({
     applySession,
   } = useSessions();
   const workspaces = useWorkspaces(sessions);
+  // Creates whose outcome the wizard never learned keep reconciling here, past its unmount.
+  useEffect(() => {
+    startPendingCreates({
+      onCreated: (session) => {
+        if (!session) return;
+        injectSession(session);
+        toastBus.handler?.info(`"${session.title}" is ready`);
+      },
+      onFailed: (message) => toastBus.handler?.error(`Session was not created: ${message}`),
+      onUnknown: (message) => toastBus.handler?.error(message),
+      onUnsaved: () =>
+        toastBus.handler?.error(
+          "This browser could not save a session that is still being created; keep this tab open until it finishes.",
+        ),
+    });
+  }, [injectSession]);
   // Trash is a whole-workspace concern, so it is derived here from the
   // authoritative unsliced workspace list rather than reconstructed from the
   // sidebar's per-`group_path` slice views. A workspace is in Trash only when
@@ -1574,33 +1592,23 @@ function AppContent({
 
   const handleToggleSidebar = useCallback(() => {
     setSidebarOpen((o) => !o);
+    setPickerOpen(false);
   }, []);
 
-  const openSidebar = useCallback(() => setSidebarOpen(true), []);
-  const openDiff = useCallback(() => {
-    if (isMdUp) {
-      openTab("diff", "right");
-    } else {
-      setPickerOpen(true);
-    }
-  }, [isMdUp, openTab]);
-  useEdgeSwipe({
-    edge: "left",
-    // The swipe-right-to-open gesture only makes sense for a left-anchored
-    // drawer; with the sidebar on the right edge it would slide in from the
-    // opposite side of the drag, so disable it there (#2244).
-    enabled: !sidebarOpen && webSettings.sidebarSide !== "right",
-    onSwipe: openSidebar,
-    blurOnSwipe: true,
-    // A swipe-right anywhere on screen opens the sidebar, not just from the
-    // left edge. The right-edge (diff) swipe stays edge-only below.
-    anywhere: true,
-  });
-  useEdgeSwipe({
-    edge: "right",
-    enabled: rightDockCollapsed && !!activeSessionId,
-    onSwipe: openDiff,
-  });
+  const closePicker = useCallback(() => setPickerOpen(false), []);
+  const handleDrawerSwipe = useCallback((action: DrawerSwipeAction) => {
+    if (action === "open-sidebar" || action === "close-sidebar") setSidebarOpen(action === "open-sidebar");
+    else setPickerOpen(action === "open-panels");
+  }, []);
+  useDrawerSwipe(
+    {
+      sidebarOpen,
+      sidebarSide: webSettings.sidebarSide,
+      panelsOpen: pickerOpen,
+      panelsAvailable: !!activeWorkspace && !!activeSession,
+    },
+    handleDrawerSwipe,
+  );
 
   // Read-only mode hides mutation UI. Guard creation at the handler so every
   // caller (keyboard shortcut, command palette) is a no-op rather than opening
@@ -1853,7 +1861,18 @@ function AppContent({
           onClose={handleCloseSettings}
           onSelectTab={(t) => {
             const p = searchParams.get("profile");
-            navigate(`/settings/${t}${p ? `?profile=${encodeURIComponent(p)}` : ""}`);
+            // Marks a tab opened from the mobile section list, so its Back pops to it.
+            navigate(`/settings/${t}${p ? `?profile=${encodeURIComponent(p)}` : ""}`, {
+              state: { fromSettingsList: settingsTab === null },
+            });
+          }}
+          onShowList={() => {
+            if ((location.state as { fromSettingsList?: boolean } | null)?.fromSettingsList) {
+              navigate(-1);
+              return;
+            }
+            const p = searchParams.get("profile");
+            navigate(`/settings${p ? `?profile=${encodeURIComponent(p)}` : ""}`, { replace: true });
           }}
           onServerAboutRefresh={refreshServerAbout}
           profile={searchParams.get("profile")}
@@ -2119,12 +2138,14 @@ function AppContent({
   const acpPrefs = useMemo(
     () => ({
       showToolDurations: serverAbout?.acp_show_tool_durations ?? true,
+      wrapToolOutput: serverAbout?.acp_wrap_tool_output ?? false,
       replayEvents: serverAbout?.acp_replay_events ?? 0,
       compactionReminder: serverAbout?.acp_compaction_reminder ?? false,
       compactionReminderPercent: serverAbout?.acp_compaction_reminder_percent ?? 75,
     }),
     [
       serverAbout?.acp_show_tool_durations,
+      serverAbout?.acp_wrap_tool_output,
       serverAbout?.acp_replay_events,
       serverAbout?.acp_compaction_reminder,
       serverAbout?.acp_compaction_reminder_percent,
@@ -2417,6 +2438,11 @@ function AppContent({
               setShowSessionWizard(false);
               setWizardPrefill(undefined);
             }}
+            onCreatedInBackground={(session?: SessionResponse) => {
+              if (!session) return;
+              injectSession(session);
+              toastBus.handler?.info(`"${session.title}" is ready`);
+            }}
             prefill={wizardPrefill}
             nameOnly={caps.nameOnlyWizard}
           />
@@ -2521,14 +2547,15 @@ function AppContent({
           />
         )}
 
-        {activeWorkspace && activeSession && (
+        {singlePane && activeWorkspace && activeSession && (
           <MobileRightPanelPicker
-            open={pickerOpen && singlePane}
+            open={pickerOpen}
             active={rightPanelView}
-            pluginPanes={pluginPanes}
+            sessionTitle={activeSession.title}
             availablePanes={mobilePaneIds}
+            describePane={paneDescriptor}
             onSelect={handlePickView}
-            onClose={() => setPickerOpen(false)}
+            onClose={closePicker}
           />
         )}
 
