@@ -123,6 +123,7 @@ export function SidebarToolbar({
               onClick={onToggleFilter}
               className={`${TOOLBAR_BUTTON} ${TOOLBAR_TINT(filterOpen, "text-text-secondary")}`}
               aria-label="Filter sessions"
+              aria-expanded={filterOpen}
             >
               <StrokeIcon size={14} strokeWidth="2">
                 <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />

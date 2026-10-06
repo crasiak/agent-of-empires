@@ -18,35 +18,44 @@ function workspaceMatchesQuery(ws: Workspace, q: string): boolean {
   );
 }
 
-/** A row survives when it or any enclosing header name matches `q`, and it passes the facet filter. */
-export function makeRowFilter(q: string, matchesFacets: (ws: Workspace) => boolean) {
+/** Text matches may come from a parent header; other filters always apply to the row. */
+export function makeRowFilter(q: string, matchesFilters: (ws: Workspace) => boolean) {
   return (v: SidebarWorkspaceView, ...groupNames: string[]) =>
     (!q || workspaceMatchesQuery(v.workspace, q) || groupNames.some((n) => n.toLowerCase().includes(q))) &&
-    matchesFacets(v.workspace);
+    matchesFilters(v.workspace);
 }
 
 type RowFilter = ReturnType<typeof makeRowFilter>;
+type EmptyGroupFilter = (group: SidebarGroup, ...parentNames: string[]) => boolean;
 
-/** Filters each group's rows and drops groups left empty. */
-function filterLevel<G extends SidebarGroup>(groups: G[], keep: RowFilter, ...parentNames: string[]): G[] {
+function filterLevel(
+  groups: SidebarGroup[],
+  keep: RowFilter,
+  keepEmpty?: EmptyGroupFilter,
+  ...parentNames: string[]
+): SidebarGroup[] {
   return groups
     .map((g) => ({ ...g, workspaces: g.workspaces.filter((v) => keep(v, g.displayName, ...parentNames)) }))
-    .filter((g) => g.workspaces.length > 0);
+    .filter((g) => g.workspaces.length > 0 || (g.pinnedEmpty && keepEmpty?.(g, ...parentNames)));
 }
 
-export function filterFlat(groups: SidebarGroup[], keep: RowFilter): SidebarGroup[] {
-  return filterLevel(groups, keep);
+export function filterFlat(groups: SidebarGroup[], keep: RowFilter, keepEmpty?: EmptyGroupFilter): SidebarGroup[] {
+  return filterLevel(groups, keep, keepEmpty);
 }
 
-export function filterNested(groups: NestedSidebarGroup[], keep: RowFilter): NestedSidebarGroup[] {
+export function filterNested(
+  groups: NestedSidebarGroup[],
+  keep: RowFilter,
+  keepEmpty?: EmptyGroupFilter,
+): NestedSidebarGroup[] {
   return groups
-    .map((ng) => ({ repo: ng.repo, subgroups: filterLevel(ng.subgroups, keep, ng.repo.displayName) }))
-    .filter((ng) => ng.subgroups.length > 0);
+    .map((ng) => ({ repo: ng.repo, subgroups: filterLevel(ng.subgroups, keep, keepEmpty, ng.repo.displayName) }))
+    .filter((ng) => ng.subgroups.length > 0 || (ng.repo.pinnedEmpty && keepEmpty?.(ng.repo)));
 }
 
-export function filterOrg(groups: OrgNestedGroup[], keep: RowFilter): OrgNestedGroup[] {
+export function filterOrg(groups: OrgNestedGroup[], keep: RowFilter, keepEmpty?: EmptyGroupFilter): OrgNestedGroup[] {
   return groups
-    .map((og) => ({ org: og.org, repos: filterLevel(og.repos, keep, og.org.displayName) }))
+    .map((og) => ({ org: og.org, repos: filterLevel(og.repos, keep, keepEmpty, og.org.displayName) }))
     .filter((og) => og.repos.length > 0);
 }
 

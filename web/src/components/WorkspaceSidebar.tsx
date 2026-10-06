@@ -12,6 +12,7 @@ import {
   type SidebarWorkspaceView,
 } from "../lib/sidebarGroups";
 import type { RepoAppearanceUpdate } from "../lib/repoAppearance";
+import { useSessionColorsEnabled } from "../lib/sessionColors";
 import { useWebSettings } from "../hooks/useWebSettings";
 import { SidebarCompactContext } from "../lib/sidebarCompact";
 import { TOUR_ANCHORS, tourAnchor } from "../lib/tourSteps";
@@ -33,14 +34,19 @@ import {
 } from "./sidebar/filterGroups";
 import { FlatGroupList, NestedGroupList, OrgGroupList, type ListContext } from "./sidebar/GroupLists";
 import { SessionRow } from "./sidebar/SessionRow";
+import { HighlightFilter } from "./sidebar/HighlightFilter";
+import { workspaceHighlight } from "./sidebar/rowModel";
 import { FacetPanel, SidebarToolbar } from "./sidebar/SidebarToolbar";
 import { TrashMenu } from "./sidebar/TrashMenu";
 import { useFacetFilter } from "./sidebar/useFacetFilter";
 import { useSidebarSelection } from "./sidebar/useSidebarSelection";
 import { useSidebarWidth } from "./sidebar/useSidebarWidth";
 
+const NO_HIGHLIGHTS: readonly (string | null)[] = [];
+
 interface Props {
   groups: SidebarGroup[];
+  repoGroups: RepoGroup[];
   /** Used only when `axis === "repo+group"`. */
   nestedGroups: NestedSidebarGroup[];
   /** Used only when `axis === "org"`. */
@@ -105,33 +111,74 @@ export function WorkspaceSidebar(props: Props) {
     props.pluginSortRef != null &&
     pluginSorts.some((s) => s.pluginId === props.pluginSortRef!.pluginId && s.entryId === props.pluginSortRef!.entryId);
 
-  // Reorder rebuilds order from the full list, so it is off whenever the visible order is computed or filtered,
-  // and on axes (the user-group axis) whose groups cannot persist an order.
-  const reorderDisabled =
-    !!readOnly ||
-    props.sortMode === "lastActivity" ||
-    pluginSortActive ||
-    facets.activeFacets.length > 0 ||
-    groups.some((g) => !g.capabilities.reorder);
   const dragSuppressRef = useRef<number>(0);
   useSuppressClickAfterDrag(dragSuppressRef);
 
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
+  const [sessionHighlights, setSessionHighlights] = useState<(string | null)[]>([]);
+  const [projectHighlights, setProjectHighlights] = useState<(string | null)[]>([]);
+  const sessionColorsEnabled = useSessionColorsEnabled();
   const [facetOpen, setFacetOpen] = useState(false);
   const filterRef = useRef<HTMLInputElement>(null);
   const [sunkExpanded, toggleSunkExpanded] = usePersistedFlag("aoe-sidebar-sunk-expanded", false);
-  // The compact rail has no filter controls, so a query typed earlier stops applying without being cleared.
+  // Hidden filter controls must not silently narrow the list.
   const activeFilterQuery = compact ? "" : filterQuery;
+  const activeSessionHighlights = compact || !sessionColorsEnabled ? NO_HIGHLIGHTS : sessionHighlights;
+  const activeProjectHighlights = compact ? NO_HIGHLIGHTS : projectHighlights;
   const q = activeFilterQuery.trim().toLowerCase();
-  const hasFilter = !!q || facets.activeFacets.length > 0;
+  const hasHighlightFilter = activeSessionHighlights.length > 0 || activeProjectHighlights.length > 0;
+  const hasFacets = facets.activeFacets.length > 0;
+  const hasFilter = !!q || hasHighlightFilter || hasFacets;
+  const repoColorsByWorkspace = useMemo(
+    () => new Map(props.repoGroups.flatMap((g) => g.workspaces.map((w) => [w.id, g.color] as const))),
+    [props.repoGroups],
+  );
+  const matchesProjectHighlight = useCallback(
+    (color: string | null) => activeProjectHighlights.length === 0 || activeProjectHighlights.includes(color),
+    [activeProjectHighlights],
+  );
+
+  // Reordering a filtered list could discard hidden rows from the saved order.
+  const reorderDisabled =
+    !!readOnly ||
+    props.sortMode === "lastActivity" ||
+    pluginSortActive ||
+    hasFilter ||
+    groups.some((g) => !g.capabilities.reorder);
 
   const { matchesFacets } = facets;
   const [filteredGroups, filteredNested, filteredOrgGroups] = useMemo(() => {
     if (!hasFilter) return [groups, nestedGroups, orgGroups] as const;
-    const keep = makeRowFilter(q, matchesFacets);
-    return [filterFlat(groups, keep), filterNested(nestedGroups, keep), filterOrg(orgGroups, keep)] as const;
-  }, [hasFilter, q, matchesFacets, groups, nestedGroups, orgGroups]);
+    const keep = makeRowFilter(
+      q,
+      (ws) =>
+        matchesFacets(ws) &&
+        (activeSessionHighlights.length === 0 || activeSessionHighlights.includes(workspaceHighlight(ws))) &&
+        matchesProjectHighlight(repoColorsByWorkspace.get(ws.id) ?? null),
+    );
+    const keepEmpty = (g: SidebarGroup, ...parents: string[]) =>
+      activeSessionHighlights.length === 0 &&
+      !hasFacets &&
+      matchesProjectHighlight(g.color) &&
+      (!q || [g.displayName, g.repoPath ?? "", ...parents].some((n) => n.toLowerCase().includes(q)));
+    return [
+      filterFlat(groups, keep, keepEmpty),
+      filterNested(nestedGroups, keep, keepEmpty),
+      filterOrg(orgGroups, keep, keepEmpty),
+    ] as const;
+  }, [
+    hasFilter,
+    q,
+    matchesFacets,
+    activeSessionHighlights,
+    matchesProjectHighlight,
+    repoColorsByWorkspace,
+    hasFacets,
+    groups,
+    nestedGroups,
+    orgGroups,
+  ]);
   const isNested = axis === "repo+group";
   const isOrgAxis = axis === "org";
 
@@ -198,9 +245,12 @@ export function WorkspaceSidebar(props: Props) {
     },
   };
 
+  const filteredProjects = props.savedProjects.filter(
+    (p) => !hasFacets && activeSessionHighlights.length === 0 && matchesProjectHighlight(p.color),
+  );
   const savedProjectsMatchQuery =
-    !!q &&
-    props.savedProjects.some((p) => p.displayName.toLowerCase().includes(q) || p.repoPath.toLowerCase().includes(q));
+    (props.canManageProjects ?? true) &&
+    filteredProjects.some((p) => !q || p.displayName.toLowerCase().includes(q) || p.repoPath.toLowerCase().includes(q));
   const hasResults =
     (isNested ? filteredNested.length : isOrgAxis ? filteredOrgGroups.length : filteredGroups.length) > 0 ||
     savedProjectsMatchQuery;
@@ -212,12 +262,15 @@ export function WorkspaceSidebar(props: Props) {
         : filteredGroups,
   );
 
+  const clearFilters = () => {
+    setFilterQuery("");
+    setSessionHighlights([]);
+    setProjectHighlights([]);
+  };
   const toggleFilter = () => {
-    setFilterOpen((o) => {
-      if (o) setFilterQuery("");
-      return !o;
-    });
-    if (!filterOpen) requestAnimationFrame(() => filterRef.current?.focus());
+    if (filterOpen) clearFilters();
+    else requestAnimationFrame(() => filterRef.current?.focus());
+    setFilterOpen(!filterOpen);
   };
 
   // The phone overlay starts under the header, which the app root insets below the status bar.
@@ -259,19 +312,38 @@ export function WorkspaceSidebar(props: Props) {
         />
 
         {filterOpen && !compact && (
-          <div className="px-3 pb-2">
+          <div
+            className="px-3 pb-2"
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.stopPropagation();
+                toggleFilter();
+              }
+            }}
+          >
             <input
               ref={filterRef}
               type="text"
               value={filterQuery}
               onChange={(e) => setFilterQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") toggleFilter();
-              }}
+              aria-label="Filter by name, branch, agent"
               placeholder="Filter by name, branch, agent..."
               data-testid="sidebar-filter-input"
               className="w-full bg-surface-800 border border-surface-700 rounded-md px-2.5 py-1.5 text-[13px] text-text-primary placeholder:text-text-dim focus:border-brand-600 focus:outline-none"
             />
+            {sessionColorsEnabled && (
+              <HighlightFilter scope="sessions" selected={sessionHighlights} onChange={setSessionHighlights} />
+            )}
+            <HighlightFilter scope="projects" selected={projectHighlights} onChange={setProjectHighlights} />
+            {(q || hasHighlightFilter) && (
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="mt-1 h-8 text-[11px] text-text-secondary hover:text-text-primary cursor-pointer"
+              >
+                Clear filters
+              </button>
+            )}
           </div>
         )}
 
@@ -306,7 +378,7 @@ export function WorkspaceSidebar(props: Props) {
               groups={filteredGroups}
               fullGroups={groups}
               reorderDisabled={reorderDisabled}
-              groupDragDisabled={reorderDisabled || q.length > 0}
+              groupDragDisabled={reorderDisabled}
               onToggleGroup={props.onToggleGroup}
               onReorderGroups={props.onReorderGroups}
               onReorderWorkspaces={props.onReorderWorkspaces}
@@ -334,23 +406,26 @@ export function WorkspaceSidebar(props: Props) {
             </div>
           )}
 
-          {(props.canManageProjects ?? true) && (
-            <ProjectsSection
-              projects={props.savedProjects}
-              query={q}
-              readOnly={readOnly}
-              offline={offline}
-              onCreateSession={props.onCreateSession}
-              onAddProject={props.onAddProject}
-              onEditProject={props.onEditProject}
-              onRemoveProject={props.onRemoveProject}
-              onUpdateAppearance={props.onUpdateRepoAppearance}
-            />
-          )}
+          {(props.canManageProjects ?? true) &&
+            ((!hasHighlightFilter && !hasFacets) || filteredProjects.length > 0) && (
+              <ProjectsSection
+                projects={filteredProjects}
+                query={q}
+                readOnly={readOnly}
+                offline={offline}
+                onCreateSession={props.onCreateSession}
+                onAddProject={props.onAddProject}
+                onEditProject={props.onEditProject}
+                onRemoveProject={props.onRemoveProject}
+                onUpdateAppearance={props.onUpdateRepoAppearance}
+              />
+            )}
 
           {!hasResults && hasFilter && (
             <div className="px-4 py-8 text-center">
-              <p className="text-sm text-text-muted">No matches for &ldquo;{activeFilterQuery}&rdquo;</p>
+              <p className="text-sm text-text-muted">
+                {q ? <>No matches for &ldquo;{activeFilterQuery}&rdquo;</> : "No matches for the selected filters"}
+              </p>
             </div>
           )}
 
