@@ -2,6 +2,7 @@
 
 pub mod acp;
 pub mod add;
+pub mod afk;
 pub mod agents;
 pub mod cityhall;
 pub mod definition;

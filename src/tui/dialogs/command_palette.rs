@@ -50,6 +50,7 @@ impl PaletteGroup {
 
 /// What the dialog asks the input handler to do when the user picks an entry.
 pub enum PaletteAction {
+    AfkControl,
     /// Run a registry action directly. The canonical path: it synthesizes no
     /// keypress, so strict mode's typing-guard cannot misfire on it.
     Invoke(ActionId),

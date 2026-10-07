@@ -44,6 +44,7 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+mod afk;
 mod apply_session_id_updates;
 mod archive_restart_grouping;
 mod click_to_select;

@@ -290,6 +290,12 @@ A wrapper around a supported agent needs no `agent_acp_cmd` at all: map it with 
 
 To pass those overrides to a host structured session anyway, use the session's `extra_env` or [`environment`](#host-environment). A Docker-sandboxed session reads only `sandbox.environment` and pins its own config dir at a container path, so set the container-side value there, or give the wrapper a real `agent_acp_cmd`. An explicit `agent_acp_cmd` wins if you set both.
 
+## AFK presence control
+
+Direct Pi terminal sessions support [expiring control-only AFK](afk.md). It is
+runtime session state, not a configuration default or permission mode, and does
+not authorize autonomous actions.
+
 ## Agent command overrides
 
 An override replaces the command AoE launches for an agent, which is how you run it with fixed options, through a script, or under a sandbox such as [nono](https://github.com/always-further/nono/).

@@ -274,6 +274,7 @@ impl HomeView {
             no_agents_dialog: None,
             changelog_dialog: None,
             info_dialog: None,
+            afk_dialog: None,
             snooze_duration_dialog: None,
             pending_snooze_session: None,
             profile_picker_dialog: None,

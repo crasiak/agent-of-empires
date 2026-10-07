@@ -183,6 +183,7 @@ pub struct HomeView {
     pub(super) no_agents_dialog: Option<NoAgentsDialog>,
     pub(super) changelog_dialog: Option<ChangelogDialog>,
     pub(super) info_dialog: Option<InfoDialog>,
+    pub(super) afk_dialog: Option<super::dialogs::afk::AfkDialog>,
     pub(super) snooze_duration_dialog: Option<SnoozeDurationDialog>,
     pub(super) pending_snooze_session: Option<String>,
     pub(super) profile_picker_dialog: Option<ProfilePickerDialog>,

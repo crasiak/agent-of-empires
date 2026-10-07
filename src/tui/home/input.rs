@@ -1152,6 +1152,9 @@ impl HomeView {
     }
 
     pub fn handle_dialog_click(&mut self, col: u16, row: u16) -> bool {
+        if self.afk_dialog.is_some() {
+            return true;
+        }
         if let Some(dialog) = &mut self.intro_dialog {
             let click = dialog.handle_click(col, row);
             let preview = dialog.take_pending_preview();
@@ -1931,6 +1934,13 @@ impl HomeView {
                     self.tips_dialog = None;
                     self.persist_tips_outcome(outcome);
                 }
+            }
+            return None;
+        }
+
+        if let Some(dialog) = &mut self.afk_dialog {
+            if matches!(dialog.handle_key(key), DialogResult::Cancel) {
+                self.afk_dialog = None;
             }
             return None;
         }
@@ -3684,6 +3694,16 @@ impl HomeView {
 
     fn open_command_palette(&mut self) {
         let mut entries: Vec<PaletteCommand> = builtin_commands(self.strict_hotkeys);
+        if self.selected_session.is_some() {
+            entries.push(PaletteCommand {
+                id: "afk-control",
+                title: "AFK control-only: inspect / enable / disable".into(),
+                group: PaletteGroup::Actions,
+                keywords: vec!["away", "afk"],
+                hotkey: String::new(),
+                payload: PaletteAction::AfkControl,
+            });
+        }
 
         // Quit lives in the registry but is excluded from `builtin_commands` (no palette
         // metadata) so it can sit in the Settings group at the end; add it here, still
@@ -3820,6 +3840,17 @@ impl HomeView {
                 self.search_match_index = 0;
                 self.search_query = Input::default();
                 self.run_action(id, update_info)
+            }
+            PaletteAction::AfkControl => {
+                if let Some(instance) = self
+                    .selected_session
+                    .as_deref()
+                    .and_then(|id| self.get_instance(id))
+                    .cloned()
+                {
+                    self.afk_dialog = Some(super::super::dialogs::afk::AfkDialog::new(instance));
+                }
+                None
             }
             PaletteAction::Activate => self.activate_selected_session(),
             PaletteAction::LiveSend => self.start_live_send(),

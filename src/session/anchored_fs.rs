@@ -102,6 +102,10 @@ impl AnchoredDir {
         })
     }
 
+    pub(crate) fn metadata(&self) -> Result<FileStat> {
+        Ok(fstat(&self.fd)?)
+    }
+
     pub(crate) fn identity(&self) -> Result<(libc::dev_t, libc::ino_t)> {
         let stat = fstat(&self.fd)?;
         Ok((stat.st_dev, stat.st_ino))

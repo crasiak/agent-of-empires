@@ -33,8 +33,7 @@
             # every other compile-time embedded asset has to be unioned in
             # explicitly: the acp-worker/adapters manifests that
             # src/acp/adapters.rs reads with include_bytes! (#3204), and
-            # assets/session, the identity extension that lets supported agents
-            # publish their own conversation id, and
+            # assets/session, the identity and control-only AFK extensions, and
             # docker/Dockerfile, which the agent_compat test embeds to pin the
             # sandbox npm floor, and acp-worker/aoe-agent (manifest, lock and
             # sources), which src/acp/adapters.rs embeds to install the

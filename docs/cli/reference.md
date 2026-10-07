@@ -20,6 +20,10 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe usage export`↴](#aoe-usage-export)
 * [`aoe killall`↴](#aoe-killall)
 * [`aoe session`↴](#aoe-session)
+* [`aoe session afk`↴](#aoe-session-afk)
+* [`aoe session afk on`↴](#aoe-session-afk-on)
+* [`aoe session afk off`↴](#aoe-session-afk-off)
+* [`aoe session afk status`↴](#aoe-session-afk-status)
 * [`aoe session report-launch`↴](#aoe-session-report-launch)
 * [`aoe session report-ledger-launch`↴](#aoe-session-report-ledger-launch)
 * [`aoe session start`↴](#aoe-session-start)
@@ -451,6 +455,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 
 ###### **Subcommands:**
 
+* `afk` — Inspect or request expiring control-only AFK for a direct Pi session
 * `report-launch` — Report resolved launch identity from inside the agent pane
 * `report-ledger-launch` — Report optional Ledger run attribution from inside the agent pane
 * `start` — Start a session's tmux process
@@ -476,6 +481,60 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `import` — Import existing Claude Code sessions from disk. Scans the given path(s) (default: current directory) for Claude Code conversations whose working directory is at or under a path, and creates an AoE session for each: a terminal/tmux session that resumes the conversation with `claude --resume <id>` (default), or a structured-view session with `--structured`
 * `list-trash` — List the sessions currently in the trash
 * `empty-trash` — Permanently purge every trashed session in the profile (irreversible)
+
+
+
+## `aoe session afk`
+
+Inspect or request expiring control-only AFK for a direct Pi session
+
+**Usage:** `aoe session afk <COMMAND>`
+
+###### **Subcommands:**
+
+* `on` — Request control-only AFK. Does not authorize autonomous work
+* `off` — Record AFK off even if the integration is unavailable
+* `status` — Probe the current integration; does not enable or renew AFK
+
+
+
+## `aoe session afk on`
+
+Request control-only AFK. Does not authorize autonomous work
+
+**Usage:** `aoe session afk on --minutes <MINUTES> <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>` — Session ID or title
+
+###### **Options:**
+
+* `--minutes <MINUTES>` — Explicit expiry, from 1 to 1440 minutes
+
+
+
+## `aoe session afk off`
+
+Record AFK off even if the integration is unavailable
+
+**Usage:** `aoe session afk off <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>`
+
+
+
+## `aoe session afk status`
+
+Probe the current integration; does not enable or renew AFK
+
+**Usage:** `aoe session afk status <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>`
 
 
 

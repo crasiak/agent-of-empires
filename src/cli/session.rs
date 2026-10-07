@@ -196,6 +196,8 @@ fn report_launch(args: ReportLaunchArgs) -> Result<()> {
 
 #[derive(Subcommand)]
 pub enum SessionCommands {
+    /// Inspect or request expiring control-only AFK for a direct Pi session
+    Afk(super::afk::AfkArgs),
     /// Report resolved launch identity from inside the agent pane
     ReportLaunch(ReportLaunchArgs),
     /// Report optional Ledger run attribution from inside the agent pane
@@ -576,6 +578,7 @@ fn session_details(inst: &Instance, profile: &str) -> SessionDetails {
 #[tracing::instrument(target = "cli.session", skip_all, fields(profile = %profile))]
 pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
     match command {
+        SessionCommands::Afk(args) => super::afk::run(profile, args).await,
         SessionCommands::ReportLaunch(args) => report_launch(args),
         SessionCommands::ReportLedgerLaunch(args) => report_ledger_launch(args),
         SessionCommands::Start(args) => start_session(profile, args).await,

@@ -975,6 +975,19 @@ impl Instance {
                     }
                     let is_existing =
                         self.apply_session_flags(&mut cmd, "host agent", agent, execution)?;
+                    if self.tool == "pi" && !self.is_sandboxed() {
+                        if let (Some(execution), Some(native_id)) =
+                            (execution, self.agent_session_id.as_deref())
+                        {
+                            if execution.agent.name == "pi" && execution.pi_pinnable {
+                                cmd.push_str(&crate::session::afk::launch_arguments(
+                                    self,
+                                    native_id,
+                                    &execution.inputs.launch_id,
+                                )?);
+                            }
+                        }
+                    }
                     apply_agent_launch_env(&mut cmd, agent);
                     let raw_command = format!("{}{}", env_prefix, cmd);
                     let command = if let Some(plan) = omp_capture_plan.as_ref() {

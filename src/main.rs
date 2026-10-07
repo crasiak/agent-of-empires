@@ -58,6 +58,16 @@ fn take_launch_report(command: &mut Option<Commands>) -> Option<cli::session::Se
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    {
+        let mut args = std::env::args().skip(1);
+        if args.next().as_deref() == Some("__afk-bridge") {
+            return agent_of_empires::session::afk::run_bridge(
+                &args.next().unwrap_or_default(),
+                &args.next().unwrap_or_default(),
+            );
+        }
+    }
+
     // Hidden helper for the VT live preview, handled before clap so it stays off the CLI surface.
     {
         let mut a = std::env::args();
