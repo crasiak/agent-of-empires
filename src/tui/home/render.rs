@@ -917,17 +917,6 @@ impl ListRowLayout {
     }
 }
 
-fn session_color_background(color: Color, theme: &Theme) -> Option<Color> {
-    let rgb = |c: Color| match c {
-        Color::Rgb(r, g, b) => Some((r, g, b)),
-        _ => None,
-    };
-    let (r, g, b) = rgb(color)?;
-    let (br, bg, bb) = rgb(theme.background)?;
-    let lerp = |x: u8, y: u8| ((x as f32) * 0.14 + (y as f32) * 0.86).round() as u8;
-    Some(Color::Rgb(lerp(r, br), lerp(g, bg), lerp(b, bb)))
-}
-
 /// Where the right-aligned activity column lives on a session row.
 ///
 /// `prefix_width` is the display width of the spans already pushed, `list_width` the inner
@@ -1224,6 +1213,9 @@ impl HomeView {
             // context_menu renders last so its popup sits above any underlying dialog.
             context_menu,
         );
+        if let Some(dialog) = &self.highlight_filter_dialog {
+            dialog.render(frame, theme);
+        }
     }
 
     /// Dock the diagnostics strip under the session-list column: carve
@@ -1740,6 +1732,12 @@ impl HomeView {
                 } else {
                     None
                 };
+                let alias = (self.group_by == GroupByMode::Project)
+                    .then(|| self.project_appearance_id(path))
+                    .flatten()
+                    .and_then(|id| self.repo_appearances.get(&id))
+                    .and_then(|a| a.alias.as_deref());
+                let name = alias.unwrap_or(name);
                 let text = if let Some(glyph) = section_glyph {
                     Cow::Owned(format!("{} {} ({})", glyph, name, session_count))
                 } else if pinned {
@@ -2117,11 +2115,20 @@ impl HomeView {
         if is_hovered {
             return Some(theme.selection);
         }
+        if let Item::Group { path, .. } = item {
+            if self.group_by != GroupByMode::Project {
+                return None;
+            }
+            let id = self.project_appearance_id(path)?;
+            return self.repo_appearances.get(&id)?.color.map(|color| {
+                theme.highlight_background(crate::tui::highlight::project_color(color, theme))
+            });
+        }
         let Item::Session { id, .. } = item else {
             return None;
         };
         self.session_color(id, theme)
-            .and_then(|color| session_color_background(color, theme))
+            .map(|color| theme.highlight_background(color))
     }
 
     fn session_color(&self, id: &str, theme: &Theme) -> Option<Color> {
@@ -2129,15 +2136,7 @@ impl HomeView {
             return None;
         }
         let color = self.get_instance(id)?.color.as_deref()?;
-        match color {
-            "red" => Some(theme.error),
-            "amber" => Some(theme.waiting),
-            "green" => Some(theme.running),
-            // Tailwind purple-500 and teal-500, matching the web sidebar's dots.
-            "purple" => Some(theme.fixed_hue(0xa8, 0x55, 0xf7)),
-            "teal" => Some(theme.fixed_hue(0x14, 0xb8, 0xa6)),
-            _ => None,
-        }
+        crate::tui::highlight::session_color(color, theme)
     }
 
     /// Keep the live-send tmux pane sized to the preview's visible output area.
@@ -3880,7 +3879,14 @@ impl HomeView {
             .then(|| self.hovered_link())
             .flatten()
             .map(|uri| format!("\u{1f517} {uri}"));
-        let transient = self.status_flash_text().map(str::to_string).or(hovered);
+        let transient = self
+            .status_flash_text()
+            .map(str::to_string)
+            .or(hovered)
+            .or_else(|| {
+                (self.live_send.is_none() && self.highlight_filters.active())
+                    .then(|| self.highlight_filters.summary())
+            });
         if let Some(text) = transient {
             let mut spans = Vec::new();
             let mut budget = area.width as usize;

@@ -306,6 +306,13 @@ impl HttpClient {
         Ok(res.json::<PromptDispatchWire>().await.unwrap_or_default())
     }
 
+    pub async fn repo_appearances(
+        &self,
+    ) -> Result<crate::session::repo_appearance::RepoAppearances, HttpError> {
+        self.get_json("/api/app-state/repo-appearances", Scope::Global)
+            .await
+    }
+
     /// The daemon-wide plugin UI snapshot (#2402).
     pub async fn plugin_ui_state(&self) -> Result<UiSnapshot, HttpError> {
         self.get_json("/api/plugins/ui-state", Scope::Global).await

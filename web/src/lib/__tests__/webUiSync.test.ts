@@ -32,7 +32,6 @@ describe("isSyncedKey", () => {
       "aoe-sidebar-sort-mode",
       "aoe-sidebar-axis",
       "aoe-sidebar-sunk-expanded",
-      "aoe-repo-appearance-v1",
       "aoe-repo-group-order-v1",
       "aoe-acp-last-tool",
       "aoe-last-browse-dir",
@@ -44,6 +43,7 @@ describe("isSyncedKey", () => {
       expect(isSyncedKey(k), k).toBe(true);
     }
     for (const k of [
+      "aoe-repo-appearance-v1",
       "aoe-sidebar-width",
       "aoe-split-ratio",
       "aoe-right-vsplit",

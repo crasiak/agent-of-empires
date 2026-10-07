@@ -5,6 +5,7 @@ import { renderHook, act } from "@testing-library/react";
 
 vi.mock("../../lib/api", () => ({
   fetchSessions: vi.fn().mockResolvedValue(null),
+  fetchRepoAppearances: vi.fn().mockResolvedValue({}),
 }));
 
 import { useSessions } from "../useSessions";

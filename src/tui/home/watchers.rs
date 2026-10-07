@@ -286,7 +286,10 @@ impl ConfigWatchState {
         if global_needs_install {
             match crate::session::get_app_dir() {
                 Ok(app_dir) => {
-                    let matcher = FileMatcher::Exact(app_dir.join("config.toml"));
+                    let matcher = FileMatcher::AnyOf(vec![
+                        app_dir.join("config.toml"),
+                        app_dir.join("state.toml"),
+                    ]);
                     let span = tracing::debug_span!("tui.config_watch.global.forwarder");
                     let name_ = "tui.config_watch.global.forwarder";
                     let spec = watch_spec(&app_dir, matcher, 100);

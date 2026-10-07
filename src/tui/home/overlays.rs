@@ -94,6 +94,7 @@ impl HomeView {
             || self.worktree_name_dialog.is_some()
             || self.restart_dialog.is_some()
             || self.context_menu.is_some()
+            || self.highlight_filter_dialog.is_some()
             || self.repo_trust_dialog.is_some()
             || self.hooks_install_dialog.is_some()
             || self.volume_ignores_glob_dialog.is_some()

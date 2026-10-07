@@ -52,6 +52,8 @@ A grouping toggle next to it cycles **By repo** (default), **By group** (the gro
 
 Open **Filter sessions** in the sidebar to search by name, branch, agent, or path. Use **Session highlight** to match the color shown on a session row and **Project highlight** to match its repository's highlight, regardless of the grouping mode. Project highlights also filter saved and pinned projects without sessions; session highlights exclude those projects.
 
+Project aliases and highlights are shared with the local and remote TUI through the daemon. Changes from another client appear on refresh without reopening the sidebar. Appearance edits are optimistic; a failed save shows an error and reverts that edit. See [TUI highlight filters](../../quick-start.md#highlight-filters) for the keyboard workflow.
+
 Select multiple colors to match any of them within one selector. Session highlights, project highlights, text, and plugin facets narrow results together. **None** matches unhighlighted rows; **All** removes that selector's restriction. **Clear filters**, closing the filter, or pressing Escape inside it resets the text and highlight selections without changing plugin facets. Compact mode pauses text and highlight filtering until the sidebar is expanded again.
 
 ## Triage: pin, archive, snooze

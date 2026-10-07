@@ -1,12 +1,17 @@
 // @vitest-environment jsdom
 
 import { renderHook, act } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useRepoGroups, MULTI_REPO_GROUP_ID, SCRATCH_GROUP_ID } from "./useRepoGroups";
 import type { SessionResponse, Workspace } from "../lib/types";
 import type { SidebarSortMode } from "../lib/sidebarSort";
 import { session, workspace } from "./__tests__/fixtures";
+
+vi.mock("../lib/api", () => ({
+  fetchRepoAppearances: vi.fn(async () => ({})),
+  patchRepoAppearance: vi.fn(async () => ({ "/repo-a": { alias: "pretty-name" } })),
+}));
 
 const multiRepos = [
   { name: "repo-a", source_path: "/repo-a", branch: "main" },
@@ -159,7 +164,7 @@ describe("useRepoGroups manual group order (#1644)", () => {
 });
 
 describe("useRepoGroups stateful API", () => {
-  it("toggleRepoCollapsed, updateRepoAppearance, and reorderRepoGroups persist", () => {
+  it("toggleRepoCollapsed, updateRepoAppearance, and reorderRepoGroups persist", async () => {
     const { result } = groupsOf([ws("a1", "/repo-a"), ws("b1", "/repo-b")], "manual");
     const first = () => result.current.groups[0]!;
 
@@ -170,7 +175,9 @@ describe("useRepoGroups stateful API", () => {
     expect(first().collapsed).toBe(false);
     expect(localStorage.getItem("aoe-repo-collapsed-/repo-a")).toBeNull();
 
-    act(() => result.current.updateRepoAppearance("/repo-a", { alias: "pretty-name" }));
+    await act(async () => {
+      await result.current.updateRepoAppearance("/repo-a", { alias: "pretty-name" });
+    });
     expect(first()).toMatchObject({ displayName: "pretty-name", alias: "pretty-name" });
 
     act(() => result.current.reorderRepoGroups(["/repo-b", "/repo-a"]));

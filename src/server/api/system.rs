@@ -983,6 +983,99 @@ pub async fn dismiss_update(
     }
 }
 
+/// Shared project appearance snapshot. Read failures must not look like an empty map.
+pub async fn get_repo_appearances(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    match tokio::task::spawn_blocking(|| {
+        crate::session::Config::load().map(|c| c.app_state.repo_appearances)
+    })
+    .await
+    {
+        Ok(Ok(map)) => Json(map).into_response(),
+        _ => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "load_failed",
+            "Failed to read repository appearances",
+        ),
+    }
+}
+
+pub async fn patch_repo_appearance(
+    State(state): State<Arc<AppState>>,
+    body: Result<
+        Json<crate::session::repo_appearance::RepoAppearancePatch>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> impl IntoResponse {
+    if state.read_only {
+        return read_only_response();
+    }
+    let Json(patch) = match body {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) = patch.validate() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_repo_path",
+            error.to_string(),
+        );
+    }
+    match tokio::task::spawn_blocking(move || {
+        crate::session::update_app_state(|state| {
+            patch.apply(&mut state.repo_appearances);
+            state.repo_appearances.clone()
+        })
+    })
+    .await
+    {
+        Ok(Ok(map)) => Json(map).into_response(),
+        _ => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "save_failed",
+            "Failed to save repository appearance",
+        ),
+    }
+}
+
+/// One-time browser migration. Existing entries, including clear tombstones, win.
+pub async fn import_repo_appearances(
+    State(state): State<Arc<AppState>>,
+    body: Result<
+        Json<crate::session::repo_appearance::RepoAppearanceImport>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> impl IntoResponse {
+    if state.read_only {
+        return read_only_response();
+    }
+    let Json(import) = match body {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) = import.validate() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_repo_path",
+            error.to_string(),
+        );
+    }
+    match tokio::task::spawn_blocking(move || {
+        crate::session::update_app_state(|state| {
+            import.apply(&mut state.repo_appearances);
+            state.repo_appearances.clone()
+        })
+    })
+    .await
+    {
+        Ok(Ok(map)) => Json(map).into_response(),
+        _ => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "save_failed",
+            "Failed to import repository appearances",
+        ),
+    }
+}
+
 /// Returns the dashboard's server-side UI-state blob (`app_state.web_ui_state`):
 /// a flat map of frontend localStorage keys to opaque string values. Exposes only
 /// UI preferences, so the normal token wall is enough.
@@ -1018,6 +1111,14 @@ pub async fn patch_web_ui_state(
         Ok(b) => b,
         Err(rej) => return rej.into_response(),
     };
+
+    if patch.contains_key("aoe-repo-appearance-v1") {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "retired_key",
+            "Use /api/app-state/repo-appearances",
+        );
+    }
 
     // Reject anything that is not a string (set) or null (delete), so a client
     // regression surfaces instead of silently dropping part of the sync.
@@ -2473,5 +2574,154 @@ mod tests {
             let body = to_bytes(resp.into_body(), 1024).await.unwrap();
             assert!(body.is_empty(), "{name}: unexpected body bytes: {body:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod repo_appearance_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn repo_appearances_per_entry_validation_auth_and_read_only() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_home(home.path());
+        let mut state = crate::server::test_support::build_test_app_state_with_policy(
+            vec![],
+            vec![],
+            vec![],
+            Some("test-token".into()),
+        );
+        let app = crate::server::router::build_router(state.clone());
+        let request = |method: &str, path: &str, body: &str, auth: bool| {
+            let mut req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .header("host", "127.0.0.1")
+                .extension(axum::extract::ConnectInfo(
+                    "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                ));
+            if auth {
+                req = req.header("authorization", "Bearer test-token");
+            }
+            req.body(Body::from(body.to_string())).unwrap()
+        };
+        let path = "/api/app-state/repo-appearances";
+        assert_eq!(
+            app.clone()
+                .oneshot(request("GET", path, "", false))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for body in [
+            r#"{"repo_path":"/a","alias":" A ","color":"sky"}"#,
+            r#"{"repo_path":"/b","color":"rose"}"#,
+            r#"{"repo_path":"/a","color":null}"#,
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request("PATCH", path, body, true))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+        let response = app
+            .clone()
+            .oneshot(request("GET", path, "", true))
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 10000)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            serde_json::json!({"/a":{"alias":"A"},"/b":{"color":"rose"}})
+        );
+        for (body, status) in [
+            (
+                r#"{"repo_path":"basename","color":"sky"}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                r#"{"repo_path":"/a","color":"green"}"#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                r#"{"repo_path":"/a","unknown":true}"#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request("PATCH", path, body, true))
+                    .await
+                    .unwrap()
+                    .status(),
+                status
+            );
+        }
+        assert_eq!(
+            app.clone()
+                .oneshot(request(
+                    "PATCH",
+                    "/api/app-state/web-ui-state",
+                    r#"{"aoe-repo-appearance-v1":"{}"}"#,
+                    true
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(request(
+                    "PATCH",
+                    path,
+                    r#"{"repo_path":"/a","alias":null}"#,
+                    true
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let import_path = "/api/app-state/repo-appearances/import";
+        for _ in 0..2 {
+            let response = app.clone().oneshot(request("POST", import_path, r#"{"appearances":{"/a":{"alias":"stale","color":"sky"},"/b":{"color":"amber"},"/browser":{"alias":"Browser","color":"violet"}}}"#, true)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 10000)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                serde_json::json!({"/a":{},"/b":{"color":"rose"},"/browser":{"alias":"Browser","color":"violet"}})
+            );
+        }
+        drop(app);
+        Arc::get_mut(&mut state).unwrap().read_only = true;
+        let app = crate::server::router::build_router(state);
+        assert_eq!(
+            app.clone()
+                .oneshot(request("POST", import_path, "not json", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            app.oneshot(request("PATCH", path, "not json", true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
     }
 }
