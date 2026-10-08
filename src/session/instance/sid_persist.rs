@@ -1349,6 +1349,7 @@ mod tests {
 
             let profile = "publish-applied";
             let mut inst = omp_inst(profile, "fpaw");
+            inst.project_path = temp.path().to_string_lossy().into_owned();
             inst.pending_host_env = vec![
                 ("OMP_PROFILE".to_string(), "work".to_string()),
                 ("PI_CONFIG_DIR".to_string(), "/custom".to_string()),
@@ -1420,6 +1421,7 @@ mod tests {
             let _home_guard = crate::session::test_support::isolate_home(temp.path());
 
             let mut inst = omp_inst("omp-legacy-metadata", "legacy-omp");
+            inst.project_path = temp.path().to_string_lossy().into_owned();
             inst.agent_session_id = Some(VALID_SID.to_string());
             let tmux = TmuxSession::create(&inst.id, &inst.title);
             let meta_key = crate::tmux::env::AOE_OMP_CAPTURE_META_KEY;
