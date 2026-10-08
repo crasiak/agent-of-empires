@@ -495,7 +495,7 @@ Inspect AFK presence or explicitly delegate one bounded file cycle for Pi
 ###### **Subcommands:**
 
 * `on` — Request control-only AFK. Does not authorize autonomous work
-* `delegate` — One-cycle delegation during active ordinary work; idle activation is refused
+* `delegate` — One-file delegation during active work; nonzero nudges require queue-preserving abort
 * `audit` — Export private-ledger audit JSON without payloads or preimages
 * `off` — Record AFK off even if the integration is unavailable
 * `status` — Probe the current integration; does not enable or renew AFK
@@ -520,7 +520,7 @@ Request control-only AFK. Does not authorize autonomous work
 
 ## `aoe session afk delegate`
 
-One-cycle delegation during active ordinary work; idle activation is refused
+One-file delegation during active work; nonzero nudges require queue-preserving abort
 
 **Usage:** `aoe session afk delegate --minutes <MINUTES> --grant <GRANT> <SESSION>`
 
@@ -531,7 +531,7 @@ One-cycle delegation during active ordinary work; idle activation is refused
 ###### **Options:**
 
 * `--minutes <MINUTES>`
-* `--grant <GRANT>`
+* `--grant <GRANT>` — Protocol-3 grant: requests 1..8; settlement_nudges omitted=0, maximum 2
 
 
 

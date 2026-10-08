@@ -18,7 +18,7 @@ pub use bridge::run_bridge;
 pub(crate) use store::initialize;
 
 const VERSION: u32 = 1;
-const BRIDGE_VERSION: u32 = 2;
+const BRIDGE_VERSION: u32 = 3;
 const MODE: &str = "control-only";
 const MAX_BYTES: usize = 16 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(3);
@@ -224,7 +224,7 @@ pub struct Report {
 impl Report {
     pub fn describe(&self) -> String {
         if let Some(view) = &self.delegation {
-            return format!("Delegation: {:?} (explicit operator grant)\nSDK reservations: {}/{}; reads: {}/16\nOne file cycle; independent background requests unknown\nRevision: {}; expiry (Unix ms): {}\n{}\nUse 'aoe session afk audit' for decisions and outcomes.", self.state, view["reservations_used"], view["grant"]["requests"], view["reads_used"], self.revision, view["expires_at_ms"], self.detail);
+            return format!("Delegation: {:?} (explicit operator grant)\nSDK reservations: {}/{}; reads: {}/16\nSettlement nudges: {}/{}; one file cycle; independent background requests unknown\nRevision: {}; expiry (Unix ms): {}\n{}\nTerminal reason: {}\nUse 'aoe session afk audit' for decisions and outcomes.", self.state, view["reservations_used"], view["grant"]["requests"], view["reads_used"], view["nudges_used"], view["grant"]["settlement_nudges"], self.revision, view["expires_at_ms"], self.detail, view["terminal_reason"]);
         }
         format!(
             "{:?}\nRequested: {}\nRevision: {}\nExpiry (Unix ms): {}\n{}\n{}",

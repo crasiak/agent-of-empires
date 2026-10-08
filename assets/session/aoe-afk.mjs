@@ -61,7 +61,9 @@ export function spawnBridge(bootstrap, generation) {
     },
   };
   return { close: bridge.close, request(packet) {
-    const next = queue.then(() => bridge.request(packet));
+    let timer;
+    const deadline = new Promise((_, reject) => { timer = setTimeout(() => { fail(); reject(new Error("AFK queued RPC deadline")); }, 1500); });
+    const next = Promise.race([queue.then(() => bridge.request(packet)), deadline]).finally(() => clearTimeout(timer));
     queue = next.catch(() => {});
     return next;
   } };
@@ -149,14 +151,15 @@ export function registerAfk(pi, options = {}) {
   });
   pi.on("context", async (event, ctx) => {
     const r = runtime;
-    const messages = event.messages.filter(m => m.customType !== "aoe-afk-control");
-    if (!r) return { messages };
+    let messages = event.messages.filter(m => !["aoe-afk-control", "aoe-afk-delegation"].includes(m.customType));
+    if (!r) return { messages: messages.filter(m => m.customType !== "aoe-afk-continuation") };
     // An idle poll may have read its snapshot before this request boundary.
     if (r.refreshing) await r.refreshing;
-    if (runtime !== r) return { messages };
+    if (runtime !== r) return { messages: messages.filter(m => m.customType !== "aoe-afk-continuation") };
     await r.refresh();
     const delegated = await options.delegation?.context(r, messages, ctx);
     if (delegated) return delegated;
+    messages = messages.filter(m => m.customType !== "aoe-afk-continuation");
     if (runtime !== r || r.state !== "control-only" || mono() >= r.deadline || ctx.sessionManager.getSessionId() !== r.bootstrap.binding.native_id) return { messages };
     return { messages: [...messages, { role: "custom", customType: "aoe-afk-control", content: REMINDER, display: false, timestamp: wall() }] };
   });

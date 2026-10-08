@@ -70,7 +70,7 @@ pub(super) fn serve(
             });
             match command {
                 Command::Poll => Ok(serde_json::json!({"policy":policy,"probe":probe,
-                    "delegation":runtime.map(delegation::snapshot).transpose()?,
+                    "delegation":runtime.map(|s| delegation::settlement::reconcile(s, binding, generation, now_ms())).transpose()?,
                     "runtime_probe":store.read::<delegation::RuntimeProbe>("runtime-probe.json")?})),
                 Command::Runtime { command } => delegation::execute_checked(
                     runtime.context("runtime unavailable")?,

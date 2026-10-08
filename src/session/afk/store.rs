@@ -37,7 +37,7 @@ impl Store {
             app_dir,
             id,
             create,
-            "afk-runtime-v2",
+            "afk-runtime-v3",
             super::delegation::SESSION_BYTES,
         )
     }

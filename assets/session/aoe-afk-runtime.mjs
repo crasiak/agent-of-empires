@@ -5,9 +5,13 @@ import { randomUUID } from "node:crypto";
 import { registerAfk } from "./aoe-afk.mjs";
 
 const COVERAGE = "stock-sdk-main-loop-reservations";
-const NAMES = ["aoe_afk_read", "aoe_afk_record", "aoe_afk_apply"];
+const NAMES = ["aoe_afk_read", "aoe_afk_record", "aoe_afk_apply", "aoe_afk_checkpoint"];
 const textResult = value => ({ content: [{ type: "text", text: JSON.stringify(value) }], details: value });
-const REMINDER = "AoE explicit delegation. Use only aoe_afk_read, aoe_afk_record, aoe_afk_apply. One reversible low-risk file action within the exact operator grant. Record alternatives with pros/cons, criteria weights and scores (1..5), evidence, assumptions, uncertainties, rationale, rollback, recommendation, risk, human_required, depends_on and exact action before applying on a LATER request. Same-response sibling apply is forbidden. Known ask-first/security gates veto regardless of scores; unknown/high risk or dependent work must be deferred. Claims are model evaluations, not human approval or machine-proven safety. No native tools, shell, network or descendants. No extra reporting request. Bound is stock-SDK main-loop reservations, not physical retries or dollars. Native transcript/provider retention is separate. Independent background coverage is unknown.";
+const CONTINUATION = "aoe-afk-continuation";
+const clean = messages => messages.filter(m => ![CONTINUATION, "aoe-afk-delegation"].includes(m.customType));
+const externalMessages = messages => JSON.stringify(messages.filter(m => ["user", "custom"].includes(m.role)));
+const competing = event => event.continue || event.entries.length > 0 || event.context.pendingMessages.length > 0;
+const REMINDER = "AoE explicit delegation. Use only aoe_afk_read, aoe_afk_record, aoe_afk_apply, aoe_afk_checkpoint. Checkpoint schema: {status:unfinished|completed|blocked,next_step:null|{kind:read|record,path}|{kind:apply,decision},rationale,evidence:[host evidence hashes],depends_on:[]}. Record unfinished granted work before settlement. Host binds evidence; prose and identical reads are not progress. Explicit settlement nudges grant no requests or effects. One reversible low-risk file action within the exact operator grant. Record alternatives with pros/cons, criteria weights and scores (1..5), evidence, assumptions, uncertainties, rationale, rollback, recommendation, risk, human_required, depends_on and exact action before applying on a LATER request. Same-response sibling apply is forbidden. Known ask-first/security gates veto regardless of scores; unknown/high risk or dependent work must be deferred. Claims are model evaluations, not human approval or machine-proven safety. No native tools, shell, network or descendants. No extra reporting request. Bound is stock-SDK main-loop reservations, not physical retries or dollars. Native transcript/provider retention is separate. Independent background coverage is unknown.";
 
 export function delegationRuntime(pi) {
   let current;
@@ -19,18 +23,22 @@ export function delegationRuntime(pi) {
     && Buffer.byteLength(JSON.stringify(args)) <= 8192
     && Object.keys(args).every(k => ["question", "context", "options", "allowMultiple", "allowFreeform", "allowComment", "displayMode", "overlayToggleKey", "commentToggleKey", "timeout"].includes(k))
     && (!args.options || (Array.isArray(args.options) && args.options.every(o => o && typeof o.title === "string" && Object.keys(o).every(k => ["title", "description"].includes(k)))));
-  const stop = async (r, reason, abort = false) => {
+  const abortEpisode = (r, ctx = r?.ctx) => {
+    if (r?.queueAbort) r.queueAbort();
+    else if (!r?.view?.grant.settlement_nudges) ctx.abort();
+  };
+  const stop = async (r, reason, abort = false, disposition = "interrupted") => {
     if (!r) return;
     r.parked = true;
     r.reason ??= reason;
-    if (abort) r.ctx.abort();
+    if (abort) abortEpisode(r);
     const window = r.view?.window;
     if (!window || r.view.state === "ended" || r.stoppedWindow === window) return;
     if (r.stopping) await r.stopping;
     if (r.stoppedWindow === window) return;
     r.stopping = (async () => {
       try {
-        await r.bridge.request({ op: "runtime", command: { kind: "stop", window } });
+        await r.bridge.request({ op: "runtime", command: { kind: "stop", window, reason: disposition } });
         r.stoppedWindow = window;
       } catch { r.failure = true; }
     })();
@@ -57,15 +65,16 @@ export function delegationRuntime(pi) {
   pi.on("context", observe);
   const command = async (r, data, ctx) => {
     if (!r || !r.view || !r.owned || r.parked || !observable(r) || ctx.signal?.aborted || !r.request || performance.now() >= r.delegateDeadline || Date.now() >= r.view.expires_at_ms) {
-      ctx.abort(); throw new Error("AFK tool has no current owned request");
+      abortEpisode(r, ctx); throw new Error("AFK tool has no current owned request");
     }
     try { return await r.bridge.request({ op: "runtime", command: { ...data, window: r.view.window, request: r.request } }); }
-    catch (error) { await stop(r, "host denied/failed", true); throw error; }
+    catch (error) { await stop(r, "host denied/failed", true, "failed"); throw error; }
   };
   for (const [name, parameters, run] of [
     [NAMES[0], Type.Object({ path: Type.String({ maxLength: 256 }) }, { additionalProperties: false }), (args) => ({ kind: "read", path: args.path })],
     [NAMES[1], Type.Object({ decision: Type.Unknown() }, { additionalProperties: false }), (args) => ({ kind: "record", decision: args.decision })],
     [NAMES[2], Type.Object({ decision: Type.String({ maxLength: 36 }) }, { additionalProperties: false }), (args) => ({ kind: "apply", decision: args.decision })],
+    [NAMES[3], Type.Object({ checkpoint: Type.Unknown() }, { additionalProperties: false }), args => ({ kind: "checkpoint", claims: args.checkpoint })],
   ]) {
     pi.registerTool({ name, label: name, description: `${REMINDER} Record schema: {id:UUID,question,alternatives:[{name,pros,cons,scores:[1..5]}],criteria:[{name,weight:1..5}],evidence:[],assumptions:[],uncertainties:[],recommendation,rationale,rollback,reversible:boolean,risk:"low"|"high"|"unknown",human_required:boolean,depends_on:[],action:null|{path,expected_hash:null|sha256,content}}. Record at most 8KiB UTF8 JSON.`, parameters, executionMode: "sequential",
       async execute(_id, args, _signal, _update, ctx) { return textResult(await command(current, run(args), ctx)); },
@@ -105,13 +114,50 @@ export function delegationRuntime(pi) {
   pi.on("turn_end", async (event, ctx) => {
     if (event.outcome === "aborted" || ctx.signal?.aborted) await intervention("explicit stop");
   });
+  pi.on("agent_before_settle", async (event, ctx) => {
+    const r = current;
+    if (!r?.owned) return;
+    r.settling = true;
+    r.contribution = undefined;
+    if (event.outcome !== "completed") { await stop(r, "non-completed boundary", true, event.outcome === "error" ? "failed" : "interrupted"); return; }
+    if (r.parked || r.failure || !live(r)) { await stop(r, "ended boundary", true); return; }
+    if (competing(event) || ctx.hasPendingMessages()) { await stop(r, "existing work at settlement"); return; }
+    try {
+      await r.refresh();
+      if (r.parked || r.failure || !live(r) || r.view.state !== "owned" || r.view.generation !== r.generation) { await stop(r, "stale boundary", true); return; }
+      const checkpoint = r.view.checkpoints?.at(-1);
+      if (!checkpoint || checkpoint.claims.status !== "unfinished" || !r.view.grant.settlement_nudges) return;
+      const receipt = await r.bridge.request({ op: "runtime", command: { kind: "nudge", window: r.view.window, request: r.request, checkpoint: checkpoint.sequence } });
+      if (r.parked || ctx.hasPendingMessages()) { await stop(r, "interrupted admission"); return; }
+      if (!live(r)) { await stop(r, "expired admission", true); return; }
+      await r.bridge.request({ op: "runtime", command: { kind: "contribution_intent", window: r.view.window, identity: receipt.identity } });
+      if (r.parked) return;
+      if (!live(r)) { await stop(r, "expired contribution", true); return; }
+      r.contribution = receipt.identity;
+    } catch { await stop(r, "settlement admission denied/failed", true, "failed"); }
+  });
+  // Pi refreshes the queue/draft preview between these ordered handlers.
+  pi.on("agent_before_settle", (event, ctx) => {
+    const r = current;
+    if (!r?.contribution || r.parked) return;
+    if (!live(r) || event.outcome !== "completed") { void stop(r, "ended contribution", true); return; }
+    if (competing(event) || ctx.hasPendingMessages()) { void stop(r, "competing settlement work"); return; }
+    const entry = { type: "custom_message", customType: CONTINUATION, content: `[AoE settlement nudge] Continue only the recorded unfinished operator-granted step. No new request or file authority. Identity: ${JSON.stringify(r.contribution)}`, display: true, details: r.contribution };
+    r.expectedContinuation = { identity: r.contribution, content: entry.content, before: JSON.stringify(clean(event.context.contextMessages).filter(m => m.role !== "system")) };
+    return { entries: [...event.entries, entry], continue: true };
+  });
   pi.on("agent_settled", async () => {
     const r = current;
     if (!r) return;
     r.settling = true;
     forgetSignal(r);
     await r.refresh?.();
-    if (r.view || r.owned) await stop(r, "settled without further ownership");
+    if (r.view || r.owned) {
+      r.parked = true;
+      try { await r.bridge.request({ op: "runtime", command: { kind: "settle", window: r.view.window } }); }
+      catch { await stop(r, "settlement failed", false, "failed"); }
+    }
+    r.expectedContinuation = undefined; r.contribution = undefined;
     r.owned = false; r.request = undefined; r.settling = false;
   });
   pi.on("cache_warming_decision", () => active(current) ? { action: "stop" } : undefined);
@@ -130,13 +176,13 @@ export function delegationRuntime(pi) {
   return {
     attach(r) { current = r; r.owned = false; r.parked = false; },
     async shutdown(r) { forgetSignal(r); await stop(r, "shutdown", r.owned); if (current === r) current = undefined; },
-    failed(r) { if (active(r)) { void stop(r, "host unavailable", r.owned); } },
-    status(r) { return r.view ? `AFK delegation: ${r.parked ? `ended (${r.reason})` : r.view.state}; SDK reservations ${r.view.reservations_used}/${r.view.grant.requests}; background unknown` : undefined; },
+    failed(r) { if (active(r)) { void stop(r, "host unavailable", r.owned, "failed"); } },
+    status(r) { return r.view ? `AFK delegation: ${r.parked ? `ended (${r.reason})` : r.view.state}; SDK reservations ${r.view.reservations_used}/${r.view.grant.requests}; nudges ${r.view.nudges_used}/${r.view.grant.settlement_nudges}; one file effect; ${r.view.terminal_reason ?? "nonterminal"}; background unknown` : undefined; },
     async poll(r, view, probe) {
       if (view && r.window !== view.window) {
         // Never replace a still-owned episode with a new operator window.
         if (r.owned) { await stop(r, "replacement during owned episode", true); return; }
-        r.window = view.window;
+        r.window = view.window; r.externalMessages = undefined; r.queueAbort = undefined;
         r.parked = false; r.request = undefined; r.reason = undefined;
         if (!qualified) { r.view = view; await stop(r, "unsupported SDK; executable activation refused"); return; }
         r.delegateDeadline = performance.now() + Math.max(0, Math.min(view.expires_at_ms - view.issued_at_ms, view.expires_at_ms - Date.now()));
@@ -144,11 +190,18 @@ export function delegationRuntime(pi) {
       if (!view && r.view) await stop(r, "delegation disappeared", r.owned);
       r.view = view;
       if (view && (view.state === "ended" || !live(r))) await stop(r, "ended or expired");
+      if (view?.state === "pending" && view.grant.settlement_nudges > 0) {
+        if (typeof r.ctx.abortPreservingQueue !== "function") {
+          await stop(r, "settlement nudges unavailable: queue-preserving abort capability required");
+          return;
+        }
+        r.queueAbort = () => r.ctx.abortPreservingQueue();
+      }
       if (view?.state === "pending" && (r.parked || r.failure || r.interaction || !observable(r))) {
         await stop(r, "executable activation refused: start ordinary work with an observable stop signal, then delegate");
         return;
       }
-      if (probe && qualified && probe.version === 2 && JSON.stringify(probe.binding) === JSON.stringify(r.bootstrap.binding)
+      if (probe && qualified && (!probe.window || !view?.grant.settlement_nudges || typeof r.ctx.abortPreservingQueue === "function") && probe.version === 3 && JSON.stringify(probe.binding) === JSON.stringify(r.bootstrap.binding)
         && (!probe.window || (probe.window === view?.window && probe.grant_hash === view?.grant_hash))) {
         const ack = { ...probe, generation: r.generation, sdk: VERSION, coverage: COVERAGE };
         const signature = JSON.stringify(ack);
@@ -163,6 +216,9 @@ export function delegationRuntime(pi) {
       }
     },
     async context(r, messages, ctx) {
+      const original = messages;
+      messages = clean(messages);
+      r.settling = false;
       if (r.interaction) await r.interaction;
       const w = r.view;
       if (!qualified || (!r.owned && (r.parked || !w || w.state !== "pending" || !w.confirmed))) return;
@@ -172,14 +228,26 @@ export function delegationRuntime(pi) {
         await stop(r, "ended, interrupted or stale", true); return { messages };
       }
       try {
+        if (r.externalMessages !== undefined && externalMessages(messages) !== r.externalMessages) {
+          await stop(r, "new human or extension context", true); return { messages };
+        }
+        const expected = r.expectedContinuation;
+        const continuation = expected ? original.filter(m => m.customType === CONTINUATION).at(-1) : undefined;
+        if (expected) {
+          if (!continuation || JSON.stringify(continuation.details) !== JSON.stringify(expected.identity) || continuation.content !== expected.content || JSON.stringify(messages) !== expected.before) {
+            await stop(r, "late competing or changed continuation context", true); return { messages };
+          }
+        }
         const request = randomUUID();
-        const receipt = await r.bridge.request({ op: "runtime", command: { kind: "reserve", window: w.window, request } });
+        const receipt = await r.bridge.request({ op: "runtime", command: { kind: "reserve", window: w.window, request, continuation: r.expectedContinuation?.identity ?? null } });
         if (!observable(r) || ctx.signal?.aborted || r.parked || performance.now() >= r.delegateDeadline || Date.now() >= w.expires_at_ms) { await stop(r, "interrupted reservation", true); return { messages }; }
         r.request = request;
-        return { messages: [...messages.filter(m => m.customType !== "aoe-afk-delegation"), { role: "custom", customType: "aoe-afk-delegation", content: `${REMINDER}\nHost grant: ${JSON.stringify(receipt)}`, display: false, timestamp: Date.now() }] };
-      } catch { await stop(r, "reservation denied/failed", true); return { messages }; }
+        r.externalMessages = externalMessages(messages);
+        r.expectedContinuation = undefined; r.contribution = undefined;
+        return { messages: [...messages, ...(continuation ? [continuation] : []), { role: "custom", customType: "aoe-afk-delegation", content: `${REMINDER}\nHost grant: ${JSON.stringify(receipt)}`, display: false, timestamp: Date.now() }] };
+      } catch { await stop(r, "reservation denied/failed", true, "failed"); return { messages }; }
     },
   };
 }
 
-export default function (pi) { registerAfk(pi, { protocol: 2, delegation: delegationRuntime(pi) }); }
+export default function (pi) { registerAfk(pi, { protocol: 3, delegation: delegationRuntime(pi) }); }

@@ -40,7 +40,7 @@ For example, save this as `scratch-grant.json`:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "task": "scratch-greeting",
   "scope": "Create scratch.txt with a short greeting; no other effects",
   "files": [{ "path": "scratch.txt", "capability": "create" }],
@@ -87,7 +87,8 @@ settlement and stale polling cannot revive it: resumption requires a fresh
 explicit operator command/window and acknowledgement. Queued human input and
 ordinary follow-ups are preserved; they cannot adopt an ended grant.
 
-The runtime supplies `aoe_afk_read`, `aoe_afk_record` and `aoe_afk_apply`. Each
+The runtime supplies `aoe_afk_read`, `aoe_afk_record`, `aoe_afk_apply` and
+`aoe_afk_checkpoint`. Each
 owned request requires a durable reservation. A weighted record and its one
 exact action permit must be durably acknowledged before apply on a **later
 request**. Same-response siblings cannot satisfy that boundary, even when
@@ -117,6 +118,48 @@ follow-up cannot escape its limit. Normal tool selections are not rewritten.
 Resuming delegation requires a new operator command and fresh acknowledgement;
 unused counters, reloads, polling and model requests do not resume it.
 
+### Optional settlement nudges
+
+**Unmodified stock Pi 0.87.1 refuses nonzero nudge grants.** The runtime requires
+an actual optional `abortPreservingQueue()` context operation before acknowledging
+such a grant. Native Pi's ordinary abort restores queued human text to the editor
+but can discard queued extension custom messages. This build's pinned runtime does not provide the required additive core
+operation. A qualified source candidate is not an installed runtime upgrade. Omit `settlement_nudges` to retain stock-supported zero-nudge
+one-file delegation; rejection does not abort unrelated ordinary work.
+
+Protocol-3 grants may explicitly specify `"settlement_nudges": 1` or `2` when a
+qualified runtime provides that operation. Omission means **zero**, and two is
+the hard ceiling. This allowance adds neither request slots nor file permits.
+No timer, idle start, post-settlement restart or new task is introduced.
+
+`aoe_afk_checkpoint` records bounded model claims (`unfinished`, `completed` or
+`blocked`), a granted next step and references to host evidence returned by reads
+or decisions. The host derives checkpoint sequence, request, window, generation
+and time. Completed/blocked work or declared prerequisites ends the window;
+missing, stale, out-of-scope and repeated evidence cannot admit another nudge.
+Prose changes, fresh IDs, timestamps, counters and identical reads are not new
+progress. A nudge requires changed observed path/hash or admitted action facts.
+These checks do not prove semantic task completion or natural-language scope.
+
+Only an already-owned completed candidate settlement boundary can contribute a
+labelled custom message. Two ordered handlers admit durably, then check Pi's
+refreshed queue/draft preview without replacing earlier entries. Final settlement
+always retires ownership. Later contexts filter stale AFK instructions without
+rewriting transcript history, and reject newly introduced user/custom work from
+AFK authority.
+
+There is **no universal priority guarantee against later trusted hooks**. An
+invisible late custom follow-up may remain queued while an earlier qualified
+AFK request completes. It must never inherit AFK rights. A qualified runtime must retain the original queue/transcript data for later
+ordinary recovery. Native attachment recovery is not claimed lossless. No controller re-send or input reconstruction is performed.
+
+Admission, contribution intent and observation of the next request are separate
+ledger facts, none a claim of provider delivery. Stop can veto dispatch even
+after a custom entry commits. Unobserved admissions end as `delivery_unknown`,
+with no refund, replay or automatic reconciliation. Other terminal reasons are
+`completed`, `deferred`, `exhausted`, `interrupted` and `failed`; checkpoint
+completion remains a model claim distinct from an observed file effect.
+
 ### What the request bound covers
 
 The tested bound is **stock-SDK main-loop reservations on Pi 0.87.1**, not
@@ -145,6 +188,8 @@ It omits action payloads and private preimages. Review before sharing.
 | Host limit | Ceiling |
 | --- | --- |
 | Main-loop reservations | Explicit 1 to 8 per window |
+| Settlement nudges | Explicit 0 to 2, omitted means 0 |
+| Checkpoints | 16 per window, 2 KiB serialized claims each |
 | Reads | 16 operations per window, 64 KiB per file |
 | Decision records | 4 per window, 8 KiB serialized UTF-8 each |
 | One file effect/preimage | 64 KiB each |
@@ -166,12 +211,13 @@ counters and replay tombstones remain. Data needed to interpret an ambiguous
 attempt is retained regardless of age, still counts toward quota, and can block
 new grants. There is no automatic reconciliation or quota-reset shortcut.
 
-The private protocol-2 ledger lives under
-`<app_dir>/afk-runtime-v2/<instance-id>/ledger.json`, with a stable writer lock.
+The private protocol-3 ledger lives under
+`<app_dir>/afk-runtime-v3/<instance-id>/ledger.json`, with a stable writer lock.
 Presence files remain under `<app_dir>/afk/<instance-id>/` with their original
-16 KiB bounds. Migration 37 initializes a separate runtime namespace and never
-adopts old presence windows into delegation; migration 36 keeps its legacy
-meaning. The launch/stdio bridge now uses protocol 2. Fresh challenges bind
+16 KiB bounds. Migration 38 initializes a separate runtime namespace, preserves
+protocol-2 evidence and requires explicit reenrollment. Historical migrations
+36 and 37 retain their meaning. The launch/stdio bridge uses protocol 3.
+Fresh challenges bind
 capability acknowledgements to the instance, profile, native conversation,
 launch, generation, window and exact grant.
 
@@ -202,7 +248,26 @@ requirement; pure host and control tests still run. The SDK matrix asserts
 provider invocation counts, sibling ordering, last-slot behavior, store/lost
 acknowledgement failures, stop/input/UI interaction, idle rejection, pending
 stop/settlement races, stale-window non-human follow-ups, and warming pass-through
-after terminal states and reload.
+after terminal states and reload. Stock SDK tests now assert nonzero-nudge
+refusal. The prepared positive/interruption/late-queue nudge matrix runs only
+when the actual loaded SDK exposes the required context operation; stock results
+are not proof of that candidate matrix or native support.
+
+For a prepared candidate Pi source checkout with its dependencies and provider
+catalogs available, use the actual source SDK:
+
+```bash
+export AOE_PI_SOURCE_ROOT=/path/to/pi-source
+cargo test --lib afk
+TSX_TSCONFIG_PATH="$AOE_PI_SOURCE_ROOT/tsconfig.json" \
+  node --import "$AOE_PI_SOURCE_ROOT/node_modules/tsx/dist/loader.mjs" \
+  --test assets/session/aoe-afk.test.mjs assets/session/aoe-afk-sdk.test.mjs
+```
+
+The host test scopes the source loader to its SDK subprocess. Do not set a global
+`NODE_OPTIONS` loader for the full suite; unrelated Node fixtures use native
+module semantics. Candidate qualification fails if the operation is absent.
+
 Fake-provider results do not establish native-model semantic correctness, paid
 transport attempt counts, or qualification of untested auxiliary extensions.
 An attended disposable-session review remains a release gate.

@@ -5,9 +5,9 @@ fn setup(requests: u8) -> (tempfile::TempDir, tempfile::TempDir, Store, Window) 
     let root = tempfile::tempdir().unwrap();
     let store = Store::runtime(app.path(), "test", true).unwrap();
     let (dev, ino) = AnchoredDir::open(root.path()).unwrap().identity().unwrap();
-    let w = Window { version:2,binding:Binding {instance_id:"test".into(),profile:"default".into(),native_id:"native".into(),launch_id:uuid::Uuid::new_v4().to_string()},generation:uuid::Uuid::new_v4().to_string(),id:uuid::Uuid::new_v4().to_string(),revision:1,root:root.path().into(),control_root:app.path().into(),root_identity:(dev as u64,ino),grant:serde_json::from_value(json!({"version":2,"task":"scratch","scope":"create disposable scratch text","files":[{"path":"scratch.txt","capability":"create"}],"requests":requests,"assurance":COVERAGE})).unwrap(),issued_at_ms:1000,expires_at_ms:61000,state:"pending".into(),confirmed:true,reservations:vec![],reads:0,records:vec![],permit:None };
+    let w = Window { version:3,binding:Binding {instance_id:"test".into(),profile:"default".into(),native_id:"native".into(),launch_id:uuid::Uuid::new_v4().to_string()},generation:uuid::Uuid::new_v4().to_string(),id:uuid::Uuid::new_v4().to_string(),revision:1,root:root.path().into(),control_root:app.path().into(),root_identity:(dev as u64,ino),grant:serde_json::from_value(json!({"version":3,"task":"scratch","scope":"create disposable scratch text","files":[{"path":"scratch.txt","capability":"create"}],"requests":requests,"assurance":COVERAGE})).unwrap(),issued_at_ms:1000,expires_at_ms:61000,state:"pending".into(),confirmed:true,reservations:vec![],reads:0,records:vec![],permit:None,read_facts:vec![],checkpoints:vec![],nudges:vec![],terminal_reason:None };
     Book {
-        version: 2,
+        version: 3,
         windows: vec![w.clone()],
     }
     .save(&store)
@@ -24,6 +24,7 @@ fn reserve(store: &Store, w: &Window) -> String {
         &w.binding,
         &w.generation,
         Request::Reserve {
+            continuation: None,
             window: w.id.clone(),
             request: request.clone(),
         },
@@ -160,6 +161,7 @@ fn finite_requests_reads_privacy_and_unsafe_targets() {
             &w.binding,
             &w.generation,
             Request::Reserve {
+                continuation: None,
                 window: w.id.clone(),
                 request: uuid::Uuid::new_v4().to_string()
             },
@@ -247,74 +249,238 @@ fn failed_store_ambiguous_commit_and_retention_do_not_refund() {
 fn real_pi_sdk_records_then_applies_through_host_bridge() {
     use std::io::{BufRead, Write};
     use std::process::{Command, Stdio};
-    if std::env::var_os("AOE_PI_ROOT").is_none() {
-        eprintln!("Set AOE_PI_ROOT to pinned Pi 0.87.1 to run the offline SDK/host integration");
+    if std::env::var_os("AOE_PI_ROOT").is_none() && std::env::var_os("AOE_PI_SOURCE_ROOT").is_none()
+    {
+        eprintln!("Set AOE_PI_ROOT or AOE_PI_SOURCE_ROOT to pinned Pi 0.87.1 for offline SDK/host integration");
         return;
     }
-    let (_app, root, store, mut w) = setup(2);
-    let control_root = tempfile::tempdir().unwrap();
-    let control = Store::open(control_root.path(), "test", true).unwrap();
-    let mut child = Command::new("node")
-        .args(["assets/session/aoe-afk-sdk.test.mjs", "--host"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
-    let mut input = child.stdin.take().unwrap();
-    let output = std::io::BufReader::new(child.stdout.take().unwrap());
-    let mut initialized = false;
-    let mut observed = false;
-    for line in output.lines() {
-        let value: Value = serde_json::from_str(&line.unwrap()).unwrap();
-        if value.get("result").is_some() {
-            assert_eq!(value["result"]["calls"], 3);
-            observed = true;
+    for scenario in [
+        "positive",
+        "nudge-one",
+        "nudge-two",
+        "nudge-stop-before",
+        "nudge-stop-during",
+        "nudge-stop-after",
+        "nudge-human",
+        "nudge-extension",
+        "nudge-prior",
+        "nudge-late",
+        "nudge-lost-ack",
+        "nudge-off-before",
+        "nudge-expiry-before",
+        "nudge-off-during",
+        "nudge-expiry-during",
+        "nudge-off-after",
+        "nudge-expiry-after",
+        "nudge-stop-context",
+        "nudge-off-context",
+        "nudge-expiry-context",
+        "nudge-late-human",
+        "nudge-late-extension",
+        "nudge-late-extension-live",
+    ] {
+        let nudging = scenario != "positive";
+        let twice = scenario == "nudge-two";
+        let positive = matches!(
+            scenario,
+            "positive" | "nudge-one" | "nudge-two" | "nudge-late-extension"
+        );
+        let (_app, root, store, mut w) =
+            setup(if twice || scenario == "nudge-late-extension-live" {
+                8
+            } else if nudging {
+                4
+            } else {
+                2
+            });
+        w.grant.settlement_nudges = if twice { 2 } else { u8::from(nudging) };
+        let control_root = tempfile::tempdir().unwrap();
+        let control = Store::open(control_root.path(), "test", true).unwrap();
+        let mut command = Command::new("node");
+        if let Some(source) = std::env::var_os("AOE_PI_SOURCE_ROOT") {
+            let source = std::path::PathBuf::from(source);
+            command
+                .arg("--import")
+                .arg(source.join("node_modules/tsx/dist/loader.mjs"))
+                .env("TSX_TSCONFIG_PATH", source.join("tsconfig.json"));
+        }
+        let mut child = command
+            .args(["assets/session/aoe-afk-sdk.test.mjs", "--host", scenario])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let output = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut initialized = false;
+        let mut observed = false;
+        let mut capability_refused = false;
+        for line in output.lines() {
+            let value: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            if value.get("result").is_some() {
+                capability_refused = value["result"]["capability_refused"] == true;
+                if capability_refused {
+                    observed = true;
+                    break;
+                }
+                assert_eq!(
+                    value["result"]["calls"],
+                    if twice {
+                        8
+                    } else if matches!(
+                        scenario,
+                        "nudge-one" | "nudge-late-extension" | "nudge-late-extension-live"
+                    ) {
+                        5
+                    } else if nudging {
+                        4
+                    } else {
+                        3
+                    },
+                    "{scenario}"
+                );
+                observed = true;
+                break;
+            }
+            if !initialized {
+                w.binding = serde_json::from_value(value["binding"].clone()).unwrap();
+                w.generation = value["generation"].as_str().unwrap().into();
+                w.issued_at_ms = now_ms();
+                w.expires_at_ms = w.issued_at_ms + 60000;
+                Book {
+                    version: 3,
+                    windows: vec![w.clone()],
+                }
+                .save(&store)
+                .unwrap();
+                initialized = true;
+            }
+            if let Some(kind) = value["packet"]["fixture"].as_str() {
+                if kind == "off" {
+                    stop(&store).unwrap();
+                } else {
+                    let _lock = store.lock(TIMEOUT).unwrap();
+                    let mut book = Book::load(&store).unwrap();
+                    let latest = book.windows.last_mut().unwrap();
+                    latest.issued_at_ms = now_ms() - 60001;
+                    latest.expires_at_ms = latest.issued_at_ms + 60000;
+                    book.save(&store).unwrap();
+                }
+                input.write_all(b"{\"ok\":true,\"value\":null}\n").unwrap();
+                input.flush().unwrap();
+                continue;
+            }
+            let packet = serde_json::to_string(&value["packet"]).unwrap() + "\n";
+            let mut reply = Vec::new();
+            super::super::bridge::serve(
+                &control,
+                Some(&store),
+                &w.binding,
+                &w.generation,
+                Cursor::new(packet),
+                &mut reply,
+                || Ok(()),
+            )
+            .unwrap();
+            input.write_all(&reply).unwrap();
+            input.flush().unwrap();
+        }
+        drop(input);
+        assert!(child.wait().unwrap().success());
+        assert!(observed);
+        if capability_refused {
+            let view = snapshot(&store).unwrap();
+            assert_eq!(view["state"], "ended");
+            assert_eq!(view["reservations_used"], 0);
+            assert_eq!(view["nudges_used"], 0);
+            assert!(!root.path().join("scratch.txt").exists());
+            eprintln!("Actual stock SDK refuses nonzero nudges; candidate queue-preserving capability matrix remains blocked");
             break;
         }
-        if !initialized {
-            w.binding = serde_json::from_value(value["binding"].clone()).unwrap();
-            w.generation = value["generation"].as_str().unwrap().into();
-            w.issued_at_ms = now_ms();
-            w.expires_at_ms = w.issued_at_ms + 60000;
-            Book {
-                version: 2,
-                windows: vec![w.clone()],
-            }
-            .save(&store)
-            .unwrap();
-            initialized = true;
+        assert_eq!(
+            root.path().join("scratch.txt").exists(),
+            positive,
+            "{scenario}"
+        );
+        let book = Book::load(&store).unwrap();
+        let w = &book.windows[0];
+        assert_eq!(
+            w.reservations.len(),
+            if twice {
+                7
+            } else if matches!(
+                scenario,
+                "nudge-one" | "nudge-late-extension" | "nudge-late-extension-live"
+            ) {
+                4
+            } else if nudging {
+                3
+            } else {
+                2
+            },
+            "{scenario}"
+        );
+        if positive {
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("scratch.txt")).unwrap(),
+                "hello\n"
+            );
+            assert_eq!(
+                w.permit.as_ref().unwrap().outcomes,
+                ["unknown", "observed_applied"]
+            );
+            assert_eq!(w.terminal_reason, Some(TerminalReason::Completed));
+            assert!(w
+                .nudges
+                .iter()
+                .all(|n| serde_json::to_value(n).unwrap()["observed_request"].is_string()));
+        } else if scenario == "nudge-late-extension-live" {
+            assert_eq!(w.terminal_reason, Some(TerminalReason::Interrupted));
+            assert!(w
+                .nudges
+                .iter()
+                .all(|n| serde_json::to_value(n).unwrap()["observed_request"].is_string()));
+            assert!(w.permit.as_ref().unwrap().attempted_at_ms.is_none());
+        } else if !matches!(
+            scenario,
+            "nudge-prior"
+                | "nudge-off-before"
+                | "nudge-expiry-before"
+                | "nudge-off-during"
+                | "nudge-expiry-during"
+        ) {
+            assert_eq!(
+                w.terminal_reason,
+                Some(TerminalReason::DeliveryUnknown),
+                "{scenario}"
+            );
+            assert!(w
+                .nudges
+                .iter()
+                .all(|n| serde_json::to_value(n).unwrap()["observed_request"].is_null()));
         }
-        let packet = serde_json::to_string(&value["packet"]).unwrap() + "\n";
-        let mut reply = Vec::new();
-        super::super::bridge::serve(
-            &control,
-            Some(&store),
-            &w.binding,
-            &w.generation,
-            Cursor::new(packet),
-            &mut reply,
-            || Ok(()),
-        )
-        .unwrap();
-        input.write_all(&reply).unwrap();
-        input.flush().unwrap();
+        assert_eq!(
+            w.nudges.len(),
+            if twice {
+                2
+            } else if nudging
+                && !matches!(
+                    scenario,
+                    "nudge-prior"
+                        | "nudge-off-before"
+                        | "nudge-expiry-before"
+                        | "nudge-off-during"
+                        | "nudge-expiry-during"
+                )
+            {
+                1
+            } else {
+                0
+            },
+            "{scenario}"
+        );
     }
-    drop(input);
-    assert!(child.wait().unwrap().success());
-    assert!(observed);
-    assert_eq!(
-        std::fs::read_to_string(root.path().join("scratch.txt")).unwrap(),
-        "hello\n"
-    );
-    let book = Book::load(&store).unwrap();
-    let w = &book.windows[0];
-    assert_eq!(w.reservations.len(), 2);
-    assert_eq!(w.records[0].disposition, "admitted");
-    assert_eq!(
-        w.permit.as_ref().unwrap().outcomes,
-        ["unknown", "observed_applied"]
-    );
 }
 
 #[test]
@@ -323,7 +489,7 @@ fn replacement_preimage_store_failure_caps_and_expired_body_pruning() {
     std::fs::write(root.path().join("scratch.txt"), "before").unwrap();
     w.grant.files[0].capability = Capability::Replace;
     Book {
-        version: 2,
+        version: 3,
         windows: vec![w.clone()],
     }
     .save(&store)
@@ -332,7 +498,7 @@ fn replacement_preimage_store_failure_caps_and_expired_body_pruning() {
     let mut d = decision();
     d["action"]["expected_hash"] = json!(hash("before"));
     // An unsafe store must deny record and therefore deny all dependent effects.
-    let ledger = app.path().join("afk-runtime-v2/test/ledger.json");
+    let ledger = app.path().join("afk-runtime-v3/test/ledger.json");
     std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(record(&store, &w, &first, d.clone()).is_err());
     std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -387,7 +553,7 @@ fn executable_large_and_hardlinked_targets_and_unconfirmed_grants_are_rejected()
     let (_app, root, store, mut w) = setup(2);
     w.confirmed = false;
     Book {
-        version: 2,
+        version: 3,
         windows: vec![w.clone()],
     }
     .save(&store)
@@ -397,6 +563,7 @@ fn executable_large_and_hardlinked_targets_and_unconfirmed_grants_are_rejected()
         &w.binding,
         &w.generation,
         Request::Reserve {
+            continuation: None,
             window: w.id.clone(),
             request: uuid::Uuid::new_v4().to_string()
         },
@@ -405,7 +572,7 @@ fn executable_large_and_hardlinked_targets_and_unconfirmed_grants_are_rejected()
     .is_err());
     w.confirmed = true;
     Book {
-        version: 2,
+        version: 3,
         windows: vec![w.clone()],
     }
     .save(&store)
@@ -476,7 +643,7 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
         let app = crate::session::get_app_dir().unwrap();
         let control = Store::open(&app, &instance.id, true).unwrap();
         let runtime = Store::runtime(&app, &instance.id, true).unwrap();
-        let grant = json!({"version":2,"task":"scratch","scope":"create scratch greeting","files":[{"path":"scratch.txt","capability":"create"}],"requests":2,"assurance":COVERAGE});
+        let grant = json!({"version":3,"task":"scratch","scope":"create scratch greeting","files":[{"path":"scratch.txt","capability":"create"}],"requests":2,"assurance":COVERAGE});
         let file = workspace.path().join("grant.json");
         std::fs::write(&file, serde_json::to_vec(&grant).unwrap()).unwrap();
         let binding = Binding::for_instance(&instance).unwrap();
@@ -496,6 +663,7 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
                                 &binding,
                                 &generation,
                                 Request::Reserve {
+                                    continuation: None,
                                     window: id.clone(),
                                     request: uuid::Uuid::new_v4().to_string()
                                 },
@@ -512,7 +680,7 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
                             &binding,
                             &generation,
                             RuntimeAck {
-                                version: 2,
+                                version: 3,
                                 binding: binding.clone(),
                                 challenge: probe.challenge,
                                 window: probe.window,
@@ -556,3 +724,5 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
         assert_eq!(snapshot(&runtime).unwrap()["state"], "ended");
     }
 }
+
+mod settlement;

@@ -12,10 +12,13 @@ pub(crate) const FRAME_BYTES: usize = 256 * 1024;
 const WINDOW_BYTES: usize = 1024 * 1024;
 const RECORD_BYTES: usize = 8 * 1024;
 const FILE_BYTES: usize = 64 * 1024;
+const READ_LIMIT: u8 = 16;
 const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 #[cfg(test)]
 thread_local! { static FAIL_AFTER_ATTEMPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-const PROTOCOL: u32 = 2;
+const PROTOCOL: u32 = 3;
+pub(super) mod settlement;
+use settlement::{Checkpoint, CheckpointClaims, Continuation, Nudge, ReadFact, TerminalReason};
 const COVERAGE: &str = "stock-sdk-main-loop-reservations";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -26,6 +29,8 @@ pub struct Grant {
     scope: String,
     files: Vec<Target>,
     requests: u8,
+    #[serde(default)]
+    settlement_nudges: u8,
     assurance: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -132,6 +137,10 @@ struct Window {
     reads: u8,
     records: Vec<Record>,
     permit: Option<Permit>,
+    read_facts: Vec<ReadFact>,
+    checkpoints: Vec<Checkpoint>,
+    nudges: Vec<Nudge>,
+    terminal_reason: Option<TerminalReason>,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,7 +257,9 @@ impl Grant {
             "unsupported assurance or grant version"
         );
         ensure!(
-            (1..=8).contains(&self.requests) && (1..=16).contains(&self.files.len()),
+            (1..=8).contains(&self.requests)
+                && (1..=16).contains(&self.files.len())
+                && self.settlement_nudges <= 2,
             "invalid finite limits"
         );
         ensure!(
@@ -283,6 +294,7 @@ impl Book {
         for (i, w) in self.windows.iter().enumerate() {
             bounded(w, WINDOW_BYTES)?;
             w.grant.validate()?;
+            w.validate_settlement()?;
             ensure!(
                 w.version == PROTOCOL
                     && uuid::Uuid::parse_str(&w.id).is_ok()
@@ -302,7 +314,7 @@ impl Book {
             );
             ensure!(
                 w.reservations.len() <= usize::from(w.grant.requests)
-                    && w.reads <= 16
+                    && w.reads <= READ_LIMIT
                     && w.records.len() <= 4,
                 "corrupt counters"
             );
@@ -400,18 +412,21 @@ impl Book {
     }
     fn prune(&mut self, now: i64) {
         for w in &mut self.windows {
-            let ambiguous = w.permit.as_ref().is_some_and(|p| {
-                p.attempted_at_ms.is_some() && !p.outcomes.iter().any(|o| o == "observed_applied")
-            });
+            let ambiguous = w.unresolved_nudge()
+                || w.permit.as_ref().is_some_and(|p| {
+                    p.attempted_at_ms.is_some()
+                        && !p.outcomes.iter().any(|o| o == "observed_applied")
+                });
             if now.saturating_sub(w.expires_at_ms) > RETENTION_MS && !ambiguous {
                 for r in &mut w.records {
                     r.claims = None;
                 }
+                w.prune_checkpoint_bodies();
                 if let Some(p) = &mut w.permit {
                     p.content = None;
                     p.preimage = None;
                 }
-                w.state = "ended".into();
+                w.end(TerminalReason::Interrupted);
             }
         }
     }
@@ -505,7 +520,8 @@ impl Window {
             "confirmed":self.confirmed,"grant_hash":hash(serde_json::to_vec(&self.grant).unwrap()),"expires_at_ms":self.expires_at_ms,"issued_at_ms":self.issued_at_ms,
             "reservations_used":self.reservations.len(),"reads_used":self.reads,"records":records,
             "action":self.permit.as_ref().map(|p| json!({"decision":p.decision,"path":p.path,"expected_hash":p.expected_hash,"payload_hash":p.payload_hash,"attempted_at_ms":p.attempted_at_ms,"outcomes":p.outcomes})),
-            "coverage":COVERAGE,"background_coverage":"independent/unknown; not physical requests or billing",
+            "checkpoints":self.checkpoints,"nudges":self.nudges,"nudges_used":self.nudges.len(),"terminal_reason":self.terminal_reason,
+            "evidence":self.evidence(),"coverage":COVERAGE,"background_coverage":"independent/unknown; not physical requests or billing",
             "privacy":"heuristic credential filtering; native Pi/provider history has separate retention"})
     }
 }
@@ -516,9 +532,28 @@ pub(super) enum Request {
     Reserve {
         window: String,
         request: String,
+        continuation: Option<Continuation>,
+    },
+    Checkpoint {
+        window: String,
+        request: String,
+        claims: CheckpointClaims,
+    },
+    Nudge {
+        window: String,
+        request: String,
+        checkpoint: usize,
+    },
+    ContributionIntent {
+        window: String,
+        identity: Continuation,
+    },
+    Settle {
+        window: String,
     },
     Stop {
         window: String,
+        reason: TerminalReason,
     },
     Read {
         window: String,
@@ -547,7 +582,7 @@ pub(super) fn stop(store: &Store) -> Result<()> {
     let _lock = store.lock(TIMEOUT)?;
     let mut book = Book::load(store)?;
     if let Some(w) = book.windows.last_mut() {
-        w.state = "ended".into();
+        w.end(TerminalReason::Interrupted);
         book.save(store)?;
     }
     Ok(())
@@ -576,21 +611,41 @@ pub(super) fn execute_checked(
     let mut book = Book::load(store)?;
     let id = match &command {
         Request::Reserve { window, .. }
-        | Request::Stop { window }
+        | Request::Stop { window, .. }
+        | Request::Checkpoint { window, .. }
+        | Request::Nudge { window, .. }
+        | Request::ContributionIntent { window, .. }
+        | Request::Settle { window }
         | Request::Read { window, .. }
         | Request::Record { window, .. }
         | Request::Apply { window, .. } => window,
     };
     let w = book.windows.last_mut().context("no delegation")?;
     ensure!(w.id == *id, "stale window");
-    if matches!(command, Request::Stop { .. }) {
+    if matches!(command, Request::Stop { .. } | Request::Settle { .. }) {
         ensure!(
             w.binding == *binding && w.generation == generation,
             "stale stop"
         );
-        w.state = "ended".into();
+        let reason = match command {
+            Request::Stop { reason, .. } => reason,
+            _ => w.settlement_reason(),
+        };
+        w.end(reason);
         book.save(store)?;
         return Ok(json!({"ended":true}));
+    }
+    if let Request::Checkpoint {
+        request, claims, ..
+    } = &command
+    {
+        ensure!(
+            w.binding == *binding && w.generation == generation,
+            "stale checkpoint retry"
+        );
+        if let Some(receipt) = w.checkpoint_retry(request, claims) {
+            return Ok(receipt);
+        }
     }
     w.live(
         binding,
@@ -598,7 +653,11 @@ pub(super) fn execute_checked(
         now.saturating_add(started.elapsed().as_millis() as i64),
     )?;
     let result = match command {
-        Request::Reserve { request, .. } => {
+        Request::Reserve {
+            request,
+            continuation,
+            ..
+        } => {
             ensure!(
                 uuid::Uuid::parse_str(&request).is_ok(),
                 "invalid request identity"
@@ -607,23 +666,29 @@ pub(super) fn execute_checked(
                 !w.reservations.contains(&request),
                 "request reservation cannot be replayed"
             );
-            ensure!(
-                w.reservations.len() < usize::from(w.grant.requests),
-                "request reservations exhausted"
-            );
+            if w.reservations.len() >= usize::from(w.grant.requests) {
+                w.end(TerminalReason::Exhausted);
+                book.save(store)?;
+                anyhow::bail!("request reservations exhausted");
+            }
+            w.observe_nudge(continuation.as_ref(), &request)?;
             w.state = "owned".into();
             w.reservations.push(request);
             json!({"request_number":w.reservations.len(),"grant":w.grant})
         }
         Request::Read { request, path, .. } => {
             w.request(&request)?;
-            ensure!(w.reads < 16, "read operations exhausted");
+            ensure!(w.reads < READ_LIMIT, "read operations exhausted");
             w.reads += 1;
             // Consumption is durable even when the read subsequently fails.
             book.save(store)?;
-            let w = book.windows.last().unwrap();
+            let w = book.windows.last_mut().unwrap();
             let (_, _, body, _) = w.file(&path)?;
-            return Ok(json!({"path":path,"hash":body.as_ref().map(hash),"content":body}));
+            let evidence = w.read_fact(path.clone(), &body);
+            book.save(store)?;
+            return Ok(
+                json!({"path":path,"hash":body.as_ref().map(hash),"content":body,"evidence":evidence}),
+            );
         }
         Request::Record {
             request, decision, ..
@@ -727,6 +792,8 @@ pub(super) fn execute_checked(
                 recorded_at_ms: now,
                 disposition: disposition.into(),
             });
+            let mut receipt = receipt;
+            receipt["evidence"] = json!(w.evidence());
             receipt
         }
         Request::Apply {
@@ -759,7 +826,7 @@ pub(super) fn execute_checked(
             let p = w.permit.as_mut().unwrap();
             p.attempted_at_ms = Some(now);
             p.outcomes.push("unknown".into());
-            w.state = "ended".into();
+            w.end(TerminalReason::Failed);
             // This durable commitment serializes revocation. A failed acknowledgement never refunds it.
             book.save(store)?;
             #[cfg(test)]
@@ -786,6 +853,7 @@ pub(super) fn execute_checked(
                 }),
             );
             if matches!(effect, Ok(true)) {
+                book.windows.last_mut().unwrap().terminal_reason = Some(TerminalReason::Completed);
                 book.windows
                     .last_mut()
                     .unwrap()
@@ -799,7 +867,27 @@ pub(super) fn execute_checked(
             }
             anyhow::bail!("action outcome unknown; permit consumed, inspect private ledger")
         }
-        Request::Stop { .. } => unreachable!(),
+        Request::Checkpoint {
+            request, claims, ..
+        } => {
+            let receipt = w.checkpoint(&request, claims, now)?;
+            book.save(store)?;
+            return Ok(receipt);
+        }
+        Request::Nudge {
+            request,
+            checkpoint,
+            ..
+        } => match w.admit_nudge(&request, checkpoint, now) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                w.end(w.settlement_reason());
+                book.save(store)?;
+                return Err(error);
+            }
+        },
+        Request::ContributionIntent { identity, .. } => w.contribution_intent(&identity, now)?,
+        Request::Stop { .. } | Request::Settle { .. } => unreachable!(),
     };
     book.windows.last().unwrap().live(
         binding,
@@ -811,8 +899,14 @@ pub(super) fn execute_checked(
 }
 
 pub(crate) fn initialize() -> Result<()> {
+    initialize_namespace("afk-runtime-v2")
+}
+pub(crate) fn initialize_settlement() -> Result<()> {
+    initialize_namespace("afk-runtime-v3")
+}
+fn initialize_namespace(namespace: &str) -> Result<()> {
     let app = AnchoredDir::open(&super::super::get_app_dir()?)?;
-    let dir = app.create_child(Path::new("afk-runtime-v2"))?;
+    let dir = app.create_child(Path::new(namespace))?;
     let stat = dir.metadata()?;
     ensure!(
         stat.st_mode & 0o777 == 0o700 && stat.st_uid == unsafe { libc::geteuid() },
@@ -970,6 +1064,10 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
         reads: 0,
         records: vec![],
         permit: None,
+        read_facts: vec![],
+        checkpoints: vec![],
+        nudges: vec![],
+        terminal_reason: None,
     };
     for target in &w.grant.files {
         w.file(&target.path)?;
@@ -982,7 +1080,7 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
                 .revision
                 .checked_add(1)
                 .context("revision overflow")?;
-            previous.state = "ended".into();
+            previous.end(TerminalReason::Interrupted);
         }
         book.prune(issued_at_ms);
         book.windows.push(w.clone());
