@@ -135,7 +135,7 @@ impl AfkDialog {
     }
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let block = super::toned_dialog_block(
-            " AFK control-only (no autonomy) ",
+            " AFK control-only / delegation status ",
             theme.border,
             theme.title,
         );
@@ -145,7 +145,7 @@ impl AfkDialog {
         } else {
             ""
         };
-        let text = format!("{}\n\n{}{}\n\nExpiry in minutes: {}\nEnter: request on   o: off   r: inspect   Esc: close\nQuestions remain open. No automatic continuation.", self.title, stale, self.message, self.minutes.value());
+        let text = format!("{}\n\n{}{}\n\nExpiry in minutes: {}\nEnter: control-only on   o: off   r: inspect   Esc: close\nQuestions remain open; delegation requires a CLI grant.", self.title, stale, self.message, self.minutes.value());
         frame.render_widget(
             Paragraph::new(text)
                 .wrap(Wrap { trim: false })
@@ -238,5 +238,25 @@ mod tests {
         ] {
             assert!(text.contains(required), "missing {required}");
         }
+        dialog.message = afk::Report {
+            state: afk::State::Owned, requested_on: false, revision: 2,
+            expires_at_ms: Some(1000), observed_at_ms: Some(1), detail: "fresh capability acknowledgement".into(),
+            delegation: Some(serde_json::json!({"reservations_used":1,"reads_used":2,"grant":{"requests":4},"expires_at_ms":1000})),
+        }.describe();
+        dialog.stale = false;
+        terminal
+            .draw(|frame| dialog.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("Delegation: Owned"));
+        assert!(text.contains("SDK reservations: 1/4"));
+        assert!(!text.contains("no autonomy"));
+        assert!(!text.contains("Autonomous allowance: 0"));
     }
 }

@@ -196,7 +196,7 @@ fn report_launch(args: ReportLaunchArgs) -> Result<()> {
 
 #[derive(Subcommand)]
 pub enum SessionCommands {
-    /// Inspect or request expiring control-only AFK for a direct Pi session
+    /// Inspect AFK presence or explicitly delegate one bounded file cycle for Pi
     Afk(super::afk::AfkArgs),
     /// Report resolved launch identity from inside the agent pane
     ReportLaunch(ReportLaunchArgs),

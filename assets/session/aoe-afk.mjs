@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 
 const LIMIT = 16 * 1024;
+const FRAME_LIMIT = 256 * 1024;
 const REMINDER = "AoE AFK control-only: the human is away. This notice grants no new decision or action authority. Preserve all existing approval and waiting requirements. Do not answer, dismiss, or bypass human questions because of this notice. Autonomous allowance: zero.";
 const same = (a, b) => a && b && ["instance_id", "profile", "native_id", "launch_id"].every(k => typeof a[k] === "string" && a[k] === b[k]);
 const uuid = value => typeof value === "string" && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
@@ -24,7 +25,7 @@ export function spawnBridge(bootstrap, generation) {
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", data => {
     buffer += data;
-    if (Buffer.byteLength(buffer) > LIMIT) return fail();
+    if (Buffer.byteLength(buffer) > FRAME_LIMIT) return fail();
     const end = buffer.indexOf("\n");
     if (end < 0) return;
     if (!pending || end !== buffer.length - 1) return fail();
@@ -38,11 +39,12 @@ export function spawnBridge(bootstrap, generation) {
       else waiter.resolve(result.value);
     } catch { waiter.reject(new Error("Invalid AFK bridge reply")); fail(); }
   });
-  return {
+  let queue = Promise.resolve();
+  const bridge = {
     request(packet) {
       if (closed || pending) return Promise.reject(new Error("AFK bridge unavailable or busy"));
       const line = JSON.stringify(packet) + "\n";
-      if (Buffer.byteLength(line) > LIMIT) return Promise.reject(new Error("AFK packet too large"));
+      if (Buffer.byteLength(line) > FRAME_LIMIT) return Promise.reject(new Error("AFK packet too large"));
       return new Promise((resolve, reject) => {
         const timer = setTimeout(fail, 1500);
         pending = { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } };
@@ -58,6 +60,11 @@ export function spawnBridge(bootstrap, generation) {
       clearTimeout(timer);
     },
   };
+  return { close: bridge.close, request(packet) {
+    const next = queue.then(() => bridge.request(packet));
+    queue = next.catch(() => {});
+    return next;
+  } };
 }
 
 export function registerAfk(pi, options = {}) {
@@ -72,6 +79,7 @@ export function registerAfk(pi, options = {}) {
     runtime = undefined;
     if (!old) return;
     old.stop?.();
+    await options.delegation?.shutdown(old);
     old.state = "unavailable";
     if (old.ctx.hasUI) old.ctx.ui.setStatus("aoe-afk", undefined);
     await old.bridge.close();
@@ -83,13 +91,14 @@ export function registerAfk(pi, options = {}) {
     if (typeof raw !== "string" || Buffer.byteLength(raw) > LIMIT) return;
     let bootstrap;
     try { bootstrap = JSON.parse(raw); } catch { return; }
-    if (bootstrap.version !== 1 || !bootstrap.binding || typeof bootstrap.aoe_bin !== "string"
+    if (bootstrap.version !== (options.protocol ?? 1) || !bootstrap.binding || typeof bootstrap.aoe_bin !== "string"
       || !bootstrap.aoe_bin.startsWith("/") || typeof bootstrap.app_dir !== "string" || !bootstrap.app_dir.startsWith("/")
       || !same(bootstrap.binding, bootstrap.binding) || !uuid(bootstrap.binding.launch_id)
       || ctx.sessionManager.getSessionId() !== bootstrap.binding.native_id) return;
     const generation = randomUUID();
     const r = { ctx, bootstrap, generation, bridge: bridgeFactory(bootstrap, generation), state: "off", revision: 0, deadline: 0, lastAck: "", policy: null };
     runtime = r;
+    options.delegation?.attach(r);
     const refresh = () => {
       if (r.refreshing) return r.refreshing;
       r.refreshing = (async () => {
@@ -97,8 +106,9 @@ export function registerAfk(pi, options = {}) {
           if (runtime !== r || ctx.sessionManager.getSessionId() !== bootstrap.binding.native_id) {
             r.state = "invalidated"; return;
           }
-          const { policy: p, probe } = await r.bridge.request({ op: "poll" });
+          const { policy: p, probe, delegation, runtime_probe } = await r.bridge.request({ op: "poll" });
           if (runtime !== r) return;
+          await options.delegation?.poll(r, delegation, runtime_probe);
           r.policy = p;
           if (!p) r.state = "off";
           else if (p.version !== 1 || p.mode !== "control-only" || p.allowance !== 0 || !Number.isSafeInteger(p.revision) || p.revision < r.revision
@@ -125,9 +135,9 @@ export function registerAfk(pi, options = {}) {
               if (runtime === r) r.lastAck = signature;
             }
           }
-        } catch { r.state = "unavailable"; }
+        } catch { r.state = "unavailable"; options.delegation?.failed(r); }
         finally {
-          if (runtime === r && ctx.hasUI) ctx.ui.setStatus("aoe-afk", r.state === "off" ? undefined : `AFK: ${r.state} (no autonomy)`);
+          if (runtime === r && ctx.hasUI) ctx.ui.setStatus("aoe-afk", options.delegation?.status(r) ?? (r.state === "off" ? undefined : `AFK: ${r.state} (no autonomy)`));
           r.refreshing = undefined;
         }
       })();
@@ -145,6 +155,8 @@ export function registerAfk(pi, options = {}) {
     if (r.refreshing) await r.refreshing;
     if (runtime !== r) return { messages };
     await r.refresh();
+    const delegated = await options.delegation?.context(r, messages, ctx);
+    if (delegated) return delegated;
     if (runtime !== r || r.state !== "control-only" || mono() >= r.deadline || ctx.sessionManager.getSessionId() !== r.bootstrap.binding.native_id) return { messages };
     return { messages: [...messages, { role: "custom", customType: "aoe-afk-control", content: REMINDER, display: false, timestamp: wall() }] };
   });

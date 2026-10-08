@@ -21,6 +21,16 @@ enum AfkCommand {
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1440))]
         minutes: u32,
     },
+    /// One-cycle delegation during active ordinary work; idle activation is refused
+    Delegate {
+        session: String,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1440))]
+        minutes: u32,
+        #[arg(long)]
+        grant: std::path::PathBuf,
+    },
+    /// Export private-ledger audit JSON without payloads or preimages
+    Audit { session: String },
     /// Record AFK off even if the integration is unavailable
     Off { session: String },
     /// Probe the current integration; does not enable or renew AFK
@@ -28,10 +38,29 @@ enum AfkCommand {
 }
 
 pub async fn run(profile: &str, args: AfkArgs) -> Result<()> {
+    if let AfkCommand::Delegate { session, .. } | AfkCommand::Audit { session } = &args.command {
+        let storage = Storage::open_unwatched(profile)?;
+        let (mut rows, _) = storage.load_with_groups()?;
+        for row in &mut rows {
+            row.source_profile = profile.to_owned();
+        }
+        let instance = super::resolve_session(session, &rows)?.clone();
+        let result = tokio::task::spawn_blocking(move || match args.command {
+            AfkCommand::Delegate { minutes, grant, .. } => {
+                crate::session::afk::delegation::delegate(&instance, minutes, &grant)
+            }
+            AfkCommand::Audit { .. } => crate::session::afk::delegation::audit(&instance),
+            _ => unreachable!(),
+        })
+        .await??;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     let (identifier, operation) = match args.command {
         AfkCommand::On { session, minutes } => (session, Operation::On { minutes }),
         AfkCommand::Off { session } => (session, Operation::Off),
         AfkCommand::Status { session } => (session, Operation::Status),
+        _ => unreachable!(),
     };
     let storage = Storage::open_unwatched(profile)?;
     let (mut rows, _) = storage.load_with_groups()?;
@@ -80,6 +109,7 @@ mod tests {
                 expires_at_ms: Some(100),
                 observed_at_ms: Some(1),
                 detail: String::new(),
+                delegation: None,
             };
             assert_eq!(
                 super::require_acknowledged_activation(Operation::On { minutes: 1 }, &report)
@@ -94,6 +124,16 @@ mod tests {
     fn activation_requires_explicit_bounded_duration() {
         for args in [
             vec!["aoe", "session", "afk", "on", "s"],
+            vec!["aoe", "session", "afk", "delegate", "s", "--minutes", "1"],
+            vec![
+                "aoe",
+                "session",
+                "afk",
+                "delegate",
+                "s",
+                "--grant",
+                "grant.json",
+            ],
             vec!["aoe", "session", "afk", "on", "s", "--minutes", "0"],
             vec!["aoe", "session", "afk", "on", "s", "--minutes", "1441"],
         ] {

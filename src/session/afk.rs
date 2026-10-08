@@ -1,6 +1,7 @@
-//! Control-only AFK requests. This protocol never admits autonomous work.
+//! Control-only presence and a separately granted, bounded delegation runtime.
 
 mod bridge;
+pub mod delegation;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -17,6 +18,7 @@ pub use bridge::run_bridge;
 pub(crate) use store::initialize;
 
 const VERSION: u32 = 1;
+const BRIDGE_VERSION: u32 = 2;
 const MODE: &str = "control-only";
 const MAX_BYTES: usize = 16 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(3);
@@ -88,14 +90,26 @@ pub(crate) fn launch_arguments(
         launch_id: launch_id.to_owned(),
     };
     Store::open(&app_dir, &instance.id, true)?;
-    let asset = PathBuf::from("agent-extensions/aoe-afk.mjs");
-    super::storage::replace_file_no_follow(
-        &app_dir,
-        &asset,
-        include_bytes!("../../assets/session/aoe-afk.mjs"),
-    )?;
+    let asset = PathBuf::from("agent-extensions/aoe-afk-runtime.mjs");
+    Store::runtime(&app_dir, &instance.id, true)?;
+    for (name, bytes) in [
+        (
+            "aoe-afk.mjs",
+            include_bytes!("../../assets/session/aoe-afk.mjs").as_slice(),
+        ),
+        (
+            "aoe-afk-runtime.mjs",
+            include_bytes!("../../assets/session/aoe-afk-runtime.mjs").as_slice(),
+        ),
+    ] {
+        super::storage::replace_file_no_follow(
+            &app_dir,
+            &PathBuf::from("agent-extensions").join(name),
+            bytes,
+        )?;
+    }
     let bootstrap = Bootstrap {
-        version: VERSION,
+        version: BRIDGE_VERSION,
         app_dir: app_dir.clone(),
         aoe_bin: std::env::current_exe()?,
         binding,
@@ -191,6 +205,9 @@ pub enum State {
     Unsupported,
     Requested,
     Unavailable,
+    Pending,
+    Owned,
+    Ended,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -201,11 +218,16 @@ pub struct Report {
     pub expires_at_ms: Option<i64>,
     pub observed_at_ms: Option<i64>,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<serde_json::Value>,
 }
 impl Report {
     pub fn describe(&self) -> String {
+        if let Some(view) = &self.delegation {
+            return format!("Delegation: {:?} (explicit operator grant)\nSDK reservations: {}/{}; reads: {}/16\nOne file cycle; independent background requests unknown\nRevision: {}; expiry (Unix ms): {}\n{}\nUse 'aoe session afk audit' for decisions and outcomes.", self.state, view["reservations_used"], view["grant"]["requests"], view["reads_used"], self.revision, view["expires_at_ms"], self.detail);
+        }
         format!(
-            "{:?}\nRequested: {}\nRevision: {}\nExpiry (Unix ms): {}\n{}\nAutonomous allowance: 0",
+            "{:?}\nRequested: {}\nRevision: {}\nExpiry (Unix ms): {}\n{}\n{}",
             self.state,
             if self.requested_on {
                 "on (control-only)"
@@ -215,7 +237,12 @@ impl Report {
             self.revision,
             self.expires_at_ms
                 .map_or_else(|| "none".into(), |n| n.to_string()),
-            self.detail
+            self.detail,
+            if matches!(self.state, State::Pending | State::Owned) {
+                "Explicit delegation: one file cycle, finite SDK reservations"
+            } else {
+                "Autonomous allowance: 0"
+            }
         )
     }
 }
@@ -244,10 +271,35 @@ fn report(
         expires_at_ms: policy.and_then(|p| p.expires_at_ms),
         observed_at_ms: observed.then(now_ms),
         detail: detail.into(),
+        delegation: None,
     }
 }
 
 pub fn control(instance: &Instance, operation: Operation) -> Result<Report> {
+    let mut report = control_presence(instance, operation)?;
+    if matches!(operation, Operation::Status) {
+        let store = Store::runtime(&super::get_app_dir()?, &instance.id, true)?;
+        let view = delegation::inspect(instance, &store)?;
+        if !view.is_null() {
+            report.state = match view["state"].as_str() {
+                Some("pending") => State::Pending,
+                Some("owned") => State::Owned,
+                Some("invalidated") => State::Invalidated,
+                _ => State::Ended,
+            };
+            report.detail = view["observation"]
+                .as_str()
+                .unwrap_or("Host snapshot; runtime unconfirmed")
+                .into();
+            report.observed_at_ms = view["observed_at_ms"].as_i64();
+            report.revision = view["revision"].as_u64().unwrap_or(0);
+            report.expires_at_ms = view["expires_at_ms"].as_i64();
+            report.delegation = Some(view);
+        }
+    }
+    Ok(report)
+}
+fn control_presence(instance: &Instance, operation: Operation) -> Result<Report> {
     if let Operation::On { minutes } = operation {
         ensure!(
             (1..=1440).contains(&minutes),
@@ -257,6 +309,9 @@ pub fn control(instance: &Instance, operation: Operation) -> Result<Report> {
     let app_dir = super::get_app_dir()?;
     let store = Store::open(&app_dir, &instance.id, true)?;
     let _lock = store.lock(TIMEOUT)?;
+    if !matches!(operation, Operation::Status) {
+        delegation::stop(&Store::runtime(&app_dir, &instance.id, true)?)?;
+    }
     let mut policy = store
         .read::<Policy>("policy.json")
         .context("AFK policy needs explicit repair; refusing to invent a revision")?;

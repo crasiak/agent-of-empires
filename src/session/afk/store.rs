@@ -26,15 +26,34 @@ fn private_dir(dir: &AnchoredDir) -> Result<()> {
 
 pub(super) struct Store {
     dir: AnchoredDir,
+    limit: usize,
 }
 impl Store {
     pub(super) fn open(app_dir: &Path, id: &str, create: bool) -> Result<Self> {
+        Self::open_namespace(app_dir, id, create, "afk", MAX_BYTES)
+    }
+    pub(super) fn runtime(app_dir: &Path, id: &str, create: bool) -> Result<Self> {
+        Self::open_namespace(
+            app_dir,
+            id,
+            create,
+            "afk-runtime-v2",
+            super::delegation::SESSION_BYTES,
+        )
+    }
+    fn open_namespace(
+        app_dir: &Path,
+        id: &str,
+        create: bool,
+        namespace: &str,
+        limit: usize,
+    ) -> Result<Self> {
         super::super::validate_instance_id(id)?;
         let app = AnchoredDir::open(app_dir)?;
         let root = if create {
-            app.create_child(Path::new("afk"))?
+            app.create_child(Path::new(namespace))?
         } else {
-            app.child(Path::new("afk"))?
+            app.child(Path::new(namespace))?
         };
         private_dir(&root)?;
         let dir = if create {
@@ -43,7 +62,7 @@ impl Store {
             root.child(Path::new(id))?
         };
         private_dir(&dir)?;
-        Ok(Self { dir })
+        Ok(Self { dir, limit })
     }
     fn check_leaf(&self, leaf: &str) -> Result<bool> {
         let Some(stat) = self.dir.entry_stat(Path::new(leaf))? else {
@@ -55,7 +74,7 @@ impl Store {
                 && stat.st_mode & 0o777 == 0o600
                 && stat.st_nlink <= 1
                 && stat.st_size >= 0
-                && stat.st_size as u64 <= MAX_BYTES as u64,
+                && stat.st_size as u64 <= self.limit as u64,
             "unsafe or oversized AFK file: {leaf}"
         );
         Ok(true)
@@ -66,14 +85,14 @@ impl Store {
         }
         let file = self
             .dir
-            .open_regular(Path::new(leaf), MAX_BYTES)?
+            .open_regular(Path::new(leaf), self.limit)?
             .context("AFK file changed while opening")?;
-        read_snapshot(file, leaf).map(Some)
+        read_snapshot_bounded(file, leaf, self.limit).map(Some)
     }
     pub(super) fn write(&self, leaf: &str, value: &impl Serialize) -> Result<()> {
         self.check_leaf(leaf)?;
         let bytes = serde_json::to_vec(value)?;
-        ensure!(bytes.len() <= MAX_BYTES, "oversized AFK publication");
+        ensure!(bytes.len() <= self.limit, "oversized AFK publication");
         self.dir.publish_file(
             Path::new(leaf),
             &mut Cursor::new(bytes),
@@ -128,7 +147,15 @@ impl Store {
     }
 }
 
+#[cfg(test)]
 fn read_snapshot<T: serde::de::DeserializeOwned>(file: File, leaf: &str) -> Result<T> {
+    read_snapshot_bounded(file, leaf, MAX_BYTES)
+}
+fn read_snapshot_bounded<T: serde::de::DeserializeOwned>(
+    file: File,
+    leaf: &str,
+    limit: usize,
+) -> Result<T> {
     // Atomic replacement can unlink an already-open, still-valid snapshot.
     let meta = file.metadata()?;
     ensure!(
@@ -140,8 +167,8 @@ fn read_snapshot<T: serde::de::DeserializeOwned>(file: File, leaf: &str) -> Resu
     );
     use std::io::Read;
     let mut bytes = Vec::new();
-    file.take((MAX_BYTES + 1) as u64).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= MAX_BYTES, "oversized AFK file");
+    file.take((limit + 1) as u64).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= limit, "oversized AFK file");
     serde_json::from_slice(&bytes).with_context(|| format!("invalid {leaf}"))
 }
 

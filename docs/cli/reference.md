@@ -22,6 +22,8 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe session`↴](#aoe-session)
 * [`aoe session afk`↴](#aoe-session-afk)
 * [`aoe session afk on`↴](#aoe-session-afk-on)
+* [`aoe session afk delegate`↴](#aoe-session-afk-delegate)
+* [`aoe session afk audit`↴](#aoe-session-afk-audit)
 * [`aoe session afk off`↴](#aoe-session-afk-off)
 * [`aoe session afk status`↴](#aoe-session-afk-status)
 * [`aoe session report-launch`↴](#aoe-session-report-launch)
@@ -455,7 +457,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 
 ###### **Subcommands:**
 
-* `afk` — Inspect or request expiring control-only AFK for a direct Pi session
+* `afk` — Inspect AFK presence or explicitly delegate one bounded file cycle for Pi
 * `report-launch` — Report resolved launch identity from inside the agent pane
 * `report-ledger-launch` — Report optional Ledger run attribution from inside the agent pane
 * `start` — Start a session's tmux process
@@ -486,13 +488,15 @@ Manage session lifecycle (start, stop, attach, etc.)
 
 ## `aoe session afk`
 
-Inspect or request expiring control-only AFK for a direct Pi session
+Inspect AFK presence or explicitly delegate one bounded file cycle for Pi
 
 **Usage:** `aoe session afk <COMMAND>`
 
 ###### **Subcommands:**
 
 * `on` — Request control-only AFK. Does not authorize autonomous work
+* `delegate` — One-cycle delegation during active ordinary work; idle activation is refused
+* `audit` — Export private-ledger audit JSON without payloads or preimages
 * `off` — Record AFK off even if the integration is unavailable
 * `status` — Probe the current integration; does not enable or renew AFK
 
@@ -511,6 +515,35 @@ Request control-only AFK. Does not authorize autonomous work
 ###### **Options:**
 
 * `--minutes <MINUTES>` — Explicit expiry, from 1 to 1440 minutes
+
+
+
+## `aoe session afk delegate`
+
+One-cycle delegation during active ordinary work; idle activation is refused
+
+**Usage:** `aoe session afk delegate --minutes <MINUTES> --grant <GRANT> <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>`
+
+###### **Options:**
+
+* `--minutes <MINUTES>`
+* `--grant <GRANT>`
+
+
+
+## `aoe session afk audit`
+
+Export private-ledger audit JSON without payloads or preimages
+
+**Usage:** `aoe session afk audit <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>`
 
 
 
