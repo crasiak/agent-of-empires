@@ -108,9 +108,9 @@ export function registerAfk(pi, options = {}) {
           if (runtime !== r || ctx.sessionManager.getSessionId() !== bootstrap.binding.native_id) {
             r.state = "invalidated"; return;
           }
-          const { policy: p, probe, delegation, runtime_probe } = await r.bridge.request({ op: "poll" });
+          const { policy: p, probe, delegation, runtime_probe, question_guards } = await r.bridge.request({ op: "poll" });
           if (runtime !== r) return;
-          await options.delegation?.poll(r, delegation, runtime_probe);
+          await options.delegation?.poll(r, delegation, runtime_probe, question_guards);
           r.policy = p;
           if (!p) r.state = "off";
           else if (p.version !== 1 || p.mode !== "control-only" || p.allowance !== 0 || !Number.isSafeInteger(p.revision) || p.revision < r.revision

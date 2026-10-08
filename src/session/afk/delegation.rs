@@ -16,8 +16,10 @@ const READ_LIMIT: u8 = 16;
 const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 #[cfg(test)]
 thread_local! { static FAIL_AFTER_ATTEMPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-const PROTOCOL: u32 = 3;
+const PROTOCOL: u32 = 4;
+pub(super) mod questions;
 pub(super) mod settlement;
+use questions::{Question, QuestionIdentity, QuestionOutcome};
 use settlement::{Checkpoint, CheckpointClaims, Continuation, Nudge, ReadFact, TerminalReason};
 const COVERAGE: &str = "stock-sdk-main-loop-reservations";
 
@@ -31,6 +33,8 @@ pub struct Grant {
     requests: u8,
     #[serde(default)]
     settlement_nudges: u8,
+    #[serde(default)]
+    question_deferrals: u8,
     assurance: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -141,6 +145,7 @@ struct Window {
     checkpoints: Vec<Checkpoint>,
     nudges: Vec<Nudge>,
     terminal_reason: Option<TerminalReason>,
+    question: Option<Question>,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -259,7 +264,8 @@ impl Grant {
         ensure!(
             (1..=8).contains(&self.requests)
                 && (1..=16).contains(&self.files.len())
-                && self.settlement_nudges <= 2,
+                && self.settlement_nudges <= 2
+                && self.question_deferrals <= 1,
             "invalid finite limits"
         );
         ensure!(
@@ -295,6 +301,7 @@ impl Book {
             bounded(w, WINDOW_BYTES)?;
             w.grant.validate()?;
             w.validate_settlement()?;
+            w.validate_question()?;
             ensure!(
                 w.version == PROTOCOL
                     && uuid::Uuid::parse_str(&w.id).is_ok()
@@ -412,7 +419,8 @@ impl Book {
     }
     fn prune(&mut self, now: i64) {
         for w in &mut self.windows {
-            let ambiguous = w.unresolved_nudge()
+            let ambiguous = w.unresolved_question()
+                || w.unresolved_nudge()
                 || w.permit.as_ref().is_some_and(|p| {
                     p.attempted_at_ms.is_some()
                         && !p.outcomes.iter().any(|o| o == "observed_applied")
@@ -520,6 +528,7 @@ impl Window {
             "confirmed":self.confirmed,"grant_hash":hash(serde_json::to_vec(&self.grant).unwrap()),"expires_at_ms":self.expires_at_ms,"issued_at_ms":self.issued_at_ms,
             "reservations_used":self.reservations.len(),"reads_used":self.reads,"records":records,
             "action":self.permit.as_ref().map(|p| json!({"decision":p.decision,"path":p.path,"expected_hash":p.expected_hash,"payload_hash":p.payload_hash,"attempted_at_ms":p.attempted_at_ms,"outcomes":p.outcomes})),
+            "question":self.question,"question_deferrals_used":usize::from(self.question.is_some()),
             "checkpoints":self.checkpoints,"nudges":self.nudges,"nudges_used":self.nudges.len(),"terminal_reason":self.terminal_reason,
             "evidence":self.evidence(),"coverage":COVERAGE,"background_coverage":"independent/unknown; not physical requests or billing",
             "privacy":"heuristic credential filtering; native Pi/provider history has separate retention"})
@@ -533,6 +542,20 @@ pub(super) enum Request {
         window: String,
         request: String,
         continuation: Option<Continuation>,
+        question: Option<QuestionIdentity>,
+    },
+    QuestionAdmit {
+        window: String,
+        identity: QuestionIdentity,
+    },
+    QuestionIntent {
+        window: String,
+        identity: QuestionIdentity,
+    },
+    QuestionOutcome {
+        window: String,
+        identity: QuestionIdentity,
+        outcome: QuestionOutcome,
     },
     Checkpoint {
         window: String,
@@ -611,6 +634,9 @@ pub(super) fn execute_checked(
     let mut book = Book::load(store)?;
     let id = match &command {
         Request::Reserve { window, .. }
+        | Request::QuestionAdmit { window, .. }
+        | Request::QuestionIntent { window, .. }
+        | Request::QuestionOutcome { window, .. }
         | Request::Stop { window, .. }
         | Request::Checkpoint { window, .. }
         | Request::Nudge { window, .. }
@@ -647,6 +673,18 @@ pub(super) fn execute_checked(
             return Ok(receipt);
         }
     }
+    if let Request::QuestionOutcome {
+        identity, outcome, ..
+    } = &command
+    {
+        ensure!(
+            w.binding == *binding && w.generation == generation,
+            "stale question outcome"
+        );
+        let result = w.question_outcome(identity, *outcome, now)?;
+        book.save(store)?;
+        return Ok(result);
+    }
     w.live(
         binding,
         generation,
@@ -656,6 +694,7 @@ pub(super) fn execute_checked(
         Request::Reserve {
             request,
             continuation,
+            question,
             ..
         } => {
             ensure!(
@@ -671,11 +710,17 @@ pub(super) fn execute_checked(
                 book.save(store)?;
                 anyhow::bail!("request reservations exhausted");
             }
+            w.observe_question(question.as_ref(), &request)?;
             w.observe_nudge(continuation.as_ref(), &request)?;
             w.state = "owned".into();
             w.reservations.push(request);
-            json!({"request_number":w.reservations.len(),"grant":w.grant})
+            json!({"request_number":w.reservations.len(),"grant":w.grant,"unanswered_gate":w.question,"human_required":w.question.is_some()})
         }
+        Request::QuestionAdmit { identity, .. } => w.admit_question(identity, now)?,
+        Request::QuestionIntent { identity, .. } => w.question_intent(&identity, now)?,
+        Request::QuestionOutcome {
+            identity, outcome, ..
+        } => w.question_outcome(&identity, outcome, now)?,
         Request::Read { request, path, .. } => {
             w.request(&request)?;
             ensure!(w.reads < READ_LIMIT, "read operations exhausted");
@@ -901,6 +946,9 @@ pub(super) fn execute_checked(
 pub(crate) fn initialize() -> Result<()> {
     initialize_namespace("afk-runtime-v2")
 }
+pub(crate) fn initialize_questions() -> Result<()> {
+    initialize_namespace("afk-runtime-v4")
+}
 pub(crate) fn initialize_settlement() -> Result<()> {
     initialize_namespace("afk-runtime-v3")
 }
@@ -1068,6 +1116,7 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
         checkpoints: vec![],
         nudges: vec![],
         terminal_reason: None,
+        question: None,
     };
     for target in &w.grant.files {
         w.file(&target.path)?;
@@ -1075,6 +1124,12 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
     {
         let _lock = runtime.lock(TIMEOUT)?;
         let mut book = Book::load(&runtime)?;
+        ensure!(
+            !book.windows.iter().any(
+                |old| old.binding.native_id == w.binding.native_id && old.unresolved_question()
+            ),
+            "unresolved question attempt; explicit ordinary recovery required"
+        );
         if let Some(previous) = book.windows.last_mut() {
             w.revision = previous
                 .revision

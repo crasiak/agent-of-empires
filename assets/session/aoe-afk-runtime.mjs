@@ -2,6 +2,7 @@ import { VERSION } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { performance } from "node:perf_hooks";
 import { randomUUID } from "node:crypto";
+import { questionRuntime } from "./aoe-afk-questions.mjs";
 import { registerAfk } from "./aoe-afk.mjs";
 
 const COVERAGE = "stock-sdk-main-loop-reservations";
@@ -25,7 +26,7 @@ export function delegationRuntime(pi) {
     && (!args.options || (Array.isArray(args.options) && args.options.every(o => o && typeof o.title === "string" && Object.keys(o).every(k => ["title", "description"].includes(k)))));
   const abortEpisode = (r, ctx = r?.ctx) => {
     if (r?.queueAbort) r.queueAbort();
-    else if (!r?.view?.grant.settlement_nudges) ctx.abort();
+    else if (!r?.view?.grant.settlement_nudges && !r?.view?.grant.question_deferrals) ctx.abort();
   };
   const stop = async (r, reason, abort = false, disposition = "interrupted") => {
     if (!r) return;
@@ -45,14 +46,17 @@ export function delegationRuntime(pi) {
     await r.stopping;
     r.stopping = undefined;
   };
+  const questions = questionRuntime(pi, { current: () => current, stop, live, observable, supportedQuestion });
   const forgetSignal = r => {
     r.signal?.removeEventListener("abort", r.onAbort);
     r.signal = undefined;
     r.onAbort = undefined;
   };
-  const observe = (_event, ctx) => {
+  const observe = (event, ctx) => {
     const r = current;
-    if (!r || r.signal === ctx.signal) return;
+    if (!r) return;
+    if (event.type === "context") r.ordinaryExternal = externalMessages(clean(event.messages));
+    if (r.signal === ctx.signal) return;
     forgetSignal(r);
     r.signal = ctx.signal;
     if (!r.signal) return;
@@ -105,12 +109,13 @@ export function delegationRuntime(pi) {
     r.interaction = pending;
     return pending.finally(() => { if (r.interaction === pending) r.interaction = undefined; });
   };
-  pi.on("input", async () => {
+  pi.on("input", async (event, ctx) => {
+    if (current) questions.input(current, event, ctx);
     // No abort or transformation: Pi retains the input, including queued steering.
     await intervention("human input");
     return { action: "continue" };
   });
-  pi.on("ui_prompt_end", () => intervention("UI interaction; origin unknown, no human answer inferred"));
+  pi.on("ui_prompt_end", event => questions.end(current, event) ? undefined : intervention("UI interaction; origin unknown, no human answer inferred"));
   pi.on("turn_end", async (event, ctx) => {
     if (event.outcome === "aborted" || ctx.signal?.aborted) await intervention("explicit stop");
   });
@@ -174,23 +179,25 @@ export function delegationRuntime(pi) {
     });
   }
   return {
-    attach(r) { current = r; r.owned = false; r.parked = false; },
-    async shutdown(r) { forgetSignal(r); await stop(r, "shutdown", r.owned); if (current === r) current = undefined; },
+    attach(r) { current = r; r.owned = false; r.parked = false; questions.attach(r); },
+    async shutdown(r) { questions.shutdown(r); forgetSignal(r); await stop(r, "shutdown", r.owned); if (current === r) current = undefined; },
     failed(r) { if (active(r)) { void stop(r, "host unavailable", r.owned, "failed"); } },
-    status(r) { return r.view ? `AFK delegation: ${r.parked ? `ended (${r.reason})` : r.view.state}; SDK reservations ${r.view.reservations_used}/${r.view.grant.requests}; nudges ${r.view.nudges_used}/${r.view.grant.settlement_nudges}; one file effect; ${r.view.terminal_reason ?? "nonterminal"}; background unknown` : undefined; },
-    async poll(r, view, probe) {
+    status(r) { return r.questionWarning ?? (r.view ? `AFK delegation: ${r.parked ? `ended (${r.reason})` : r.view.state}; SDK reservations ${r.view.reservations_used}/${r.view.grant.requests}; nudges ${r.view.nudges_used}/${r.view.grant.settlement_nudges}; question deferrals ${r.view.question_deferrals_used ?? 0}/${r.view.grant.question_deferrals ?? 0}; one file effect; ${r.view.terminal_reason ?? "nonterminal"}; background unknown` : undefined); },
+    async poll(r, view, probe, guards) {
+      questions.restoreGuards(r, guards);
       if (view && r.window !== view.window) {
         // Never replace a still-owned episode with a new operator window.
         if (r.owned) { await stop(r, "replacement during owned episode", true); return; }
+        questions.newWindow(r);
         r.window = view.window; r.externalMessages = undefined; r.queueAbort = undefined;
-        r.parked = false; r.request = undefined; r.reason = undefined;
+        r.parked = false; r.request = undefined; r.reason = undefined; r.questionUnavailable = false;
         if (!qualified) { r.view = view; await stop(r, "unsupported SDK; executable activation refused"); return; }
         r.delegateDeadline = performance.now() + Math.max(0, Math.min(view.expires_at_ms - view.issued_at_ms, view.expires_at_ms - Date.now()));
       }
       if (!view && r.view) await stop(r, "delegation disappeared", r.owned);
       r.view = view;
       if (view && (view.state === "ended" || !live(r))) await stop(r, "ended or expired");
-      if (view?.state === "pending" && view.grant.settlement_nudges > 0) {
+      if (view?.state === "pending" && (view.grant.settlement_nudges > 0 || view.grant.question_deferrals > 0)) {
         if (typeof r.ctx.abortPreservingQueue !== "function") {
           await stop(r, "settlement nudges unavailable: queue-preserving abort capability required");
           return;
@@ -201,7 +208,9 @@ export function delegationRuntime(pi) {
         await stop(r, "executable activation refused: start ordinary work with an observable stop signal, then delegate");
         return;
       }
-      if (probe && qualified && (!probe.window || !view?.grant.settlement_nudges || typeof r.ctx.abortPreservingQueue === "function") && probe.version === 3 && JSON.stringify(probe.binding) === JSON.stringify(r.bootstrap.binding)
+      await questions.poll(r);
+      if (r.parked && view?.state === "pending") return;
+      if (probe && qualified && (!probe.window || !r.questionUnavailable) && (!probe.window || (!view?.grant.settlement_nudges && !view?.grant.question_deferrals) || typeof r.ctx.abortPreservingQueue === "function") && probe.version === 4 && JSON.stringify(probe.binding) === JSON.stringify(r.bootstrap.binding)
         && (!probe.window || (probe.window === view?.window && probe.grant_hash === view?.grant_hash))) {
         const ack = { ...probe, generation: r.generation, sdk: VERSION, coverage: COVERAGE };
         const signature = JSON.stringify(ack);
@@ -220,6 +229,10 @@ export function delegationRuntime(pi) {
       messages = clean(messages);
       r.settling = false;
       if (r.interaction) await r.interaction;
+      let question;
+      try { question = await questions.guard(r, messages, ctx); }
+      catch { question = await questions.block(r, ctx); }
+      if (question.blocked || question.ordinary) return { messages };
       const w = r.view;
       if (!qualified || (!r.owned && (r.parked || !w || w.state !== "pending" || !w.confirmed))) return;
       // Context is emitted after the prior tool batch settles, never in a tool callback.
@@ -239,8 +252,9 @@ export function delegationRuntime(pi) {
           }
         }
         const request = randomUUID();
-        const receipt = await r.bridge.request({ op: "runtime", command: { kind: "reserve", window: w.window, request, continuation: r.expectedContinuation?.identity ?? null } });
+        const receipt = await r.bridge.request({ op: "runtime", command: { kind: "reserve", window: w.window, request, continuation: r.expectedContinuation?.identity ?? null, question: question.identity ?? null } });
         if (!observable(r) || ctx.signal?.aborted || r.parked || performance.now() >= r.delegateDeadline || Date.now() >= w.expires_at_ms) { await stop(r, "interrupted reservation", true); return { messages }; }
+        questions.reserved(r, question.identity);
         r.request = request;
         r.externalMessages = externalMessages(messages);
         r.expectedContinuation = undefined; r.contribution = undefined;
@@ -250,4 +264,4 @@ export function delegationRuntime(pi) {
   };
 }
 
-export default function (pi) { registerAfk(pi, { protocol: 3, delegation: delegationRuntime(pi) }); }
+export default function (pi) { registerAfk(pi, { protocol: 4, delegation: delegationRuntime(pi) }); }

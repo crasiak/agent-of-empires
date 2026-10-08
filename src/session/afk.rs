@@ -18,7 +18,7 @@ pub use bridge::run_bridge;
 pub(crate) use store::initialize;
 
 const VERSION: u32 = 1;
-const BRIDGE_VERSION: u32 = 3;
+const BRIDGE_VERSION: u32 = 4;
 const MODE: &str = "control-only";
 const MAX_BYTES: usize = 16 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(3);
@@ -100,6 +100,10 @@ pub(crate) fn launch_arguments(
         (
             "aoe-afk-runtime.mjs",
             include_bytes!("../../assets/session/aoe-afk-runtime.mjs").as_slice(),
+        ),
+        (
+            "aoe-afk-questions.mjs",
+            include_bytes!("../../assets/session/aoe-afk-questions.mjs").as_slice(),
         ),
     ] {
         super::storage::replace_file_no_follow(
@@ -224,7 +228,7 @@ pub struct Report {
 impl Report {
     pub fn describe(&self) -> String {
         if let Some(view) = &self.delegation {
-            return format!("Delegation: {:?} (explicit operator grant)\nSDK reservations: {}/{}; reads: {}/16\nSettlement nudges: {}/{}; one file cycle; independent background requests unknown\nRevision: {}; expiry (Unix ms): {}\n{}\nTerminal reason: {}\nUse 'aoe session afk audit' for decisions and outcomes.", self.state, view["reservations_used"], view["grant"]["requests"], view["reads_used"], view["nudges_used"], view["grant"]["settlement_nudges"], self.revision, view["expires_at_ms"], self.detail, view["terminal_reason"]);
+            return format!("Delegation: {:?} (explicit operator grant)\nSDK reservations: {}/{}; reads: {}/16\nSettlement nudges: {}/{}; question deferrals: {}/{}; one file cycle; independent background requests unknown\nRevision: {}; expiry (Unix ms): {}\n{}\nTerminal reason: {}\nUse 'aoe session afk audit' for decisions and outcomes.", self.state, view["reservations_used"], view["grant"]["requests"], view["reads_used"], view["nudges_used"], view["grant"]["settlement_nudges"], view["question_deferrals_used"], view["grant"]["question_deferrals"], self.revision, view["expires_at_ms"], self.detail, view["terminal_reason"]);
         }
         format!(
             "{:?}\nRequested: {}\nRevision: {}\nExpiry (Unix ms): {}\n{}\n{}",

@@ -45,6 +45,7 @@ mod v035_custom_sort_order;
 mod v036_afk_control;
 mod v037_afk_runtime;
 mod v038_afk_settlement;
+mod v039_afk_questions;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -90,7 +91,7 @@ use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 38;
+const CURRENT_VERSION: u32 = 39;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -223,6 +224,7 @@ const MIGRATIONS: &[Migration] = &[
     (36, "afk_control", v036_afk_control::run),
     (37, "afk_runtime", v037_afk_runtime::run),
     (38, "afk_settlement", v038_afk_settlement::run),
+    (39, "afk_questions", v039_afk_questions::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install

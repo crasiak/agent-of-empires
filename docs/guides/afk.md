@@ -40,7 +40,7 @@ For example, save this as `scratch-grant.json`:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "task": "scratch-greeting",
   "scope": "Create scratch.txt with a short greeting; no other effects",
   "files": [{ "path": "scratch.txt", "capability": "create" }],
@@ -108,7 +108,8 @@ question/options shape is blocked before execution with `deferred_by_afk` and
 `no_human_answer`. It supplies neither an answer nor permission approval. Its
 question remains human-required; only independent granted work may proceed.
 Unknown question shapes and other tools stop the episode. Already-open dialogs
-are **not closed**. UI interaction completion conservatively pauses pending
+remain untouched unless the operator explicitly grants the qualified cooperative
+deferral below. Other UI interaction completion conservatively pauses pending
 delegation without assuming the human answered or cancelled.
 
 Human input is retained intact and pauses delegation. Explicit stop, off,
@@ -127,7 +128,7 @@ but can discard queued extension custom messages. This build's pinned runtime do
 operation. A qualified source candidate is not an installed runtime upgrade. Omit `settlement_nudges` to retain stock-supported zero-nudge
 one-file delegation; rejection does not abort unrelated ordinary work.
 
-Protocol-3 grants may explicitly specify `"settlement_nudges": 1` or `2` when a
+Protocol-4 grants may explicitly specify `"settlement_nudges": 1` or `2` when a
 qualified runtime provides that operation. Omission means **zero**, and two is
 the hard ceiling. This allowance adds neither request slots nor file permits.
 No timer, idle start, post-settlement restart or new task is introduced.
@@ -160,6 +161,76 @@ with no refund, replay or automatic reconciliation. Other terminal reasons are
 `completed`, `deferred`, `exhausted`, `interrupted` and `failed`; checkpoint
 completion remains a model claim distinct from an observed file effect.
 
+### Optional already-open question deferral
+
+**Stock Pi refuses nonzero question-deferral grants. This source integration is
+not released or an installed runtime upgrade.** A qualified native runtime and
+cooperative question package may accept `"question_deferrals": 1` in a protocol-4
+grant. Omission means **zero**, and one is the hard ceiling. It adds no request
+reservation, settlement nudge or file permit. Control-only presence never closes
+questions.
+
+The controller must have observed the ordinary assistant batch containing exactly
+one supported `ask_user`, its live stop signal and the matching fresh opened
+interaction before activation. It requires actual queue-preserving abort,
+exclusive UI ownership, targeted cancellation and settled input-pipeline
+provenance (`pipeline-v1`) capabilities, plus an enabled
+persistent native session. Startup capability snapshots, siblings, RPC, inline
+UI, missing/truncated metadata and stale IDs cannot establish ownership. The
+qualified integrated paths are native input and custom-overlay options. A
+custom-overlay to select fallback changes kind after opening and is refused;
+component-level select support alone does not qualify that transition.
+
+An exact operation admission is durable before emission. Emission intent, cleanup
+outcome and the next request reservation are separate facts. The close requires
+matching reply, exclusively attributed UI end, package closed event and real tool
+result. Any mixed/unrelated UI end or actual ordinary input still pauses. A proven
+ordinary answer or cancellation winner keeps its original outcome, never an AFK
+answer. No whole-turn abort is used merely to dismiss the open dialog.
+
+Deferral reports `no_human_answer` / `deferred_by_afk`, with null response. The
+question remains an immutable, human-required unanswered gate in audit and in the
+reserved context. It cannot satisfy an approval or ask-first prerequisite.
+Declared dependencies cannot obtain a file permit. Only independently granted
+work may proceed, and independence remains a model claim, not host-proven
+natural-language safety.
+
+Intent guards the controller-caused next request even after off, expiry, lost
+reply or failed persistence. Unknown outcomes are parked, never refunded,
+resent or treated as successful cleanup. Admission-only receipts remain
+discoverable for exact explicit recovery but cannot quarantine a return they did
+not cause. Recovery consumes no new attempt and restores no AFK authority. A matching accepted close still needs
+an ordinary durable reservation before any independent provider step. Exhaustion
+stops through the preserving operation without removing queued work.
+
+A versioned native custom-entry marker stores identity and phase only, not a
+question, answer or draft. It conveys no authority. Unresolved native provenance
+or host receipts survive reload and can quarantine an automatic return even when
+the other store is unavailable. A fresh interactive **text** input, corroborated
+by its new native user entry, can recover ordinary work without restoring AFK.
+Native ordinary recovery is separate from host receipt cleanup. If host cleanup
+fails, the receipt remains discoverable for a later fresh qualified input; no
+background retry, attempt refund or deferral resend occurs. Already recovered
+ordinary work is not quarantined again solely because cleanup is outstanding.
+A core-owned settled provenance view must show no transform, handling or
+handler failure anywhere in the input pipeline. Earlier transforms, later
+transforms and transform-then-revert do not count, even when the resulting text
+matches. Extension-origin input and missing provenance cannot resolve quarantine
+or host receipts. Malformed or conflicting markers require inspection rather
+than inferred recovery. Partial
+draft recovery is not claimed. The host ledger and native history are not an
+atomic transaction; synchronous native append is not a universal fsync or
+power-loss guarantee.
+
+**Release blocker: incompatible restoration is not preservation-safe.** Reopening
+an unresolved guard under a runtime without preserving abort cannot currently
+both prevent dispatch and retain native custom queues. The isolated development
+containment branch blocks dispatch with ordinary abort and explicitly warns of
+possible custom-queue loss. Its synthetic loss fixture is limitation evidence,
+not supported restoration or permission to expose real queued work. Release
+requires preventing incompatible restoration or qualifying a preserving stop at
+that boundary. Do not install this path based on candidate test results.
+
 ### What the request bound covers
 
 The tested bound is **stock-SDK main-loop reservations on Pi 0.87.1**, not
@@ -189,6 +260,7 @@ It omits action payloads and private preimages. Review before sharing.
 | --- | --- |
 | Main-loop reservations | Explicit 1 to 8 per window |
 | Settlement nudges | Explicit 0 to 2, omitted means 0 |
+| Question deferrals | Explicit 0 to 1, omitted means 0 |
 | Checkpoints | 16 per window, 2 KiB serialized claims each |
 | Reads | 16 operations per window, 64 KiB per file |
 | Decision records | 4 per window, 8 KiB serialized UTF-8 each |
@@ -211,12 +283,12 @@ counters and replay tombstones remain. Data needed to interpret an ambiguous
 attempt is retained regardless of age, still counts toward quota, and can block
 new grants. There is no automatic reconciliation or quota-reset shortcut.
 
-The private protocol-3 ledger lives under
-`<app_dir>/afk-runtime-v3/<instance-id>/ledger.json`, with a stable writer lock.
+The private protocol-4 ledger lives under
+`<app_dir>/afk-runtime-v4/<instance-id>/ledger.json`, with a stable writer lock.
 Presence files remain under `<app_dir>/afk/<instance-id>/` with their original
-16 KiB bounds. Migration 38 initializes a separate runtime namespace, preserves
-protocol-2 evidence and requires explicit reenrollment. Historical migrations
-36 and 37 retain their meaning. The launch/stdio bridge uses protocol 3.
+16 KiB bounds. Migration 39 initializes a separate runtime namespace, preserves
+protocol-3 evidence and requires explicit reenrollment. Historical migrations
+36 through 38 retain their meaning. The launch/stdio bridge uses protocol 4.
 Fresh challenges bind
 capability acknowledgements to the instance, profile, native conversation,
 launch, generation, window and exact grant.
@@ -258,11 +330,18 @@ catalogs available, use the actual source SDK:
 
 ```bash
 export AOE_PI_SOURCE_ROOT=/path/to/pi-source
+export AOE_ASK_USER_SOURCE_ROOT=/path/to/cooperative-question-source
 cargo test --lib afk
 TSX_TSCONFIG_PATH="$AOE_PI_SOURCE_ROOT/tsconfig.json" \
   node --import "$AOE_PI_SOURCE_ROOT/node_modules/tsx/dist/loader.mjs" \
-  --test assets/session/aoe-afk.test.mjs assets/session/aoe-afk-sdk.test.mjs
+  --test assets/session/aoe-afk.test.mjs assets/session/aoe-afk-sdk.test.mjs \
+  assets/session/aoe-afk-questions.test.mjs
 ```
+
+The question fixture uses the actual package, native components, extension runner,
+persisted native sessions and an offline scripted provider. Its host cases use the
+real Rust ledger. Reopen/recovery assertions retain original queue objects on the
+qualified candidate, while unsupported-restoration loss is reported separately.
 
 The host test scopes the source loader to its SDK subprocess. Do not set a global
 `NODE_OPTIONS` loader for the full suite; unrelated Node fixtures use native

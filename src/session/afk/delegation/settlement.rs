@@ -82,7 +82,7 @@ impl Window {
     pub(in crate::session::afk) fn end(&mut self, reason: TerminalReason) {
         self.state = "ended".into();
         if self.terminal_reason.is_none() {
-            self.terminal_reason = Some(if self.unresolved_nudge() {
+            self.terminal_reason = Some(if self.unresolved_nudge() || self.unresolved_question() {
                 TerminalReason::DeliveryUnknown
             } else {
                 reason

@@ -5,9 +5,9 @@ fn setup(requests: u8) -> (tempfile::TempDir, tempfile::TempDir, Store, Window) 
     let root = tempfile::tempdir().unwrap();
     let store = Store::runtime(app.path(), "test", true).unwrap();
     let (dev, ino) = AnchoredDir::open(root.path()).unwrap().identity().unwrap();
-    let w = Window { version:3,binding:Binding {instance_id:"test".into(),profile:"default".into(),native_id:"native".into(),launch_id:uuid::Uuid::new_v4().to_string()},generation:uuid::Uuid::new_v4().to_string(),id:uuid::Uuid::new_v4().to_string(),revision:1,root:root.path().into(),control_root:app.path().into(),root_identity:(dev as u64,ino),grant:serde_json::from_value(json!({"version":3,"task":"scratch","scope":"create disposable scratch text","files":[{"path":"scratch.txt","capability":"create"}],"requests":requests,"assurance":COVERAGE})).unwrap(),issued_at_ms:1000,expires_at_ms:61000,state:"pending".into(),confirmed:true,reservations:vec![],reads:0,records:vec![],permit:None,read_facts:vec![],checkpoints:vec![],nudges:vec![],terminal_reason:None };
+    let w = Window { version:4,binding:Binding {instance_id:"test".into(),profile:"default".into(),native_id:"native".into(),launch_id:uuid::Uuid::new_v4().to_string()},generation:uuid::Uuid::new_v4().to_string(),id:uuid::Uuid::new_v4().to_string(),revision:1,root:root.path().into(),control_root:app.path().into(),root_identity:(dev as u64,ino),grant:serde_json::from_value(json!({"version":4,"task":"scratch","scope":"create disposable scratch text","files":[{"path":"scratch.txt","capability":"create"}],"requests":requests,"assurance":COVERAGE})).unwrap(),issued_at_ms:1000,expires_at_ms:61000,state:"pending".into(),confirmed:true,reservations:vec![],reads:0,records:vec![],permit:None,read_facts:vec![],checkpoints:vec![],nudges:vec![],terminal_reason:None,question:None };
     Book {
-        version: 3,
+        version: 4,
         windows: vec![w.clone()],
     }
     .save(&store)
@@ -25,6 +25,7 @@ fn reserve(store: &Store, w: &Window) -> String {
         &w.generation,
         Request::Reserve {
             continuation: None,
+            question: None,
             window: w.id.clone(),
             request: request.clone(),
         },
@@ -162,6 +163,7 @@ fn finite_requests_reads_privacy_and_unsafe_targets() {
             &w.generation,
             Request::Reserve {
                 continuation: None,
+                question: None,
                 window: w.id.clone(),
                 request: uuid::Uuid::new_v4().to_string()
             },
@@ -349,7 +351,7 @@ fn real_pi_sdk_records_then_applies_through_host_bridge() {
                 w.issued_at_ms = now_ms();
                 w.expires_at_ms = w.issued_at_ms + 60000;
                 Book {
-                    version: 3,
+                    version: 4,
                     windows: vec![w.clone()],
                 }
                 .save(&store)
@@ -489,7 +491,7 @@ fn replacement_preimage_store_failure_caps_and_expired_body_pruning() {
     std::fs::write(root.path().join("scratch.txt"), "before").unwrap();
     w.grant.files[0].capability = Capability::Replace;
     Book {
-        version: 3,
+        version: 4,
         windows: vec![w.clone()],
     }
     .save(&store)
@@ -498,7 +500,7 @@ fn replacement_preimage_store_failure_caps_and_expired_body_pruning() {
     let mut d = decision();
     d["action"]["expected_hash"] = json!(hash("before"));
     // An unsafe store must deny record and therefore deny all dependent effects.
-    let ledger = app.path().join("afk-runtime-v3/test/ledger.json");
+    let ledger = app.path().join("afk-runtime-v4/test/ledger.json");
     std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(record(&store, &w, &first, d.clone()).is_err());
     std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -553,7 +555,7 @@ fn executable_large_and_hardlinked_targets_and_unconfirmed_grants_are_rejected()
     let (_app, root, store, mut w) = setup(2);
     w.confirmed = false;
     Book {
-        version: 3,
+        version: 4,
         windows: vec![w.clone()],
     }
     .save(&store)
@@ -564,6 +566,7 @@ fn executable_large_and_hardlinked_targets_and_unconfirmed_grants_are_rejected()
         &w.generation,
         Request::Reserve {
             continuation: None,
+            question: None,
             window: w.id.clone(),
             request: uuid::Uuid::new_v4().to_string()
         },
@@ -572,7 +575,7 @@ fn executable_large_and_hardlinked_targets_and_unconfirmed_grants_are_rejected()
     .is_err());
     w.confirmed = true;
     Book {
-        version: 3,
+        version: 4,
         windows: vec![w.clone()],
     }
     .save(&store)
@@ -643,7 +646,7 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
         let app = crate::session::get_app_dir().unwrap();
         let control = Store::open(&app, &instance.id, true).unwrap();
         let runtime = Store::runtime(&app, &instance.id, true).unwrap();
-        let grant = json!({"version":3,"task":"scratch","scope":"create scratch greeting","files":[{"path":"scratch.txt","capability":"create"}],"requests":2,"assurance":COVERAGE});
+        let grant = json!({"version":4,"task":"scratch","scope":"create scratch greeting","files":[{"path":"scratch.txt","capability":"create"}],"requests":2,"assurance":COVERAGE});
         let file = workspace.path().join("grant.json");
         std::fs::write(&file, serde_json::to_vec(&grant).unwrap()).unwrap();
         let binding = Binding::for_instance(&instance).unwrap();
@@ -664,6 +667,7 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
                                 &generation,
                                 Request::Reserve {
                                     continuation: None,
+                                    question: None,
                                     window: id.clone(),
                                     request: uuid::Uuid::new_v4().to_string()
                                 },
@@ -680,7 +684,7 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
                             &binding,
                             &generation,
                             RuntimeAck {
-                                version: 3,
+                                version: 4,
                                 binding: binding.clone(),
                                 challenge: probe.challenge,
                                 window: probe.window,
@@ -726,3 +730,5 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
 }
 
 mod settlement;
+
+mod questions;

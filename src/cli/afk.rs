@@ -21,12 +21,12 @@ enum AfkCommand {
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1440))]
         minutes: u32,
     },
-    /// One-file delegation during active work; nonzero nudges require queue-preserving abort
+    /// One-file delegation during active work; nudges and question deferral require qualified native support
     Delegate {
         session: String,
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1440))]
         minutes: u32,
-        /// Protocol-3 grant: requests 1..8; settlement_nudges omitted=0, maximum 2
+        /// Protocol-4 grant: requests 1..8; settlement_nudges 0..2; question_deferrals 0..1, both omitted=0
         #[arg(long)]
         grant: std::path::PathBuf,
     },

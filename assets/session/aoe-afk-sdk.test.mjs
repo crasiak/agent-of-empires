@@ -32,23 +32,23 @@ async function runCase(scenario, externalHost) {
   try {
     const sessionManager = sdk.SessionManager.inMemory(cwd);
     const binding = { instance_id: "test", profile: "default", native_id: sessionManager.getSessionId(), launch_id: randomUUID() };
-    const bootstrap = { version: 3, app_dir: cwd, aoe_bin: "/unused/aoe", binding };
+    const bootstrap = { version: 4, app_dir: cwd, aoe_bin: "/unused/aoe", binding };
     const d = claims();
     if (scenario === "question") { d.human_required = true; d.action = null; }
-    const grant = { version: 3, task: "scratch", scope: "scratch text", files: [{ path: "scratch.txt", capability: "create" }], requests: nudging ? (twice || liveCustom ? 8 : 4) : scenario === "limit-one" ? 1 : 2, settlement_nudges: nudging ? (twice ? 2 : 1) : 0, assurance: coverage };
+    const grant = { version: 4, task: "scratch", scope: "scratch text", files: [{ path: "scratch.txt", capability: "create" }], requests: nudging ? (twice || liveCustom ? 8 : 4) : scenario === "limit-one" ? 1 : 2, settlement_nudges: nudging ? (twice ? 2 : 1) : 0, question_deferrals: scenario === "question-capability" ? 1 : 0, assurance: coverage };
     let armed = false, stopped = false, stale = false, later = false, generation, requestNumber = 0, recordRequest, attempted = false, toolExecutions = 0, calls = 0, reserves = 0, settled = 0, uiEnded = 0, compactCancelled = 0;
     const ops = [], messages = [], errors = [], warmingChecks = [];
     const challenge = randomUUID();
     const warming = action => session.extensionRunner.emitCacheWarmingDecision({ type: "cache_warming_decision", action, warmCost: 0, missCost: 1, continuationProbability: 1 });
     const assertNativeWarming = async () => { for (const action of ["warm", "stop"]) assert.equal(await warming(action), action, `${scenario}: ordinary warming passes through`); };
-    const view = { version: 3, revision: 1, window: randomUUID(), binding, generation: "", state: "pending", confirmed: true, issued_at_ms: Date.now(), expires_at_ms: Date.now() + 60000, grant, grant_hash: sha(JSON.stringify(grant)), reservations_used: 0 };
+    const view = { version: 4, revision: 1, window: randomUUID(), binding, generation: "", state: "pending", confirmed: true, issued_at_ms: Date.now(), expires_at_ms: Date.now() + 60000, grant, grant_hash: sha(JSON.stringify(grant)), reservations_used: 0 };
     const hostOperation = async packet => {
       ops.push(packet);
       if (externalHost) return externalHost({ packet, generation, binding, decision: d });
       if (packet.op === "poll" && recordRequest && scenario === "failed-refresh") throw Error("poll failed after ownership");
       if (packet.op === "poll" && recordRequest && scenario === "missing-ledger") return { policy: null, probe: null, delegation: null, runtime_probe: null };
       if (packet.op === "poll") {
-        const result = { policy: null, probe: null, delegation: armed ? { ...view, state: stale ? "pending" : stopped ? "ended" : view.state, generation, reservations_used: requestNumber } : null, runtime_probe: armed ? { version: 3, binding, challenge, window: view.window, grant_hash: view.grant_hash } : null };
+        const result = { policy: null, probe: null, delegation: armed ? { ...view, state: stale ? "pending" : stopped ? "ended" : view.state, generation, reservations_used: requestNumber } : null, runtime_probe: armed ? { version: 4, binding, challenge, window: view.window, grant_hash: view.grant_hash } : null };
         if (scenario === "pending-poll-stop" && armed && !stopped) void session.abort();
         return result;
       }
@@ -146,7 +146,7 @@ async function runCase(scenario, externalHost) {
     await writeFile(fixture, `import { registerAfk } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk.mjs")).href)};
 import { delegationRuntime } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk-runtime.mjs")).href)};
 import { Type } from "@sinclair/typebox";
-export default function(pi) { const f=globalThis.__aoeAfkFixture; pi.on("agent_before_settle",f.before); pi.on("context",f.context); const delegate=delegationRuntime(pi); registerAfk(pi,{protocol:3,delegation:{...delegate,attach(r){delegate.attach(r);f.capture(r);f.refresh=()=>r.refresh();}},bridge:f.bridge,schedule:()=>()=>{}}); pi.on("agent_before_settle",f.after); pi.on("agent_settled",f.observe); pi.on("ui_prompt_end",f.observe); pi.on("session_compact_failed",f.observe); pi.registerTool({name:"noop",label:"noop",description:"ordinary tool",parameters:Type.Object({}),execute:f.noop}); pi.registerTool({name:"ask_user",label:"Ask User",description:"0.12 compatible question shape",parameters:Type.Object({question:Type.String()}),execute:async()=>{throw Error("question must never execute");}}); }
+export default function(pi) { const f=globalThis.__aoeAfkFixture; pi.on("agent_before_settle",f.before); pi.on("context",f.context); const delegate=delegationRuntime(pi); registerAfk(pi,{protocol:4,delegation:{...delegate,attach(r){delegate.attach(r);f.capture(r);f.refresh=()=>r.refresh();}},bridge:f.bridge,schedule:()=>()=>{}}); pi.on("agent_before_settle",f.after); pi.on("agent_settled",f.observe); pi.on("ui_prompt_end",f.observe); pi.on("session_compact_failed",f.observe); pi.registerTool({name:"noop",label:"noop",description:"ordinary tool",parameters:Type.Object({}),execute:f.noop}); pi.registerTool({name:"ask_user",label:"Ask User",description:"0.12 compatible question shape",parameters:Type.Object({question:Type.String()}),execute:async()=>{throw Error("question must never execute");}}); }
 `);
     const runtime = createExtensionRuntime(); runtime.flagValues.set("aoe-afk-binding", JSON.stringify(bootstrap));
     const loaded = await loadExtensions([fixture], cwd, sdk.createEventBus(), runtime);
@@ -167,7 +167,7 @@ export default function(pi) { const f=globalThis.__aoeAfkFixture; pi.on("agent_b
         else if (calls === 4 || (twice && calls === 7) || (liveCustom && calls === 5) || ["nudge-prior", "nudge-human", "nudge-extension"].includes(scenario)) tools = [];
         else tools = [{ name: twice && calls === 5 ? "aoe_afk_record" : "aoe_afk_apply", arguments: { decision: twice && calls === 5 ? d : d.id } }];
       }
-      else if (["ui-answer", "pending-completion", "pending-off", "pending-expiry"].includes(scenario)) tools = [];
+      else if (["question-capability", "ui-answer", "pending-completion", "pending-off", "pending-expiry"].includes(scenario)) tools = [];
       else if (scenario === "question") tools = calls === 2 ? [{ name: "ask_user", arguments: { question: "Human choice required?" } }] : [{ name: "aoe_afk_record", arguments: { decision: d } }];
       else if (calls === 2) tools = scenario === "unknown-tool" ? [{ name: "noop", arguments: {} }] : [{ name: "aoe_afk_record", arguments: { decision: d } }, ...(scenario === "sibling" ? [{ name: "aoe_afk_apply", arguments: { decision: d.id } }] : [])];
       else tools = [{ name: "aoe_afk_apply", arguments: { decision: d.id } }];
@@ -291,6 +291,10 @@ export default function(pi) { const f=globalThis.__aoeAfkFixture; pi.on("agent_b
       const result = session.messages.find(m => m.role === "toolResult" && m.toolName === "ask_user");
       assert.match(JSON.stringify(result), /no_human_answer/); assert.doesNotMatch(JSON.stringify(result), /User answered|User cancelled/);
     }
+    if (scenario === "question-capability") {
+      assert.equal(reserves, 0); assert.equal(ops.filter(p => p.op === "runtime_ack").length, 0);
+      assert.match(globalThis.__aoeAfkFixture.current.reason, /question deferral unavailable|queue-preserving abort capability required/);
+    }
     if (!externalHost) {
       assert.equal(attempted, scenario === "positive");
       if (scenario === "compaction") assert.equal(compactCancelled, 1, "owned automatic compaction cancelled before its provider request");
@@ -316,6 +320,6 @@ if (process.argv.includes("--host")) {
   process.stdout.write(JSON.stringify({ result }) + "\n"); process.exit(0);
 } else {
   test(`actual ${sourceRoot ? "candidate source" : "stock"} Pi SDK request/ownership gate, offline provider`, { skip: !root && !sourceRoot, timeout: 60000 }, async () => {
-    for (const scenario of ["positive", "sibling", "limit-one", "failed-store", "unknown-tool", "explicit-stop", "human-input", "off", "ui-answer", "question", "lost-ack", "expiry", "pending-idle", "pending-stop", "pending-completion", "pending-poll-stop", "pending-ack-stop", "pending-off", "pending-expiry", "compaction", "missing-ledger", "failed-refresh", "nudge-one", "nudge-two", "nudge-stop-before", "nudge-stop-during", "nudge-stop-after", "nudge-off-before", "nudge-expiry-before", "nudge-human", "nudge-extension", "nudge-prior", "nudge-late", "nudge-lost-ack", "nudge-off-during", "nudge-expiry-during", "nudge-off-after", "nudge-expiry-after", "nudge-stop-context", "nudge-off-context", "nudge-expiry-context", "nudge-late-human", "nudge-late-extension", "nudge-late-extension-live"]) { const result = await runCase(scenario); console.log(JSON.stringify(result)); if (result.capability_refused) { console.log("Candidate nudge matrix blocked: actual queue-preserving context operation absent"); break; } }
+    for (const scenario of ["question-capability", "positive", "sibling", "limit-one", "failed-store", "unknown-tool", "explicit-stop", "human-input", "off", "ui-answer", "question", "lost-ack", "expiry", "pending-idle", "pending-stop", "pending-completion", "pending-poll-stop", "pending-ack-stop", "pending-off", "pending-expiry", "compaction", "missing-ledger", "failed-refresh", "nudge-one", "nudge-two", "nudge-stop-before", "nudge-stop-during", "nudge-stop-after", "nudge-off-before", "nudge-expiry-before", "nudge-human", "nudge-extension", "nudge-prior", "nudge-late", "nudge-lost-ack", "nudge-off-during", "nudge-expiry-during", "nudge-off-after", "nudge-expiry-after", "nudge-stop-context", "nudge-off-context", "nudge-expiry-context", "nudge-late-human", "nudge-late-extension", "nudge-late-extension-live"]) { const result = await runCase(scenario); console.log(JSON.stringify(result)); if (result.capability_refused) { console.log("Candidate nudge matrix blocked: actual queue-preserving context operation absent"); break; } }
   });
 }

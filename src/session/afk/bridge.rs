@@ -5,9 +5,19 @@ use std::io::{BufRead, Write};
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     Poll,
-    Runtime { command: delegation::Request },
-    RuntimeAck { ack: delegation::RuntimeAck },
-    Ack { ack: Box<Ack> },
+    QuestionRecover {
+        window: String,
+        identity: delegation::questions::QuestionIdentity,
+    },
+    Runtime {
+        command: delegation::Request,
+    },
+    RuntimeAck {
+        ack: delegation::RuntimeAck,
+    },
+    Ack {
+        ack: Box<Ack>,
+    },
 }
 
 pub fn run_bridge(raw: &str, generation: &str) -> Result<()> {
@@ -69,8 +79,16 @@ pub(super) fn serve(
                     && r.revision == policy.as_ref().map_or(0, |p| p.revision)
             });
             match command {
+                Command::QuestionRecover { window, identity } => delegation::questions::recover(
+                    runtime.context("runtime unavailable")?,
+                    binding,
+                    &window,
+                    &identity,
+                    &validate,
+                ),
                 Command::Poll => Ok(serde_json::json!({"policy":policy,"probe":probe,
                     "delegation":runtime.map(|s| delegation::settlement::reconcile(s, binding, generation, now_ms())).transpose()?,
+                    "question_guards":runtime.map(|s| delegation::questions::guards(s, binding)).transpose()?,
                     "runtime_probe":store.read::<delegation::RuntimeProbe>("runtime-probe.json")?})),
                 Command::Runtime { command } => delegation::execute_checked(
                     runtime.context("runtime unavailable")?,
