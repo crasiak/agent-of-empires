@@ -41,6 +41,10 @@ impl HomeView {
     /// its parent. Refuses where a move would be discarded or would write a membership the
     /// list is not showing.
     pub(super) fn move_row_at_cursor(&mut self, delta: isize) -> anyhow::Result<()> {
+        if self.highlight_filters.active() {
+            self.flash_status("Clear highlight filters before reordering");
+            return Ok(());
+        }
         if self.sort_order != SortOrder::Custom {
             self.flash_status("Press o for the Custom sort to arrange rows by hand");
             return Ok(());

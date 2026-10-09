@@ -86,6 +86,74 @@ fn y_hides_stopped_sessions_in_groups_and_counts_them_on_the_header() {
     assert!(header_text(&env.view, "util").contains("util (3)"));
 }
 
+#[test]
+#[serial]
+fn hide_stopped_composes_with_highlight_filters_and_project_aliases() {
+    use crate::session::repo_appearance::{RepoAppearance, RepoColor};
+
+    let instances: Vec<_> = [
+        ("alpha-live", "alpha", Status::Idle, "red"),
+        ("alpha-stopped", "alpha", Status::Stopped, "red"),
+        ("alpha-excluded", "alpha", Status::Stopped, "green"),
+        ("beta-stopped", "beta", Status::Stopped, "red"),
+        ("gamma-excluded", "gamma", Status::Idle, "green"),
+    ]
+    .into_iter()
+    .map(|(title, group, status, color)| {
+        let mut inst = with_status(instance_in(title, &format!("/tmp/{group}"), group), status);
+        inst.color = Some(color.into());
+        inst
+    })
+    .collect();
+
+    for grouping in [GroupByMode::Manual, GroupByMode::Project] {
+        let mut env = seeded_env(test_home(), &instances, true);
+        env.view.group_by = grouping;
+        env.view.sort_order = SortOrder::AZ;
+        for group in ["alpha", "beta", "gamma"] {
+            env.view.repo_appearances.insert(
+                format!("/tmp/{group}"),
+                RepoAppearance {
+                    alias: (group == "alpha").then(|| "Alias".into()),
+                    color: Some(RepoColor::Sky),
+                },
+            );
+        }
+        env.view.highlight_filters.sessions = vec![Some("red".into())];
+        env.view.highlight_filters.projects = vec![Some(RepoColor::Sky)];
+        env.view.search_query = Input::new("beta-stopped".into());
+        env.view.rebuild_flat_items();
+        select_session(&mut env, "beta-stopped");
+        assert_eq!(env.view.search_matches.len(), 1);
+
+        press_y(&mut env);
+        assert_eq!(session_titles(&env.view), ["alpha-live"]);
+        let label = if grouping == GroupByMode::Project {
+            "Alias"
+        } else {
+            "alpha"
+        };
+        assert!(header_text(&env.view, "alpha").contains(&format!("{label} (1/2)")));
+        assert!(header_text(&env.view, "beta").contains("beta (0/1)"));
+        assert!(!env
+            .view
+            .flat_items
+            .iter()
+            .any(|item| matches!(item, Item::Group { path, .. } if path == "gamma")));
+        assert_eq!(env.view.selected_group.as_deref(), Some("beta"));
+        assert!(env.view.selected_session.is_none());
+        assert!(env.view.search_matches.is_empty());
+
+        press_y(&mut env);
+        assert_eq!(session_titles(&env.view).len(), 3);
+        assert_eq!(env.view.search_matches.len(), 1);
+        assert!(matches!(
+            &env.view.flat_items[env.view.search_matches[0]],
+            Item::Session { id, .. } if env.view.get_instance(id).unwrap().title == "beta-stopped"
+        ));
+    }
+}
+
 /// Project grouping derives its groups from the repo, so hiding follows those groups too.
 #[test]
 #[serial]

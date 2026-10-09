@@ -398,13 +398,12 @@ impl HomeView {
     /// Rebuild rows after a worker replaced an instance, keeping the cursor on the same item.
     fn refresh_rows_preserving_selection(&mut self) {
         self.rebuild_flat_items_keeping_cursor();
-        if self.search_active && !self.search_query.value().is_empty() {
-            self.update_search();
-        } else if !self.search_matches.is_empty() {
-            self.refresh_search_matches();
+        if self.live_send.is_none() {
+            if self.search_active && !self.search_query.value().is_empty() {
+                self.update_search();
+            }
+            self.update_selected();
         }
-
-        self.update_selected();
     }
 
     pub fn apply_restart_results(&mut self) -> bool {

@@ -77,11 +77,100 @@ impl HomeView {
         }
         match self.flat_items.get(self.cursor) {
             Some(Item::Group { path, name, .. })
-                if !crate::session::is_synthetic_project_header(path) =>
+                if !crate::session::is_synthetic_project_header(path)
+                    && path != crate::session::repo_appearance::MULTI_REPO_ID =>
             {
                 Some(name.clone())
             }
             _ => None,
+        }
+    }
+
+    /// Display labels can merge repositories. Only an unambiguous header may write shared state.
+    pub(super) fn project_appearance_id(&self, group: &str) -> Option<String> {
+        use crate::session::repo_appearance::instance_repo_id;
+        let archived_prefix = format!("{}/", crate::session::ARCHIVED_SECTION_PATH);
+        let group = group.strip_prefix(&archived_prefix).unwrap_or(group);
+        if crate::session::is_archived_section_path(group)
+            || crate::session::is_within_trash_section(group)
+        {
+            return None;
+        }
+        let paths: std::collections::HashSet<&str> = self
+            .instances
+            .values()
+            .filter(|i| {
+                self.active_profile
+                    .as_ref()
+                    .is_none_or(|profile| *profile == i.source_profile)
+                    && !i.is_trashed()
+                    && project_group_key(i) == group
+            })
+            .map(instance_repo_id)
+            .chain(
+                self.registered_projects
+                    .iter()
+                    .filter(|p| crate::session::projects::repo_label(&p.path) == group)
+                    .map(|p| p.path.as_str()),
+            )
+            .collect();
+        (paths.len() == 1)
+            .then(|| paths.into_iter().next().map(str::to_string))
+            .flatten()
+    }
+
+    pub(super) fn open_project_context_menu(&mut self, anchor: (u16, u16)) {
+        if self.group_by != GroupByMode::Project {
+            return;
+        }
+        let Some(Item::Group { path, .. }) = self.flat_items.get(self.cursor) else {
+            return;
+        };
+        if self.project_appearance_id(path).is_none() {
+            self.flash_status(
+                "Project highlight unavailable: this header has no unique repository path",
+            );
+            return;
+        }
+        self.context_menu = Some(if crate::session::is_within_archived_section(path) {
+            ContextMenuDialog::for_project_highlights(anchor)
+        } else if path == crate::session::SCRATCH_GROUP_PATH
+            || path == crate::session::repo_appearance::MULTI_REPO_ID
+        {
+            ContextMenuDialog::for_synthetic_project(anchor)
+        } else {
+            ContextMenuDialog::for_project_group(anchor, self.is_project_label_pinned(path))
+        });
+    }
+
+    pub(super) fn set_project_highlight(
+        &mut self,
+        color: Option<crate::session::repo_appearance::RepoColor>,
+    ) {
+        if self.group_by != GroupByMode::Project {
+            return;
+        }
+        let Some(Item::Group { path, .. }) = self.flat_items.get(self.cursor) else {
+            return;
+        };
+        let Some(repo_path) = self.project_appearance_id(path) else {
+            self.flash_status("Cannot highlight an ambiguous project header");
+            return;
+        };
+        let patch = crate::session::repo_appearance::RepoAppearancePatch {
+            repo_path,
+            alias: None,
+            color: Some(color),
+        };
+        match crate::session::update_app_state(|state| {
+            patch.apply(&mut state.repo_appearances);
+            state.repo_appearances.clone()
+        }) {
+            Ok(map) => {
+                self.repo_appearances = map;
+                self.rebuild_flat_items_keeping_cursor();
+            }
+            Err(error) => self.flash_status(format!("Could not save project highlight: {error}")),
         }
     }
 

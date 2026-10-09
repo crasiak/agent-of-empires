@@ -64,6 +64,10 @@ impl HomeView {
         self.host_tab_title = config.session.host_tab_title;
         self.row_tag_mode = config.session.row_tag;
         self.show_session_colors = config.session.show_session_colors;
+        if self.repo_appearances != config.app_state.repo_appearances {
+            self.repo_appearances = config.app_state.repo_appearances.clone();
+            self.rebuild_flat_items_keeping_cursor();
+        }
         self.show_activity_age = config.session.show_activity_age;
         self.set_sidebar_position(sidebar_position);
         self.show_diagnostics = config.session.show_diagnostics_pane;

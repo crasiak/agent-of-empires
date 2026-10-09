@@ -1410,9 +1410,19 @@
       "specs": [
         "src/components/__tests__/SessionRowTriage.test.tsx",
         "src/components/__tests__/ProjectsSection.test.tsx",
-        "tests/sidebar-multi-session.spec.ts"
+        "tests/sidebar-multi-session.spec.ts",
+        "src/lib/repoAppearanceStore.test.tsx",
+        "src/lib/migrateRepoAppearances.test.ts",
+        "src/hooks/useRepoGroups.test.ts"
       ],
-      "components": ["web/src/components/WorkspaceSidebar.tsx", "web/src/components/ProjectsSection.tsx"]
+      "components": [
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/ProjectsSection.tsx",
+        "web/src/lib/repoAppearanceStore.ts",
+        "web/src/lib/migrateRepoAppearances.ts",
+        "web/src/hooks/useRepoGroups.ts"
+      ],
+      "notes": "Shared typed repository appearance API hydrates aliases/colors, refreshes cross-client edits, patches fields optimistically, and rolls back failures. Browser-only legacy import retries failures and removes its key only after success; canonical entries and clear tombstones win."
     },
     {
       "id": "sidebar.menu-choice-stays-open",
@@ -3230,8 +3240,26 @@
       "id": "story.sidebar-filter",
       "kind": "mocked-playwright",
       "risk": "low",
-      "specs": ["tests/sidebar-grouping.spec.ts"],
-      "components": ["web/src/components/WorkspaceSidebar.tsx"]
+      "specs": ["tests/sidebar-grouping.spec.ts", "tests/sidebar-highlight-filter.spec.ts"],
+      "components": [
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/HighlightFilter.tsx",
+        "web/src/components/sidebar/SidebarToolbar.tsx"
+      ],
+      "notes": "Text and highlight filters compose; desktop keyboard selection, Escape, grouping changes, compact mode, and mobile touch targets are exercised."
+    },
+    {
+      "id": "sidebar.highlight-filter-semantics",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/components/__tests__/WorkspaceSidebarFilter.test.tsx"],
+      "components": [
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/HighlightFilter.tsx",
+        "web/src/components/sidebar/filterGroups.ts",
+        "web/src/components/sidebar/rowModel.ts"
+      ],
+      "notes": "Session and project color unions intersect with text and plugin facets across all grouping axes. Covers no-highlight, live updates, multi-session displayed colors, saved and pinned-empty projects, read-only mode, hidden controls, clearing, and drag safety."
     },
     {
       "id": "story.sidebar-fold-group",

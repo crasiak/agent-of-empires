@@ -1,12 +1,8 @@
 import { useCallback, useMemo, useState } from "react";
 import type { ProjectInfo, Workspace, RepoGroup } from "../lib/types";
 import { mergeRegisteredProjects, unpinnedSavedProjects } from "../lib/registeredProjects";
-import {
-  applyRepoAppearanceUpdate,
-  loadRepoAppearances,
-  persistRepoAppearances,
-  type RepoAppearanceUpdate,
-} from "../lib/repoAppearance";
+import type { RepoAppearanceUpdate } from "../lib/repoAppearance";
+import { useRepoAppearances, updateRepoAppearance } from "../lib/repoAppearanceStore";
 import { loadRepoGroupOrder, persistRepoGroupOrder } from "../lib/repoGroupOrder";
 import { useCollapsedKeys } from "./useCollapsedKeys";
 import { compareSortValues } from "../lib/pluginUi";
@@ -49,7 +45,7 @@ export function useRepoGroups(
   reorderRepoGroups: (orderedGroupIds: string[]) => void;
 } {
   const { isCollapsed, toggle: toggleRepoCollapsed } = useCollapsedKeys("aoe-repo-collapsed-");
-  const [appearanceMap, setAppearanceMap] = useState(loadRepoAppearances);
+  const appearanceMap = useRepoAppearances();
   const [groupOrder, setGroupOrder] = useState<string[]>(loadRepoGroupOrder);
 
   const { groups, savedProjects } = useMemo(() => {
@@ -201,14 +197,6 @@ export function useRepoGroups(
 
     return { groups: merged, savedProjects };
   }, [workspaces, workspaceOrdering, sortMode, pluginSort, projects, isCollapsed, appearanceMap, groupOrder]);
-
-  const updateRepoAppearance = useCallback((repoId: string, update: RepoAppearanceUpdate) => {
-    setAppearanceMap((prev) => {
-      const next = applyRepoAppearanceUpdate(prev, repoId, update);
-      persistRepoAppearances(next);
-      return next;
-    });
-  }, []);
 
   const reorderRepoGroups = useCallback((orderedGroupIds: string[]) => {
     setGroupOrder(orderedGroupIds);

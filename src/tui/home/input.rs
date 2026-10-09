@@ -1861,9 +1861,20 @@ impl HomeView {
             }
         }
 
-        // The right-click context menu routes before every other dialog so keys go to the
-        // popup just opened. Submit dispatches through the shared helper, keeping the
-        // keyboard and mouse paths aligned.
+        if let Some(dialog) = &mut self.highlight_filter_dialog {
+            match dialog.handle_key(key) {
+                DialogResult::Continue => {}
+                DialogResult::Cancel => self.highlight_filter_dialog = None,
+                DialogResult::Submit(filters) => {
+                    self.highlight_filter_dialog = None;
+                    self.highlight_filters = filters;
+                    self.rebuild_flat_items_keeping_cursor();
+                }
+            }
+            return None;
+        }
+
+        // Route popup keys before underlying dialogs.
         if let Some(menu) = &mut self.context_menu {
             match menu.handle_key(key) {
                 DialogResult::Continue => {}
@@ -2595,9 +2606,12 @@ impl HomeView {
 
         // Context-dependent Esc handling (not a relocatable action).
         match key.code {
-            // Esc clears a committed search (the input box is already closed). Gated on
-            // the query, not `search_matches`, so a zero-result committed search is still
-            // dismissable rather than stuck on screen.
+            KeyCode::Esc if self.highlight_filters.active() => {
+                self.highlight_filters = Default::default();
+                self.rebuild_flat_items_keeping_cursor();
+                return None;
+            }
+            // A committed zero-result search must still be dismissible.
             KeyCode::Esc if !self.search_query.value().is_empty() => {
                 self.search_matches.clear();
                 self.search_match_index = 0;
@@ -2761,6 +2775,12 @@ impl HomeView {
                     self.open_tool_picker();
                 }
             }
+            ActionId::HighlightFilter => {
+                self.highlight_filter_dialog = Some(
+                    crate::tui::highlight::HighlightFilterDialog::new(&self.highlight_filters),
+                );
+            }
+            ActionId::ProjectContext => self.open_project_context_menu((2, 2)),
             ActionId::SearchStart => {
                 self.search_active = true;
                 self.search_query = Input::default();
@@ -2925,8 +2945,7 @@ impl HomeView {
                 }
             })
             .or_else(|| {
-                // The scratch bucket's group_path is an internal sentinel; show
-                // its display label in the Group field, not the raw sentinel (#3237).
+                // Synthetic buckets prefill their display label, never the sentinel.
                 self.selected_group
                     .as_deref()
                     .map(|g| crate::session::project_group_display_name(g).to_string())
@@ -3970,7 +3989,8 @@ impl HomeView {
             .instances
             .values()
             .find(|inst| {
-                if visible_sessions.contains(&inst.id)
+                if !self.instance_matches_highlight_view(inst)
+                    || visible_sessions.contains(&inst.id)
                     || current_session.as_deref() == Some(inst.id.as_str())
                     || inst.is_dismissed()
                     || self.hidden_by_filter(inst)
@@ -4009,7 +4029,8 @@ impl HomeView {
         // the existing most-recently-accessed selection for hidden rows.
         let mut best_hidden: Option<(String, Option<chrono::DateTime<chrono::Utc>>)> = None;
         for inst in self.instances.values() {
-            if visible_sessions.contains(&inst.id)
+            if !self.instance_matches_highlight_view(inst)
+                || visible_sessions.contains(&inst.id)
                 || current_session.as_deref() == Some(inst.id.as_str())
                 || inst.is_dismissed()
                 || inst.status != Status::Idle
@@ -4203,6 +4224,11 @@ impl HomeView {
                 // hinge on a dwell tick firing during a quick hop.
                 self.manual_unread_hold = None;
             }
+        } else {
+            self.cursor = 0;
+            self.selected_session = None;
+            self.selected_group = None;
+            self.selected_group_profile = None;
         }
     }
 
@@ -4723,9 +4749,14 @@ impl HomeView {
                 }
             }
             let is_group = matches!(self.flat_items[idx], super::Item::Group { .. });
-            // A real project header in project view gets the pin menu; the cursor was
-            // just moved onto this row, so `project_group_at_cursor` reflects it.
-            // Manual and synthetic group rows keep Rename/Delete.
+            // The clicked project must resolve to one shared repository identity.
+            if self.group_by == GroupByMode::Project
+                && is_group
+                && matches!(&self.flat_items[idx], Item::Group { path, .. } if self.project_appearance_id(path).is_some())
+            {
+                self.open_project_context_menu(anchor);
+                return true;
+            }
             let project_label = self.project_group_at_cursor();
             self.context_menu = Some(if let Some(label) = project_label {
                 ContextMenuDialog::for_project_group(anchor, self.is_project_label_pinned(&label))
@@ -4848,6 +4879,7 @@ impl HomeView {
     /// site.
     pub(super) fn dispatch_context_menu_action(&mut self, action: ContextMenuAction) {
         match action {
+            ContextMenuAction::ProjectColor(color) => self.set_project_highlight(color),
             ContextMenuAction::Rename => self.open_rename_for_selected(),
             ContextMenuAction::Delete => self.open_delete_for_selected(),
             ContextMenuAction::ToggleArchive => {
@@ -4939,6 +4971,7 @@ impl HomeView {
         }) {
             tracing::error!("set_selected_session_color (context menu) failed: {}", e);
         }
+        self.rebuild_flat_items_keeping_cursor();
     }
 
     /// Which synthetic section the cursor's `Item::Group` header belongs to, for the
@@ -6520,9 +6553,7 @@ impl HomeView {
     /// (#2676).
     pub(super) fn rebuild_flat_items(&mut self) {
         self.refresh_flat_items();
-        if !self.search_matches.is_empty() {
-            self.refresh_search_matches();
-        }
+        self.refresh_search_matches();
     }
 
     pub(super) fn refresh_search_matches(&mut self) {

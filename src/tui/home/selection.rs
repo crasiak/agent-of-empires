@@ -23,14 +23,16 @@ impl HomeView {
 
     /// Rebuild `flat_items` and move the cursor back onto the selected session or group.
     pub(super) fn rebuild_flat_items_keeping_cursor(&mut self) {
+        let selected_session = self.selected_session.clone();
+        let selected_group = self.selected_group.clone();
+        let selected_profile = self.selected_group_profile.clone();
         self.rebuild_flat_items();
-        let restored = match (&self.selected_session, &self.selected_group) {
+        let restored = match (&selected_session, &selected_group) {
             (Some(sid), _) => self.session_row(sid),
             (None, Some(gpath)) => {
                 // Two profiles can hold the same group path in the all-profiles list, and
                 // landing on the wrong one leaves `selected_group_profile` pointing at the
                 // other profile, which the next action would act on.
-                let selected_profile = self.selected_group_profile.clone();
                 self.flat_items
                     .iter()
                     .position(|item| {
@@ -62,6 +64,9 @@ impl HomeView {
                 self.cursor = self.flat_items.len() - 1;
             }
             None => {}
+        }
+        if self.live_send.is_none() {
+            self.update_selected();
         }
     }
 
@@ -124,5 +129,6 @@ impl HomeView {
         if let Some(pos) = self.session_row(session_id) {
             self.cursor = pos;
         }
+        self.update_selected();
     }
 }

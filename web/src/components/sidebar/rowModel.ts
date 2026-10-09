@@ -10,9 +10,7 @@ import {
   type OptimisticTriage,
 } from "../../lib/sidebarOptimistic";
 
-/** Mirrors the Rust `SESSION_COLORS` list. Theme tokens keep the row tint legible in custom
- *  light and dark themes while the solid dot remains an accessible cue. Purple and teal have
- *  no theme slot, so they tint from Tailwind's fixed palette, as the TUI does. */
+/** Mirrors Rust's `SESSION_COLORS`; purple and teal have no theme slot. */
 export const SESSION_COLOR_OPTIONS: { key: string; label: string; dotClass: string; token: string }[] = [
   { key: "red", label: "Red · needs attention", dotClass: "bg-red-500", token: "--color-status-error" },
   { key: "amber", label: "Amber · working", dotClass: "bg-amber-400", token: "--color-status-waiting" },
@@ -20,6 +18,10 @@ export const SESSION_COLOR_OPTIONS: { key: string; label: string; dotClass: stri
   { key: "purple", label: "Purple", dotClass: "bg-purple-500", token: "--color-purple-500" },
   { key: "teal", label: "Teal", dotClass: "bg-teal-500", token: "--color-teal-500" },
 ];
+
+export function workspaceHighlight(workspace: Workspace): string | null {
+  return workspace.sessions.find((s) => s.color != null)?.color ?? null;
+}
 
 /** Tailwind dot class for a stored color key, or null when unset / unknown. */
 export function sessionColorDotClass(color: string | null | undefined): string | null {
@@ -85,7 +87,7 @@ export function deriveRowModel(
   const branchLabel = workspace.branch ?? null;
   const label =
     sessions.length === 1 ? sessionTitle || branchLabel || "default" : branchLabel || sessionTitle || "default";
-  const sessionColor = sessions.map((s) => s.color).find((c) => c != null) ?? null;
+  const sessionColor = workspaceHighlight(workspace);
   const isPinned = sessions.some((s) => s.pinned_at != null);
   const isArchived = sessions.some((s) => s.archived_at != null);
   const snoozedUntil = sessions.find((s) => s.snoozed_until)?.snoozed_until ?? null;

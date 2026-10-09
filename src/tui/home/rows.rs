@@ -27,6 +27,9 @@ pub(super) fn project_group_key(inst: &Instance) -> String {
     if inst.scratch {
         return crate::session::SCRATCH_GROUP_PATH.to_string();
     }
+    if inst.all_repos().len() > 1 {
+        return crate::session::repo_appearance::MULTI_REPO_ID.to_string();
+    }
     crate::session::projects::repo_label(inst.repo_path())
 }
 
@@ -244,8 +247,8 @@ impl HomeView {
             GroupByMode::Manual => {}
         }
 
-        let pool = self.cloned_instances_in_active_view();
-        // Manual grouping under Attention sort is flat, so it has no groups to hide in.
+        let pool = self.highlight_filtered_instances();
+        // Manual Attention sort is flat, so stopped sessions stay visible.
         let pool = if self.sort_order == SortOrder::Attention {
             pool
         } else {
@@ -267,9 +270,51 @@ impl HomeView {
         } else {
             flatten_tree_all_profiles(&pool, &self.group_trees, self.sort_order)
         };
+        if self.highlight_filters.active() {
+            items.retain(|item| match item {
+                Item::Session { .. } => true,
+                Item::Group { path, profile, .. } => self.instances.values().any(|i| {
+                    self.instance_matches_highlight_view(i)
+                        && profile
+                            .as_ref()
+                            .is_none_or(|profile| *profile == i.source_profile)
+                        && !i.is_archived()
+                        && !i.is_trashed()
+                        && (i.group_path == *path || i.group_path.starts_with(&format!("{path}/")))
+                }),
+            });
+        }
         append_archived_section(&mut items, &pool, self.archived_section_collapsed);
         append_trash_section(&mut items, &pool, self.trashed_section_collapsed);
         items
+    }
+
+    pub(super) fn instance_matches_highlight_view(&self, inst: &Instance) -> bool {
+        self.active_profile
+            .as_ref()
+            .is_none_or(|profile| *profile == inst.source_profile)
+            && self.highlight_filters.matches(
+                inst.color.as_deref(),
+                self.repo_appearances
+                    .get(crate::session::repo_appearance::instance_repo_id(inst))
+                    .and_then(|a| a.color),
+            )
+    }
+
+    fn highlight_filtered_instances(&self) -> Vec<Instance> {
+        self.cloned_instances_in_active_view()
+            .into_iter()
+            .filter(|inst| {
+                // Trash remains reachable, like the dashboard's independent shelf.
+                inst.is_trashed()
+                    || self.highlight_filters.matches(
+                        inst.color.as_deref(),
+                        self.repo_appearances
+                            .get(crate::session::repo_appearance::instance_repo_id(inst))
+                            .and_then(|a| a.color),
+                    )
+            })
+            .collect()
     }
 
     /// Instances in the active view with `group_path` rewritten by `key`, plus the live
@@ -281,7 +326,7 @@ impl HomeView {
         hide_stopped: bool,
     ) -> (Vec<Instance>, Vec<Instance>) {
         let grouped: Vec<Instance> = self
-            .cloned_instances_in_active_view()
+            .highlight_filtered_instances()
             .into_iter()
             .map(|mut inst| {
                 inst.group_path = key(&inst);
@@ -335,12 +380,24 @@ impl HomeView {
             &self.registered_projects,
         )
         .into_iter()
+        .filter(|p| {
+            self.highlight_filters.sessions.is_empty()
+                && self
+                    .highlight_filters
+                    .matches_project(self.repo_appearances.get(&p.path).and_then(|a| a.color))
+        })
         .map(|p| Group::new(&p.label, &p.label))
         .collect();
         if populated_labels.contains(crate::session::SCRATCH_GROUP_PATH) {
             seed_groups.push(Group::new(
                 crate::session::SCRATCH_GROUP_NAME,
                 crate::session::SCRATCH_GROUP_PATH,
+            ));
+        }
+        if populated_labels.contains(crate::session::repo_appearance::MULTI_REPO_ID) {
+            seed_groups.push(Group::new(
+                "Multi-repo",
+                crate::session::repo_appearance::MULTI_REPO_ID,
             ));
         }
         self.flatten_derived_groups(

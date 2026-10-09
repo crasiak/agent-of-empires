@@ -46,6 +46,29 @@ const skill = {
 const preview = { kind: "consent_required", dismissed: false, consent: { id: "p" } };
 
 const requestCases: RequestCase[] = [
+  [
+    "POST /api/app-state/repo-appearances/import",
+    () => api.importRepoAppearances({ "/a": { alias: "A" } }),
+    {
+      body: { appearances: { "/a": { alias: "A" } } },
+      respond: json({ "/a": { alias: "Canonical" } }),
+      result: { "/a": { alias: "Canonical" } },
+    },
+  ],
+  [
+    "GET /api/app-state/repo-appearances",
+    () => api.fetchRepoAppearances(),
+    { respond: json({ "/a": { color: "sky" } }), result: { "/a": { color: "sky" } } },
+  ],
+  [
+    "PATCH /api/app-state/repo-appearances",
+    () => api.patchRepoAppearance("/a", { color: null }),
+    {
+      body: { repo_path: "/a", color: null },
+      respond: json({ "/a": { alias: "A" } }),
+      result: { "/a": { alias: "A" } },
+    },
+  ],
   ["GET /api/sessions", () => api.fetchSessions(), { respond: json(session), result: session }],
   [
     "GET /api/sessions/search?q=foo%20bar",

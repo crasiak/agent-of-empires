@@ -1,3 +1,4 @@
+import { refreshRepoAppearances } from "../lib/repoAppearanceStore";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionResponse } from "../lib/types";
 import { fetchSessions, type SessionsEnvelope } from "../lib/api";
@@ -27,6 +28,7 @@ export function useSessions() {
   }, []);
 
   const applyResult = useCallback((data: SessionsEnvelope | null) => {
+    void refreshRepoAppearances();
     if (data !== null) {
       setSessions(data.sessions);
       // Ignore server ordering while a local drag's PUT may still be landing.
