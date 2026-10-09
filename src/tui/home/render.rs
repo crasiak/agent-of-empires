@@ -1710,6 +1710,7 @@ impl HomeView {
                 collapsed,
                 session_count,
                 archived_at,
+                profile,
                 ..
             } => {
                 let icon = if *collapsed {
@@ -1731,6 +1732,14 @@ impl HomeView {
                     Some(ICON_ARCHIVED_SECTION)
                 } else {
                     None
+                };
+                // Count hidden stopped sessions within the active highlight filters.
+                let total = (!self.group_totals.is_empty())
+                    .then(|| self.group_totals.get(&(path.clone(), profile.clone())))
+                    .flatten();
+                let session_count = match total {
+                    Some(total) if total > session_count => format!("{session_count}/{total}"),
+                    _ => session_count.to_string(),
                 };
                 let alias = (self.group_by == GroupByMode::Project)
                     .then(|| self.project_appearance_id(path))

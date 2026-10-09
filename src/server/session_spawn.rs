@@ -166,6 +166,7 @@ pub(crate) async fn spawn_structured_session(
 
         let params = InstanceParams {
             title,
+            title_typed: false,
             path,
             group,
             tool,
@@ -472,6 +473,7 @@ pub(crate) async fn spawn_structured_session(
                     let inst_lock = service_for_check.instance_lock(&id).await;
                     let sandbox_info = match crate::acp::sandbox::ensure_container_for_session(
                         &service_for_check.instances,
+                        &service_for_check.mutation_epoch,
                         &inst_lock,
                         &id,
                         true,
@@ -499,6 +501,8 @@ pub(crate) async fn spawn_structured_session(
                             cwd,
                             additional_dirs: vec![],
                             provider_env: vec![],
+                            // A pick is made on a live session, never at create.
+                            provider: None,
                             model,
                             effort,
                             effort_explicit,
