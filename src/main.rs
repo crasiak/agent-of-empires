@@ -56,8 +56,8 @@ fn take_launch_report(command: &mut Option<Commands>) -> Option<cli::session::Se
     None
 }
 
-fn take_afk_overview(command: &mut Option<Commands>) -> Option<cli::afk::AfkArgs> {
-    if matches!(command.as_ref(), Some(Commands::Session { command: cli::session::SessionCommands::Afk(args) }) if args.is_overview())
+fn take_afk_inspection(command: &mut Option<Commands>) -> Option<cli::afk::AfkArgs> {
+    if matches!(command.as_ref(), Some(Commands::Session { command: cli::session::SessionCommands::Afk(args) }) if args.is_inspection())
     {
         if let Some(Commands::Session {
             command: cli::session::SessionCommands::Afk(args),
@@ -131,8 +131,8 @@ async fn main() -> Result<()> {
         return cli::session::run("", command).await;
     }
 
-    // Fleet inspection must not migrate, initialize logging, or send telemetry.
-    if let Some(args) = take_afk_overview(&mut cli.command) {
+    // AFK inspections bypass migrations, logging, telemetry and daemon dispatch.
+    if let Some(args) = take_afk_inspection(&mut cli.command) {
         return cli::afk::run("", args).await;
     }
 
@@ -467,21 +467,32 @@ mod launch_report_startup_tests {
 }
 
 #[cfg(test)]
-mod afk_overview_startup_tests {
+mod afk_inspection_startup_tests {
     use super::*;
     #[test]
-    fn only_global_read_only_overview_bypasses_startup_writes() {
+    fn only_afk_inspection_commands_bypass_startup_writes() {
         for args in [
             vec!["aoe", "session", "afk", "overview"],
             vec!["aoe", "session", "afk", "overview", "--active-only"],
+            vec![
+                "aoe",
+                "session",
+                "afk",
+                "batch",
+                "preview",
+                "--manifest",
+                "manifest.json",
+                "--output",
+                "preview.json",
+            ],
         ] {
             let mut cli = Cli::try_parse_from(args).unwrap();
-            assert!(take_afk_overview(&mut cli.command).is_some());
+            assert!(take_afk_inspection(&mut cli.command).is_some());
             assert!(cli.command.is_none());
         }
         for command in ["status", "off"] {
             let mut cli = Cli::try_parse_from(["aoe", "session", "afk", command, "s"]).unwrap();
-            assert!(take_afk_overview(&mut cli.command).is_none());
+            assert!(take_afk_inspection(&mut cli.command).is_none());
             assert!(cli.command.is_some());
         }
     }

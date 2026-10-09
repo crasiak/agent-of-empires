@@ -47,6 +47,89 @@ is unknown; SDK reservations do not prove provider delivery or cost. Global
 visibility does not turn sessions into tenants or impose a profile-wide budget.
 Profile-scoped batches and optional shared limits remain future work.
 
+## Non-authorizing batch inspection
+
+`batch preview` exports an **inspection-only** artifact. There is no batch apply
+command, active batch, shared-budget enforcement or bulk opt-out in this format.
+Global visibility remains available independently of this one-profile selection.
+
+Create an owned directory with mode `0700`, then write a `0600` manifest inside
+it. Select **1 through 16 exact IDs** from one explicit profile, not titles or a
+filter. The manifest profile is authoritative, not the current CLI default.
+Every member needs its own existing protocol-4 grant:
+
+```json
+{
+  "version": 1,
+  "profile": "default",
+  "minutes": 10,
+  "shared_requests": null,
+  "members": [{
+    "session_id": "EXACT_SESSION_ID",
+    "grant": {
+      "version": 4,
+      "task": "scratch-greeting",
+      "scope": "Create scratch.txt only",
+      "files": [{ "path": "scratch.txt", "capability": "create" }],
+      "requests": 2,
+      "assurance": "stock-sdk-main-loop-reservations"
+    }
+  }]
+}
+```
+
+```sh
+chmod 600 afk-inspection/manifest.json
+aoe session afk batch preview --manifest afk-inspection/manifest.json --output afk-inspection/preview.json
+```
+
+The output directory must also be owned and `0700`, outside the AoE app directory.
+The command never overwrites an existing output, including a link. Both files
+are bounded to **256 KiB**; each grant retains its **8 KiB** limit. Oversized data
+is rejected, not truncated. Treat the artifact as private: it includes operator
+grants, displayed identities, raw host launch commands and workspace paths, but
+not ledger bodies, file content or human answers. Keep the export directory in
+place while inspection waits. Detected parent identity, permission or location
+changes refuse publication; this is not a sandbox against arbitrary external
+namespace mutation. On a durability or publication-location error, inspect the
+requested and any moved directory before retrying; a private file may already exist.
+
+`minutes` is required, from **1 through 1440**. `shared_requests` may be omitted or
+null for **No shared budget**, or explicitly **1 through 128** as a proposed
+ceiling. Zero is invalid. The proposal is neither enforced nor charged. There is
+no expiry timestamp before an eventual first actual apply.
+
+The artifact identifies itself as `aoe-afk-batch-inspection`, version 1, with
+`apply_available: false`. It records a new operation UUID, collection interval,
+exact frozen members, grant hashes, host bindings, profile revision/control
+epoch, workspace identity and observed generations. Its `digest` is SHA-256 of
+UTF-8 compact JSON after removing `digest` and recursively sorting object keys;
+array order is retained. This detects content changes, not authenticity, and is
+not an authorization token.
+
+Each member has `exclusions` and `observations`. Missing, stopped, archived,
+trashed, unsupported, uninitialized, non-ended delegation, unresolved host human
+guards, unsafe workspaces, stale captures and unacknowledged runtimes remain
+distinct where evidence supports them. Two fresh null-window acknowledgements
+establish **base SDK coverage and generation only**. They do not qualify active
+work or the requested nudge/question capabilities. No row is apply-eligible,
+even with empty exclusions; timeout never proves idle or unsupported status.
+Newly appearing sessions are not added to the selection.
+
+Inspection does not migrate, initialize authority, repair/quarantine registries,
+replace windows, consume allowances or recover guards. Unready namespaces are
+refused with an `aoe migrate` instruction. It reads bounded existing authority
+and releases its profile lock before acquiring transport locks or awaiting
+acknowledgements. Intentional writes are existing-session transport probes/locks
+and the explicit output. Independent ordinary runtime activity can still change
+state during collection; capture/recheck changes are marked stale, not overwritten.
+
+Bulk exclusion is explicitly **unrecorded/not implemented**. A future executable
+preview/apply must use a new format and fresh complete exception, budget and
+grant-specific validation. Inspection-v1 can never be silently promoted to
+authority. The remaining profile-scoped batch controls and optional budgets are
+still required; this workflow is not full S6 or release qualification.
+
 ## Control-only presence
 
 A session must have been launched by this AoE build as a direct host `pi`

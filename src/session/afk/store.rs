@@ -6,6 +6,11 @@ use std::io::Cursor;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static LOCK_CONTENDED: std::cell::RefCell<Option<std::sync::mpsc::Sender<PathBuf>>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) fn initialize() -> Result<()> {
     let app = AnchoredDir::open(&super::super::get_app_dir()?)?;
     let dir = app.create_child(Path::new("afk"))?;
@@ -179,7 +184,17 @@ impl Store {
         Ok(Some(bytes))
     }
     pub(super) fn lock(&self, timeout: Duration) -> Result<File> {
-        let file = match self.dir.create_new_regular(Path::new("writer.lock"))? {
+        self.lock_with_creation(timeout, true)
+    }
+    pub(super) fn lock_existing(&self, timeout: Duration) -> Result<File> {
+        self.lock_with_creation(timeout, false)
+    }
+    fn lock_with_creation(&self, timeout: Duration, create: bool) -> Result<File> {
+        let file = match if create {
+            self.dir.create_new_regular(Path::new("writer.lock"))?
+        } else {
+            None
+        } {
             Some(file) => {
                 file.sync_all()?;
                 self.dir.sync()?;
@@ -206,6 +221,12 @@ impl Store {
                 Err(e)
                     if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
                 {
+                    #[cfg(test)]
+                    LOCK_CONTENDED.with(|slot| {
+                        if let Some(sender) = slot.borrow_mut().take() {
+                            let _ = sender.send(self.dir.path().to_owned());
+                        }
+                    });
                     std::thread::sleep(Duration::from_millis(10))
                 }
                 Err(e) => return Err(e).context("AFK writer is busy"),

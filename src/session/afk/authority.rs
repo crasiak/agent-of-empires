@@ -82,6 +82,7 @@ impl Session {
     }
 }
 
+// Migration 40 hashes this serialized shape; a new schema needs a separate historical decoder.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Snapshot {
@@ -152,6 +153,23 @@ pub(super) fn profile_store(app: &Path, profile: &str, create: bool) -> Result<S
 
 pub(super) fn ready(app: &Path) -> Result<()> {
     migration::ready(app).context("AFK authority unavailable; run normal `aoe migrate` in this app namespace, then inspect migration evidence before reenrolling")
+}
+
+pub(super) fn validate_existing_snapshot(
+    app: &Path,
+    profile: &str,
+    snapshot: Option<&Snapshot>,
+) -> Result<()> {
+    if let Some(snapshot) = snapshot {
+        snapshot.validate(profile)?;
+        migration::validate_import(app, snapshot)
+    } else {
+        ensure!(
+            !migration::expected_profile(app, profile)?,
+            "missing imported profile authority; run normal `aoe migrate` and inspect evidence"
+        );
+        Ok(())
+    }
 }
 
 impl Store {

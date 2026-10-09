@@ -1,9 +1,11 @@
 //! Control-only presence and a separately granted, bounded delegation runtime.
 
 pub(crate) mod authority;
+pub mod batch;
 mod bridge;
 pub mod delegation;
 pub mod overview;
+mod registry;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -13,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use super::{Instance, Storage};
+use super::Instance;
+#[cfg(test)]
+use super::Storage;
 use store::Store;
 
 pub use bridge::run_bridge;
@@ -545,13 +549,9 @@ fn exchange(store: &Store, binding: &Binding, policy: Option<&Policy>) -> Result
 }
 
 fn current_instance(binding: &Binding) -> Result<Instance> {
-    let storage = Storage::open_unwatched(&binding.profile)?;
-    let (mut rows, _) = storage.load_with_groups()?;
-    let mut instance = rows
-        .drain(..)
-        .find(|i| i.id == binding.instance_id)
+    let instance = registry::load(&super::get_app_dir_path()?, &binding.profile)?
+        .remove(&binding.instance_id)
         .context("session no longer exists")?;
-    instance.source_profile.clone_from(&binding.profile);
     ensure!(
         Binding::for_instance(&instance)? == *binding,
         "native launch/conversation changed"

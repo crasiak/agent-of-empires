@@ -10,7 +10,7 @@ use std::path::{Component, Path};
 pub(crate) const SESSION_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const FRAME_BYTES: usize = 256 * 1024;
 pub(super) const WINDOW_BYTES: usize = 1024 * 1024;
-const RECORD_BYTES: usize = 8 * 1024;
+pub(super) const RECORD_BYTES: usize = 8 * 1024;
 const FILE_BYTES: usize = 64 * 1024;
 const READ_LIMIT: u8 = 16;
 const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
@@ -154,7 +154,7 @@ pub(super) struct Book {
     windows: Vec<Window>,
 }
 
-fn hash(bytes: impl AsRef<[u8]>) -> String {
+pub(super) fn hash(bytes: impl AsRef<[u8]>) -> String {
     Sha256::digest(bytes.as_ref())
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -256,7 +256,7 @@ fn target_path(path: &str) -> Result<()> {
     Ok(())
 }
 impl Grant {
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         ensure!(
             self.version == PROTOCOL && self.assurance == COVERAGE,
             "unsupported assurance or grant version"
@@ -301,6 +301,12 @@ impl Book {
             "ledger scope mismatch"
         );
         Ok(())
+    }
+    pub(super) fn inspection_flags(&self) -> (bool, bool) {
+        (
+            self.windows.iter().any(|w| w.state != "ended"),
+            self.windows.iter().any(Window::unresolved_question),
+        )
     }
     pub(super) fn end_all(&mut self) {
         for w in &mut self.windows {
@@ -506,6 +512,77 @@ impl Window {
         );
         Ok(self.reservations.len() as u8)
     }
+    fn file(&self, path: &str) -> Result<(AnchoredDir, String, Option<String>, u32)> {
+        Workspace {
+            root: self.root.clone(),
+            control_root: self.control_root.clone(),
+            root_identity: self.root_identity,
+        }
+        .file(&self.grant, path)
+    }
+    fn view(&self, now: i64) -> Value {
+        let mut records = self.records.clone();
+        for record in &mut records {
+            if let Some(claims) = &mut record.claims {
+                claims.action = None;
+            }
+        }
+        json!({"version":PROTOCOL,"window":self.id,"revision":self.revision,"binding":self.binding,"generation":self.generation,
+            "state":if now >= self.expires_at_ms {"ended"} else {&self.state},"grant":self.grant,
+            "confirmed":self.confirmed,"grant_hash":hash(serde_json::to_vec(&self.grant).unwrap()),"expires_at_ms":self.expires_at_ms,"issued_at_ms":self.issued_at_ms,
+            "reservations_used":self.reservations.len(),"reads_used":self.reads,"records":records,
+            "action":self.permit.as_ref().map(|p| json!({"decision":p.decision,"path":p.path,"expected_hash":p.expected_hash,"payload_hash":p.payload_hash,"attempted_at_ms":p.attempted_at_ms,"outcomes":p.outcomes})),
+            "question":self.question,"question_deferrals_used":usize::from(self.question.is_some()),
+            "checkpoints":self.checkpoints,"nudges":self.nudges,"nudges_used":self.nudges.len(),"terminal_reason":self.terminal_reason,
+            "evidence":self.evidence(),"coverage":COVERAGE,"background_coverage":"independent/unknown; not physical requests or billing",
+            "privacy":"heuristic credential filtering; native Pi/provider history has separate retention"})
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(super) struct Workspace {
+    root: PathBuf,
+    control_root: PathBuf,
+    root_identity: (u64, u64),
+}
+impl Workspace {
+    pub(super) fn inspect(instance: &Instance, app_dir: &Path, grant: &Grant) -> Result<Self> {
+        let root = std::fs::canonicalize(&instance.project_path)?;
+        ensure!(
+            !root.starts_with(std::fs::canonicalize(app_dir)?)
+                && !["/nix", "/etc", "/var", "/System", "/Library"]
+                    .iter()
+                    .any(|p| root.starts_with(p)),
+            "protected workspace root"
+        );
+        ensure!(
+            !root
+                .components()
+                .any(|c| c.as_os_str().to_str().is_some_and(|name| [
+                    ".git",
+                    ".pi",
+                    ".ssh",
+                    ".config",
+                    ".local",
+                    ".nix-profile",
+                    "profiles",
+                    "node_modules"
+                ]
+                .contains(&name))),
+            "protected workspace path"
+        );
+        let anchored = AnchoredDir::open(&root)?;
+        let (dev, ino) = anchored.identity()?;
+        let workspace = Self {
+            root,
+            control_root: std::fs::canonicalize(app_dir)?,
+            root_identity: (dev as u64, ino),
+        };
+        for target in &grant.files {
+            workspace.file(grant, &target.path)?;
+        }
+        Ok(workspace)
+    }
     fn workspace(&self) -> Result<AnchoredDir> {
         let root = AnchoredDir::open(&self.root)?;
         let (dev, ino) = root.identity()?;
@@ -515,10 +592,14 @@ impl Window {
         );
         Ok(root)
     }
-    fn file(&self, path: &str) -> Result<(AnchoredDir, String, Option<String>, u32)> {
+    fn file(
+        &self,
+        grant: &Grant,
+        path: &str,
+    ) -> Result<(AnchoredDir, String, Option<String>, u32)> {
         target_path(path)?;
         ensure!(
-            self.grant.files.iter().any(|f| f.path == path),
+            grant.files.iter().any(|f| f.path == path),
             "target outside grant"
         );
         ensure!(
@@ -560,23 +641,6 @@ impl Window {
         text(&body)?;
         ensure!(!body.starts_with("#!"), "executable content");
         Ok((parent, leaf, Some(body), meta.mode() & 0o666))
-    }
-    fn view(&self, now: i64) -> Value {
-        let mut records = self.records.clone();
-        for record in &mut records {
-            if let Some(claims) = &mut record.claims {
-                claims.action = None;
-            }
-        }
-        json!({"version":PROTOCOL,"window":self.id,"revision":self.revision,"binding":self.binding,"generation":self.generation,
-            "state":if now >= self.expires_at_ms {"ended"} else {&self.state},"grant":self.grant,
-            "confirmed":self.confirmed,"grant_hash":hash(serde_json::to_vec(&self.grant).unwrap()),"expires_at_ms":self.expires_at_ms,"issued_at_ms":self.issued_at_ms,
-            "reservations_used":self.reservations.len(),"reads_used":self.reads,"records":records,
-            "action":self.permit.as_ref().map(|p| json!({"decision":p.decision,"path":p.path,"expected_hash":p.expected_hash,"payload_hash":p.payload_hash,"attempted_at_ms":p.attempted_at_ms,"outcomes":p.outcomes})),
-            "question":self.question,"question_deferrals_used":usize::from(self.question.is_some()),
-            "checkpoints":self.checkpoints,"nudges":self.nudges,"nudges_used":self.nudges.len(),"terminal_reason":self.terminal_reason,
-            "evidence":self.evidence(),"coverage":COVERAGE,"background_coverage":"independent/unknown; not physical requests or billing",
-            "privacy":"heuristic credential filtering; native Pi/provider history has separate retention"})
     }
 }
 
@@ -1102,6 +1166,9 @@ fn exchange_runtime(
         std::thread::sleep(Duration::from_millis(25));
     }
 }
+pub(super) fn observe_base_runtime(store: &Store, binding: &Binding) -> Result<String> {
+    Ok(exchange_runtime(store, binding, None)?.generation)
+}
 pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<Value> {
     ensure!((1..=1440).contains(&minutes), "invalid expiry");
     use std::os::unix::fs::OpenOptionsExt;
@@ -1124,32 +1191,7 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
     let control = Store::transport(&app_dir, &binding.profile, &instance.id, true)?;
     let _control_lock = control.lock(TIMEOUT)?;
     let ack = exchange_runtime(&control, &binding, None)?;
-    let root = std::fs::canonicalize(&instance.project_path)?;
-    ensure!(
-        !root.starts_with(std::fs::canonicalize(&app_dir)?)
-            && !["/nix", "/etc", "/var", "/System", "/Library"]
-                .iter()
-                .any(|p| root.starts_with(p)),
-        "protected workspace root"
-    );
-    ensure!(
-        !root
-            .components()
-            .any(|c| c.as_os_str().to_str().is_some_and(|name| [
-                ".git",
-                ".pi",
-                ".ssh",
-                ".config",
-                ".local",
-                ".nix-profile",
-                "profiles",
-                "node_modules"
-            ]
-            .contains(&name))),
-        "protected workspace path"
-    );
-    let anchored = AnchoredDir::open(&root)?;
-    let (dev, ino) = anchored.identity()?;
+    let workspace = Workspace::inspect(instance, &app_dir, &grant)?;
     let issued_at_ms = now_ms();
     let mut w = Window {
         version: PROTOCOL,
@@ -1157,9 +1199,9 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
         generation: ack.generation,
         id: uuid::Uuid::new_v4().to_string(),
         revision: 1,
-        root,
-        control_root: std::fs::canonicalize(&app_dir)?,
-        root_identity: (dev as u64, ino),
+        root: workspace.root,
+        control_root: workspace.control_root,
+        root_identity: workspace.root_identity,
         grant,
         issued_at_ms,
         expires_at_ms: issued_at_ms + i64::from(minutes) * 60_000,
@@ -1175,9 +1217,6 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
         terminal_reason: None,
         question: None,
     };
-    for target in &w.grant.files {
-        w.file(&target.path)?;
-    }
     let epoch = {
         let _lock = runtime.lock(TIMEOUT)?;
         current_instance(&w.binding)?;

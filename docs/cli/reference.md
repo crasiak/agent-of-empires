@@ -21,6 +21,8 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe killall`↴](#aoe-killall)
 * [`aoe session`↴](#aoe-session)
 * [`aoe session afk`↴](#aoe-session-afk)
+* [`aoe session afk batch`↴](#aoe-session-afk-batch)
+* [`aoe session afk batch preview`↴](#aoe-session-afk-batch-preview)
 * [`aoe session afk overview`↴](#aoe-session-afk-overview)
 * [`aoe session afk on`↴](#aoe-session-afk-on)
 * [`aoe session afk delegate`↴](#aoe-session-afk-delegate)
@@ -495,12 +497,38 @@ Inspect AFK presence or explicitly delegate one bounded file cycle for Pi
 
 ###### **Subcommands:**
 
+* `batch` — Inspect a frozen profile-scoped selection; no executable batch controls
 * `overview` — Read stored AFK summaries across all profiles, without probing or enabling sessions
 * `on` — Request control-only AFK. Does not authorize autonomous work
 * `delegate` — One-file delegation during active work; nudges and question deferral require qualified native support
 * `audit` — Export scoped profile-authority audit and legacy evidence references, without payloads or preimages
 * `off` — Record AFK off even if the integration is unavailable
 * `status` — Probe the current integration; does not enable or renew AFK
+
+
+
+## `aoe session afk batch`
+
+Inspect a frozen profile-scoped selection; no executable batch controls
+
+**Usage:** `aoe session afk batch <COMMAND>`
+
+###### **Subcommands:**
+
+* `preview` — Export private non-authorizing inspection-v1; apply is unavailable
+
+
+
+## `aoe session afk batch preview`
+
+Export private non-authorizing inspection-v1; apply is unavailable
+
+**Usage:** `aoe session afk batch preview --manifest <MANIFEST> --output <OUTPUT>`
+
+###### **Options:**
+
+* `--manifest <MANIFEST>` — Private manifest-v1 with one profile, 1..16 exact IDs and explicit protocol-4 grants
+* `--output <OUTPUT>` — New private artifact outside app state; never overwrites an existing file
 
 
 

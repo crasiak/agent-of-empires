@@ -12,13 +12,21 @@ pub struct AfkArgs {
 }
 
 impl AfkArgs {
-    pub fn is_overview(&self) -> bool {
-        matches!(self.command, AfkCommand::Overview { .. })
+    pub fn is_inspection(&self) -> bool {
+        matches!(
+            self.command,
+            AfkCommand::Overview { .. } | AfkCommand::Batch { .. }
+        )
     }
 }
 
 #[derive(Subcommand)]
 enum AfkCommand {
+    /// Inspect a frozen profile-scoped selection; no executable batch controls
+    Batch {
+        #[command(subcommand)]
+        command: BatchCommand,
+    },
     /// Read stored AFK summaries across all profiles, without probing or enabling sessions
     Overview {
         /// Hide archived and trashed sessions (shown by default)
@@ -50,7 +58,31 @@ enum AfkCommand {
     Status { session: String },
 }
 
+#[derive(Subcommand)]
+enum BatchCommand {
+    /// Export private non-authorizing inspection-v1; apply is unavailable
+    Preview {
+        /// Private manifest-v1 with one profile, 1..16 exact IDs and explicit protocol-4 grants
+        #[arg(long)]
+        manifest: std::path::PathBuf,
+        /// New private artifact outside app state; never overwrites an existing file
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
+}
+
 pub async fn run(profile: &str, args: AfkArgs) -> Result<()> {
+    if let AfkCommand::Batch {
+        command: BatchCommand::Preview { manifest, output },
+    } = args.command
+    {
+        let receipt = tokio::task::spawn_blocking(move || {
+            crate::session::afk::batch::preview(&manifest, &output)
+        })
+        .await??;
+        println!("{}", serde_json::to_string_pretty(&receipt)?);
+        return Ok(());
+    }
     if let AfkCommand::Overview { active_only } = &args.command {
         let mut overview =
             tokio::task::spawn_blocking(crate::session::afk::overview::snapshot).await??;
@@ -131,6 +163,44 @@ fn require_acknowledged_activation(
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    #[test]
+    fn batch_requires_explicit_files_and_has_no_apply_command() {
+        for args in [
+            vec![
+                "aoe",
+                "session",
+                "afk",
+                "batch",
+                "preview",
+                "--manifest",
+                "manifest.json",
+            ],
+            vec![
+                "aoe",
+                "session",
+                "afk",
+                "batch",
+                "preview",
+                "--output",
+                "preview.json",
+            ],
+            vec!["aoe", "session", "afk", "batch", "apply", "preview.json"],
+        ] {
+            assert!(crate::cli::Cli::try_parse_from(args).is_err());
+        }
+        assert!(crate::cli::Cli::try_parse_from([
+            "aoe",
+            "session",
+            "afk",
+            "batch",
+            "preview",
+            "--manifest",
+            "manifest.json",
+            "--output",
+            "preview.json"
+        ])
+        .is_ok());
+    }
     #[test]
     fn only_acknowledged_activation_is_success_but_diagnostics_and_durable_off_are_success() {
         use crate::session::afk::{Operation, Report, State};
