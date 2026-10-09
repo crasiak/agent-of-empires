@@ -32,6 +32,7 @@ function renderSidebar(workspaces: Workspace[], over: Partial<Props> = {}) {
       sortMode: "lastActivity",
       isCollapsed: () => false,
     }),
+    repoGroups: [],
     nestedGroups: [],
     orgGroups: [],
     onToggleSubgroup: noop,

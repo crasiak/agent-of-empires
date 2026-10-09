@@ -2367,6 +2367,7 @@ function AppContent({
           {!showSettings && (
             <WorkspaceSidebar
               groups={sidebarGroups}
+              repoGroups={repoGroups}
               nestedGroups={nestedGroups}
               orgGroups={orgGroups}
               trashedWorkspaces={trashedWorkspaces}

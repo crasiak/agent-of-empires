@@ -3211,8 +3211,26 @@
       "id": "story.sidebar-filter",
       "kind": "mocked-playwright",
       "risk": "low",
-      "specs": ["tests/sidebar-grouping.spec.ts"],
-      "components": ["web/src/components/WorkspaceSidebar.tsx"]
+      "specs": ["tests/sidebar-grouping.spec.ts", "tests/sidebar-highlight-filter.spec.ts"],
+      "components": [
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/HighlightFilter.tsx",
+        "web/src/components/sidebar/SidebarToolbar.tsx"
+      ],
+      "notes": "Text and highlight filters compose; desktop keyboard selection, Escape, grouping changes, compact mode, and mobile touch targets are exercised."
+    },
+    {
+      "id": "sidebar.highlight-filter-semantics",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/components/__tests__/WorkspaceSidebarFilter.test.tsx"],
+      "components": [
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/HighlightFilter.tsx",
+        "web/src/components/sidebar/filterGroups.ts",
+        "web/src/components/sidebar/rowModel.ts"
+      ],
+      "notes": "Session and project color unions intersect with text and plugin facets across all grouping axes. Covers no-highlight, live updates, multi-session displayed colors, saved and pinned-empty projects, read-only mode, hidden controls, clearing, and drag safety."
     },
     {
       "id": "story.sidebar-fold-group",
