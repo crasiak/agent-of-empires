@@ -1,8 +1,11 @@
 //! Restartable, evidence-preserving transition from per-instance authority.
+use super::super::delegation::Book;
 use super::*;
+pub(in crate::session::afk) mod frozen;
 use crate::session::{backup_before_migration, AnchoredDir};
+use frozen::{profile_store, Session, Snapshot, NAMESPACE, PROFILE_BYTES};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const INVENTORY_LIMIT: usize = 4096;
@@ -726,3 +729,6 @@ pub(crate) fn initialize_test(app: &Path) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod golden;

@@ -1,8 +1,6 @@
 //! Profile-scoped publication. Transport files never supply authority.
 use super::*;
-use delegation::Book;
 use serde_json::Value;
-use std::collections::BTreeMap;
 use std::path::Path;
 
 pub(crate) mod migration;
@@ -55,82 +53,7 @@ impl Evidence {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Session {
-    pub epoch: u64,
-    pub policy: Option<Policy>,
-    pub book: Book,
-    pub evidence: Vec<Evidence>,
-}
-impl Session {
-    pub fn empty() -> Self {
-        Self {
-            epoch: 0,
-            policy: None,
-            book: Book::empty(),
-            evidence: vec![],
-        }
-    }
-    pub fn revoke(&mut self) -> Result<()> {
-        self.epoch = self
-            .epoch
-            .checked_add(1)
-            .context("control epoch overflow")?;
-        self.book.end_all();
-        Ok(())
-    }
-}
-
-// Migration 40 hashes this serialized shape; a new schema needs a separate historical decoder.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Snapshot {
-    pub version: u32,
-    pub profile: String,
-    pub revision: u64,
-    pub sessions: BTreeMap<String, Session>,
-}
-impl Snapshot {
-    pub fn empty(profile: &str) -> Self {
-        Self {
-            version: 1,
-            profile: profile.into(),
-            revision: 1,
-            sessions: BTreeMap::new(),
-        }
-    }
-    pub fn validate(&self, profile: &str) -> Result<()> {
-        scope(profile, None)?;
-        ensure!(
-            self.version == 1 && self.profile == profile && self.revision > 0,
-            "invalid profile authority identity/revision"
-        );
-        ensure!(
-            serde_json::to_vec(self)?.len() <= PROFILE_BYTES,
-            "profile authority exceeds 32 MiB"
-        );
-        for (id, session) in &self.sessions {
-            scope(profile, Some(id))?;
-            if let Some(policy) = &session.policy {
-                policy.validate()?;
-                ensure!(
-                    policy.binding.profile == profile && policy.binding.instance_id == *id,
-                    "policy scope mismatch"
-                );
-                ensure!(
-                    serde_json::to_vec(policy)?.len() <= MAX_BYTES,
-                    "oversized policy"
-                );
-            }
-            session.book.validate_scope(profile, id)?;
-            for evidence in &session.evidence {
-                evidence.validate(profile, id)?;
-            }
-        }
-        Ok(())
-    }
-}
+pub(super) use migration::frozen::{Session, Snapshot};
 
 pub(super) fn scope(profile: &str, id: Option<&str>) -> Result<()> {
     super::super::validate_profile_name(profile)?;

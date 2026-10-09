@@ -2,9 +2,9 @@ use super::*;
 use serde_json::json;
 use std::os::unix::fs::MetadataExt;
 
-struct Isolated(tempfile::TempDir);
+pub(super) struct Isolated(tempfile::TempDir);
 impl Isolated {
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         self.0.path()
     }
 }
@@ -20,7 +20,7 @@ impl Drop for Isolated {
         }
     }
 }
-fn isolated() -> Isolated {
+pub(super) fn isolated() -> Isolated {
     Isolated(tempfile::tempdir().unwrap())
 }
 
