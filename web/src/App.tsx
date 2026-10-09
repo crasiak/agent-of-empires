@@ -1925,6 +1925,7 @@ function AppContent({
     if (singlePane) {
       return (
         <MobileMainPane
+          cityhall={caps.cityhall}
           view={rightPanelView}
           pluginPanes={pluginPanes}
           onBackToAgent={() => handlePickView("agent")}
@@ -2012,7 +2013,7 @@ function AppContent({
             onToggleCollapse={toggleRightDock}
             left={
               <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
-                <SessionInfo session={activeSession} />
+                {!caps.cityhall && <SessionInfo session={activeSession} />}
                 <div className={selectedFilePath ? "hidden" : "flex-1 flex flex-col min-h-0 overflow-hidden"}>
                   {activeSession?.view === "structured" ? (
                     <Suspense fallback={<AcpLoadingFallback />}>

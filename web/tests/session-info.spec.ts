@@ -1,6 +1,25 @@
 import { test, expect } from "./helpers/mockedTest";
 import { mockTerminalApis } from "./helpers/terminal-mocks";
 
+for (const width of [1440, 390]) {
+  test(`CityHall omits local session info and its polling at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.clock.install();
+    await mockTerminalApis(page, { sessionFields: { title: "CityHall agent", view: "structured" } });
+    await page.route("**/api/about", (route) => route.fulfill({ json: { cityhall_mode: true } }));
+    const requests: string[] = [];
+    await page.route(/\/api\/(system\/health|sessions\/[^/]+\/(usage|ledger-run))$/, (route) => {
+      requests.push(new URL(route.request().url()).pathname);
+      return route.fulfill({ status: 403, json: { error: "Unavailable in CityHall" } });
+    });
+    await page.goto("/session/pinch-test");
+    await expect(page.getByText("CityHall agent", { exact: true }).first()).toBeVisible();
+    await page.clock.runFor(31_000);
+    await expect(page.getByTestId("session-info")).toHaveCount(0);
+    expect(requests).toEqual([]);
+  });
+}
+
 for (const viewport of [
   { width: 1440, height: 900 },
   { width: 390, height: 844 },
@@ -111,6 +130,7 @@ for (const viewport of [
     await page.addStyleTag({
       content: "[data-live-debug], div:has(> [data-input-trace]) { display: none !important; }",
     });
-    await page.screenshot({ path: testInfo.outputPath(`session-info-${viewport.width}.png`) });
+    const screenshot = await page.screenshot({ path: testInfo.outputPath(`session-info-${viewport.width}.png`) });
+    await testInfo.attach(`Session info at ${viewport.width}px`, { body: screenshot, contentType: "image/png" });
   });
 }

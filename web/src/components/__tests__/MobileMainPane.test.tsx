@@ -79,7 +79,7 @@ function setup(overrides: Partial<Parameters<typeof MobileMainPane>[0]> = {}) {
     activeSession: session(),
     activeSessionId: "s1",
     sessions: [session()],
-    serverAbout: null,
+    cityhall: false,
     webSettings: { persistentTerminals: false, maxPersistentTerminals: 3 },
     selectedFilePath: null,
     selectedRepoName: undefined,
@@ -117,6 +117,12 @@ describe("MobileMainPane", () => {
     cleanup();
     setup({ view: "paired", pairedMounted: true });
     expect(screen.getByTestId("paired-shell")).toBeTruthy();
+    expect(screen.queryByTestId("session-info")).toBeNull();
+  });
+
+  it("does not mount local session info for CityHall sessions", async () => {
+    setup({ cityhall: true, activeSession: session({ view: "structured" }) });
+    expect(await screen.findByTestId("acp-view")).toBeDefined();
     expect(screen.queryByTestId("session-info")).toBeNull();
   });
 
