@@ -126,6 +126,7 @@ import { SwitchViewDialog } from "./components/SwitchViewDialog";
 import { TopBar } from "./components/TopBar";
 import { AppShellSkeleton, MainPaneSkeleton } from "./components/AppShellSkeleton";
 import { ContentSplit } from "./components/ContentSplit";
+import { SessionInfo } from "./components/SessionInfo";
 import { TerminalSessionStack } from "./components/TerminalSessionStack";
 // Lazy-load the acp surface so non-acp users never download
 // the @assistant-ui/react, shiki, and in-house StringDiff/DiffLine
@@ -1924,6 +1925,7 @@ function AppContent({
     if (singlePane) {
       return (
         <MobileMainPane
+          cityhall={caps.cityhall}
           view={rightPanelView}
           pluginPanes={pluginPanes}
           onBackToAgent={() => handlePickView("agent")}
@@ -2011,6 +2013,7 @@ function AppContent({
             onToggleCollapse={toggleRightDock}
             left={
               <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
+                {!caps.cityhall && <SessionInfo session={activeSession} />}
                 <div className={selectedFilePath ? "hidden" : "flex-1 flex flex-col min-h-0 overflow-hidden"}>
                   {activeSession?.view === "structured" ? (
                     <Suspense fallback={<AcpLoadingFallback />}>

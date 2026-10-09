@@ -20,7 +20,7 @@ const base: UsageSummary = {
   tracked: false,
 };
 
-describe("usage overlay text", () => {
+describe("session usage text", () => {
   it("matches the TUI duration format", () => {
     const min = 60_000;
     expect([20_000, 42 * min, 125 * min, 76 * 60 * min, -5_000].map(formatDurationShort)).toEqual([

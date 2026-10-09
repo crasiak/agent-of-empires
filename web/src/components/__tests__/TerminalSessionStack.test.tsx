@@ -1,9 +1,16 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import type { SessionResponse } from "../../lib/types";
 import { makeSession as baseSession } from "./fixtures";
+
+vi.mock("../../lib/api", () => ({
+  fetchSessionUsage: vi.fn(),
+  fetchSessionLedgerRun: vi.fn(),
+  fetchSystemHealth: vi.fn(),
+}));
+import { fetchSessionUsage, fetchSessionLedgerRun, fetchSystemHealth } from "../../lib/api";
 
 vi.mock("../TerminalView", () => ({
   TerminalView: ({ session, active }: { session: SessionResponse; active: boolean }) => (
@@ -49,6 +56,16 @@ async function mountThreeKeepingTwo() {
 }
 
 describe("TerminalSessionStack", () => {
+  it("keeps usage and metrics out of persistent terminal layers", async () => {
+    await mountThreeKeepingTwo();
+    await act(async () => {});
+    expect(screen.queryByTestId("session-info")).toBeNull();
+    expect(screen.queryByTestId("session-usage")).toBeNull();
+    expect(fetchSessionUsage).not.toHaveBeenCalled();
+    expect(fetchSessionLedgerRun).not.toHaveBeenCalled();
+    expect(fetchSystemHealth).not.toHaveBeenCalled();
+  });
+
   it("renders only the active session when persistence is disabled", () => {
     const sessions = [makeSession("s1"), makeSession("s2")];
     const { rerender } = render(<TerminalSessionStack activeSessionId="s1" sessions={sessions} persistent={false} />);

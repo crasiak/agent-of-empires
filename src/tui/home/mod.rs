@@ -273,6 +273,7 @@ pub struct HomeView {
     pub(super) metrics_poller: super::metrics_poller::MetricsPoller,
     pub(super) pending_metrics_refresh: bool,
     pub(super) metrics: crate::process::metrics::MetricsSnapshot,
+    pub(super) resource_history: crate::tui::components::session_resources::ResourceHistory,
     pub(super) usage_poller: super::usage_poller::UsagePoller,
     pub(super) pending_usage_refresh: bool,
     /// Summary for one instance id; drawn only while that id is selected.

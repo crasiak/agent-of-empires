@@ -27,14 +27,7 @@ impl<'a> CachedPreview<'a> {
     }
 }
 
-/// Row count of the Agent-view info header (profile/tool, path, status, optional
-/// sandbox line, optional worktree block) for `instance`.
-///
-/// Module-level so callers outside `Preview::render_with_cache` compute the same
-/// split: render sizes the live-send tmux pane to the OUTPUT portion,
-/// `inner.height - agent_info_height(inst) - 1`, subtracting the header and the
-/// one row the inner ` Output ` banner block consumes. A taller pane clips the
-/// top of the agent's output on every frame.
+/// Metadata rows before resources. `PreviewLayout` adds the shared info chrome.
 pub fn agent_info_height(instance: &Instance) -> u16 {
     let base: u16 = 3 + u16::from(instance.current_launch_identity().is_some());
     let sandbox_lines: u16 = if instance.is_sandboxed() { 1 } else { 0 };
@@ -47,11 +40,7 @@ pub fn agent_info_height(instance: &Instance) -> u16 {
     }
 }
 
-/// Row count of the Terminal-view (and Tool-view) info header (title / path /
-/// status, plus one optional sandbox row) for `instance`.
-///
-/// Symmetric with [`agent_info_height`]: the live-send resize against a terminal
-/// target uses `inner.height - terminal_info_height(inst) - 1`.
+/// Metadata rows for Terminal and Tool views, before resources.
 pub fn terminal_info_height(instance: &Instance) -> u16 {
     let base: u16 = 3; // title / path / status
     let sandbox_lines: u16 = if instance.sandbox_info.as_ref().is_some_and(|s| s.enabled) {
@@ -71,8 +60,7 @@ pub fn terminal_info_height(instance: &Instance) -> u16 {
 /// definition; `output.height` is THE visible-row count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PreviewLayout {
-    /// The info-header rect, present iff the header is shown (header toggle on
-    /// and the viewport is not compact).
+    /// Info header when enabled and the viewport leaves space for output.
     pub info: Option<Rect>,
     /// The inner ` Output ` / ` Terminal Output ` banner row, present exactly
     /// when `info` is (it visually separates the header from the body).
@@ -83,13 +71,11 @@ pub(crate) struct PreviewLayout {
 }
 
 impl PreviewLayout {
-    /// Split `area` (the preview block's inner rect) into header / banner /
-    /// output. With the header hidden or the viewport compact, the output claims
-    /// the whole `area` and there is no banner. Otherwise the header takes the
-    /// top `info_height` rows, a one-row banner follows, and the output gets the
-    /// rest, clamped so a pane shorter than that chrome yields zero height.
+    /// Split metadata, resources and badges from output. Collapse optional info
+    /// when hidden, compact, or too short to leave an output row.
     pub(crate) fn compute(area: Rect, compact: bool, show_info: bool, info_height: u16) -> Self {
-        if compact || !show_info {
+        let info_height = info_height.saturating_add(3).max(8);
+        if compact || !show_info || area.height <= info_height.saturating_add(1) {
             return Self {
                 info: None,
                 banner: None,
@@ -104,8 +90,7 @@ impl PreviewLayout {
             width: area.width,
             height: info_h,
         };
-        // The banner row only exists when the pane had room for it on top of
-        // the header (i.e. `chrome` reached `info_height + 1`).
+        // Keep the banner within the allocated chrome.
         let banner = if chrome > info_h {
             Some(Rect {
                 x: area.x,
@@ -126,6 +111,31 @@ impl PreviewLayout {
             info: Some(info),
             banner,
             output,
+        }
+    }
+}
+
+/// Metadata and its resource traces sit beside the usage/Ledger badge column.
+pub(crate) struct InfoAreas {
+    pub metadata: Rect,
+    pub resources: Rect,
+    pub badges: Rect,
+}
+
+impl InfoAreas {
+    pub(crate) fn compute(area: Rect, metadata_height: u16) -> Self {
+        let badge_width = (area.width / 2).min(48);
+        let left_width = area.width.saturating_sub(badge_width + 2);
+        let metadata_height = metadata_height.min(area.height);
+        Self {
+            metadata: Rect::new(area.x, area.y, left_width, metadata_height),
+            resources: Rect::new(
+                area.x,
+                area.y + metadata_height,
+                left_width,
+                area.height.saturating_sub(metadata_height).min(3),
+            ),
+            badges: Rect::new(area.right() - badge_width, area.y, badge_width, area.height),
         }
     }
 }
@@ -152,7 +162,7 @@ impl Preview {
             PreviewLayout::compute(area, compact, show_info, terminal_info_height(instance));
 
         if let Some(info_area) = layout.info {
-            // Minimal info for terminal view.
+            let info_area = InfoAreas::compute(info_area, terminal_info_height(instance)).metadata;
             let mut info_lines = vec![
                 Line::from(vec![
                     Span::styled("Title:   ", Style::default().fg(theme.dimmed)),
@@ -287,6 +297,7 @@ impl Preview {
         theme: &Theme,
         idle_decay_window: Duration,
     ) {
+        let area = InfoAreas::compute(area, agent_info_height(instance)).metadata;
         let mut info_lines = Vec::new();
 
         // Profile and Tool on the same row to save vertical space
@@ -639,25 +650,26 @@ mod tests {
     fn layout_shown_info_carves_header_plus_banner_once() {
         let area = rect(2, 3, 80, 40);
         let l = PreviewLayout::compute(area, false, true, 7);
-        // Header: top 7 rows.
-        assert_eq!(l.info, Some(rect(2, 3, 80, 7)));
-        // Banner: the single row just below the header.
-        assert_eq!(l.banner, Some(rect(2, 3 + 7, 80, 1)));
-        // Output: the rest, shifted down by header + banner (7 + 1).
-        assert_eq!(l.output, rect(2, 3 + 8, 80, 40 - 8));
-        // The banner block spans banner + output so its inner == output.
+        assert_eq!(l.info, Some(rect(2, 3, 80, 10)));
+        assert_eq!(l.banner, Some(rect(2, 13, 80, 1)));
+        assert_eq!(l.output, rect(2, 14, 80, 29));
         let block_area = banner_block_area(l.output, l.banner.unwrap());
-        assert_eq!(block_area, rect(2, 3 + 7, 80, 40 - 8 + 1));
+        assert_eq!(block_area, rect(2, 13, 80, 30));
+        let info = InfoAreas::compute(l.info.unwrap(), 7);
+        assert_eq!(info.metadata, rect(2, 3, 38, 7));
+        assert_eq!(info.resources, rect(2, 10, 38, 3));
+        assert_eq!(info.badges, rect(42, 3, 40, 10));
     }
 
     #[test]
-    fn layout_clamps_when_pane_shorter_than_chrome() {
-        // Pane shorter than header + banner: output clamps to zero height and
-        // never underflows (the old panic-on-subtraction case).
-        let area = rect(0, 0, 80, 3);
-        let l = PreviewLayout::compute(area, false, true, 4);
-        assert_eq!(l.output.height, 0);
-        assert!(l.output.y <= area.y + area.height);
+    fn layout_preserves_output_in_shallow_panes() {
+        for height in [0, 3, 8, 9] {
+            let area = rect(0, 0, 80, height);
+            let layout = PreviewLayout::compute(area, false, true, 4);
+            assert_eq!(layout.output, area);
+            assert!(layout.info.is_none());
+            assert!(layout.banner.is_none());
+        }
     }
 
     // End to end: a captured screen exactly as tall as the banner-less output,

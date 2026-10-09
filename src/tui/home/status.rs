@@ -73,14 +73,14 @@ impl HomeView {
         }
     }
 
-    /// Request a system-health sample in the background while either health
-    /// surface is visible. Call `apply_metrics_updates` to pick up the result.
+    /// Sample in the background for health views and the session info panel.
     pub fn request_metrics_refresh(&mut self) {
         let instances = self.pollable_instances();
         let tip_candidate = !self.system_health_tip_earned
             && !self.system_health_discovered
             && instances.len() >= crate::tips::SYSTEM_HEALTH_AGENT_THRESHOLD;
-        if (self.show_diagnostics || self.system_health_open || tip_candidate)
+        let info_visible = self.show_preview_info && self.preview_pane_area.y > self.preview_area.y;
+        if (self.show_diagnostics || self.system_health_open || info_visible || tip_candidate)
             && !self.pending_metrics_refresh
         {
             self.metrics_poller.request_refresh(instances);
@@ -95,6 +95,8 @@ impl HomeView {
 
         match self.metrics_poller.try_recv_updates() {
             Ok(snapshot) => {
+                self.resource_history
+                    .record(&snapshot, std::time::Instant::now());
                 self.metrics = snapshot;
                 self.observe_system_health_tip_load();
                 self.pending_metrics_refresh = false;
@@ -108,6 +110,7 @@ impl HomeView {
                     target: "tui.home",
                     "metrics poller worker gone; respawning a fresh poller",
                 );
+                self.resource_history = Default::default();
                 self.metrics_poller = crate::tui::metrics_poller::MetricsPoller::new();
                 self.pending_metrics_refresh = false;
                 false
@@ -115,7 +118,7 @@ impl HomeView {
         }
     }
 
-    /// Request the selected session's usage summary while the overlay is on.
+    /// Request the selected session's summary while usage display is enabled.
     pub fn request_usage_refresh(&mut self) {
         if !self.show_usage_overlay || self.pending_usage_refresh {
             return;
@@ -126,7 +129,7 @@ impl HomeView {
         }
     }
 
-    /// Apply a loaded usage summary; true when the overlay needs a repaint.
+    /// Apply a usage summary; true when session info needs a repaint.
     pub fn apply_usage_updates(&mut self) -> bool {
         use std::sync::mpsc::TryRecvError;
 
@@ -145,9 +148,7 @@ impl HomeView {
         }
     }
 
-    /// Store a fetched summary; true when the overlay needs a repaint.
-    /// Split out from `apply_usage_updates` so tests can drive it without a
-    /// background thread.
+    /// Store a summary; true when session info needs a repaint.
     pub(in crate::tui) fn apply_one_usage_update(
         &mut self,
         id: String,
@@ -183,7 +184,7 @@ impl HomeView {
         self.pending_ledger_refresh = true;
     }
 
-    /// Apply a loaded Ledger run view; true when the overlay needs a repaint.
+    /// Apply a Ledger run view; true when session info needs a repaint.
     pub fn apply_ledger_updates(&mut self) -> bool {
         use std::sync::mpsc::TryRecvError;
 
@@ -202,8 +203,7 @@ impl HomeView {
         }
     }
 
-    /// Store a fetched view; true when the overlay needs a repaint. Split out
-    /// so tests can drive it without a background thread.
+    /// Store a Ledger view; true when session info needs a repaint.
     pub(in crate::tui) fn apply_one_ledger_update(
         &mut self,
         id: String,

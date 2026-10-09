@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 
 import { TerminalSessionStack } from "./TerminalSessionStack";
+import { SessionInfo } from "./SessionInfo";
 import { PairedShellPane } from "./PairedTerminal";
 import { BackgroundAgentsPanel } from "./acp/BackgroundAgentsPanel";
 import { FilesPane } from "./FilesPane";
@@ -18,6 +19,7 @@ import type { FileRef } from "../lib/fileRef";
 const StructuredView = lazy(() => import("./acp/StructuredView").then((m) => ({ default: m.StructuredView })));
 
 interface Props {
+  cityhall: boolean;
   view: RightPanelView;
   pluginPanes: PluginPane[];
   onBackToAgent: () => void;
@@ -58,6 +60,7 @@ function layerClass(active: boolean): string {
 /** Keep terminal geometry and scrollback across switches; only the visible
  *  surface owns keyboard input. */
 export function MobileMainPane({
+  cityhall,
   view,
   pluginPanes,
   onBackToAgent,
@@ -117,6 +120,7 @@ export function MobileMainPane({
       )}
       <div className="relative flex-1 flex flex-col min-h-0 overflow-hidden">
         <div className={layerClass(view === "agent")} inert={view !== "agent"}>
+          {!cityhall && view === "agent" && activeSession && <SessionInfo session={activeSession} />}
           {activeSession?.view === "structured" ? (
             <Suspense fallback={null}>
               <StructuredView
