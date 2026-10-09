@@ -113,14 +113,17 @@ test.describe("sidebar repo groups (#1220)", () => {
     const alphaHeader = page.locator(HEADER, { has: page.getByText("repo-alpha") });
     const betaHeader = page.locator(HEADER, { has: page.getByText("repo-beta") });
     const expandBtn = alphaHeader.locator("button[aria-expanded]");
+    const alphaRow = page.locator(ROW).filter({ hasText: "alpha-session" });
 
     // Expanded, the open session's row carries the frame instead of the header.
     await expect(expandBtn).toHaveAttribute("aria-expanded", "true");
+    await expect(alphaRow).toBeVisible();
     expect(await alphaHeader.getAttribute("class")).not.toContain("border-session-active");
 
     // Collapsed, the header uses the projected token; border-brand-600 fails contrast on catppuccin-latte.
     await expandBtn.click();
-    await expect(page.getByText("alpha-session")).toBeHidden();
+    await expect(alphaRow).toBeHidden();
+    await expect(page.getByTestId("session-info").getByText("alpha-session")).toBeVisible();
     expect(await alphaHeader.getAttribute("class")).toContain("border-session-active");
     expect(await betaHeader.getAttribute("class")).not.toContain("border-session-active");
     // toHaveCSS polls past the color transition.

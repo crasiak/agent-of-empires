@@ -38,7 +38,7 @@ test.describe("compact mode (#2288)", () => {
     await expect(page.locator(COUNT)).toHaveCount(0);
     await expect(page.getByRole("button", { name: "New session in repo-alpha" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Expand sidebar" })).toBeVisible();
-    await page.getByText("alpha-session").click();
+    await panel.getByText("alpha-session").click();
     // Wide uppercase footer labels used to spill past the rail.
     await expect.poll(() => panel.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
     await expect(page.getByTestId("sidebar-projects-toggle")).toBeVisible();
@@ -59,15 +59,16 @@ test.describe("compact mode (#2288)", () => {
     const filterInput = page.getByTestId("sidebar-filter-input");
     // "beta" matches a title only; "alpha" would also match the project name.
     await filterInput.fill("beta");
-    await expect(page.getByText("alpha-session")).toHaveCount(0);
-    await expect(page.getByText("beta-session")).toBeVisible();
+    await expect(panel.getByText("alpha-session")).toHaveCount(0);
+    await expect(panel.getByText("beta-session")).toBeVisible();
+    await expect(page.getByTestId("session-info").getByText("alpha-session")).toBeVisible();
     await page.getByRole("button", { name: "Compact sidebar" }).click();
     await expect(filterInput).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Filter sessions" })).toHaveCount(0);
-    await expect(page.getByText("alpha-session")).toBeVisible();
+    await expect(panel.getByText("alpha-session")).toBeVisible();
     await page.getByRole("button", { name: "Expand sidebar" }).click();
     await expect(filterInput).toHaveValue("beta");
-    await expect(page.getByText("alpha-session")).toHaveCount(0);
+    await expect(panel.getByText("alpha-session")).toHaveCount(0);
   });
 });
 
