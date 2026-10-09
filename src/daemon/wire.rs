@@ -212,14 +212,12 @@ pub struct SessionResponse {
     pub acp_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acp_agent: Option<String>,
-    /// Launch identity the pane's launcher reported through
-    /// `aoe session report-launch` (agent, account, launcher, launch
-    /// profile). Runtime metadata scoped to the live tmux pane: omitted for
-    /// structured, archived, stopped or dead sessions and for panes whose
-    /// launcher never reported. The web sidebar's `agent` row tag renders it
-    /// as `[cc:p:lh]`, mirroring the TUI.
+    /// Launcher-reported identity, scoped to the live tmux pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_identity: Option<crate::session::launch_identity::LaunchIdentity>,
+    /// LLM backend the session is pinned to; absent means the host decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_provider: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub acp_can_fork: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
