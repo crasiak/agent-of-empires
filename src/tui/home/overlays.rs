@@ -20,6 +20,10 @@ impl HomeView {
         use crate::session::config::repo_config::HookProgress;
 
         let mut changed = self.afk_dialog.as_mut().is_some_and(|dialog| dialog.tick());
+        changed |= self
+            .afk_overview_dialog
+            .as_mut()
+            .is_some_and(|dialog| dialog.tick());
         if let Some(dialog) = &mut self.new_dialog {
             changed |= dialog.tick();
             if dialog.is_loading() {
@@ -102,6 +106,7 @@ impl HomeView {
             || self.changelog_dialog.is_some()
             || self.info_dialog.is_some()
             || self.afk_dialog.is_some()
+            || self.afk_overview_dialog.is_some()
             || self.snooze_duration_dialog.is_some()
             || self.profile_picker_dialog.is_some()
             || self.project_session_picker_dialog.is_some()

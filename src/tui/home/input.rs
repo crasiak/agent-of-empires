@@ -1152,7 +1152,7 @@ impl HomeView {
     }
 
     pub fn handle_dialog_click(&mut self, col: u16, row: u16) -> bool {
-        if self.afk_dialog.is_some() {
+        if self.afk_dialog.is_some() || self.afk_overview_dialog.is_some() {
             return true;
         }
         if let Some(dialog) = &mut self.intro_dialog {
@@ -1934,6 +1934,13 @@ impl HomeView {
                     self.tips_dialog = None;
                     self.persist_tips_outcome(outcome);
                 }
+            }
+            return None;
+        }
+
+        if let Some(dialog) = &mut self.afk_overview_dialog {
+            if matches!(dialog.handle_key(key), DialogResult::Cancel) {
+                self.afk_overview_dialog = None;
             }
             return None;
         }
@@ -3705,6 +3712,15 @@ impl HomeView {
             });
         }
 
+        entries.push(PaletteCommand {
+            id: "afk-overview",
+            title: "AFK global overview (read-only)".into(),
+            group: PaletteGroup::Actions,
+            keywords: vec!["away", "afk", "fleet", "profiles"],
+            hotkey: String::new(),
+            payload: PaletteAction::AfkOverview,
+        });
+
         // Quit lives in the registry but is excluded from `builtin_commands` (no palette
         // metadata) so it can sit in the Settings group at the end; add it here, still
         // routed through the shared action dispatch.
@@ -3840,6 +3856,11 @@ impl HomeView {
                 self.search_match_index = 0;
                 self.search_query = Input::default();
                 self.run_action(id, update_info)
+            }
+            PaletteAction::AfkOverview => {
+                self.afk_overview_dialog =
+                    Some(super::super::dialogs::afk_overview::AfkOverviewDialog::new());
+                None
             }
             PaletteAction::AfkControl => {
                 if let Some(instance) = self

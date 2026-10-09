@@ -21,6 +21,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe killall`↴](#aoe-killall)
 * [`aoe session`↴](#aoe-session)
 * [`aoe session afk`↴](#aoe-session-afk)
+* [`aoe session afk overview`↴](#aoe-session-afk-overview)
 * [`aoe session afk on`↴](#aoe-session-afk-on)
 * [`aoe session afk delegate`↴](#aoe-session-afk-delegate)
 * [`aoe session afk audit`↴](#aoe-session-afk-audit)
@@ -494,11 +495,24 @@ Inspect AFK presence or explicitly delegate one bounded file cycle for Pi
 
 ###### **Subcommands:**
 
+* `overview` — Read stored AFK summaries across all profiles, without probing or enabling sessions
 * `on` — Request control-only AFK. Does not authorize autonomous work
 * `delegate` — One-file delegation during active work; nudges and question deferral require qualified native support
 * `audit` — Export private-ledger audit JSON without payloads or preimages
 * `off` — Record AFK off even if the integration is unavailable
 * `status` — Probe the current integration; does not enable or renew AFK
+
+
+
+## `aoe session afk overview`
+
+Read stored AFK summaries across all profiles, without probing or enabling sessions
+
+**Usage:** `aoe session afk overview [OPTIONS]`
+
+###### **Options:**
+
+* `--active-only` — Hide archived and trashed sessions (shown by default)
 
 
 

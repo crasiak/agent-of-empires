@@ -56,6 +56,19 @@ fn take_launch_report(command: &mut Option<Commands>) -> Option<cli::session::Se
     None
 }
 
+fn take_afk_overview(command: &mut Option<Commands>) -> Option<cli::afk::AfkArgs> {
+    if matches!(command.as_ref(), Some(Commands::Session { command: cli::session::SessionCommands::Afk(args) }) if args.is_overview())
+    {
+        if let Some(Commands::Session {
+            command: cli::session::SessionCommands::Afk(args),
+        }) = command.take()
+        {
+            return Some(args);
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     {
@@ -116,6 +129,11 @@ async fn main() -> Result<()> {
     // They must not migrate stores, flush telemetry, or initialize app state.
     if let Some(command) = take_launch_report(&mut cli.command) {
         return cli::session::run("", command).await;
+    }
+
+    // Fleet inspection must not migrate, initialize logging, or send telemetry.
+    if let Some(args) = take_afk_overview(&mut cli.command) {
+        return cli::afk::run("", args).await;
     }
 
     if let Some(err) = serve_unavailable_error(&cli) {
@@ -445,5 +463,26 @@ mod launch_report_startup_tests {
         assert!(take_launch_report(&mut normal.command).is_none());
         assert!(normal.command.is_some());
         assert!(Cli::try_parse_from(["aoe", "session", "report-ledger-launch"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod afk_overview_startup_tests {
+    use super::*;
+    #[test]
+    fn only_global_read_only_overview_bypasses_startup_writes() {
+        for args in [
+            vec!["aoe", "session", "afk", "overview"],
+            vec!["aoe", "session", "afk", "overview", "--active-only"],
+        ] {
+            let mut cli = Cli::try_parse_from(args).unwrap();
+            assert!(take_afk_overview(&mut cli.command).is_some());
+            assert!(cli.command.is_none());
+        }
+        for command in ["status", "off"] {
+            let mut cli = Cli::try_parse_from(["aoe", "session", "afk", command, "s"]).unwrap();
+            assert!(take_afk_overview(&mut cli.command).is_none());
+            assert!(cli.command.is_some());
+        }
     }
 }

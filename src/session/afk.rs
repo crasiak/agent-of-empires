@@ -2,6 +2,7 @@
 
 mod bridge;
 pub mod delegation;
+pub mod overview;
 mod store;
 #[cfg(test)]
 mod tests;

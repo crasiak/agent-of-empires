@@ -41,6 +41,29 @@ impl Store {
             super::delegation::SESSION_BYTES,
         )
     }
+    pub(super) fn existing(app_dir: &Path, id: &str, runtime: bool) -> Result<Option<Self>> {
+        super::super::validate_instance_id(id)?;
+        let app = AnchoredDir::open(app_dir)?;
+        let namespace = if runtime { "afk-runtime-v4" } else { "afk" };
+        if app.entry_stat(Path::new(namespace))?.is_none() {
+            return Ok(None);
+        }
+        let root = app.child(Path::new(namespace))?;
+        private_dir(&root)?;
+        if root.entry_stat(Path::new(id))?.is_none() {
+            return Ok(None);
+        }
+        let dir = root.child(Path::new(id))?;
+        private_dir(&dir)?;
+        Ok(Some(Self {
+            dir,
+            limit: if runtime {
+                super::delegation::SESSION_BYTES
+            } else {
+                MAX_BYTES
+            },
+        }))
+    }
     fn open_namespace(
         app_dir: &Path,
         id: &str,
@@ -88,6 +111,23 @@ impl Store {
             .open_regular(Path::new(leaf), self.limit)?
             .context("AFK file changed while opening")?;
         read_snapshot_bounded(file, leaf, self.limit).map(Some)
+    }
+    pub(super) fn read_budgeted<T: serde::de::DeserializeOwned>(
+        &self,
+        leaf: &str,
+        remaining: &mut usize,
+    ) -> Result<Option<T>> {
+        if !self.check_leaf(leaf)? {
+            return Ok(None);
+        }
+        let file = self
+            .dir
+            .open_regular(Path::new(leaf), self.limit)?
+            .context("AFK file changed while opening")?;
+        let size = usize::try_from(file.metadata()?.len())?;
+        ensure!(size <= *remaining, "overview read capacity exceeded");
+        *remaining -= size;
+        read_snapshot_bounded(file, leaf, size).map(Some)
     }
     pub(super) fn write(&self, leaf: &str, value: &impl Serialize) -> Result<()> {
         self.check_leaf(leaf)?;

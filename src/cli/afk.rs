@@ -11,8 +11,20 @@ pub struct AfkArgs {
     command: AfkCommand,
 }
 
+impl AfkArgs {
+    pub fn is_overview(&self) -> bool {
+        matches!(self.command, AfkCommand::Overview { .. })
+    }
+}
+
 #[derive(Subcommand)]
 enum AfkCommand {
+    /// Read stored AFK summaries across all profiles, without probing or enabling sessions
+    Overview {
+        /// Hide archived and trashed sessions (shown by default)
+        #[arg(long)]
+        active_only: bool,
+    },
     /// Request control-only AFK. Does not authorize autonomous work
     On {
         /// Session ID or title
@@ -39,6 +51,34 @@ enum AfkCommand {
 }
 
 pub async fn run(profile: &str, args: AfkArgs) -> Result<()> {
+    if let AfkCommand::Overview { active_only } = &args.command {
+        let mut overview =
+            tokio::task::spawn_blocking(crate::session::afk::overview::snapshot).await??;
+        let complete = overview.complete();
+        let mut filtered_sessions = 0;
+        if *active_only {
+            for profile in &mut overview.profiles {
+                let before = profile.sessions.len();
+                profile
+                    .sessions
+                    .retain(|row| (!row.archived && !row.trashed) || !row.errors.is_empty());
+                filtered_sessions += before - profile.sessions.len();
+            }
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "complete": complete,
+                "filtered_sessions": filtered_sessions,
+                "overview": overview,
+            }))?
+        );
+        anyhow::ensure!(
+            complete,
+            "AFK overview is incomplete; inspect profile and session errors"
+        );
+        return Ok(());
+    }
     if let AfkCommand::Delegate { session, .. } | AfkCommand::Audit { session } = &args.command {
         let storage = Storage::open_unwatched(profile)?;
         let (mut rows, _) = storage.load_with_groups()?;

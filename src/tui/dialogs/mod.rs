@@ -8,6 +8,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear};
 use crate::tui::styles::Theme;
 
 pub mod afk;
+pub mod afk_overview;
 pub mod attach_project;
 mod changelog;
 mod cheats;

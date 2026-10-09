@@ -6,6 +6,46 @@ qualified stock Pi 0.87.1 SDK. Neither mode starts an idle agent turn. Executabl
 delegation requires ordinary work already in flight; control-only presence
 remains available while idle.
 
+## Global read-only overview
+
+```sh
+aoe session afk overview
+aoe session afk overview --active-only
+```
+
+The overview reads stored host summaries across **all profiles and sessions**,
+including unsupported, stopped and archived workstreams. It does not probe
+runtimes, read transcripts, enable AFK, or run startup migrations. The TUI
+command palette's **AFK global overview (read-only)** opens the same reader:
+Up/Down selects a row, `a` toggles archived/trashed rows, `r` rereads storage,
+and Escape closes it. No session selection is required.
+
+Requested presence, host delegation confirmation, reservation counts, expiry,
+unresolved question guards and stored acknowledgements are separate fields.
+Stored activity is not a live process check. Acknowledgement freshness is
+**unknown**; rereading does not make an acknowledgement fresh. Use the targeted
+`status SESSION` command for a runtime probe. The overview discards decision
+bodies, grant task text and file payloads from its output; it is not a full
+ledger validation or a substitute for `audit` and ordinary question recovery.
+Question review remains flagged even after a controlled return is observed or
+its guard is recovered: AFK does not record the human's answer. Guard recovery
+clears quarantine, not the underlying question.
+
+Unreadable profiles and invalid session/AFK snapshots are reported explicitly.
+CLI output has `complete: false` and exits nonzero for an incomplete scan.
+`--active-only` hides archived/trashed rows without errors and reports the
+filtered count; error rows remain visible. Reads are bounded to 256 directory
+entries (including non-profile files), 128 profiles, 4096 session rows,
+8 MiB per profile file, existing AFK file limits and 64 MiB total input. Capacity failures are errors, not silent truncation.
+
+The overview says **No shared budget**: batch controls and persistent bulk
+exclusions are not implemented in this increment. Existing windows remain
+individual, outside any shared allowance. Off must not be mistaken for a
+persistent bulk opt-out in this storage version. Billing/account attribution
+is unknown; SDK reservations do not prove provider delivery or cost. Global
+visibility does not turn sessions into tenants or impose a profile-wide budget.
+Profile-scoped batches and optional shared limits remain future work.
+
 ## Control-only presence
 
 A session must have been launched by this AoE build as a direct host `pi`
