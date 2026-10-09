@@ -42,7 +42,7 @@ enum AfkCommand {
         #[arg(long)]
         grant: std::path::PathBuf,
     },
-    /// Export private-ledger audit JSON without payloads or preimages
+    /// Export scoped profile-authority audit and legacy evidence references, without payloads or preimages
     Audit { session: String },
     /// Record AFK off even if the integration is unavailable
     Off { session: String },

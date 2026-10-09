@@ -3,6 +3,7 @@
 
 mod config_file;
 pub mod progress;
+mod runner_lock;
 mod sessions_file;
 mod store_fs;
 #[cfg(test)]
@@ -46,6 +47,7 @@ mod v036_afk_control;
 mod v037_afk_runtime;
 mod v038_afk_settlement;
 mod v039_afk_questions;
+mod v040_afk_authority;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -91,7 +93,7 @@ use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 39;
+const CURRENT_VERSION: u32 = 40;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -225,6 +227,7 @@ const MIGRATIONS: &[Migration] = &[
     (37, "afk_runtime", v037_afk_runtime::run),
     (38, "afk_settlement", v038_afk_settlement::run),
     (39, "afk_questions", v039_afk_questions::run),
+    (40, "afk_authority", v040_afk_authority::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -300,6 +303,7 @@ pub fn run_migrations_announced(reporter: Option<progress::Reporter>) -> Result<
 fn run_migrations_inner(reporter: Option<progress::Reporter>, announce: bool) -> Result<()> {
     let _installed = progress::install(reporter);
     let _announced = progress::install_announced(announce);
+    let _runner_lock = runner_lock::acquire(std::time::Duration::from_secs(30))?;
     let current = get_current_version();
     debug!("Current schema version: {}", current);
 
@@ -365,6 +369,42 @@ fn set_version(version: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn concurrent_new_runners_reread_schema_after_the_stable_lock() {
+        use std::time::Duration;
+        let _home = crate::session::test_support::isolate_app_dir();
+        let app = crate::session::get_app_dir().unwrap();
+        fs::write(app.join(VERSION_FILE), "35").unwrap();
+        let held = runner_lock::acquire(Duration::ZERO).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let peers: Vec<_> = (0..2)
+            .map(|_| {
+                let sent = sent.clone();
+                std::thread::spawn(move || {
+                    assert_eq!(get_current_version(), 35);
+                    assert!(runner_lock::acquire(Duration::ZERO).is_err());
+                    sent.send(()).unwrap();
+                    run_migrations().unwrap();
+                })
+            })
+            .collect();
+        received.recv_timeout(Duration::from_secs(3)).unwrap();
+        received.recv_timeout(Duration::from_secs(3)).unwrap();
+        drop(held);
+        for peer in peers {
+            peer.join().unwrap();
+        }
+        assert_eq!(get_current_version(), 40);
+        crate::session::afk::authority::migration::run_at(&app).unwrap();
+        assert!(app
+            .join("afk-authority-v1/migration/manifest.json")
+            .is_file());
+        fs::remove_file(app.join(".migration-runner.lock")).unwrap();
+        std::os::unix::fs::symlink("/missing", app.join(".migration-runner.lock")).unwrap();
+        assert!(run_migrations().is_err());
+    }
 
     #[test]
     fn test_migrations_are_sequential() {

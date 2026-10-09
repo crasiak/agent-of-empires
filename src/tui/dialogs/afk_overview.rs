@@ -88,6 +88,10 @@ impl AfkOverviewDialog {
             return vec![];
         };
         let mut rows = Vec::new();
+        for historical in &snapshot.historical_authority {
+            rows.push((format!("[{}] HISTORICAL AUTHORITY {}", historical.profile, historical.instance_id),
+                format!("{}; {} evidence references; {} retained windows. Inspect CLI overview JSON for redacted identities and guards.", historical.observation, historical.evidence.len(), historical.windows.len())));
+        }
         for profile in &snapshot.profiles {
             for error in &profile.errors {
                 rows.push((
@@ -270,10 +274,13 @@ mod tests {
             presence_expires_at_ms: None,
             presence_acknowledgement: "unobserved".into(),
             delegation: None,
+            legacy_evidence: vec![],
             errors: vec![],
         };
         calls.lock().unwrap()[0]
             .send(Ok(Overview {
+                migration_evidence: vec![],
+                historical_authority: vec![],
                 captured_at_ms: 1000,
                 profiles: vec![
                     ProfileOverview {

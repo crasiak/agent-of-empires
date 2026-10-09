@@ -9,7 +9,7 @@ use std::path::{Component, Path};
 
 pub(crate) const SESSION_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const FRAME_BYTES: usize = 256 * 1024;
-const WINDOW_BYTES: usize = 1024 * 1024;
+pub(super) const WINDOW_BYTES: usize = 1024 * 1024;
 const RECORD_BYTES: usize = 8 * 1024;
 const FILE_BYTES: usize = 64 * 1024;
 const READ_LIMIT: u8 = 16;
@@ -147,9 +147,9 @@ struct Window {
     terminal_reason: Option<TerminalReason>,
     question: Option<Question>,
 }
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Book {
+pub(super) struct Book {
     version: u32,
     windows: Vec<Window>,
 }
@@ -286,11 +286,56 @@ impl Grant {
     }
 }
 impl Book {
-    fn load(store: &Store) -> Result<Self> {
-        let book = store.read::<Self>("ledger.json")?.unwrap_or(Self {
+    pub(super) fn empty() -> Self {
+        Self {
             version: PROTOCOL,
             windows: vec![],
-        });
+        }
+    }
+    pub(super) fn validate_scope(&self, profile: &str, id: &str) -> Result<()> {
+        self.validate()?;
+        ensure!(
+            self.windows
+                .iter()
+                .all(|w| w.binding.profile == profile && w.binding.instance_id == id),
+            "ledger scope mismatch"
+        );
+        Ok(())
+    }
+    pub(super) fn end_all(&mut self) {
+        for w in &mut self.windows {
+            w.end(TerminalReason::Interrupted);
+            w.confirmed = false;
+        }
+    }
+    pub(super) fn import(
+        bytes: &[u8],
+        id: &str,
+    ) -> Result<std::collections::BTreeMap<String, Self>> {
+        let book: Self = serde_json::from_slice(bytes)?;
+        book.validate()?;
+        let mut profiles = std::collections::BTreeMap::new();
+        for w in book.windows {
+            super::authority::scope(&w.binding.profile, Some(id))?;
+            ensure!(
+                w.binding.instance_id == id,
+                "legacy window belongs to another instance"
+            );
+            profiles
+                .entry(w.binding.profile.clone())
+                .or_insert_with(Self::empty)
+                .windows
+                .push(w);
+        }
+        for book in profiles.values_mut() {
+            book.end_all();
+        }
+        Ok(profiles)
+    }
+    fn load(store: &Store) -> Result<Self> {
+        let book = store
+            .read::<Self>("ledger.json")?
+            .context("missing session ledger")?;
         book.validate()?;
         Ok(book)
     }
@@ -594,6 +639,16 @@ pub(super) enum Request {
         decision: String,
     },
 }
+pub(super) fn poll(store: &Store, binding: &Binding, generation: &str, now: i64) -> Result<Value> {
+    let _lock = store.lock(TIMEOUT)?;
+    let mut session = store.session()?;
+    if session.book.reconcile(binding, generation, now) {
+        store.publish_session(session.clone())?;
+    }
+    Ok(json!({"policy":session.policy,
+        "delegation":session.book.windows.last().map_or(Value::Null, |w| w.view(now)),
+        "question_guards":questions::guards_in(&session.book, binding)}))
+}
 pub(super) fn snapshot(store: &Store) -> Result<Value> {
     let book = Book::load(store)?;
     Ok(book
@@ -601,6 +656,7 @@ pub(super) fn snapshot(store: &Store) -> Result<Value> {
         .last()
         .map_or(Value::Null, |w| w.view(now_ms())))
 }
+#[cfg(test)]
 pub(super) fn stop(store: &Store) -> Result<()> {
     let _lock = store.lock(TIMEOUT)?;
     let mut book = Book::load(store)?;
@@ -1063,8 +1119,9 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
     let binding = Binding::for_instance(instance)?;
     current_instance(&binding)?;
     let app_dir = super::super::get_app_dir()?;
-    let control = Store::open(&app_dir, &instance.id, true)?;
-    let runtime = Store::runtime(&app_dir, &instance.id, true)?;
+    let runtime = Store::authority(&app_dir, &binding.profile, &instance.id, true)?;
+    let epoch = runtime.session()?.epoch;
+    let control = Store::transport(&app_dir, &binding.profile, &instance.id, true)?;
     let _control_lock = control.lock(TIMEOUT)?;
     let ack = exchange_runtime(&control, &binding, None)?;
     let root = std::fs::canonicalize(&instance.project_path)?;
@@ -1121,9 +1178,15 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
     for target in &w.grant.files {
         w.file(&target.path)?;
     }
-    {
+    let epoch = {
         let _lock = runtime.lock(TIMEOUT)?;
-        let mut book = Book::load(&runtime)?;
+        current_instance(&w.binding)?;
+        let mut session = runtime.session()?;
+        ensure!(
+            session.epoch == epoch,
+            "control changed during capability acknowledgement"
+        );
+        let mut book = session.book.clone();
         ensure!(
             !book.windows.iter().any(
                 |old| old.binding.native_id == w.binding.native_id && old.unresolved_question()
@@ -1139,35 +1202,73 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
         }
         book.prune(issued_at_ms);
         book.windows.push(w.clone());
-        book.save(&runtime)?;
-    }
+        session.epoch = session
+            .epoch
+            .checked_add(1)
+            .context("control epoch overflow")?;
+        session.book = book;
+        let epoch = session.epoch;
+        runtime.publish_session(session)?;
+        epoch
+    };
     // Capability acknowledgement does not take the ledger lock.
-    if let Err(error) = exchange_runtime(&control, &w.binding, Some(&w)) {
-        stop(&runtime)?;
+    if let Err(error) = exchange_runtime(&control, &w.binding, Some(&w)).and_then(|ack| {
+        ensure!(
+            ack.generation == w.generation,
+            "runtime generation changed during acknowledgement"
+        );
+        Ok(())
+    }) {
+        end_attempt(&runtime, &w.id, epoch)?;
         return Err(error);
     }
-    {
+    let confirmation = (|| -> Result<()> {
         let _lock = runtime.lock(TIMEOUT)?;
         current_instance(&w.binding)?;
-        let mut book = Book::load(&runtime)?;
-        let latest = book.windows.last_mut().context("window disappeared")?;
-        ensure!(
-            latest.id == w.id && latest.state == "pending",
-            "window ended or changed before confirmation; start ordinary work, then request a fresh delegation"
-        );
-        latest.confirmed = true;
-        book.save(&runtime)?;
+        confirm_attempt(&runtime, &w, epoch)
+    })();
+    if let Err(error) = confirmation {
+        end_attempt(&runtime, &w.id, epoch)?;
+        return Err(error);
     }
     snapshot(&runtime)
 }
+fn end_attempt(store: &Store, window: &str, epoch: u64) -> Result<()> {
+    let _lock = store.lock(TIMEOUT)?;
+    let mut session = store.session()?;
+    if session.epoch == epoch {
+        if let Some(w) = session.book.windows.last_mut().filter(|w| w.id == window) {
+            w.end(TerminalReason::Interrupted);
+            store.publish_session(session)?;
+        }
+    }
+    Ok(())
+}
+fn confirm_attempt(store: &Store, w: &Window, epoch: u64) -> Result<()> {
+    let mut session = store.session()?;
+    let latest = session
+        .book
+        .windows
+        .last_mut()
+        .context("window disappeared")?;
+    ensure!(session.epoch == epoch && latest.id == w.id && latest.binding == w.binding && latest.generation == w.generation && latest.state == "pending" && now_ms() < latest.expires_at_ms,
+        "window ended or changed before confirmation; start ordinary work, then request a fresh delegation");
+    latest.confirmed = true;
+    store.publish_session(session)
+}
 pub fn audit(instance: &Instance) -> Result<Value> {
-    let store = Store::runtime(&super::super::get_app_dir()?, &instance.id, true)?;
+    let store = Store::authority(
+        &super::super::get_app_dir()?,
+        &instance.effective_profile(),
+        &instance.id,
+        true,
+    )?;
     let _lock = store.lock(TIMEOUT)?;
     let mut book = Book::load(&store)?;
     book.prune(now_ms());
     book.save(&store)?;
     let views: Vec<_> = book.windows.iter().map(|w| w.view(now_ms())).collect();
-    let output = json!({"windows":views});
+    let output = json!({"windows":views,"legacy_evidence":store.session()?.evidence});
     bounded(&output, SESSION_BYTES)?;
     Ok(output)
 }
@@ -1182,7 +1283,12 @@ pub(super) fn inspect(instance: &Instance, store: &Store) -> Result<Value> {
         let binding = Binding::for_instance(instance)?;
         current_instance(&binding)?;
         ensure!(binding == w.binding, "different current binding");
-        let control = Store::open(&super::super::get_app_dir()?, &instance.id, false)?;
+        let control = Store::transport(
+            &super::super::get_app_dir()?,
+            &instance.effective_profile(),
+            &instance.id,
+            false,
+        )?;
         let _lock = control.lock(TIMEOUT)?;
         exchange_runtime(&control, &binding, Some(w))
     })();

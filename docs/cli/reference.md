@@ -498,7 +498,7 @@ Inspect AFK presence or explicitly delegate one bounded file cycle for Pi
 * `overview` — Read stored AFK summaries across all profiles, without probing or enabling sessions
 * `on` — Request control-only AFK. Does not authorize autonomous work
 * `delegate` — One-file delegation during active work; nudges and question deferral require qualified native support
-* `audit` — Export private-ledger audit JSON without payloads or preimages
+* `audit` — Export scoped profile-authority audit and legacy evidence references, without payloads or preimages
 * `off` — Record AFK off even if the integration is unavailable
 * `status` — Probe the current integration; does not enable or renew AFK
 
@@ -551,7 +551,7 @@ One-file delegation during active work; nudges and question deferral require qua
 
 ## `aoe session afk audit`
 
-Export private-ledger audit JSON without payloads or preimages
+Export scoped profile-authority audit and legacy evidence references, without payloads or preimages
 
 **Usage:** `aoe session afk audit <SESSION>`
 

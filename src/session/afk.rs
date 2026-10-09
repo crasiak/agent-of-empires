@@ -1,5 +1,6 @@
 //! Control-only presence and a separately granted, bounded delegation runtime.
 
+pub(crate) mod authority;
 mod bridge;
 pub mod delegation;
 pub mod overview;
@@ -90,9 +91,10 @@ pub(crate) fn launch_arguments(
         native_id: native_id.to_owned(),
         launch_id: launch_id.to_owned(),
     };
-    Store::open(&app_dir, &instance.id, true)?;
+    Store::authority(&app_dir, &binding.profile, &instance.id, true)?;
+    Store::transport(&app_dir, &binding.profile, &instance.id, true)?;
     let asset = PathBuf::from("agent-extensions/aoe-afk-runtime.mjs");
-    Store::runtime(&app_dir, &instance.id, true)?;
+
     for (name, bytes) in [
         (
             "aoe-afk.mjs",
@@ -283,7 +285,12 @@ fn report(
 pub fn control(instance: &Instance, operation: Operation) -> Result<Report> {
     let mut report = control_presence(instance, operation)?;
     if matches!(operation, Operation::Status) {
-        let store = Store::runtime(&super::get_app_dir()?, &instance.id, true)?;
+        let store = Store::authority(
+            &super::get_app_dir()?,
+            &instance.effective_profile(),
+            &instance.id,
+            true,
+        )?;
         let view = delegation::inspect(instance, &store)?;
         if !view.is_null() {
             report.state = match view["state"].as_str() {
@@ -312,51 +319,43 @@ fn control_presence(instance: &Instance, operation: Operation) -> Result<Report>
         );
     }
     let app_dir = super::get_app_dir()?;
-    let store = Store::open(&app_dir, &instance.id, true)?;
-    let _lock = store.lock(TIMEOUT)?;
-    if !matches!(operation, Operation::Status) {
-        delegation::stop(&Store::runtime(&app_dir, &instance.id, true)?)?;
-    }
-    let mut policy = store
-        .read::<Policy>("policy.json")
-        .context("AFK policy needs explicit repair; refusing to invent a revision")?;
-    if let Some(p) = &policy {
-        p.validate()
-            .context("AFK policy needs explicit repair; refusing to invent a revision")?;
-        ensure!(
-            matches!(operation, Operation::Off)
-                || (p.binding.instance_id == instance.id
-                    && p.binding.profile == instance.effective_profile()),
-            "policy belongs to a different session/profile; request Off before re-enabling"
-        );
-    }
+    let authority = Store::authority(&app_dir, &instance.effective_profile(), &instance.id, true)?;
     let binding = Binding::for_instance(instance).and_then(|binding| {
         current_instance(&binding)?;
         Ok(binding)
     });
-    if matches!(operation, Operation::Off) {
-        let binding = binding.as_ref().cloned().unwrap_or_else(|_| Binding {
-            instance_id: instance.id.clone(),
-            profile: instance.effective_profile(),
-            native_id: String::new(),
-            launch_id: String::new(),
-        });
-        let revision = next_revision(policy.as_ref())?;
-        policy = Some(Policy {
-            version: VERSION,
-            binding,
-            revision,
-            window: uuid::Uuid::new_v4().to_string(),
-            generation: String::new(),
-            enabled: false,
-            expires_at_ms: None,
-            issued_at_ms: now_ms(),
-            duration_ms: 0,
-            mode: MODE.into(),
-            allowance: 0,
-        });
-        store.write("policy.json", policy.as_ref().unwrap())?;
-    }
+    let (mut policy, epoch) = {
+        let _lock = authority.lock(TIMEOUT)?;
+        let mut session = authority
+            .session()
+            .context("AFK policy needs explicit repair; refusing to invent a revision")?;
+        if !matches!(operation, Operation::Status) {
+            session.revoke()?;
+            if matches!(operation, Operation::Off) {
+                let binding = binding.as_ref().cloned().unwrap_or_else(|_| Binding {
+                    instance_id: instance.id.clone(),
+                    profile: instance.effective_profile(),
+                    native_id: String::new(),
+                    launch_id: String::new(),
+                });
+                session.policy = Some(Policy {
+                    version: VERSION,
+                    binding,
+                    revision: next_revision(session.policy.as_ref())?,
+                    window: uuid::Uuid::new_v4().to_string(),
+                    generation: String::new(),
+                    enabled: false,
+                    expires_at_ms: None,
+                    issued_at_ms: now_ms(),
+                    duration_ms: 0,
+                    mode: MODE.into(),
+                    allowance: 0,
+                });
+            }
+            authority.publish_session(session.clone())?;
+        }
+        (session.policy, session.epoch)
+    };
     let binding = match binding {
         Ok(binding) => binding,
         Err(error) => {
@@ -371,6 +370,23 @@ fn control_presence(instance: &Instance, operation: Operation) -> Result<Report>
                 format!("{error}; no acknowledgement"),
             ))
         }
+    };
+    let transport = (|| -> Result<(Store, std::fs::File)> {
+        let store = Store::transport(&app_dir, &binding.profile, &instance.id, true)?;
+        let lock = store.lock(TIMEOUT)?;
+        Ok((store, lock))
+    })();
+    let (store, _transport_lock) = match transport {
+        Ok(pair) => pair,
+        Err(error) if matches!(operation, Operation::Off) => {
+            return Ok(report(
+                policy.as_ref(),
+                State::Requested,
+                false,
+                format!("Off recorded; acknowledgement unavailable: {error}"),
+            ))
+        }
+        Err(error) => return Err(error),
     };
     let first = match exchange(&store, &binding, policy.as_ref()) {
         Ok(ack) => ack,
@@ -417,8 +433,25 @@ fn control_presence(instance: &Instance, operation: Operation) -> Result<Report>
             mode: MODE.into(),
             allowance: 0,
         });
-        store.write("policy.json", policy.as_ref().unwrap())?;
-        return exchange_report(&store, &binding, policy.as_ref());
+        {
+            let _lock = authority.lock(TIMEOUT)?;
+            current_instance(&binding)?;
+            let mut session = authority.session()?;
+            ensure!(
+                session.epoch == epoch,
+                "control changed during acknowledgement; activation refused"
+            );
+            session.policy = policy.clone();
+            authority.publish_session(session)?;
+        }
+        let result = exchange_report(&store, &binding, policy.as_ref())?;
+        let _lock = authority.lock(TIMEOUT)?;
+        current_instance(&binding)?;
+        ensure!(
+            authority.session()?.epoch == epoch,
+            "control changed during acknowledgement; confirmation refused"
+        );
+        return Ok(result);
     }
     Ok(match first {
         Some(ack) => report(

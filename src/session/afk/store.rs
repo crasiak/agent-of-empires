@@ -13,7 +13,7 @@ pub(crate) fn initialize() -> Result<()> {
     Ok(())
 }
 
-fn private_dir(dir: &AnchoredDir) -> Result<()> {
+pub(super) fn private_dir(dir: &AnchoredDir) -> Result<()> {
     let stat = dir.metadata()?;
     ensure!(
         (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR
@@ -25,67 +25,68 @@ fn private_dir(dir: &AnchoredDir) -> Result<()> {
 }
 
 pub(super) struct Store {
-    dir: AnchoredDir,
-    limit: usize,
+    pub(super) dir: AnchoredDir,
+    pub(super) scope: Option<(String, String)>,
+    pub(super) limit: usize,
 }
 impl Store {
+    #[cfg(test)]
     pub(super) fn open(app_dir: &Path, id: &str, create: bool) -> Result<Self> {
+        super::super::validate_instance_id(id)?;
         Self::open_namespace(app_dir, id, create, "afk", MAX_BYTES)
     }
-    pub(super) fn runtime(app_dir: &Path, id: &str, create: bool) -> Result<Self> {
-        Self::open_namespace(
-            app_dir,
-            id,
-            create,
-            "afk-runtime-v4",
-            super::delegation::SESSION_BYTES,
-        )
-    }
-    pub(super) fn existing(app_dir: &Path, id: &str, runtime: bool) -> Result<Option<Self>> {
-        super::super::validate_instance_id(id)?;
+    pub(super) fn existing_transport(
+        app_dir: &Path,
+        profile: &str,
+        id: &str,
+    ) -> Result<Option<Self>> {
+        authority::scope(profile, Some(id))?;
         let app = AnchoredDir::open(app_dir)?;
-        let namespace = if runtime { "afk-runtime-v4" } else { "afk" };
-        if app.entry_stat(Path::new(namespace))?.is_none() {
-            return Ok(None);
+        let mut dir = app;
+        for component in [authority::NAMESPACE, "profiles", profile, "transport", id] {
+            if dir.entry_stat(Path::new(component))?.is_none() {
+                return Ok(None);
+            }
+            dir = dir.child(Path::new(component))?;
+            private_dir(&dir)?;
         }
-        let root = app.child(Path::new(namespace))?;
-        private_dir(&root)?;
-        if root.entry_stat(Path::new(id))?.is_none() {
-            return Ok(None);
-        }
-        let dir = root.child(Path::new(id))?;
-        private_dir(&dir)?;
         Ok(Some(Self {
             dir,
-            limit: if runtime {
-                super::delegation::SESSION_BYTES
-            } else {
-                MAX_BYTES
-            },
+            limit: MAX_BYTES,
+            scope: None,
         }))
     }
-    fn open_namespace(
+    pub(super) fn open_namespace(
         app_dir: &Path,
         id: &str,
         create: bool,
         namespace: &str,
         limit: usize,
     ) -> Result<Self> {
-        super::super::validate_instance_id(id)?;
         let app = AnchoredDir::open(app_dir)?;
-        let root = if create {
-            app.create_child(Path::new(namespace))?
-        } else {
-            app.child(Path::new(namespace))?
-        };
-        private_dir(&root)?;
+        let mut root = app;
+        for component in Path::new(namespace).components() {
+            let std::path::Component::Normal(name) = component else {
+                anyhow::bail!("invalid AFK namespace");
+            };
+            root = if create {
+                root.create_child(Path::new(name))?
+            } else {
+                root.child(Path::new(name))?
+            };
+            private_dir(&root)?;
+        }
         let dir = if create {
             root.create_child(Path::new(id))?
         } else {
             root.child(Path::new(id))?
         };
         private_dir(&dir)?;
-        Ok(Self { dir, limit })
+        Ok(Self {
+            dir,
+            limit,
+            scope: None,
+        })
     }
     fn check_leaf(&self, leaf: &str) -> Result<bool> {
         let Some(stat) = self.dir.entry_stat(Path::new(leaf))? else {
@@ -103,6 +104,12 @@ impl Store {
         Ok(true)
     }
     pub(super) fn read<T: serde::de::DeserializeOwned>(&self, leaf: &str) -> Result<Option<T>> {
+        if self.scope.is_some() {
+            return self.authority_read(leaf);
+        }
+        self.read_raw(leaf)
+    }
+    pub(super) fn read_raw<T: serde::de::DeserializeOwned>(&self, leaf: &str) -> Result<Option<T>> {
         if !self.check_leaf(leaf)? {
             return Ok(None);
         }
@@ -130,8 +137,16 @@ impl Store {
         read_snapshot_bounded(file, leaf, size).map(Some)
     }
     pub(super) fn write(&self, leaf: &str, value: &impl Serialize) -> Result<()> {
+        if self.scope.is_some() {
+            return self.authority_write(leaf, value);
+        }
+        self.write_raw(leaf, value)
+    }
+    pub(super) fn write_raw(&self, leaf: &str, value: &impl Serialize) -> Result<()> {
+        self.write_bytes(leaf, &serde_json::to_vec(value)?)
+    }
+    pub(super) fn write_bytes(&self, leaf: &str, bytes: &[u8]) -> Result<()> {
         self.check_leaf(leaf)?;
-        let bytes = serde_json::to_vec(value)?;
         ensure!(bytes.len() <= self.limit, "oversized AFK publication");
         self.dir.publish_file(
             Path::new(leaf),
@@ -141,6 +156,27 @@ impl Store {
             None,
         )?;
         Ok(())
+    }
+    pub(super) fn bytes(&self, leaf: &str) -> Result<Option<Vec<u8>>> {
+        if !self.check_leaf(leaf)? {
+            return Ok(None);
+        }
+        let file = self
+            .dir
+            .open_regular(Path::new(leaf), self.limit)?
+            .context("AFK file changed")?;
+        let meta = file.metadata()?;
+        ensure!(
+            meta.uid() == unsafe { libc::geteuid() }
+                && meta.mode() & 0o777 == 0o600
+                && meta.nlink() <= 1,
+            "unsafe AFK original ownership"
+        );
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        file.take((self.limit + 1) as u64).read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= self.limit, "oversized AFK file");
+        Ok(Some(bytes))
     }
     pub(super) fn lock(&self, timeout: Duration) -> Result<File> {
         let file = match self.dir.create_new_regular(Path::new("writer.lock"))? {

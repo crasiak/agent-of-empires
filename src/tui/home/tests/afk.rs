@@ -4,6 +4,9 @@ use super::*;
 #[serial]
 fn afk_palette_opens_visible_modal_and_off_does_not_send_terminal_input() {
     let mut env = create_test_env_with_sessions(1);
+    crate::session::afk::authority::migration::initialize_test(
+        &crate::session::get_app_dir().unwrap(),
+    );
     env.view.handle_key(
         KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
         None,

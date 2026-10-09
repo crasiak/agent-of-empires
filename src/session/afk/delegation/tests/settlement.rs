@@ -274,7 +274,9 @@ fn unresolved_admission_restart_lost_ack_and_conflicts_never_refund_or_replay() 
     assert!(bad.validate().is_err());
     let mut old = serde_json::to_value(Book::load(&store).unwrap()).unwrap();
     old["version"] = json!(2);
-    store.write("ledger.json", &old).unwrap();
+    store
+        .corrupt_authority_for_test("ledger.json", &old)
+        .unwrap();
     assert!(Book::load(&store).is_err());
 }
 

@@ -20,6 +20,8 @@ pub struct Overview {
     pub bulk_exclusions: &'static str,
     pub account_coverage: &'static str,
     pub observation: &'static str,
+    pub migration_evidence: Vec<Value>,
+    pub historical_authority: Vec<HistoricalAuthority>,
 }
 impl Overview {
     pub fn complete(&self) -> bool {
@@ -27,6 +29,15 @@ impl Overview {
             .iter()
             .all(|p| p.errors.is_empty() && p.sessions.iter().all(|s| s.errors.is_empty()))
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct HistoricalAuthority {
+    pub profile: String,
+    pub instance_id: String,
+    pub observation: &'static str,
+    pub evidence: Vec<Value>,
+    pub windows: Vec<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,6 +60,7 @@ pub struct SessionOverview {
     pub presence_expires_at_ms: Option<i64>,
     pub presence_acknowledgement: String,
     pub delegation: Option<DelegationSummary>,
+    pub legacy_evidence: Vec<Value>,
     pub errors: Vec<String>,
 }
 
@@ -88,9 +100,11 @@ fn shown(value: &str) -> String {
     text
 }
 
-fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
+pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
     let mut result = Overview {
         captured_at_ms: now,
+        migration_evidence: vec![],
+        historical_authority: vec![],
         profiles: Vec::new(),
         shared_budget: "No shared budget; batch budget controls are not implemented",
         batch_membership: "Outside batches; only individual windows are implemented",
@@ -107,30 +121,75 @@ fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
         }
     }
     let app = AnchoredDir::open(app_path)?;
-    if app.entry_stat(Path::new("profiles"))?.is_none() {
-        return Ok(result);
+    let mut remaining_bytes = SCAN_BYTES;
+    let metadata = authority::migration::overview_metadata(app_path, &mut remaining_bytes);
+    let readiness = metadata.as_ref().map(|_| ());
+    if let Ok((evidence, _)) = &metadata {
+        result.migration_evidence = evidence
+            .iter()
+            .filter(|e| e.profiles.is_empty())
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<_, _>>()?;
     }
-    let profiles = app.child(Path::new("profiles"))?;
-    let mut names = Vec::new();
-    for (visited, entry) in std::fs::read_dir(profiles.path())?.enumerate() {
-        ensure!(
-            visited < MAX_DIRECTORY_ENTRIES,
-            "overview directory entry capacity exceeded (256); no complete fleet snapshot available"
-        );
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        if kind.is_dir() || kind.is_symlink() {
+    let profiles = if app.entry_stat(Path::new("profiles"))?.is_some() {
+        Some(app.child(Path::new("profiles"))?)
+    } else {
+        None
+    };
+    let mut names = std::collections::BTreeSet::new();
+    let authority_profiles = (|| -> Result<Option<AnchoredDir>> {
+        if app.entry_stat(Path::new(authority::NAMESPACE))?.is_none() {
+            return Ok(None);
+        }
+        let root = app.child(Path::new(authority::NAMESPACE))?;
+        if root.entry_stat(Path::new("profiles"))?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(root.child(Path::new("profiles"))?))
+    })();
+    for directory in [
+        profiles.as_ref(),
+        authority_profiles.as_ref().ok().and_then(Option::as_ref),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for (visited, entry) in std::fs::read_dir(directory.path())?.enumerate() {
             ensure!(
-                names.len() < MAX_PROFILES,
-                "overview profile capacity exceeded (128); no complete fleet snapshot available"
+                visited < MAX_DIRECTORY_ENTRIES,
+                "overview directory entry capacity exceeded (256)"
             );
-            names.push(entry.file_name().into_string().map_err(|_| {
-                anyhow::anyhow!("non-UTF8 profile name; fleet cannot be enumerated")
-            })?);
+            let entry = entry?;
+            if entry.file_type()?.is_dir() || entry.file_type()?.is_symlink() {
+                names.insert(
+                    entry
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| anyhow::anyhow!("non-UTF8 profile name"))?,
+                );
+                ensure!(
+                    names.len() <= MAX_PROFILES,
+                    "overview profile capacity exceeded (128)"
+                );
+            }
         }
     }
-    names.sort();
-    let mut remaining_bytes = SCAN_BYTES;
+    if let Ok((_, profiles)) = &metadata {
+        names.extend(profiles.iter().cloned());
+        ensure!(
+            names.len() <= MAX_PROFILES,
+            "overview profile capacity exceeded (128)"
+        );
+    }
+    if names.is_empty() {
+        authority_profiles.context("authority discovery unavailable; no empty fleet inferred")?;
+        if let Err(error) = &readiness {
+            anyhow::bail!(
+                "AFK migration metadata unavailable; no empty fleet inferred: {}; run normal `aoe migrate` in this app namespace",
+                error.root_cause()
+            );
+        }
+    }
     let mut remaining_sessions = MAX_SESSIONS;
     for name in names {
         let mut profile = ProfileOverview {
@@ -138,7 +197,46 @@ fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
             sessions: vec![],
             errors: vec![],
         };
+        let authority = (|| -> Result<SummaryProfile> {
+            if let Err(error) = &readiness {
+                anyhow::bail!(
+                    "{}; run normal `aoe migrate` in this app namespace",
+                    error.root_cause()
+                );
+            }
+            let snapshot: SummaryProfile = authority::profile_store(app_path, &name, false)?
+                .read_budgeted("snapshot.json", &mut remaining_bytes)?
+                .context("missing profile authority")?;
+            ensure!(
+                snapshot.version == 1 && snapshot.profile == name && snapshot.revision > 0,
+                "invalid profile authority identity"
+            );
+            if let Ok((evidence, _)) = &metadata {
+                for expected in evidence.iter().filter(|e| e.profiles.contains(&name)) {
+                    let session = snapshot
+                        .sessions
+                        .get(&expected.instance)
+                        .context("missing imported session authority; repair required")?;
+                    ensure!(
+                        session.evidence.contains(expected),
+                        "missing imported evidence reference; repair required"
+                    );
+                }
+            }
+            Ok(snapshot)
+        })();
+        if let Err(error) = &authority {
+            profile
+                .errors
+                .push(format!("Authority: {}", shown(&error.to_string())));
+        }
         let rows = (|| -> Result<Vec<Value>> {
+            let Some(profiles) = &profiles else {
+                return Ok(vec![]);
+            };
+            if profiles.entry_stat(Path::new(&name))?.is_none() {
+                return Ok(vec![]);
+            }
             let dir = profiles.child(Path::new(&name))?;
             if dir.entry_stat(Path::new("sessions.json"))?.is_none() {
                 return Ok(Vec::new());
@@ -160,6 +258,7 @@ fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
             }
             serde_json::from_slice(&bytes).context("invalid sessions.json")
         })();
+        let mut ids = std::collections::HashSet::new();
         match rows {
             Err(error) => profile.errors.push(shown(&error.to_string())),
             Ok(rows) if rows.len() > remaining_sessions => profile.errors.push(
@@ -167,7 +266,6 @@ fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
             ),
             Ok(rows) => {
                 remaining_sessions -= rows.len();
-                let mut ids = std::collections::HashSet::new();
                 for (index, row) in rows.into_iter().enumerate() {
                     let Ok(mut instance) = serde_json::from_value::<Instance>(row) else {
                         profile.errors.push(format!(
@@ -176,14 +274,70 @@ fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
                         continue;
                     };
                     instance.source_profile = name.clone();
-                    let mut summary =
-                        session_summary(app_path, &instance, now, &mut remaining_bytes);
+                    let mut summary = session_summary(
+                        app_path,
+                        &instance,
+                        authority
+                            .as_ref()
+                            .ok()
+                            .and_then(|s| s.sessions.get(&instance.id)),
+                        now,
+                        &mut remaining_bytes,
+                    );
                     if !ids.insert(instance.id.clone()) {
                         summary
                             .errors
                             .push("Duplicate session ID in profile".into());
                     }
                     profile.sessions.push(summary);
+                }
+            }
+        }
+        if let Ok(authority) = &authority {
+            for (id, session) in &authority.sessions {
+                if ids.contains(id) {
+                    continue;
+                }
+                if remaining_sessions == 0 {
+                    profile
+                        .errors
+                        .push("overview historical session capacity exceeded (4096)".into());
+                    break;
+                }
+                remaining_sessions -= 1;
+                if session.book.version != 4
+                    || session
+                        .book
+                        .windows
+                        .iter()
+                        .any(|w| w.validate(&name, id).is_err())
+                {
+                    profile
+                        .errors
+                        .push("Invalid historical authority summary".into());
+                    continue;
+                }
+                let evidence = session
+                    .evidence
+                    .iter()
+                    .map(|e| {
+                        e.validate(&name, id)?;
+                        Ok(serde_json::to_value(e)?)
+                    })
+                    .collect::<Result<Vec<_>>>();
+                match evidence {
+                    Err(error) => profile.errors.push(format!("Historical authority: {}", shown(&error.to_string()))),
+                    Ok(evidence) => result.historical_authority.push(HistoricalAuthority {
+                        profile: escaped(&name), instance_id: shown(id),
+                        observation: "Historical authority only; no validated registry row, no live eligibility inferred",
+                        evidence,
+                        windows: session.book.windows.iter().map(|w| serde_json::json!({
+                            "window":w.id,"generation":w.generation,"state":w.state,
+                            "unresolved_question_guard": w.question.as_ref().is_some_and(|q| q.outcome.as_deref() != Some("ordinary") && q.observed_request.is_none() && q.recovered_at_ms.is_none()),
+                            "question_requires_review":w.question.is_some(),
+                            "reservations_used":w.reservations.len(),"host_confirmed":w.confirmed
+                        })).collect(),
+                    }),
                 }
             }
         }
@@ -195,6 +349,7 @@ fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
 fn session_summary(
     app: &Path,
     instance: &Instance,
+    authority: Option<&SummarySession>,
     now: i64,
     remaining: &mut usize,
 ) -> SessionOverview {
@@ -214,14 +369,23 @@ fn session_summary(
         presence_expires_at_ms: None,
         presence_acknowledgement: "unobserved".into(),
         delegation: None,
+        legacy_evidence: authority.map_or_else(Vec::new, |s| {
+            s.evidence
+                .iter()
+                .filter(|e| e.validate(&instance.source_profile, &instance.id).is_ok())
+                .map(|e| serde_json::to_value(e).expect("evidence serializes"))
+                .collect()
+        }),
         errors: vec![],
     };
     let presence = (|| -> Result<()> {
-        let Some(store) = Store::existing(app, &instance.id, false)? else {
-            return Ok(());
-        };
-        let policy = store.read_budgeted::<Policy>("policy.json", remaining)?;
-        if let Some(p) = &policy {
+        let session =
+            authority.context("missing/unavailable session authority; no authority inferred")?;
+        for evidence in &session.evidence {
+            evidence.validate(&instance.source_profile, &instance.id)?;
+        }
+        let policy = session.policy.as_ref();
+        if let Some(p) = policy {
             p.validate().context("invalid policy summary")?;
             ensure!(
                 p.binding.instance_id == instance.id
@@ -239,12 +403,16 @@ fn session_summary(
                 row.requested_presence.push_str("; expired");
             }
         }
+        let Some(store) = Store::existing_transport(app, &instance.source_profile, &instance.id)?
+        else {
+            return Ok(());
+        };
         let ack = store.read_budgeted::<Ack>("ack.json", remaining)?;
         let probe = store.read_budgeted::<Probe>("request.json", remaining)?;
         if let Some(ack) = ack {
             row.presence_acknowledgement = if probe.as_ref().is_some_and(|probe| {
                 binding.as_ref().is_ok_and(|b| *b == probe.binding)
-                    && valid_ack(&ack, probe, policy.as_ref(), now)
+                    && valid_ack(&ack, probe, policy, now)
             }) {
                 "stored matching acknowledgement; freshness unknown"
             } else {
@@ -260,22 +428,20 @@ fn session_summary(
         row.requested_presence = "unknown; storage error".into();
     }
     let delegated = (|| -> Result<Option<DelegationSummary>> {
-        let Some(store) = Store::existing(app, &instance.id, true)? else {
-            return Ok(None);
-        };
-        let Some(book) = store.read_budgeted::<SummaryBook>("ledger.json", remaining)? else {
-            return Ok(None);
-        };
+        let session = authority.context("missing/unavailable session authority")?;
+        let book = &session.book;
         ensure!(book.version == 4, "unsupported ledger version");
         for w in &book.windows {
-            w.validate(instance)?;
+            w.validate(&instance.source_profile, &instance.id)?;
         }
         let Some(w) = book.windows.last() else {
             return Ok(None);
         };
         let current = binding.as_ref().is_ok_and(|b| *b == w.binding);
         let mut acknowledgement = "unobserved";
-        if let Some(control) = Store::existing(app, &instance.id, false)? {
+        if let Some(control) =
+            Store::existing_transport(app, &instance.source_profile, &instance.id)?
+        {
             if let Some(ack) = control.read_budgeted::<SummaryAck>("runtime-ack.json", remaining)? {
                 acknowledgement = if ack.version == 4
                     && current
@@ -312,6 +478,20 @@ fn session_summary(
             .push(format!("Delegation: {}", shown(&error.to_string()))),
     }
     row
+}
+
+#[derive(Deserialize)]
+struct SummaryProfile {
+    version: u32,
+    profile: String,
+    revision: u64,
+    sessions: std::collections::BTreeMap<String, SummarySession>,
+}
+#[derive(Deserialize)]
+struct SummarySession {
+    policy: Option<Policy>,
+    book: SummaryBook,
+    evidence: Vec<authority::Evidence>,
 }
 
 // Project only host fields; decision bodies, grants' task text and file payloads are discarded.
@@ -363,14 +543,13 @@ struct SummaryAck {
     window: Option<String>,
 }
 impl SummaryWindow {
-    fn validate(&self, instance: &Instance) -> Result<()> {
+    fn validate(&self, profile: &str, id: &str) -> Result<()> {
         ensure!(
             self.version == 4 && self.grant.version == 4,
             "unsupported window/grant version"
         );
         ensure!(
-            self.binding.instance_id == instance.id
-                && self.binding.profile == instance.source_profile,
+            self.binding.instance_id == id && self.binding.profile == profile,
             "ledger belongs to a different session/profile"
         );
         ensure!(
@@ -411,4 +590,4 @@ impl SummaryWindow {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

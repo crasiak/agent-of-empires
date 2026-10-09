@@ -402,6 +402,20 @@ impl Window {
     }
 }
 
+impl Book {
+    pub(super) fn reconcile(&mut self, binding: &Binding, generation: &str, now: i64) -> bool {
+        if let Some(w) = self.windows.last_mut() {
+            if w.state != "ended"
+                && (w.binding != *binding || w.generation != generation || now >= w.expires_at_ms)
+            {
+                w.end(TerminalReason::Interrupted);
+                return true;
+            }
+        }
+        false
+    }
+}
+#[cfg(test)]
 pub(in crate::session::afk) fn reconcile(
     store: &Store,
     binding: &Binding,
@@ -410,13 +424,8 @@ pub(in crate::session::afk) fn reconcile(
 ) -> Result<Value> {
     let _lock = store.lock(TIMEOUT)?;
     let mut book = Book::load(store)?;
-    if let Some(w) = book.windows.last_mut() {
-        if w.state != "ended"
-            && (w.binding != *binding || w.generation != generation || now >= w.expires_at_ms)
-        {
-            w.end(TerminalReason::Interrupted);
-            book.save(store)?;
-        }
+    if book.reconcile(binding, generation, now) {
+        book.save(store)?;
     }
     Ok(book.windows.last().map_or(Value::Null, |w| w.view(now)))
 }

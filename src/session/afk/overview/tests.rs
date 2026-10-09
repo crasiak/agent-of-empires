@@ -9,7 +9,7 @@ fn sessions(app: &Path, profile: &str, rows: &[Instance]) {
     fs::write(dir.join("sessions.json"), serde_json::to_vec(rows).unwrap()).unwrap();
 }
 
-fn tree(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(in crate::session::afk) fn tree(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut files = BTreeMap::new();
     for entry in fs::read_dir(path).unwrap() {
         let path = entry.unwrap().path();
@@ -34,7 +34,7 @@ fn all_profiles_and_ineligible_sessions_remain_visible_without_writes() {
     sessions(app.path(), "beta", &[archived]);
     let before = tree(app.path());
     let overview = snapshot_at(app.path(), 1000).unwrap();
-    assert!(overview.complete());
+    assert!(!overview.complete());
     assert_eq!(overview.profiles.len(), 2);
     assert_eq!(overview.profiles[0].sessions[0].activity, "stopped");
     assert!(overview.profiles[1].sessions[0].archived);
@@ -93,9 +93,10 @@ fn oversized_and_unsafe_host_snapshots_are_reported_without_payloads() {
     let app = tempfile::tempdir().unwrap();
     let instance = Instance::new("visible", "/workspace");
     sessions(app.path(), "alpha", std::slice::from_ref(&instance));
-    let store = Store::open(app.path(), &instance.id, true).unwrap();
+    authority::migration::initialize_test(app.path());
+    let store = Store::authority(app.path(), "alpha", &instance.id, true).unwrap();
     store
-        .write(
+        .corrupt_authority_for_test(
             "policy.json",
             &serde_json::json!({"secret":"PRIVATE-PAYLOAD"}),
         )
@@ -104,12 +105,10 @@ fn oversized_and_unsafe_host_snapshots_are_reported_without_payloads() {
     assert!(!overview.complete());
     let text = serde_json::to_string(&overview).unwrap();
     assert!(!text.contains("PRIVATE-PAYLOAD"));
-    assert!(text.contains("policy"));
+    assert!(text.contains("snapshot.json"));
     fs::set_permissions(
         app.path()
-            .join("afk")
-            .join(&instance.id)
-            .join("policy.json"),
+            .join("afk-authority-v1/profiles/alpha/snapshot.json"),
         fs::Permissions::from_mode(0o644),
     )
     .unwrap();
@@ -117,7 +116,10 @@ fn oversized_and_unsafe_host_snapshots_are_reported_without_payloads() {
     let file = fs::File::create(app.path().join("profiles/alpha/sessions.json")).unwrap();
     file.set_len((PROFILE_BYTES + 1) as u64).unwrap();
     let overview = snapshot_at(app.path(), 1000).unwrap();
-    assert!(overview.profiles[0].errors[0].contains("oversized"));
+    assert!(overview.profiles[0]
+        .errors
+        .iter()
+        .any(|e| e.contains("oversized")));
 }
 
 #[test]
@@ -136,8 +138,10 @@ fn stored_acknowledgements_guards_and_reservations_are_redacted_and_never_fresh(
     let window = uuid::Uuid::new_v4().to_string();
     let policy = json!({"version":1, "binding":binding, "revision":1, "window":window, "generation":generation, "enabled":true, "issued_at_ms":1000, "duration_ms":60000, "expires_at_ms":61000, "mode":"control-only", "allowance":0});
     sessions(app.path(), "alpha", std::slice::from_ref(&instance));
-    let control = Store::open(app.path(), &instance.id, true).unwrap();
-    control.write("policy.json", &policy).unwrap();
+    authority::migration::initialize_test(app.path());
+    let runtime = Store::authority(app.path(), "alpha", &instance.id, true).unwrap();
+    let control = Store::transport(app.path(), "alpha", &instance.id, true).unwrap();
+    runtime.write("policy.json", &policy).unwrap();
     control
         .write(
             "request.json",
@@ -151,14 +155,16 @@ fn stored_acknowledgements_guards_and_reservations_are_redacted_and_never_fresh(
             &json!({"version":4,"binding":binding,"generation":generation,"window":window}),
         )
         .unwrap();
-    let runtime = Store::runtime(app.path(), &instance.id, true).unwrap();
+
     let ledger = json!({"version":4,"windows":[{
         "version":4,"binding":binding,"generation":generation,"id":window,"state":"owned","confirmed":true,"expires_at_ms":61000,
         "reservations":[uuid::Uuid::new_v4().to_string()],"grant":{"version":4,"requests":2,"task":"PRIVATE-GRANT"},"nudges":[],
         "question":{"outcome":"unknown","observed_request":null,"recovered_at_ms":null,"identity":"PRIVATE-GUARD"},
         "records":[{"disposition":"human_required","claims":"PRIVATE-DECISION"}],"permit":{"outcomes":["unknown"],"content":"PRIVATE-PAYLOAD","preimage":"PRIVATE-PREIMAGE"}
     }]});
-    runtime.write("ledger.json", &ledger).unwrap();
+    runtime
+        .corrupt_authority_for_test("ledger.json", &ledger)
+        .unwrap();
     let before = tree(app.path());
     let overview = snapshot_at(app.path(), 2000).unwrap();
     assert!(overview.complete());
@@ -201,7 +207,9 @@ fn stored_acknowledgements_guards_and_reservations_are_redacted_and_never_fresh(
             "recovered" => question["recovered_at_ms"] = json!(3000),
             _ => question["outcome"] = json!("ordinary"),
         }
-        runtime.write("ledger.json", &resolved).unwrap();
+        runtime
+            .corrupt_authority_for_test("ledger.json", &resolved)
+            .unwrap();
         let overview = snapshot_at(app.path(), 4000).unwrap();
         let d = overview.profiles[0].sessions[0]
             .delegation
@@ -227,7 +235,7 @@ fn stored_acknowledgements_guards_and_reservations_are_redacted_and_never_fresh(
     assert!(!foreign.requested_presence.contains("on (control-only)"));
     let mut remaining = 1;
     assert!(runtime
-        .read_budgeted::<SummaryBook>("ledger.json", &mut remaining)
+        .read_budgeted::<SummaryProfile>("snapshot.json", &mut remaining)
         .is_err());
 }
 
@@ -242,7 +250,10 @@ fn capacity_limits_refuse_silent_truncation() {
     .unwrap();
     let overview = snapshot_at(app.path(), 0).unwrap();
     assert!(!overview.complete());
-    assert!(overview.profiles[0].errors[0].contains("capacity"));
+    assert!(overview.profiles[0]
+        .errors
+        .iter()
+        .any(|e| e.contains("capacity")));
     for i in 0..MAX_PROFILES {
         fs::create_dir(app.path().join("profiles").join(format!("p-{i}"))).unwrap();
     }
@@ -261,4 +272,37 @@ fn capacity_limits_refuse_silent_truncation() {
         .unwrap_err()
         .to_string()
         .contains("directory entry capacity"));
+}
+
+#[test]
+fn older_partial_and_missing_authority_keep_rows_and_leave_files_unchanged() {
+    let app = tempfile::tempdir().unwrap();
+    sessions(
+        app.path(),
+        "alpha",
+        &[Instance::new("visible", "/workspace")],
+    );
+    for condition in ["older", "partial", "missing"] {
+        authority::migration::initialize_test(app.path());
+        let manifest = app.path().join("afk-authority-v1/migration/manifest.json");
+        let original = fs::read(&manifest).unwrap();
+        if condition == "older" {
+            fs::write(app.path().join(".schema_version"), "39").unwrap();
+        } else if condition == "partial" {
+            let mut value: Value = serde_json::from_slice(&original).unwrap();
+            value["phase"] = serde_json::json!("imports");
+            fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
+        let before = tree(app.path());
+        let overview = snapshot_at(app.path(), 1000).unwrap();
+        assert!(!overview.complete());
+        assert_eq!(overview.profiles[0].sessions.len(), 1);
+        assert_eq!(
+            overview.profiles[0].sessions[0].requested_presence,
+            "unknown; storage error"
+        );
+        assert!(!overview.profiles[0].errors.is_empty());
+        assert_eq!(tree(app.path()), before, "{condition}");
+        fs::write(&manifest, original).unwrap();
+    }
 }

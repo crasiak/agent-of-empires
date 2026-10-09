@@ -163,9 +163,13 @@ impl Window {
     }
 }
 
+#[cfg(test)]
 pub(in crate::session::afk) fn guards(store: &Store, binding: &Binding) -> Result<Value> {
     let book = Book::load(store)?;
-    Ok(json!(book
+    Ok(guards_in(&book, binding))
+}
+pub(super) fn guards_in(book: &Book, binding: &Binding) -> Value {
+    json!(book
         .windows
         .iter()
         .filter(|w| w.binding.native_id == binding.native_id
@@ -176,7 +180,7 @@ pub(in crate::session::afk) fn guards(store: &Store, binding: &Binding) -> Resul
                 "window":w.id,"binding":w.binding,"generation":w.generation,"identity":q.identity,"emission_intent":q.emission_intent_at_ms.is_some()
             }))
         )
-        .collect::<Vec<_>>()))
+        .collect::<Vec<_>>())
 }
 pub(in crate::session::afk) fn recover(
     store: &Store,

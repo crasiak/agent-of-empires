@@ -3,7 +3,8 @@ use super::*;
 fn setup(requests: u8) -> (tempfile::TempDir, tempfile::TempDir, Store, Window) {
     let app = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
-    let store = Store::runtime(app.path(), "test", true).unwrap();
+    authority::migration::initialize_test(app.path());
+    let store = Store::authority(app.path(), "default", "test", true).unwrap();
     let (dev, ino) = AnchoredDir::open(root.path()).unwrap().identity().unwrap();
     let w = Window { version:4,binding:Binding {instance_id:"test".into(),profile:"default".into(),native_id:"native".into(),launch_id:uuid::Uuid::new_v4().to_string()},generation:uuid::Uuid::new_v4().to_string(),id:uuid::Uuid::new_v4().to_string(),revision:1,root:root.path().into(),control_root:app.path().into(),root_identity:(dev as u64,ino),grant:serde_json::from_value(json!({"version":4,"task":"scratch","scope":"create disposable scratch text","files":[{"path":"scratch.txt","capability":"create"}],"requests":requests,"assurance":COVERAGE})).unwrap(),issued_at_ms:1000,expires_at_ms:61000,state:"pending".into(),confirmed:true,reservations:vec![],reads:0,records:vec![],permit:None,read_facts:vec![],checkpoints:vec![],nudges:vec![],terminal_reason:None,question:None };
     Book {
@@ -243,7 +244,9 @@ fn failed_store_ambiguous_commit_and_retention_do_not_refund() {
     assert_eq!(book.windows[0].reservations.len(), 2);
     let mut broken = serde_json::to_value(&book).unwrap();
     broken["windows"][0]["reads"] = json!(17);
-    store.write("ledger.json", &broken).unwrap();
+    store
+        .corrupt_authority_for_test("ledger.json", &broken)
+        .unwrap();
     assert!(Book::load(&store).is_err());
 }
 
@@ -500,7 +503,9 @@ fn replacement_preimage_store_failure_caps_and_expired_body_pruning() {
     let mut d = decision();
     d["action"]["expected_hash"] = json!(hash("before"));
     // An unsafe store must deny record and therefore deny all dependent effects.
-    let ledger = app.path().join("afk-runtime-v4/test/ledger.json");
+    let ledger = app
+        .path()
+        .join("afk-authority-v1/profiles/default/snapshot.json");
     std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(record(&store, &w, &first, d.clone()).is_err());
     std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -611,7 +616,7 @@ fn executable_large_and_hardlinked_targets_and_unconfirmed_grants_are_rejected()
 #[serial_test::serial]
 fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirmation() {
     use crate::session::{ActiveExecution, ExecutionBinding, Status};
-    for refuse in [false, true] {
+    for outcome in ["confirm", "stop", "off"] {
         let _home = crate::session::test_support::isolate_app_dir();
         let workspace = tempfile::Builder::new()
             .prefix("afk-workspace-")
@@ -644,14 +649,19 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
             })
             .unwrap();
         let app = crate::session::get_app_dir().unwrap();
-        let control = Store::open(&app, &instance.id, true).unwrap();
-        let runtime = Store::runtime(&app, &instance.id, true).unwrap();
+        authority::migration::initialize_test(&app);
+        let control =
+            Store::transport(&app, &instance.effective_profile(), &instance.id, true).unwrap();
+        let runtime =
+            Store::authority(&app, &instance.effective_profile(), &instance.id, true).unwrap();
         let grant = json!({"version":4,"task":"scratch","scope":"create scratch greeting","files":[{"path":"scratch.txt","capability":"create"}],"requests":2,"assurance":COVERAGE});
         let file = workspace.path().join("grant.json");
         std::fs::write(&file, serde_json::to_vec(&grant).unwrap()).unwrap();
         let binding = Binding::for_instance(&instance).unwrap();
         let generation = uuid::Uuid::new_v4().to_string();
+        let off_instance = instance.clone();
         let peer = std::thread::spawn(move || {
+            let mut off_worker = None;
             let deadline = Instant::now() + Duration::from_secs(5);
             let mut previous = String::new();
             let mut acks = 0;
@@ -674,8 +684,23 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
                                 now_ms()
                             )
                             .is_err());
-                            if refuse {
+                            if outcome == "stop" {
                                 stop(&runtime).unwrap();
+                            }
+                            if outcome == "off" {
+                                let epoch = runtime.session().unwrap().epoch;
+                                let instance = off_instance.clone();
+                                off_worker = Some(std::thread::spawn(move || {
+                                    super::super::control(&instance, Operation::Off).unwrap()
+                                }));
+                                while runtime.session().unwrap().epoch == epoch {
+                                    assert!(
+                                        Instant::now() < deadline,
+                                        "Off could not revoke while transport was held"
+                                    );
+                                    std::thread::yield_now();
+                                }
+                                assert_eq!(snapshot(&runtime).unwrap()["state"], "ended");
                             }
                         }
                         previous = probe.challenge.clone();
@@ -704,11 +729,16 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
                 );
                 std::thread::yield_now();
             }
+            off_worker
         });
         let result = delegate(&instance, 1, &file);
-        peer.join().unwrap();
-        let runtime = Store::runtime(&app, &instance.id, false).unwrap();
-        if refuse {
+        if let Some(off_worker) = peer.join().unwrap() {
+            let off = off_worker.join().unwrap();
+            assert!(!off.requested_on);
+        }
+        let runtime =
+            Store::authority(&app, &instance.effective_profile(), &instance.id, false).unwrap();
+        if outcome != "confirm" {
             assert!(result
                 .unwrap_err()
                 .to_string()
@@ -732,3 +762,33 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
 mod settlement;
 
 mod questions;
+
+#[test]
+fn failed_ack_and_stale_confirmation_never_end_a_replacement_window() {
+    let (_app, _root, store, mut old) = setup(2);
+    old.confirmed = false;
+    old.issued_at_ms = now_ms();
+    old.expires_at_ms = old.issued_at_ms + 60000;
+    let mut session = store.session().unwrap();
+    session.book.windows = vec![old.clone()];
+    store.publish_session(session).unwrap();
+    let epoch = store.session().unwrap().epoch;
+    let mut replacement = old.clone();
+    replacement.id = uuid::Uuid::new_v4().to_string();
+    replacement.revision += 1;
+    {
+        let _lock = store.lock(TIMEOUT).unwrap();
+        let mut session = store.session().unwrap();
+        session.revoke().unwrap();
+        session.book.windows.push(replacement.clone());
+        store.publish_session(session).unwrap();
+    }
+    end_attempt(&store, &old.id, epoch).unwrap();
+    let _lock = store.lock(TIMEOUT).unwrap();
+    assert!(confirm_attempt(&store, &old, epoch).is_err());
+    confirm_attempt(&store, &replacement, epoch + 1).unwrap();
+    let session = store.session().unwrap();
+    assert_eq!(session.book.windows.last().unwrap().id, replacement.id);
+    assert!(session.book.windows.last().unwrap().confirmed);
+    assert_eq!(session.book.windows.last().unwrap().state, "pending");
+}

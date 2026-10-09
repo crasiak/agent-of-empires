@@ -36,7 +36,8 @@ CLI output has `complete: false` and exits nonzero for an incomplete scan.
 `--active-only` hides archived/trashed rows without errors and reports the
 filtered count; error rows remain visible. Reads are bounded to 256 directory
 entries (including non-profile files), 128 profiles, 4096 session rows,
-8 MiB per profile file, existing AFK file limits and 64 MiB total input. Capacity failures are errors, not silent truncation.
+8 MiB per session registry, 32 MiB per profile authority snapshot and
+64 MiB total input. Each profile authority is read once. Capacity failures are errors, not silent truncation.
 
 The overview says **No shared budget**: batch controls and persistent bulk
 exclusions are not implemented in this increment. Existing windows remain
@@ -307,6 +308,7 @@ It omits action payloads and private preimages. Review before sharing.
 | One file effect/preimage | 64 KiB each |
 | Window snapshot | 1 MiB |
 | Retained session ledger | 8 MiB |
+| Profile authority snapshot, including metadata | 32 MiB |
 | Runtime stdio frame | 256 KiB |
 | Presence/control object | 16 KiB, unchanged |
 
@@ -323,12 +325,45 @@ counters and replay tombstones remain. Data needed to interpret an ambiguous
 attempt is retained regardless of age, still counts toward quota, and can block
 new grants. There is no automatic reconciliation or quota-reset shortcut.
 
-The private protocol-4 ledger lives under
-`<app_dir>/afk-runtime-v4/<instance-id>/ledger.json`, with a stable writer lock.
-Presence files remain under `<app_dir>/afk/<instance-id>/` with their original
-16 KiB bounds. Migration 39 initializes a separate runtime namespace, preserves
-protocol-3 evidence and requires explicit reenrollment. Historical migrations
-36 through 38 retain their meaning. The launch/stdio bridge uses protocol 4.
+### Profile authority and upgrades
+
+Presence and all individual delegation history now share one private snapshot at
+`<app_dir>/afk-authority-v1/profiles/<profile>/snapshot.json` and one stable
+profile writer lock. Session IDs are scoped to their exact profile. Transport
+probes and acknowledgements cannot grant authority. The launch/stdio bridge and
+grants remain protocol 4; the storage version is independent.
+
+Run `aoe migrate` normally in the selected app namespace before launching the new
+integration. The early bridge refuses older, incomplete or corrupt authority
+rather than running migrations or creating an empty replacement. The overview
+remains read-only before migration and shows missing/unavailable authority beside
+session rows. It never repairs storage or makes stored acknowledgements fresh.
+
+Migration 40 preserves verified original bytes under
+`<app_dir>/afk-authority-v1/migration/`, with hashes and ownership in its durable
+`manifest.json`. Before inventory, it records legacy root identities and seals child creation at
+mode `0500`, qualifying denial through held root descriptors. Unsupported
+privileged identities, ACL/filesystem semantics or durability failures refuse
+completion. Roots stay sealed; do not relax their permissions for rollback.
+It fences actual legacy policy/ledger leaves under their existing locks,
+including prepared stores with absent leaves. Absence is recorded without
+fabricating originals. Root, child-directory and lock inodes remain in place. Full protocol-4 history is
+imported with presence disabled and windows ended/unconfirmed, without resetting
+counters, renewing expiry or resolving unanswered question guards. Protocol-2/3
+originals remain fenced evidence, not converted grants; `audit` and the overview
+expose their private references. Valid empty legacy Books without a stored owner
+are explicitly unassigned evidence in the manifest and global overview.
+Assigned history without a current registry profile/session appears separately
+as historical authority, with redacted references and guard summaries, never as
+an eligible live session.
+
+An interrupted migration resumes from verified originals and refuses conflicts,
+missing evidence, unsafe files or capacity overflow. Never delete its manifest,
+locks or originals to force a retry. A previously committed effect cannot be
+undone by fencing. Do not restore active legacy files when reverting code; see
+[Downgrading](../installation.md#downgrading). Ordinary exact question recovery
+remains available after import and restores no AFK authority.
+
 Fresh challenges bind
 capability acknowledgements to the instance, profile, native conversation,
 launch, generation, window and exact grant.

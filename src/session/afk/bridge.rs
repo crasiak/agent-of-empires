@@ -27,11 +27,24 @@ pub fn run_bridge(raw: &str, generation: &str) -> Result<()> {
     );
     let bootstrap: Bootstrap = serde_json::from_str(raw)?;
     ensure!(
-        bootstrap.version == BRIDGE_VERSION && bootstrap.app_dir == super::super::get_app_dir()?,
+        bootstrap.version == BRIDGE_VERSION
+            && bootstrap.app_dir == super::super::get_app_dir_path()?,
         "AFK bootstrap/app namespace mismatch"
     );
-    let store = Store::open(&bootstrap.app_dir, &bootstrap.binding.instance_id, false)?;
-    let runtime = Store::runtime(&bootstrap.app_dir, &bootstrap.binding.instance_id, false)?;
+    authority::ready(&bootstrap.app_dir)?;
+    let runtime = Store::authority(
+        &bootstrap.app_dir,
+        &bootstrap.binding.profile,
+        &bootstrap.binding.instance_id,
+        false,
+    ).context("AFK authority unavailable; run normal `aoe migrate` in this app namespace and inspect missing/corrupt imports")?;
+    current_instance(&bootstrap.binding)?;
+    let store = Store::transport(
+        &bootstrap.app_dir,
+        &bootstrap.binding.profile,
+        &bootstrap.binding.instance_id,
+        true,
+    )?;
     serve(
         &store,
         Some(&runtime),
@@ -69,7 +82,10 @@ pub(super) fn serve(
         let result = (|| -> Result<serde_json::Value> {
             validate()?;
             let command: Command = serde_json::from_slice(&line)?;
-            let policy = store.read::<Policy>("policy.json")?;
+            let policy = runtime
+                .map(|s| s.session().map(|s| s.policy))
+                .transpose()?
+                .flatten();
             if let Some(p) = &policy {
                 p.validate()?;
             }
@@ -86,10 +102,20 @@ pub(super) fn serve(
                     &identity,
                     &validate,
                 ),
-                Command::Poll => Ok(serde_json::json!({"policy":policy,"probe":probe,
-                    "delegation":runtime.map(|s| delegation::settlement::reconcile(s, binding, generation, now_ms())).transpose()?,
-                    "question_guards":runtime.map(|s| delegation::questions::guards(s, binding)).transpose()?,
-                    "runtime_probe":store.read::<delegation::RuntimeProbe>("runtime-probe.json")?})),
+                Command::Poll => {
+                    let mut view = delegation::poll(
+                        runtime.context("runtime unavailable")?,
+                        binding,
+                        generation,
+                        now_ms(),
+                    )?;
+                    let revision = view["policy"]["revision"].as_u64().unwrap_or(0);
+                    view["probe"] = serde_json::to_value(probe.filter(|p| p.revision == revision))?;
+                    view["runtime_probe"] = serde_json::to_value(
+                        store.read::<delegation::RuntimeProbe>("runtime-probe.json")?,
+                    )?;
+                    Ok(view)
+                }
                 Command::Runtime { command } => delegation::execute_checked(
                     runtime.context("runtime unavailable")?,
                     binding,
@@ -127,6 +153,50 @@ pub(super) fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[serial_test::serial]
+    fn early_helper_readiness_refuses_without_frames_or_files() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let app = crate::session::get_app_dir().unwrap();
+        let bootstrap = Bootstrap {
+            version: 4,
+            app_dir: app.clone(),
+            aoe_bin: "/worktree/aoe".into(),
+            binding: Binding {
+                instance_id: "test".into(),
+                profile: "alpha".into(),
+                native_id: "native".into(),
+                launch_id: "launch".into(),
+            },
+        };
+        let raw = serde_json::to_string(&bootstrap).unwrap();
+        for state in ["schema39", "partial", "corrupt", "missing-import"] {
+            authority::migration::run_at(&app).unwrap();
+            std::fs::write(
+                app.join(".schema_version"),
+                if state == "schema39" { "39" } else { "40" },
+            )
+            .unwrap();
+            let path = app.join("afk-authority-v1/migration/manifest.json");
+            let original = std::fs::read(&path).unwrap();
+            if state == "partial" {
+                let mut m: serde_json::Value = serde_json::from_slice(&original).unwrap();
+                m["phase"] = serde_json::json!("imports");
+                std::fs::write(&path, serde_json::to_vec(&m).unwrap()).unwrap();
+            } else if state == "corrupt" {
+                std::fs::write(&path, b"{}").unwrap();
+            }
+            let before = super::super::overview::tests::tree(&app);
+            let error = run_bridge(&raw, &uuid::Uuid::new_v4().to_string()).unwrap_err();
+            assert_eq!(
+                before,
+                super::super::overview::tests::tree(&app),
+                "{state}: {error:#}"
+            );
+            assert!(!app.join("afk-authority-v1/profiles").exists());
+            std::fs::write(&path, &original).unwrap();
+        }
+    }
     #[test]
     fn bridge_bounds_errors_and_eof_do_not_publish() {
         let root = tempfile::tempdir().unwrap();

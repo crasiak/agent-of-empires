@@ -291,7 +291,10 @@ fn actual_native_question_sdk_and_rust_ledger() {
             }
             if value["packet"]["fixture"] == "corrupt" {
                 store
-                    .write("ledger.json", &json!({"version":4,"windows":"corrupt"}))
+                    .corrupt_authority_for_test(
+                        "ledger.json",
+                        &json!({"version":4,"windows":"corrupt"}),
+                    )
                     .unwrap();
                 input.write_all(b"{\"ok\":true,\"value\":null}\n").unwrap();
                 input.flush().unwrap();

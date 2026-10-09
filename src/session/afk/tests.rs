@@ -1,7 +1,7 @@
 use super::*;
 use std::os::unix::fs::{symlink, PermissionsExt};
 
-fn binding() -> Binding {
+pub(super) fn binding() -> Binding {
     Binding {
         instance_id: "test-session".into(),
         profile: "default".into(),
@@ -9,7 +9,7 @@ fn binding() -> Binding {
         launch_id: uuid::Uuid::new_v4().to_string(),
     }
 }
-fn policy(binding: Binding) -> Policy {
+pub(super) fn policy(binding: Binding) -> Policy {
     Policy {
         version: VERSION,
         binding,
@@ -206,11 +206,18 @@ fn a_fresh_exchange_rejects_the_preexisting_response() {
 #[serial_test::serial]
 fn unsupported_session_can_record_off_without_being_revived() {
     let _home = super::super::test_support::isolate_app_dir();
+    authority::migration::initialize_test(&super::super::get_app_dir().unwrap());
     let instance = Instance::new("unsupported", "/tmp");
     let result = control(&instance, Operation::Off).unwrap();
     assert_eq!(result.state, State::Requested);
     assert!(!result.requested_on);
-    let stored = Store::open(&super::super::get_app_dir().unwrap(), &instance.id, false).unwrap();
+    let stored = Store::authority(
+        &super::super::get_app_dir().unwrap(),
+        &instance.effective_profile(),
+        &instance.id,
+        false,
+    )
+    .unwrap();
     assert!(
         !stored
             .read::<Policy>("policy.json")
@@ -218,35 +225,42 @@ fn unsupported_session_can_record_off_without_being_revived() {
             .unwrap()
             .enabled
     );
-    assert!(stored.read::<Probe>("request.json").unwrap().is_none());
+    assert!(Store::existing_transport(
+        &super::super::get_app_dir().unwrap(),
+        &instance.effective_profile(),
+        &instance.id
+    )
+    .unwrap()
+    .is_none());
 }
 
 #[test]
 #[serial_test::serial]
-fn off_replaces_valid_stale_profile_but_corrupt_policy_requires_repair() {
+fn off_is_scoped_and_corrupt_policy_requires_repair() {
     let _home = super::super::test_support::isolate_app_dir();
+    let app = super::super::get_app_dir().unwrap();
+    authority::migration::initialize_test(&app);
     let instance = Instance::new("moved", "/tmp");
-    let store = Store::open(&super::super::get_app_dir().unwrap(), &instance.id, true).unwrap();
+    let old_store = Store::authority(&app, "previous-profile", &instance.id, true).unwrap();
     let mut old = policy(binding());
     old.binding.instance_id = instance.id.clone();
     old.binding.profile = "previous-profile".into();
     old.revision = 7;
-    store.write("policy.json", &old).unwrap();
+    old_store.write("policy.json", &old).unwrap();
     let off = control(&instance, Operation::Off).unwrap();
-    assert_eq!(off.revision, 8);
+    assert_eq!(off.revision, 1);
     assert!(!off.requested_on);
-    let p = store.read::<Policy>("policy.json").unwrap().unwrap();
-    assert_eq!(p.binding.profile, instance.effective_profile());
+    assert!(old_store.session().unwrap().policy.unwrap().enabled);
+    let store = Store::authority(&app, &instance.effective_profile(), &instance.id, false).unwrap();
     store
-        .write("policy.json", &serde_json::json!({"revision": "broken"}))
+        .corrupt_authority_for_test("policy.json", &serde_json::json!({"revision":"broken"}))
         .unwrap();
-    let error = control(&instance, Operation::Off).unwrap_err();
-    assert!(error.to_string().contains("explicit repair"));
+    assert!(control(&instance, Operation::Off).is_err());
     assert_eq!(
         store
-            .read::<serde_json::Value>("policy.json")
+            .read_raw::<serde_json::Value>("snapshot.json")
             .unwrap()
-            .unwrap()["revision"],
+            .unwrap()["sessions"][&instance.id]["policy"]["revision"],
         "broken"
     );
 }
@@ -256,6 +270,7 @@ fn off_replaces_valid_stale_profile_but_corrupt_policy_requires_repair() {
 fn native_and_launch_replacement_cannot_reuse_a_dialog_snapshot() {
     use crate::session::{ActiveExecution, ExecutionBinding, Status};
     let _home = super::super::test_support::isolate_app_dir();
+    authority::migration::initialize_test(&super::super::get_app_dir().unwrap());
     let mut original = Instance::new("pi", "/tmp");
     original.tool = "pi".into();
     original.status = Status::Running;
@@ -304,6 +319,7 @@ fn native_and_launch_replacement_cannot_reuse_a_dialog_snapshot() {
 #[serial_test::serial]
 fn bootstrap_is_explicit_argv_bound_and_independent_of_usage_environment() {
     let _home = super::super::test_support::isolate_app_dir();
+    authority::migration::initialize_test(&super::super::get_app_dir().unwrap());
     let instance = Instance::new("pi", "/tmp");
     let native = uuid::Uuid::new_v4().to_string();
     let launch = uuid::Uuid::new_v4().to_string();
