@@ -354,6 +354,7 @@ impl HomeView {
             metrics_poller: crate::tui::metrics_poller::MetricsPoller::new(),
             pending_metrics_refresh: false,
             metrics: crate::process::metrics::MetricsSnapshot::default(),
+            resource_history: Default::default(),
             usage_poller: crate::tui::usage_poller::UsagePoller::new(),
             pending_usage_refresh: false,
             usage_summary: None,

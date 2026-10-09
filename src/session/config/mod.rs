@@ -1034,22 +1034,19 @@ pub struct SessionConfig {
     #[setting(label = "Record session usage", widget = "toggle")]
     pub usage_tracking: bool,
 
-    /// Show the session's context-reset count and usage breakdown in a corner
-    /// of the preview pane and the web session view.
+    /// Show context resets and usage in the TUI info panel and web info strip.
     #[serde(default = "default_true")]
-    #[setting(label = "Show usage overlay", widget = "toggle")]
+    #[setting(label = "Show usage in session info", widget = "toggle")]
     pub show_usage_overlay: bool,
 
-    /// Under the usage overlay, show which Ledger generation a Ledger-launched
-    /// session runs on and how it differs from what a new launch would get.
+    /// In session info, show the launched Ledger generation and its drift.
     #[serde(default = "default_true")]
-    #[setting(label = "Show Ledger drift overlay", widget = "toggle")]
+    #[setting(label = "Show Ledger drift in session info", widget = "toggle")]
     pub show_ledger_overlay: bool,
 
-    /// Under the usage overlay, show the input tokens Headroom compression
-    /// saved for a Ledger-launched Headroom session, with a dollar estimate.
+    /// In session info, show Headroom token savings and a dollar estimate.
     #[serde(default = "default_true")]
-    #[setting(label = "Show Headroom savings overlay", widget = "toggle")]
+    #[setting(label = "Show Headroom savings in session info", widget = "toggle")]
     pub show_headroom_overlay: bool,
 
     /// Side of the TUI session list. Narrow terminals keep the list above the preview.

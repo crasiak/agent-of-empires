@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 
 import { TerminalSessionStack } from "./TerminalSessionStack";
+import { SessionInfo } from "./SessionInfo";
 import { PairedShellPane } from "./PairedTerminal";
 import { BackgroundAgentsPanel } from "./acp/BackgroundAgentsPanel";
 import { FilesPane } from "./FilesPane";
@@ -117,6 +118,7 @@ export function MobileMainPane({
       )}
       <div className="relative flex-1 flex flex-col min-h-0 overflow-hidden">
         <div className={layerClass(view === "agent")} inert={view !== "agent"}>
+          {view === "agent" && activeSession && <SessionInfo session={activeSession} />}
           {activeSession?.view === "structured" ? (
             <Suspense fallback={null}>
               <StructuredView

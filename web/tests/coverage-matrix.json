@@ -1470,15 +1470,41 @@
       ]
     },
     {
-      "id": "sessions.usage-overlay",
+      "id": "sessions.info-usage-metrics",
       "kind": "vitest",
-      "risk": "low",
-      "specs": ["src/lib/usage.test.ts", "src/lib/ledgerRun.test.ts", "src/components/__tests__/UsageOverlay.test.tsx"],
+      "risk": "medium",
+      "specs": [
+        "src/lib/usage.test.ts",
+        "src/lib/ledgerRun.test.ts",
+        "src/lib/sessionMetrics.test.ts",
+        "src/components/__tests__/SessionUsage.test.tsx",
+        "src/components/__tests__/SessionInfo.test.tsx",
+        "src/components/__tests__/TerminalSessionStack.test.tsx",
+        "src/components/__tests__/MobileMainPane.test.tsx"
+      ],
       "components": [
         "web/src/lib/usage.ts",
         "web/src/lib/ledgerRun.ts",
         "web/src/lib/sessionFlagGate.ts",
-        "web/src/components/UsageOverlay.tsx",
+        "web/src/components/SessionUsage.tsx",
+        "web/src/components/SessionInfo.tsx",
+        "web/src/lib/sessionMetrics.ts",
+        "web/src/lib/systemHealthStore.ts",
+        "web/src/components/MobileMainPane.tsx",
+        "web/src/App.tsx",
+        "web/src/components/TerminalSessionStack.tsx"
+      ]
+    },
+    {
+      "id": "sessions.info-layout",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/session-info.spec.ts"],
+      "components": [
+        "web/src/App.tsx",
+        "web/src/components/SessionInfo.tsx",
+        "web/src/components/SessionUsage.tsx",
+        "web/src/components/MobileMainPane.tsx",
         "web/src/components/TerminalSessionStack.tsx"
       ]
     },

@@ -12,6 +12,7 @@ pub(crate) mod ledger_overlay;
 mod list_picker;
 pub(crate) mod preview;
 pub(crate) mod scroll;
+pub(crate) mod session_resources;
 pub(crate) mod text;
 mod text_input;
 mod tool_config;

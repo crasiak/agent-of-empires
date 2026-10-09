@@ -1087,7 +1087,7 @@ impl HomeView {
             let strip_col = self.diagnostics_dock(frame, strip_area, theme);
             self.render_collapsed_strip(frame, strip_col, theme);
             self.render_preview(frame, preview_area, theme);
-            self.render_usage_overlay(frame, theme);
+            self.render_session_info(frame, theme);
         } else if available_width < responsive::STACKED_BREAKPOINT {
             let main_height = content_area.height;
             let list_height = responsive::stacked_list_height(main_height);
@@ -1108,7 +1108,7 @@ impl HomeView {
             let list_rect = self.diagnostics_dock(frame, chunks[0], theme);
             self.render_list(frame, list_rect, theme, ListLayout::Stacked);
             self.render_preview(frame, chunks[1], theme);
-            self.render_usage_overlay(frame, theme);
+            self.render_session_info(frame, theme);
         } else {
             // Side-by-side: cap list width so the preview pane keeps its
             // usability floor (PREVIEW_MIN_WIDTH).
@@ -1133,7 +1133,7 @@ impl HomeView {
             let layout = ListLayout::Horizontal(self.sidebar_position);
             self.render_list(frame, list_rect, theme, layout);
             self.render_preview(frame, preview_area, theme);
-            self.render_usage_overlay(frame, theme);
+            self.render_session_info(frame, theme);
         }
         self.render_status_bar(frame, main_chunks[1], theme);
 
@@ -2838,10 +2838,8 @@ impl HomeView {
         self.active_preview_cache().captured_lines
     }
 
-    /// Draws the overlay stack over the preview's top-right corner: the reset
-    /// counter, then the Ledger drift and Headroom lines, each only when it is
-    /// switched on and loaded for the selected session.
-    fn render_usage_overlay(&self, frame: &mut Frame, theme: &Theme) {
+    /// Session-attributed badges and resources, never over captured output.
+    fn render_session_info(&self, frame: &mut Frame, theme: &Theme) {
         use crate::tui::components::{ledger_overlay, usage_overlay};
         if self.system_health_open {
             return;
@@ -2852,6 +2850,24 @@ impl HomeView {
         let Some(instance) = self.get_instance(selected) else {
             return;
         };
+        let metadata_height = match self.view_mode {
+            ViewMode::Structured => preview::agent_info_height(instance),
+            _ => preview::terminal_info_height(instance),
+        };
+        let layout = preview::PreviewLayout::compute(
+            self.preview_area,
+            self.preview_outer_area.width < responsive::STACKED_BREAKPOINT,
+            self.show_preview_info,
+            metadata_height,
+        );
+        let Some(info) = layout.info else { return };
+        // Placeholder and health views do not render an info header.
+        if layout.output != self.preview_pane_area {
+            return;
+        }
+        let areas = preview::InfoAreas::compute(info, metadata_height);
+        self.resource_history
+            .render(frame, areas.resources, instance, theme);
         let now = chrono::Utc::now();
         let mut sections = Vec::new();
         if self.show_usage_overlay {
@@ -2876,7 +2892,7 @@ impl HomeView {
                 }
             }
         }
-        usage_overlay::render_overlay_sections(frame, self.preview_pane_area, &sections, theme);
+        usage_overlay::render_info_sections(frame, areas.badges, &sections);
     }
 
     /// Paint the preview and refresh geometry used by selection and live-send.
