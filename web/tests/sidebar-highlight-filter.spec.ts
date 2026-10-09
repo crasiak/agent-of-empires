@@ -1,16 +1,11 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "./helpers/mockedTest";
+import { mockRepoAppearances } from "./helpers/apiMocks";
 import { installSidebarMocks } from "./helpers/sidebarMocks";
 import { openMobileSidebar } from "./helpers/sidebar";
 import { iPhone13 } from "./helpers/viewports";
 
 async function setup(page: Page) {
-  await page.addInitScript(() => {
-    localStorage.setItem(
-      "aoe-repo-appearance-v1",
-      JSON.stringify({ "/tmp/one": { color: "sky" }, "/tmp/two": { color: "rose" } }),
-    );
-  });
   await installSidebarMocks(page, {
     sessions: [
       { id: "red-one", title: "Fix login", project_path: "/tmp/one", branch: "fix/login", fields: { color: "red" } },
@@ -25,6 +20,7 @@ async function setup(page: Page) {
       { id: "plain", title: "Unhighlighted", project_path: "/tmp/two", branch: "main" },
     ],
   });
+  await mockRepoAppearances(page, { "/tmp/one": { color: "sky" }, "/tmp/two": { color: "rose" } });
   await page.goto("/");
 }
 

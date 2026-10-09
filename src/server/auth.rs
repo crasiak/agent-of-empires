@@ -1203,6 +1203,8 @@ mod tests {
             (Method::POST, "/api/app-state/web-tour-seen"),
             (Method::POST, "/api/app-state/dismiss-update"),
             (Method::PATCH, "/api/app-state/web-ui-state"),
+            (Method::PATCH, "/api/app-state/repo-appearances"),
+            (Method::POST, "/api/app-state/repo-appearances/import"),
             // Read-only GETs, even on settings and profile paths.
             (Method::GET, "/api/settings"),
             (Method::GET, "/api/profiles"),

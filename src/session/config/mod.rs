@@ -936,14 +936,11 @@ pub struct AppStateConfig {
     #[serde(default)]
     pub used_system_health: bool,
 
-    /// Server-side mirror of the web dashboard's syncable UI state, keyed by
-    /// the frontend's localStorage key (the value is the opaque string the
-    /// browser stored). Single-tenant: there is one user, so these prefs
-    /// (sidebar sort/axis, tool density, repo appearance/order, group collapse,
-    /// last-used tool, welcome-seen, etc.) live here so they follow the user
-    /// across browsers and devices instead of being trapped in per-browser
-    /// localStorage. The server never interprets the values; the web owns the
-    /// shape. See `GET`/`PATCH /api/app-state/web-ui-state`.
+    /// Shared repository appearance keyed by path, including synthetic bucket IDs.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub repo_appearances: crate::session::repo_appearance::RepoAppearances,
+
+    /// Opaque web-owned preferences, excluding shared repository appearances.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub web_ui_state: std::collections::BTreeMap<String, String>,
 }

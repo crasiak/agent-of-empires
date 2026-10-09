@@ -1938,3 +1938,19 @@ export function syncSkills(options?: {
     { outcomes: [] },
   );
 }
+
+export function fetchRepoAppearances(): Promise<Record<string, import("./repoAppearance").RepoAppearance> | null> {
+  return fetchJson("/api/app-state/repo-appearances");
+}
+export function patchRepoAppearance(
+  repo_path: string,
+  update: import("./repoAppearance").RepoAppearanceUpdate,
+): Promise<Record<string, import("./repoAppearance").RepoAppearance> | null> {
+  return fetchJson("/api/app-state/repo-appearances", jsonInit("PATCH", { repo_path, ...update }));
+}
+
+export function importRepoAppearances(
+  appearances: Record<string, import("./repoAppearance").RepoAppearance>,
+): Promise<Record<string, import("./repoAppearance").RepoAppearance> | null> {
+  return fetchJson("/api/app-state/repo-appearances/import", jsonInit("POST", { appearances }));
+}

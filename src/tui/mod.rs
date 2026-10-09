@@ -11,6 +11,7 @@ mod creation_poller;
 mod deletion_poller;
 pub mod dialogs;
 pub mod diff;
+pub(crate) mod highlight;
 pub(crate) mod home;
 mod host_title;
 pub mod hyperlink;

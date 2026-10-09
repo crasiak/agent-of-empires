@@ -229,6 +229,14 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/app-state/dismiss-update", post(api::dismiss_update))
         .route(
+            "/api/app-state/repo-appearances/import",
+            post(api::import_repo_appearances),
+        )
+        .route(
+            "/api/app-state/repo-appearances",
+            get(api::get_repo_appearances).patch(api::patch_repo_appearance),
+        )
+        .route(
             "/api/app-state/web-ui-state",
             get(api::get_web_ui_state).patch(api::patch_web_ui_state),
         )

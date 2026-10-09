@@ -291,6 +291,8 @@ pub(super) const CITYHALL_MUTATION_ALLOW: &[(&str, &str)] = &[
     ("POST", "/api/presence"),
     // Per-device UI preferences / client log.
     ("PATCH", "/api/app-state/web-ui-state"),
+    ("PATCH", "/api/app-state/repo-appearances"),
+    ("POST", "/api/app-state/repo-appearances/import"),
     ("POST", "/api/app-state/dismiss-update"),
     ("POST", "/api/app-state/tip-seen"),
     ("POST", "/api/app-state/volume-ignores-globs-acknowledged"),

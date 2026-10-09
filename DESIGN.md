@@ -66,6 +66,11 @@ Session color labels `red`, `amber` and `green` use the `error`, `waiting` and
 theme slot, so both surfaces use Tailwind's fixed `purple-500` and `teal-500`,
 downsampled in palette mode. The user picks the hue, so the hue is the meaning.
 
+Project highlights use fixed amber, teal, sky, violet, rose, and slate hues on
+both surfaces. Their faint header tints yield to selection and hover; TUI tints
+are downsampled in palette mode. Project highlights are independent of session
+colors.
+
 The marketing site keeps the brand palette above and does not follow the user's
 theme.
 
