@@ -162,6 +162,24 @@ impl Store {
         )?;
         Ok(())
     }
+    pub(super) fn write_exclusive(&self, leaf: &str, bytes: &[u8]) -> Result<()> {
+        ensure!(bytes.len() <= self.limit, "oversized AFK publication");
+        ensure!(
+            self.dir.entry_stat(Path::new(leaf))?.is_none(),
+            "AFK publication already exists"
+        );
+        ensure!(
+            self.dir.publish_file(
+                Path::new(leaf),
+                &mut Cursor::new(bytes),
+                Permissions::from_mode(0o600),
+                false,
+                None
+            )?,
+            "AFK publication already exists"
+        );
+        Ok(())
+    }
     pub(super) fn bytes(&self, leaf: &str) -> Result<Option<Vec<u8>>> {
         if !self.check_leaf(leaf)? {
             return Ok(None);

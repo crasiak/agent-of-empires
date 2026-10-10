@@ -42,7 +42,7 @@ fn all_profiles_and_ineligible_sessions_remain_visible_without_writes() {
         .profiles
         .iter()
         .all(|p| p.sessions[0].support != "eligible"));
-    assert!(overview.shared_budget.contains("not implemented"));
+    assert!(overview.shared_budget.contains("unobserved"));
     assert!(overview.account_coverage.contains("unknown"));
     assert_eq!(before, tree(app.path()));
     let empty = app.path().join("absent");
@@ -108,7 +108,7 @@ fn oversized_and_unsafe_host_snapshots_are_reported_without_payloads() {
     assert!(text.contains("snapshot.json"));
     fs::set_permissions(
         app.path()
-            .join("afk-authority-v1/profiles/alpha/snapshot.json"),
+            .join("afk-authority-v2/profiles/alpha/snapshot.json"),
         fs::Permissions::from_mode(0o644),
     )
     .unwrap();
@@ -152,7 +152,7 @@ fn stored_acknowledgements_guards_and_reservations_are_redacted_and_never_fresh(
     control
         .write(
             "runtime-ack.json",
-            &json!({"version":4,"binding":binding,"generation":generation,"window":window}),
+            &json!({"version":BRIDGE_VERSION,"binding":binding,"generation":generation,"window":window}),
         )
         .unwrap();
 
@@ -284,7 +284,7 @@ fn older_partial_and_missing_authority_keep_rows_and_leave_files_unchanged() {
     );
     for condition in ["older", "partial", "missing"] {
         authority::migration::initialize_test(app.path());
-        let manifest = app.path().join("afk-authority-v1/migration/manifest.json");
+        let manifest = app.path().join("afk-authority-v2/migration/manifest.json");
         let original = fs::read(&manifest).unwrap();
         if condition == "older" {
             fs::write(app.path().join(".schema_version"), "39").unwrap();
@@ -304,5 +304,6 @@ fn older_partial_and_missing_authority_keep_rows_and_leave_files_unchanged() {
         assert!(!overview.profiles[0].errors.is_empty());
         assert_eq!(tree(app.path()), before, "{condition}");
         fs::write(&manifest, original).unwrap();
+        fs::write(app.path().join(".schema_version"), "41").unwrap();
     }
 }

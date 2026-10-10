@@ -15,14 +15,17 @@ impl AfkArgs {
     pub fn is_inspection(&self) -> bool {
         matches!(
             self.command,
-            AfkCommand::Overview { .. } | AfkCommand::Batch { .. }
+            AfkCommand::Overview { .. }
+                | AfkCommand::Batch {
+                    command: BatchCommand::Preview { .. }
+                }
         )
     }
 }
 
 #[derive(Subcommand)]
 enum AfkCommand {
-    /// Inspect a frozen profile-scoped selection; no executable batch controls
+    /// Preview, explicitly apply, inspect or stop a frozen profile-scoped batch
     Batch {
         #[command(subcommand)]
         command: BatchCommand,
@@ -52,15 +55,19 @@ enum AfkCommand {
     },
     /// Export scoped profile-authority audit and legacy evidence references, without payloads or preimages
     Audit { session: String },
-    /// Record AFK off even if the integration is unavailable
+    /// Revoke AFK and persist a bulk exclusion even if integration is unavailable
     Off { session: String },
+    /// Revoke AFK and exclude the session from future batch selections
+    OptOut { session: String },
+    /// Clear only the bulk exclusion; grants no authority and requires a fresh preview
+    AllowBulk { session: String },
     /// Probe the current integration; does not enable or renew AFK
     Status { session: String },
 }
 
 #[derive(Subcommand)]
 enum BatchCommand {
-    /// Export private non-authorizing inspection-v1; apply is unavailable
+    /// Export private preview-v2; never activates on its own
     Preview {
         /// Private manifest-v1 with one profile, 1..16 exact IDs and explicit protocol-4 grants
         #[arg(long)]
@@ -69,9 +76,51 @@ enum BatchCommand {
         #[arg(long)]
         output: std::path::PathBuf,
     },
+    /// Apply the exact reviewed preview; retries only report the original operation
+    Apply {
+        #[arg(long)]
+        preview: std::path::PathBuf,
+        #[arg(long)]
+        digest: String,
+    },
+    /// Read an operation in the selected profile, without probing members
+    Status { operation: String },
+    /// Stop only this operation's original windows, never later replacements
+    Off { operation: String },
 }
 
 pub async fn run(profile: &str, args: AfkArgs) -> Result<()> {
+    if matches!(
+        &args.command,
+        AfkCommand::Batch {
+            command: BatchCommand::Apply { .. }
+                | BatchCommand::Status { .. }
+                | BatchCommand::Off { .. }
+        }
+    ) {
+        let profile = profile.to_owned();
+        let value = tokio::task::spawn_blocking(move || match args.command {
+            AfkCommand::Batch {
+                command: BatchCommand::Apply { preview, digest },
+            } => crate::session::afk::batch::apply(&preview, &digest),
+            AfkCommand::Batch {
+                command: BatchCommand::Status { operation },
+            } => crate::session::afk::batch::status(
+                &crate::session::resolve_existing_profile(&profile)?,
+                &operation,
+            ),
+            AfkCommand::Batch {
+                command: BatchCommand::Off { operation },
+            } => crate::session::afk::batch::off(
+                &crate::session::resolve_existing_profile(&profile)?,
+                &operation,
+            ),
+            _ => unreachable!(),
+        })
+        .await??;
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
     if let AfkCommand::Batch {
         command: BatchCommand::Preview { manifest, output },
     } = args.command
@@ -111,7 +160,10 @@ pub async fn run(profile: &str, args: AfkArgs) -> Result<()> {
         );
         return Ok(());
     }
-    if let AfkCommand::Delegate { session, .. } | AfkCommand::Audit { session } = &args.command {
+    if let AfkCommand::Delegate { session, .. }
+    | AfkCommand::Audit { session }
+    | AfkCommand::AllowBulk { session } = &args.command
+    {
         let storage = Storage::open_unwatched(profile)?;
         let (mut rows, _) = storage.load_with_groups()?;
         for row in &mut rows {
@@ -123,6 +175,7 @@ pub async fn run(profile: &str, args: AfkArgs) -> Result<()> {
                 crate::session::afk::delegation::delegate(&instance, minutes, &grant)
             }
             AfkCommand::Audit { .. } => crate::session::afk::delegation::audit(&instance),
+            AfkCommand::AllowBulk { .. } => crate::session::afk::batch::allow_bulk(&instance),
             _ => unreachable!(),
         })
         .await??;
@@ -131,7 +184,7 @@ pub async fn run(profile: &str, args: AfkArgs) -> Result<()> {
     }
     let (identifier, operation) = match args.command {
         AfkCommand::On { session, minutes } => (session, Operation::On { minutes }),
-        AfkCommand::Off { session } => (session, Operation::Off),
+        AfkCommand::Off { session } | AfkCommand::OptOut { session } => (session, Operation::Off),
         AfkCommand::Status { session } => (session, Operation::Status),
         _ => unreachable!(),
     };
@@ -164,7 +217,7 @@ fn require_acknowledged_activation(
 mod tests {
     use clap::Parser;
     #[test]
-    fn batch_requires_explicit_files_and_has_no_apply_command() {
+    fn batch_requires_explicit_preview_files_and_reviewed_apply_digest() {
         for args in [
             vec![
                 "aoe",

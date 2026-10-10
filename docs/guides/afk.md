@@ -39,19 +39,20 @@ entries (including non-profile files), 128 profiles, 4096 session rows,
 8 MiB per session registry, 32 MiB per profile authority snapshot and
 64 MiB total input. Each profile authority is read once. Capacity failures are errors, not silent truncation.
 
-The overview says **No shared budget**: batch controls and persistent bulk
-exclusions are not implemented in this increment. Existing windows remain
-individual, outside any shared allowance. Off must not be mistaken for a
-persistent bulk opt-out in this storage version. Billing/account attribution
-is unknown; SDK reservations do not prove provider delivery or cost. Global
-visibility does not turn sessions into tenants or impose a profile-wide budget.
-Profile-scoped batches and optional shared limits remain future work.
+The overview separates original batch membership, optional shared charges and
+per-session bulk preferences from individual windows. **No shared budget** means
+no aggregate charge or cap, not zero requests. Recorded batch counters are not
+fresh runtime observations. Billing/account attribution remains unknown; SDK
+reservations do not prove provider delivery or cost. Global visibility does not
+turn sessions into tenants or impose a profile-wide budget.
 
-## Non-authorizing batch inspection
+## Explicit profile-scoped batches
 
-`batch preview` exports an **inspection-only** artifact. There is no batch apply
-command, active batch, shared-budget enforcement or bulk opt-out in this format.
-Global visibility remains available independently of this one-profile selection.
+`batch preview` exports private **preview-v2**, without activating sessions.
+An explicit apply of its reviewed digest is a separate operation. Old
+inspection-v1 artifacts are always refused, even if edited and rehashed.
+Global visibility remains independent of this one-profile selection. This
+candidate workflow does not authorize runtime installation or release.
 
 Create an owned directory with mode `0700`, then write a `0600` manifest inside
 it. Select **1 through 16 exact IDs** from one explicit profile, not titles or a
@@ -79,8 +80,12 @@ Every member needs its own existing protocol-4 grant:
 ```
 
 ```sh
-chmod 600 afk-inspection/manifest.json
-aoe session afk batch preview --manifest afk-inspection/manifest.json --output afk-inspection/preview.json
+chmod 600 afk-preview/manifest.json
+aoe session afk batch preview --manifest afk-preview/manifest.json --output afk-preview/preview.json
+# Read the entire artifact, including exclusions, grants and digest.
+aoe session afk batch apply --preview afk-preview/preview.json --digest REVIEWED_DIGEST
+aoe -p default session afk batch status OPERATION_ID
+aoe -p default session afk batch off OPERATION_ID
 ```
 
 The output directory must also be owned and `0700`, outside the AoE app directory.
@@ -95,14 +100,16 @@ namespace mutation. On a durability or publication-location error, inspect the
 requested and any moved directory before retrying; a private file may already exist.
 
 `minutes` is required, from **1 through 1440**. `shared_requests` may be omitted or
-null for **No shared budget**, or explicitly **1 through 128** as a proposed
-ceiling. Zero is invalid. The proposal is neither enforced nor charged. There is
-no expiry timestamp before an eventual first actual apply.
+null for **No shared budget**, or explicitly **1 through 128**. Zero is invalid.
+Previewing never charges the proposed allowance. First apply freezes the absolute
+expiry; retries cannot renew it. A configured shared budget additionally requires
+the qualified queue-preserving stop capability, not unmodified stock Pi.
 
-The artifact identifies itself as `aoe-afk-batch-inspection`, version 1, with
-`apply_available: false`. It records a new operation UUID, collection interval,
-exact frozen members, grant hashes, host bindings, profile revision/control
-epoch, workspace identity and observed generations. Its `digest` is SHA-256 of
+The artifact identifies itself as `aoe-afk-batch-preview`, version 2, with
+`apply_available: true`. This means an apply attempt is available, not that a
+member is activated or guaranteed acceptance. It records a new operation UUID,
+collection interval, exact frozen members, grant hashes, host bindings, control
+and exception epochs, workspace identity and observed generations. Its `digest` is SHA-256 of
 UTF-8 compact JSON after removing `digest` and recursively sorting object keys;
 array order is retained. This detects content changes, not authenticity, and is
 not an authorization token.
@@ -112,9 +119,14 @@ trashed, unsupported, uninitialized, non-ended delegation, unresolved host human
 guards, unsafe workspaces, stale captures and unacknowledged runtimes remain
 distinct where evidence supports them. Two fresh null-window acknowledgements
 establish **base SDK coverage and generation only**. They do not qualify active
-work or the requested nudge/question capabilities. No row is apply-eligible,
-even with empty exclusions; timeout never proves idle or unsupported status.
-Newly appearing sessions are not added to the selection.
+work or the requested nudge/question capabilities. Empty exclusions identify
+candidates only; timeout never proves idle or unsupported status. Apply rechecks
+per-member evidence, creates accepted unconfirmed windows in one publication,
+then awaits exact grant acknowledgements outside the profile lock and publishes
+confirmation under it. A changed binding,
+generation, grant, control/exception epoch, workspace, expiry or window refuses
+that original attempt. Unrelated sibling revisions alone do not invalidate it.
+New sessions are never added; active windows are not replaced by a batch.
 
 Inspection does not migrate, initialize authority, repair/quarantine registries,
 replace windows, consume allowances or recover guards. Unready namespaces are
@@ -124,11 +136,36 @@ acknowledgements. Intentional writes are existing-session transport probes/locks
 and the explicit output. Independent ordinary runtime activity can still change
 state during collection; capture/recheck changes are marked stale, not overwritten.
 
-Bulk exclusion is explicitly **unrecorded/not implemented**. A future executable
-preview/apply must use a new format and fresh complete exception, budget and
-grant-specific validation. Inspection-v1 can never be silently promoted to
-authority. The remaining profile-scoped batch controls and optional budgets are
-still required; this workflow is not full S6 or release qualification.
+Apply retries are **report-only**, even after lost or partial acknowledgement:
+no re-ACK, re-enrollment, charge or renewal. A reused operation UUID with another
+digest is refused. Status and batch Off use the selected or configured default
+profile; apply always uses the artifact's explicit profile. Batch Off targets
+only original windows and never a later replacement or individual preference.
+
+With a shared cap, ordinary reservations and question/nudge first-use admissions
+publish local and shared consumption atomically. First-use tickets hold capacity;
+only their exact follow-up can bind them, once, without another charge. Loss,
+unknown outcomes, Off and a human winner never refund tickets. Shared exhaustion
+refuses a new charge without invalidating held follow-ups or final admitted tool
+rights; individual bounds, expiry and Off still veto. Question denial precedes
+any close/intent and leaves the original UI open. No automatic retry or unbudgeted
+ordinary dispatch follows denial; fresh proven ordinary input can recover without
+restoring AFK authority. No-budget mode creates no shared tickets.
+
+`off SESSION` and `opt-out SESSION` revoke and persist **excluded**. `on` and
+individual `delegate` do not erase it. `allow-bulk SESSION` changes only the bulk
+preference/exception epoch, grants nothing, and requires a fresh preview before
+batch enrollment. Migrated history is **unrecorded**, not an invented prior
+opt-out. A fresh explicit preview/apply may select unrecorded or allowed members.
+At 64 retained operations the next apply is refused, never an eviction of replay
+identities.
+
+In the TUI command palette, **AFK batch: load preview / review / explicitly
+apply** loads the same private file through the shared service. Enter loads only;
+review all grants, exclusions and the digest, then press `a` to explicitly apply.
+Up/Down and PageUp/PageDown scroll. After an attempt, `r` inspects its original
+operation and `o` stops its original windows. Closing does not undo a requested
+operation. No automatic apply retry is offered.
 
 ## Control-only presence
 
@@ -146,7 +183,7 @@ aoe session afk off SESSION
 Choose an expiry from 1 to 1440 minutes. `on` grants zero autonomous allowance
 and exits nonzero without a fresh acknowledgement. It also ends any previous
 delegation. `off` durably revokes future work, including delegation, even when
-runtime acknowledgement is unavailable. Corrupt or unsafe storage requires
+runtime acknowledgement is unavailable, and persists a bulk exclusion. Corrupt or unsafe storage requires
 explicit repair rather than a guessed revision.
 
 In the TUI command palette, **AFK control-only: inspect / enable / disable**
@@ -237,7 +274,9 @@ deferral below. Other UI interaction completion conservatively pauses pending
 delegation without assuming the human answered or cancelled.
 
 Human input is retained intact and pauses delegation. Explicit stop, off,
-expiry, failed/denied reservations and settlement end it. A stopped or exhausted
+expiry, local exhaustion, other failed reservations and ordinary settlement end
+it. Shared-budget denial instead preserves existing host rights as described
+above. A stopped or exhausted
 owned episode stays guarded through settlement, so an ordinary automatic
 follow-up cannot escape its limit. Normal tool selections are not rewritten.
 Resuming delegation requires a new operator command and fresh acknowledgement;
@@ -391,7 +430,9 @@ It omits action payloads and private preimages. Review before sharing.
 | One file effect/preimage | 64 KiB each |
 | Window snapshot | 1 MiB |
 | Retained session ledger | 8 MiB |
-| Profile authority snapshot, including metadata | 32 MiB |
+| Profile authority snapshot, including pending-publication envelope | 32 MiB |
+| Batch members / retained operations | 16 / 64 |
+| Optional shared SDK requests per batch | Explicit 1 to 128; omitted/null has no cap or charge |
 | Runtime stdio frame | 256 KiB |
 | Presence/control object | 16 KiB, unchanged |
 
@@ -410,11 +451,22 @@ new grants. There is no automatic reconciliation or quota-reset shortcut.
 
 ### Profile authority and upgrades
 
-Presence and all individual delegation history now share one private snapshot at
-`<app_dir>/afk-authority-v1/profiles/<profile>/snapshot.json` and one stable
+Presence, individual history, batch membership, preferences and optional shared
+tickets share one private snapshot at
+`<app_dir>/afk-authority-v2/profiles/<profile>/snapshot.json` and one stable
 profile writer lock. Session IDs are scoped to their exact profile. Transport
 probes and acknowledgements cannot grant authority. The launch/stdio bridge and
-grants remain protocol 4; the storage version is independent.
+runtime acknowledgement use wire 5. Policy remains 1; Book/Window/grants remain 4;
+native question markers and cooperative events remain version 1.
+
+Before each canonical publication a private pending journal durably records its
+identity, prior hash and full bounded proposal. It is a **veto**, never another
+source of authority. Uncertain publication parks the profile without refund or
+automatic repair. A known data commit with retained journal is committed but
+parked. A committed snapshot whose journal removal has uncertain directory-sync
+durability returns a publication warning, not a failed activation; restart may
+restore only a veto. Preserve these diagnostics and never delete a journal to
+force activation.
 
 Run `aoe migrate` normally in the selected app namespace before launching the new
 integration. The early bridge refuses older, incomplete or corrupt authority
@@ -439,6 +491,14 @@ are explicitly unassigned evidence in the manifest and global overview.
 Assigned history without a current registry profile/session appears separately
 as historical authority, with redacted references and guard summaries, never as
 an eligible live session.
+
+Migration 41 preserves verified v1 originals, seals v1 profile creation and
+fences actual present or prepared-absent snapshots before importing nonauthorizing
+v2 history. It preserves guards and counters, not live windows or invented bulk
+preferences. Migration 40 must finish before the first durable v41 start; after
+that, retries verify its frozen historical evidence without reopening or
+reconstructing the old active namespace. A completed newer snapshot is never
+overwritten by replay.
 
 An interrupted migration resumes from verified originals and refuses conflicts,
 missing evidence, unsafe files or capacity overflow. Never delete its manifest,

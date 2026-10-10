@@ -79,21 +79,9 @@ pub(super) fn serve(
             n <= delegation::FRAME_BYTES && line.last() == Some(&b'\n'),
             "AFK bridge packet exceeds bounds or is incomplete"
         );
-        let result = (|| -> Result<serde_json::Value> {
+        let (result, warnings) = authority::publication_context(|| -> Result<serde_json::Value> {
             validate()?;
             let command: Command = serde_json::from_slice(&line)?;
-            let policy = runtime
-                .map(|s| s.session().map(|s| s.policy))
-                .transpose()?
-                .flatten();
-            if let Some(p) = &policy {
-                p.validate()?;
-            }
-            let probe = store.read::<Probe>("request.json")?.filter(|r| {
-                r.version == VERSION
-                    && r.binding == *binding
-                    && r.revision == policy.as_ref().map_or(0, |p| p.revision)
-            });
             match command {
                 Command::QuestionRecover { window, identity } => delegation::questions::recover(
                     runtime.context("runtime unavailable")?,
@@ -108,9 +96,11 @@ pub(super) fn serve(
                         binding,
                         generation,
                         now_ms(),
+                        &validate,
                     )?;
                     let revision = view["policy"]["revision"].as_u64().unwrap_or(0);
-                    view["probe"] = serde_json::to_value(probe.filter(|p| p.revision == revision))?;
+                    view["probe"] =
+                        serde_json::to_value(matching_probe(store, binding, revision)?)?;
                     view["runtime_probe"] = serde_json::to_value(
                         store.read::<delegation::RuntimeProbe>("runtime-probe.json")?,
                     )?;
@@ -125,11 +115,24 @@ pub(super) fn serve(
                     &validate,
                 ),
                 Command::RuntimeAck { ack } => {
+                    let runtime = runtime.context("runtime unavailable")?;
+                    let _lock = runtime.lock_existing(TIMEOUT)?;
+                    validate()?;
+                    runtime.session()?;
                     delegation::acknowledge(store, binding, generation, ack)?;
                     Ok(serde_json::json!({"acknowledged":true}))
                 }
                 Command::Ack { ack } => {
-                    let probe = probe.context("no current matching probe")?;
+                    let runtime = runtime.context("runtime unavailable")?;
+                    let _lock = runtime.lock_existing(TIMEOUT)?;
+                    validate()?;
+                    let policy = runtime.session()?.policy;
+                    if let Some(policy) = &policy {
+                        policy.validate()?;
+                    }
+                    let probe =
+                        matching_probe(store, binding, policy.as_ref().map_or(0, |p| p.revision))?
+                            .context("no current matching probe")?;
                     ensure!(
                         ack.generation == generation
                             && valid_ack(&ack, &probe, policy.as_ref(), now_ms()),
@@ -139,15 +142,33 @@ pub(super) fn serve(
                     Ok(serde_json::json!({"acknowledged":true}))
                 }
             }
-        })();
+        });
         let value = match result {
-            Ok(value) => serde_json::json!({"ok":true,"value":value}),
-            Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
+            Ok(mut value) => {
+                if !warnings.is_empty() {
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert(
+                            "publication_warnings".into(),
+                            serde_json::to_value(warnings)?,
+                        );
+                    }
+                }
+                serde_json::json!({"ok":true,"value":value})
+            }
+            Err(error) => {
+                serde_json::json!({"ok":false,"code":if error.is::<batch::state::SharedExhausted>() {Some("shared_budget_exhausted")}else{None},"error":error.to_string()})
+            }
         };
         serde_json::to_writer(&mut output, &value)?;
         output.write_all(b"\n")?;
         output.flush()?;
     }
+}
+
+fn matching_probe(store: &Store, binding: &Binding, revision: u64) -> Result<Option<Probe>> {
+    Ok(store
+        .read::<Probe>("request.json")?
+        .filter(|p| p.version == VERSION && p.binding == *binding && p.revision == revision))
 }
 
 #[cfg(test)]
@@ -159,7 +180,7 @@ mod tests {
         let _home = crate::session::test_support::isolate_app_dir();
         let app = crate::session::get_app_dir().unwrap();
         let bootstrap = Bootstrap {
-            version: 4,
+            version: BRIDGE_VERSION,
             app_dir: app.clone(),
             aoe_bin: "/worktree/aoe".into(),
             binding: Binding {
@@ -170,14 +191,14 @@ mod tests {
             },
         };
         let raw = serde_json::to_string(&bootstrap).unwrap();
+        authority::migration::initialize_test(&app);
         for state in ["schema39", "partial", "corrupt", "missing-import"] {
-            authority::migration::run_at(&app).unwrap();
             std::fs::write(
                 app.join(".schema_version"),
-                if state == "schema39" { "39" } else { "40" },
+                if state == "schema39" { "39" } else { "41" },
             )
             .unwrap();
-            let path = app.join("afk-authority-v1/migration/manifest.json");
+            let path = app.join("afk-authority-v2/migration/manifest.json");
             let original = std::fs::read(&path).unwrap();
             if state == "partial" {
                 let mut m: serde_json::Value = serde_json::from_slice(&original).unwrap();
@@ -193,8 +214,9 @@ mod tests {
                 super::super::overview::tests::tree(&app),
                 "{state}: {error:#}"
             );
-            assert!(!app.join("afk-authority-v1/profiles").exists());
+            assert!(!app.join("afk-authority-v2/profiles").exists());
             std::fs::write(&path, &original).unwrap();
+            std::fs::write(app.join(".schema_version"), "41").unwrap();
         }
     }
     #[test]

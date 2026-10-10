@@ -166,7 +166,14 @@ export function questionRuntime(pi, { current, stop, live, observable, supported
       a.persisted = true;
       if (a.outcome === "ordinary") { marker(r, identity, "ordinary", a.window); a.intent = false; await stop(r, "ordinary question outcome won"); }
       else if (a.outcome !== "accepted") await stop(r, "question cleanup unknown");
-    } catch { await stop(r, "question unavailable or outcome unknown", false, "failed"); }
+    } catch (error) {
+      if (error?.code === "shared_budget_exhausted" && a && !a.intent) {
+        a.denied = true;
+        r.questionDenied = "AFK shared admission denied; original human question remains open";
+        return;
+      }
+      await stop(r, "question unavailable or outcome unknown", false, "failed");
+    }
   };
   const block = async (r, ctx) => {
     await stop(r, "unresolved controlled question return; explicit ordinary recovery required");
@@ -208,7 +215,7 @@ export function questionRuntime(pi, { current, stop, live, observable, supported
     },
     input(r, event, ctx) {
       r.questionRecovery = undefined;
-      if ((r.questionAttempt?.intent || r.restoredGuards.size || r.questionGuards?.length) && ctx.inputProvenance === "pipeline-v1" && event.provenance && event.source === "interactive" && ctx.isIdle() && !event.images?.length && event.text) {
+      if ((r.budgetDenied || r.questionAttempt?.intent || r.restoredGuards.size || r.questionGuards?.length) && ctx.inputProvenance === "pipeline-v1" && event.provenance && event.source === "interactive" && ctx.isIdle() && !event.images?.length && event.text) {
         r.questionRecovery = { text: event.text, provenance: event.provenance, entries: new Set(ctx.sessionManager.getEntries().map(e => e.id)) };
       }
     },
@@ -230,6 +237,7 @@ export function questionRuntime(pi, { current, stop, live, observable, supported
           r.resolvedQuestions.add(g.identity.operation);
         }
         r.restoredGuards.clear(); r.questionGuards = []; if (a) a.intent = false;
+        r.budgetDenied = false; r.budgetAbortSignal = undefined;
         await stop(r, "explicit ordinary recovery"); return { ordinary: true };
       }
       if (!a?.intent && !guards.some(g => g.emission_intent !== false && !r.resolvedQuestions.has(g.identity.operation)) && !r.markerInvalid) return {};

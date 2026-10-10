@@ -55,6 +55,14 @@ impl Question {
     }
 }
 impl Window {
+    pub(super) fn question_ticket(&self) -> Option<(batch::state::Origin, Option<String>)> {
+        self.question.as_ref().map(|q| {
+            (
+                batch::state::Origin::Question(q.identity.clone()),
+                q.observed_request.clone(),
+            )
+        })
+    }
     pub(super) fn unresolved_question(&self) -> bool {
         self.question.as_ref().is_some_and(Question::unresolved)
     }

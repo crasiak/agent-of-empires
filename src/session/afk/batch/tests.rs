@@ -108,7 +108,7 @@ fn manifest_validation_is_private_bounded_exact_and_all_or_nothing() {
 }
 
 #[test]
-fn inspection_freezes_selection_and_never_creates_authority_or_claims_apply() {
+fn preview_freezes_selection_and_never_creates_authority() {
     let app = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     authority::migration::initialize_test(app.path());
@@ -129,7 +129,7 @@ fn inspection_freezes_selection_and_never_creates_authority_or_claims_apply() {
     let other_bytes = other_profile.bytes("snapshot.json").unwrap();
     let snapshot = app
         .path()
-        .join("afk-authority-v1/profiles/alpha/snapshot.json");
+        .join("afk-authority-v2/profiles/alpha/snapshot.json");
     let before = fs::read(&snapshot).unwrap();
     let generation = uuid::Uuid::new_v4().to_string();
     let mut calls = 0;
@@ -156,11 +156,16 @@ fn inspection_freezes_selection_and_never_creates_authority_or_claims_apply() {
     )
     .unwrap();
     assert_eq!(calls, 2);
-    assert!(!artifact.content.apply_available);
+    assert!(artifact.content.apply_available);
+    assert_eq!(artifact.content.version, 2);
     assert_eq!(artifact.content.shared_budget, "No shared budget");
     assert_eq!(
-        artifact.content.bulk_exclusion,
-        "unrecorded/not implemented"
+        artifact.content.members[0]
+            .authority
+            .as_ref()
+            .unwrap()
+            .preference,
+        state::Preference::Unrecorded
     );
     assert_eq!(artifact.content.members.len(), 6);
     assert!(artifact.content.members[0].exclusions.is_empty());
@@ -269,7 +274,7 @@ fn output_is_private_exclusive_and_unready_inspection_does_not_initialize() {
     assert_eq!(fs::read_dir(app.path()).unwrap().count(), 0);
     assert!(!output.exists());
     authority::migration::initialize_test(app.path());
-    let migration = app.path().join("afk-authority-v1/migration/manifest.json");
+    let migration = app.path().join("afk-authority-v2/migration/manifest.json");
     let original = fs::read(&migration).unwrap();
     for state in ["older", "partial"] {
         if state == "older" {
@@ -287,10 +292,11 @@ fn output_is_private_exclusive_and_unready_inspection_does_not_initialize() {
             .contains("aoe migrate"));
         assert_eq!(before, super::super::overview::tests::tree(app.path()));
         assert!(!output.exists());
-        fs::write(app.path().join(".schema_version"), "40").unwrap();
+        fs::write(app.path().join(".schema_version"), "41").unwrap();
         fs::write(&migration, &original).unwrap();
     }
-    preview_at(app.path(), &input, &output).unwrap();
+    let receipt = preview_at(app.path(), &input, &output).unwrap();
+    assert!(receipt.apply_available);
     let before = fs::read(&output).unwrap();
     assert_eq!(
         fs::metadata(&output).unwrap().permissions().mode() & 0o777,
@@ -301,7 +307,20 @@ fn output_is_private_exclusive_and_unready_inspection_does_not_initialize() {
     assert!(before.len() <= ARTIFACT_BYTES);
     let mut value: Value = serde_json::from_slice(&before).unwrap();
     let expected = value.as_object_mut().unwrap().remove("digest").unwrap();
-    assert_eq!(expected, canonical_digest(value).unwrap());
+    assert_eq!(expected, canonical_digest(value.clone()).unwrap());
+    executable(&output, expected.as_str().unwrap()).unwrap();
+    assert!(executable(&output, &"0".repeat(64)).is_err());
+    value["format"] = json!("aoe-afk-batch-inspection");
+    value["version"] = json!(1);
+    value["apply_available"] = json!(true);
+    let edited_digest = canonical_digest(value.clone()).unwrap();
+    value["digest"] = json!(edited_digest);
+    private(&output, &serde_json::to_vec(&value).unwrap());
+    assert!(executable(&output, value["digest"].as_str().unwrap())
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("inspection-v1"));
 }
 
 #[test]
@@ -457,8 +476,8 @@ fn proposed_budget_and_publication_limits_never_invent_charges_or_partial_output
     assert!(artifact
         .content
         .shared_budget
-        .contains("not enforced or charged"));
-    assert!(!artifact.content.apply_available);
+        .contains("only after explicit apply"));
+    assert!(artifact.content.apply_available);
     assert_eq!(before, super::super::overview::tests::tree(app.path()));
 
     let mut row = Instance::new(&"x".repeat(ARTIFACT_BYTES), "/workspace");

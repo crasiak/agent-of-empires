@@ -1152,7 +1152,10 @@ impl HomeView {
     }
 
     pub fn handle_dialog_click(&mut self, col: u16, row: u16) -> bool {
-        if self.afk_dialog.is_some() || self.afk_overview_dialog.is_some() {
+        if self.afk_dialog.is_some()
+            || self.afk_overview_dialog.is_some()
+            || self.afk_batch_dialog.is_some()
+        {
             return true;
         }
         if let Some(dialog) = &mut self.intro_dialog {
@@ -1934,6 +1937,13 @@ impl HomeView {
                     self.tips_dialog = None;
                     self.persist_tips_outcome(outcome);
                 }
+            }
+            return None;
+        }
+
+        if let Some(dialog) = &mut self.afk_batch_dialog {
+            if matches!(dialog.handle_key(key), DialogResult::Cancel) {
+                self.afk_batch_dialog = None;
             }
             return None;
         }
@@ -3720,6 +3730,14 @@ impl HomeView {
             hotkey: String::new(),
             payload: PaletteAction::AfkOverview,
         });
+        entries.push(PaletteCommand {
+            id: "afk-batch",
+            title: "AFK batch: load preview / review / explicitly apply".into(),
+            group: PaletteGroup::Actions,
+            keywords: vec!["away", "afk", "batch", "preview", "apply"],
+            hotkey: String::new(),
+            payload: PaletteAction::AfkBatch,
+        });
 
         // Quit lives in the registry but is excluded from `builtin_commands` (no palette
         // metadata) so it can sit in the Settings group at the end; add it here, still
@@ -3856,6 +3874,11 @@ impl HomeView {
                 self.search_match_index = 0;
                 self.search_query = Input::default();
                 self.run_action(id, update_info)
+            }
+            PaletteAction::AfkBatch => {
+                self.afk_batch_dialog =
+                    Some(super::super::dialogs::afk_batch::AfkBatchDialog::new());
+                None
             }
             PaletteAction::AfkOverview => {
                 self.afk_overview_dialog =

@@ -71,6 +71,24 @@ pub(in crate::session::afk) struct Nudge {
 }
 
 impl Window {
+    pub(super) fn nudge_tickets(&self) -> Vec<(batch::state::Origin, Option<String>)> {
+        self.nudges
+            .iter()
+            .map(|n| {
+                (
+                    batch::state::Origin::Nudge(n.identity.clone()),
+                    n.observed_request.clone(),
+                )
+            })
+            .collect()
+    }
+    pub(super) fn nudge_ticket(&self, checkpoint: usize) -> Result<batch::state::Origin> {
+        self.nudges
+            .iter()
+            .find(|n| n.identity.checkpoint == checkpoint)
+            .map(|n| batch::state::Origin::Nudge(n.identity.clone()))
+            .context("missing nudge admission")
+    }
     pub(super) fn prune_checkpoint_bodies(&mut self) {
         for checkpoint in &mut self.checkpoints {
             checkpoint.claims = None;

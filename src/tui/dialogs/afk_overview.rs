@@ -99,6 +99,17 @@ impl AfkOverviewDialog {
                     error.clone(),
                 ));
             }
+            for batch in &profile.batches {
+                let budget = if batch["shared_requests"].is_null() {
+                    "No shared budget".into()
+                } else {
+                    format!(
+                        "{}/{} SDK charges",
+                        batch["shared_charges"], batch["shared_requests"]
+                    )
+                };
+                rows.push((format!("[{}] BATCH {} | {}", profile.profile, batch["operation_id"].as_str().unwrap_or("unknown"), budget),format!("Original operation: {}\n{}; held unbound: {}\nExpiry: {}; expired: {}; stopped: {}\n{}\nOriginal members: {}", batch["operation_id"],budget,batch["held_unbound"],batch["expires_at_ms"],batch["expired"],batch["stopped"],batch["observation"].as_str().unwrap_or("stored only"),batch["members"])));
+            }
             for session in &profile.sessions {
                 if !self.include_archived
                     && (session.archived || session.trashed)
@@ -145,6 +156,15 @@ impl AfkOverviewDialog {
                 } else {
                     detail.push_str("\nNo stored delegation summary; no live authority inferred");
                 }
+                detail.push_str(&format!(
+                    "\nBulk preference: {} (epoch {:?}); {}",
+                    session.bulk_preference,
+                    session.exception_epoch,
+                    session.batch.as_ref().map_or_else(
+                        || session.batch_membership.into(),
+                        |b| format!("batch {}", b["operation_id"])
+                    )
+                ));
                 if !session.errors.is_empty() {
                     detail = format!("ERROR: {}\n{}", session.errors.join("; "), detail);
                 }
@@ -186,7 +206,7 @@ impl AfkOverviewDialog {
         let layout = Layout::vertical([
             Constraint::Length(5),
             Constraint::Min(2),
-            Constraint::Length(9),
+            Constraint::Length(12),
             Constraint::Length(2),
         ])
         .split(inner);
@@ -200,7 +220,7 @@ impl AfkOverviewDialog {
                 )
             },
         );
-        let header = format!("All profiles | stored snapshot: {captured} | acknowledgements not fresh\nNo shared budget; batch budget controls not implemented\nOutside batches; bulk opt-out not recorded by this storage version\nAccount coverage unknown; SDK reservations are not delivery or billing\n{}", if self.pending.is_some() { "Reading host summaries (no runtime probes)..." } else { "Activity is stored, not a live process or authority check" });
+        let header = format!("All profiles | stored snapshot: {captured} | acknowledgements not fresh\n{}\n{}\nAccount coverage unknown; SDK reservations are not delivery or billing\n{}", self.snapshot.as_ref().map_or("Shared budgets unobserved",|s|s.shared_budget),self.snapshot.as_ref().map_or("Bulk preferences unobserved",|s|s.bulk_exclusions),if self.pending.is_some() { "Reading host summaries (no runtime probes)..." } else { "Activity is stored, not a live process or authority check" });
         frame.render_widget(
             Paragraph::new(header).style(Style::default().fg(theme.text)),
             layout[0],
@@ -275,6 +295,10 @@ mod tests {
             presence_acknowledgement: "unobserved".into(),
             delegation: None,
             legacy_evidence: vec![],
+            bulk_preference: "unrecorded".into(),
+            exception_epoch: Some(0),
+            batch: None,
+            batch_membership: "outside original batch windows",
             errors: vec![],
         };
         calls.lock().unwrap()[0]
@@ -286,15 +310,17 @@ mod tests {
                     ProfileOverview {
                         profile: "alpha".into(),
                         sessions: vec![row("workstream", false), row("archived", true)],
+                        batches: vec![],
                         errors: vec![],
                     },
                     ProfileOverview {
                         profile: "beta".into(),
                         sessions: vec![],
+                        batches: vec![],
                         errors: vec!["unreadable profile".into()],
                     },
                 ],
-                shared_budget: "not implemented",
+                shared_budget: "No shared budget",
                 batch_membership: "outside",
                 bulk_exclusions: "not recorded",
                 account_coverage: "unknown",
@@ -348,7 +374,7 @@ mod tests {
             "Global AFK overview",
             "INCOMPLETE",
             "No shared budget",
-            "not implemented",
+            "Bulk preference: unrecorded",
             "[alpha] workstream",
             "[beta] PROFILE ERROR",
             "unsupported host",

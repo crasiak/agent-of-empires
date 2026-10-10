@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerAfk, spawnBridge } from "./aoe-afk.mjs";
 
-function fixture(flag = true) {
+function fixture(flag = true, delegation) {
   const binding = { instance_id: "instance", profile: "default", native_id: "native", launch_id: randomUUID() };
   const bootstrap = { version: 1, app_dir: "/isolated/app", aoe_bin: "/isolated/aoe", binding };
   const handlers = new Map();
@@ -15,8 +15,8 @@ function fixture(flag = true) {
     on(name, handler) { assert.ok(["session_start", "session_shutdown", "context"].includes(name), `forbidden handler ${name}`); handlers.set(name, handler); } },
     { get(target, property) { if (!(property in target)) throw new Error(`Forbidden Pi call: ${String(property)}`); return target[property]; } });
   f.ctx = { hasUI: true, sessionManager: { getSessionId: () => f.native }, ui: { setStatus: (_key, value) => f.statuses.push(value) } };
-  registerAfk(api, { wall: () => f.wall, mono: () => f.mono, schedule(fn) { f.scheduled.push(fn); return () => f.scheduled.splice(f.scheduled.indexOf(fn), 1); },
-    bridge(_bootstrap, generation) { f.generations.push(generation); return { async request(packet) { f.calls.push(packet.op); if (f.failure) throw new Error("unavailable"); if (packet.op === "poll") { const snapshot = { policy: f.policy && structuredClone(f.policy), probe: f.probe && structuredClone(f.probe) }; if (f.holdNextPoll) { f.holdNextPoll = false; return new Promise(resolve => { f.releasePoll = () => resolve(snapshot); }); } return snapshot; } f.acks.push(structuredClone(packet.ack)); return { acknowledged: true }; }, async close() { f.closed++; } }; } });
+  registerAfk(api, { delegation, wall: () => f.wall, mono: () => f.mono, schedule(fn) { f.scheduled.push(fn); return () => f.scheduled.splice(f.scheduled.indexOf(fn), 1); },
+    bridge(_bootstrap, generation) { f.generations.push(generation); return { async request(packet) { f.calls.push(packet.op); if (f.failure) throw new Error("unavailable"); if (packet.op === "poll") { const snapshot = { policy: f.policy && structuredClone(f.policy), probe: f.probe && structuredClone(f.probe) }; if (f.holdNextPoll) { f.holdNextPoll = false; return new Promise(resolve => { f.releasePoll = () => resolve(snapshot); }); } return snapshot; } f.acks.push(structuredClone(packet.ack)); return { acknowledged: true, publication_warnings: f.warning ? [f.warning] : undefined }; }, async close() { f.closed++; } }; } });
   f.start = () => handlers.get("session_start")({}, f.ctx);
   f.stop = () => handlers.get("session_shutdown")({}, f.ctx);
   f.context = (messages = []) => handlers.get("context")({ messages }, f.ctx);
@@ -119,6 +119,21 @@ test("idle polling observes a fresh probe without a model turn; old cleanup cann
   f.probe.challenge = randomUUID();await f.context();assert.equal(f.acks.length, count + 1);
   await f.stop();await f.stop();assert.equal(f.closed, 1);
   await f.start();assert.equal(f.scheduled.length, 1);await f.stop();
+});
+
+test("publication warnings from ignored internal receipts remain visible", async () => {
+  let runtime;
+  const f = fixture(true, { attach(r) { runtime = r; }, status() {}, poll() {}, context() {}, shutdown() {}, failed() {} });
+  await f.start();
+  for (const kind of ["nudge", "contribution_intent", "question_intent", "question_outcome"]) {
+    const warning = `committed cleanup warning: ${kind}`;
+    f.warning = warning;
+    await runtime.bridge.request({ op: "runtime", command: { kind } });
+    f.warning = undefined;
+    await f.context();
+    assert.equal(f.statuses.at(-1), warning);
+  }
+  await f.stop();
 });
 
 test("stdio bridge rejects broken, oversized and unresponsive helpers and reaps on close", async () => {

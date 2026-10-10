@@ -24,7 +24,7 @@ pub use bridge::run_bridge;
 pub(crate) use store::initialize;
 
 const VERSION: u32 = 1;
-const BRIDGE_VERSION: u32 = 4;
+const BRIDGE_VERSION: u32 = 5;
 const MODE: &str = "control-only";
 const MAX_BYTES: usize = 16 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(3);
@@ -287,7 +287,22 @@ fn report(
 }
 
 pub fn control(instance: &Instance, operation: Operation) -> Result<Report> {
+    let (result, warnings) = authority::publication_context(|| control_inner(instance, operation));
+    let mut report = result?;
+    if !warnings.is_empty() {
+        report
+            .detail
+            .push_str(&format!("; {}", warnings.join("; ")));
+    }
+    Ok(report)
+}
+fn control_inner(instance: &Instance, operation: Operation) -> Result<Report> {
     let mut report = control_presence(instance, operation)?;
+    if matches!(operation, Operation::Off) {
+        report
+            .detail
+            .push_str("; excluded from future batches until explicit allow-bulk");
+    }
     if matches!(operation, Operation::Status) {
         let store = Store::authority(
             &super::get_app_dir()?,
@@ -336,6 +351,7 @@ fn control_presence(instance: &Instance, operation: Operation) -> Result<Report>
         if !matches!(operation, Operation::Status) {
             session.revoke()?;
             if matches!(operation, Operation::Off) {
+                session.preference(batch::state::Preference::Excluded)?;
                 let binding = binding.as_ref().cloned().unwrap_or_else(|_| Binding {
                     instance_id: instance.id.clone(),
                     profile: instance.effective_profile(),

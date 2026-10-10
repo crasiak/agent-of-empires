@@ -22,6 +22,7 @@ async function runCase(scenario, externalHost) {
   const cwd = await mkdtemp(join(tmpdir(), "aoe-afk-sdk-"));
   let session, supportsNudges = false;
   const nudging = scenario.startsWith("nudge-");
+  const budgeted = scenario === "shared-reserve-denied" || scenario === "nudge-shared-denied";
   const twice = scenario === "nudge-two";
   const liveCustom = scenario === "nudge-late-extension-live";
   const lateCustom = scenario === "nudge-late-extension" || liveCustom;
@@ -32,7 +33,7 @@ async function runCase(scenario, externalHost) {
   try {
     const sessionManager = sdk.SessionManager.inMemory(cwd);
     const binding = { instance_id: "test", profile: "default", native_id: sessionManager.getSessionId(), launch_id: randomUUID() };
-    const bootstrap = { version: 4, app_dir: cwd, aoe_bin: "/unused/aoe", binding };
+    const bootstrap = { version: 5, app_dir: cwd, aoe_bin: "/unused/aoe", binding };
     const d = claims();
     if (scenario === "question") { d.human_required = true; d.action = null; }
     const grant = { version: 4, task: "scratch", scope: "scratch text", files: [{ path: "scratch.txt", capability: "create" }], requests: nudging ? (twice || liveCustom ? 8 : 4) : scenario === "limit-one" ? 1 : 2, settlement_nudges: nudging ? (twice ? 2 : 1) : 0, question_deferrals: scenario === "question-capability" ? 1 : 0, assurance: coverage };
@@ -41,14 +42,14 @@ async function runCase(scenario, externalHost) {
     const challenge = randomUUID();
     const warming = action => session.extensionRunner.emitCacheWarmingDecision({ type: "cache_warming_decision", action, warmCost: 0, missCost: 1, continuationProbability: 1 });
     const assertNativeWarming = async () => { for (const action of ["warm", "stop"]) assert.equal(await warming(action), action, `${scenario}: ordinary warming passes through`); };
-    const view = { version: 4, revision: 1, window: randomUUID(), binding, generation: "", state: "pending", confirmed: true, issued_at_ms: Date.now(), expires_at_ms: Date.now() + 60000, grant, grant_hash: sha(JSON.stringify(grant)), reservations_used: 0 };
+    const view = { batch: budgeted ? { shared_requests: nudging ? 3 : 1 } : null, version: 4, revision: 1, window: randomUUID(), binding, generation: "", state: "pending", confirmed: true, issued_at_ms: Date.now(), expires_at_ms: Date.now() + 60000, grant, grant_hash: sha(JSON.stringify(grant)), reservations_used: 0 };
     const hostOperation = async packet => {
       ops.push(packet);
       if (externalHost) return externalHost({ packet, generation, binding, decision: d });
       if (packet.op === "poll" && recordRequest && scenario === "failed-refresh") throw Error("poll failed after ownership");
       if (packet.op === "poll" && recordRequest && scenario === "missing-ledger") return { policy: null, probe: null, delegation: null, runtime_probe: null };
       if (packet.op === "poll") {
-        const result = { policy: null, probe: null, delegation: armed ? { ...view, state: stale ? "pending" : stopped ? "ended" : view.state, generation, reservations_used: requestNumber } : null, runtime_probe: armed ? { version: 4, binding, challenge, window: view.window, grant_hash: view.grant_hash } : null };
+        const result = { policy: null, probe: null, delegation: armed ? { ...view, state: stale ? "pending" : stopped ? "ended" : view.state, generation, reservations_used: requestNumber } : null, runtime_probe: armed ? { version: 5, binding, challenge, window: view.window, grant_hash: view.grant_hash, budgeted } : null };
         if (scenario === "pending-poll-stop" && armed && !stopped) void session.abort();
         return result;
       }
@@ -58,6 +59,9 @@ async function runCase(scenario, externalHost) {
       if (["stop", "settle"].includes(cmd.kind)) { stopped = true; return { ended: true }; }
       assert.ok(!stopped, "host stopped");
       assert.ok(view.expires_at_ms > Date.now(), "host expiry");
+      if ((cmd.kind === "reserve" && scenario === "shared-reserve-denied") || (cmd.kind === "nudge" && scenario === "nudge-shared-denied")) {
+        const error = Error("shared admission exhausted"); error.code = "shared_budget_exhausted"; throw error;
+      }
       if (cmd.kind === "reserve") {
         reserves++;
         if (scenario === "failed-store") throw Error("injected failed store");
@@ -146,7 +150,7 @@ async function runCase(scenario, externalHost) {
     await writeFile(fixture, `import { registerAfk } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk.mjs")).href)};
 import { delegationRuntime } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk-runtime.mjs")).href)};
 import { Type } from "@sinclair/typebox";
-export default function(pi) { const f=globalThis.__aoeAfkFixture; pi.on("agent_before_settle",f.before); pi.on("context",f.context); const delegate=delegationRuntime(pi); registerAfk(pi,{protocol:4,delegation:{...delegate,attach(r){delegate.attach(r);f.capture(r);f.refresh=()=>r.refresh();}},bridge:f.bridge,schedule:()=>()=>{}}); pi.on("agent_before_settle",f.after); pi.on("agent_settled",f.observe); pi.on("ui_prompt_end",f.observe); pi.on("session_compact_failed",f.observe); pi.registerTool({name:"noop",label:"noop",description:"ordinary tool",parameters:Type.Object({}),execute:f.noop}); pi.registerTool({name:"ask_user",label:"Ask User",description:"0.12 compatible question shape",parameters:Type.Object({question:Type.String()}),execute:async()=>{throw Error("question must never execute");}}); }
+export default function(pi) { const f=globalThis.__aoeAfkFixture; pi.on("agent_before_settle",f.before); pi.on("context",f.context); const delegate=delegationRuntime(pi); registerAfk(pi,{protocol:5,delegation:{...delegate,attach(r){delegate.attach(r);f.capture(r);f.refresh=()=>r.refresh();}},bridge:f.bridge,schedule:()=>()=>{}}); pi.on("agent_before_settle",f.after); pi.on("agent_settled",f.observe); pi.on("ui_prompt_end",f.observe); pi.on("session_compact_failed",f.observe); pi.registerTool({name:"noop",label:"noop",description:"ordinary tool",parameters:Type.Object({}),execute:f.noop}); pi.registerTool({name:"ask_user",label:"Ask User",description:"0.12 compatible question shape",parameters:Type.Object({question:Type.String()}),execute:async()=>{throw Error("question must never execute");}}); }
 `);
     const runtime = createExtensionRuntime(); runtime.flagValues.set("aoe-afk-binding", JSON.stringify(bootstrap));
     const loaded = await loadExtensions([fixture], cwd, sdk.createEventBus(), runtime);
@@ -191,7 +195,7 @@ export default function(pi) { const f=globalThis.__aoeAfkFixture; pi.on("agent_b
     ({ session } = await sdk.createAgentSession({ cwd, agentDir: cwd, model, modelRuntime, resourceLoader, settingsManager: sdk.SettingsManager.inMemory({ compaction: { enabled: scenario === "compaction", reserveTokens: 90000, keepRecentTokens: 1 }, retry: { enabled: false }, cacheWarming: "off" }), sessionManager, tools: ["noop", "aoe_afk_record", "aoe_afk_apply", "aoe_afk_read", "aoe_afk_checkpoint", "ask_user"] }));
     await session.bindExtensions({ onError: e => errors.push(e), ...(scenario === "ui-answer" ? { uiContext: { input: async () => "real answer", setStatus() {} }, mode: "tui" } : {}) });
     supportsNudges = typeof globalThis.__aoeAfkFixture.current.ctx.abortPreservingQueue === "function";
-    if (nudging && !supportsNudges) {
+    if ((nudging || budgeted) && !supportsNudges) {
       assert.ok(!sourceRoot, "candidate source must implement the actual queue-preserving operation");
       await session.prompt("ordinary active task before unsupported grant"); await session.waitForIdle();
       assert.equal(calls, 2, "unsupported grant leaves ordinary work unchanged");
@@ -236,7 +240,30 @@ export default function(pi) { const f=globalThis.__aoeAfkFixture; pi.on("agent_b
     }
     await Promise.all(warmingChecks);
     assert.notEqual(session.messages.find(m => m.role === "toolResult" && m.toolName === "noop")?.isError, true, "ordinary tool fixture assertions must not be swallowed by the SDK");
-    await assertNativeWarming();
+    if (!budgeted) await assertNativeWarming();
+    if (budgeted) {
+      const r = globalThis.__aoeAfkFixture.current;
+      const before = calls;
+      const admissions = ops.filter(p => p.command?.kind === "reserve" || p.command?.kind === "nudge").length;
+      assert.equal(before, nudging ? 4 : 1);
+      assert.equal(r.budgetDenied, true);
+      assert.equal(ops.filter(p => ["stop", "settle"].includes(p.command?.kind)).length, 0, "policy denial must not indirectly end host rights");
+      const queued = {role:"custom",customType:"preserved-budget-work",content:"original queued object",display:true,timestamp:Date.now()};
+      session.agent.followUp(queued);
+      later = "done";
+      await session.sendCustomMessage({customType:"automatic-after-denial",content:"not human recovery",display:true},{triggerTurn:true});
+      await session.waitForIdle();
+      assert.equal(calls,before,"denied continuation cannot become an ordinary provider call");
+      assert.ok(session.agent.peekQueuedMessages().includes(queued),"preserving veto retains queued object");
+      assert.equal(ops.filter(p => p.command?.kind === "reserve" || p.command?.kind === "nudge").length,admissions,"no automatic admission retry");
+      await session.prompt("fresh ordinary budget recovery"); await session.waitForIdle();
+      assert.ok(calls>before,"fresh interactive recovery remains ordinary work");
+      assert.equal(r.budgetDenied,false);
+      assert.ok(ops.some(p => p.command?.kind === "stop"),"genuine human input revokes original authority");
+      assert.equal(ops.filter(p => p.command?.kind === "reserve" || p.command?.kind === "nudge").length,admissions);
+      assert.deepEqual(errors,[]);
+      return {scenario,calls:before,ordinaryRecovered:true,preservedQueue:true,hostRightsNotEndedByDenial:true};
+    }
     if (["pending-idle", "pending-completion", "pending-stop", "pending-poll-stop", "pending-ack-stop"].includes(scenario)) {
       assert.equal(stopped, true);
       assert.equal(calls, scenario === "pending-idle" ? 0 : 1);
@@ -315,10 +342,13 @@ if (process.argv.includes("--host")) {
   const result = await runCase(process.argv[process.argv.indexOf("--host") + 1] || "positive", async value => {
     process.stdout.write(JSON.stringify(value) + "\n");
     const line = await lines.next(); assert.equal(line.done, false);
-    const result = JSON.parse(line.value); if (!result.ok) throw Error(result.error); return result.value;
+    const result = JSON.parse(line.value); if (!result.ok) { const error = Error(result.error); error.code = result.code; throw error; } return result.value;
   });
   process.stdout.write(JSON.stringify({ result }) + "\n"); process.exit(0);
 } else {
+  test("actual candidate SDK nonterminal shared denial and ordinary recovery", { skip: !sourceRoot, timeout: 60000 }, async () => {
+    for (const scenario of ["shared-reserve-denied", "nudge-shared-denied"]) console.log(JSON.stringify(await runCase(scenario)));
+  });
   test(`actual ${sourceRoot ? "candidate source" : "stock"} Pi SDK request/ownership gate, offline provider`, { skip: !root && !sourceRoot, timeout: 60000 }, async () => {
     for (const scenario of ["question-capability", "positive", "sibling", "limit-one", "failed-store", "unknown-tool", "explicit-stop", "human-input", "off", "ui-answer", "question", "lost-ack", "expiry", "pending-idle", "pending-stop", "pending-completion", "pending-poll-stop", "pending-ack-stop", "pending-off", "pending-expiry", "compaction", "missing-ledger", "failed-refresh", "nudge-one", "nudge-two", "nudge-stop-before", "nudge-stop-during", "nudge-stop-after", "nudge-off-before", "nudge-expiry-before", "nudge-human", "nudge-extension", "nudge-prior", "nudge-late", "nudge-lost-ack", "nudge-off-during", "nudge-expiry-during", "nudge-off-after", "nudge-expiry-after", "nudge-stop-context", "nudge-off-context", "nudge-expiry-context", "nudge-late-human", "nudge-late-extension", "nudge-late-extension-live"]) { const result = await runCase(scenario); console.log(JSON.stringify(result)); if (result.capability_refused) { console.log("Candidate nudge matrix blocked: actual queue-preserving context operation absent"); break; } }
   });

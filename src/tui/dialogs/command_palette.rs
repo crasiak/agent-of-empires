@@ -52,6 +52,7 @@ impl PaletteGroup {
 pub enum PaletteAction {
     AfkControl,
     AfkOverview,
+    AfkBatch,
     /// Run a registry action directly. The canonical path: it synthesizes no
     /// keypress, so strict mode's typing-guard cannot misfire on it.
     Invoke(ActionId),

@@ -505,7 +505,7 @@ fn replacement_preimage_store_failure_caps_and_expired_body_pruning() {
     // An unsafe store must deny record and therefore deny all dependent effects.
     let ledger = app
         .path()
-        .join("afk-authority-v1/profiles/default/snapshot.json");
+        .join("afk-authority-v2/profiles/default/snapshot.json");
     std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(record(&store, &w, &first, d.clone()).is_err());
     std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -650,10 +650,10 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
             .unwrap();
         let app = crate::session::get_app_dir().unwrap();
         authority::migration::initialize_test(&app);
-        let control =
-            Store::transport(&app, &instance.effective_profile(), &instance.id, true).unwrap();
         let runtime =
             Store::authority(&app, &instance.effective_profile(), &instance.id, true).unwrap();
+        let control =
+            Store::transport(&app, &instance.effective_profile(), &instance.id, true).unwrap();
         let grant = json!({"version":4,"task":"scratch","scope":"create scratch greeting","files":[{"path":"scratch.txt","capability":"create"}],"requests":2,"assurance":COVERAGE});
         let file = workspace.path().join("grant.json");
         std::fs::write(&file, serde_json::to_vec(&grant).unwrap()).unwrap();
@@ -693,7 +693,14 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
                                 off_worker = Some(std::thread::spawn(move || {
                                     super::super::control(&instance, Operation::Off).unwrap()
                                 }));
-                                while runtime.session().unwrap().epoch == epoch {
+                                loop {
+                                    let revoked = {
+                                        let _lock = runtime.lock_existing(TIMEOUT).unwrap();
+                                        runtime.session().unwrap().epoch != epoch
+                                    };
+                                    if revoked {
+                                        break;
+                                    }
                                     assert!(
                                         Instant::now() < deadline,
                                         "Off could not revoke while transport was held"
@@ -709,11 +716,12 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
                             &binding,
                             &generation,
                             RuntimeAck {
-                                version: 4,
+                                version: BRIDGE_VERSION,
                                 binding: binding.clone(),
                                 challenge: probe.challenge,
                                 window: probe.window,
                                 grant_hash: probe.grant_hash,
+                                budgeted: probe.budgeted,
                                 generation: generation.clone(),
                                 sdk: "0.87.1".into(),
                                 coverage: COVERAGE.into(),
@@ -759,6 +767,7 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
     }
 }
 
+mod batches;
 mod settlement;
 
 mod questions;

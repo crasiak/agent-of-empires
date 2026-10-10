@@ -19,7 +19,8 @@ export function delegationRuntime(pi) {
   const qualified = VERSION === "0.87.1";
   const live = r => r.view && performance.now() < r.delegateDeadline && Date.now() < r.view.expires_at_ms;
   const observable = r => r.signal && !r.signal.aborted && r.ctx.signal === r.signal && !r.ctx.isIdle() && !r.settling;
-  const active = r => r && (r.owned || (live(r) && !r.parked && r.view.state === "pending"));
+  const active = r => r && (r.owned || (live(r) && (r.budgetDenied || (!r.parked && r.view.state === "pending"))));
+  const sharedDenial = error => error?.code === "shared_budget_exhausted";
   const supportedQuestion = args => args && typeof args.question === "string" && args.question.length > 0
     && Buffer.byteLength(JSON.stringify(args)) <= 8192
     && Object.keys(args).every(k => ["question", "context", "options", "allowMultiple", "allowFreeform", "allowComment", "displayMode", "overlayToggleKey", "commentToggleKey", "timeout"].includes(k))
@@ -27,6 +28,12 @@ export function delegationRuntime(pi) {
   const abortEpisode = (r, ctx = r?.ctx) => {
     if (r?.queueAbort) r.queueAbort();
     else if (!r?.view?.grant.settlement_nudges && !r?.view?.grant.question_deferrals) ctx.abort();
+  };
+  const policyAbort = (r, ctx = r.ctx) => {
+    r.budgetDenied = true;
+    r.reason = "shared admission denied; existing host rights retained; fresh ordinary input required";
+    r.budgetAbortSignal = ctx.signal;
+    abortEpisode(r, ctx);
   };
   const stop = async (r, reason, abort = false, disposition = "interrupted") => {
     if (!r) return;
@@ -60,7 +67,7 @@ export function delegationRuntime(pi) {
     forgetSignal(r);
     r.signal = ctx.signal;
     if (!r.signal) return;
-    r.onAbort = () => { void stop(r, "explicit stop"); };
+    r.onAbort = () => { if (r.budgetDenied && r.budgetAbortSignal === r.signal) return; void stop(r, "explicit stop"); };
     r.signal.addEventListener("abort", r.onAbort, { once: true });
     if (r.signal.aborted) r.onAbort();
   };
@@ -117,11 +124,12 @@ export function delegationRuntime(pi) {
   });
   pi.on("ui_prompt_end", event => questions.end(current, event) ? undefined : intervention("UI interaction; origin unknown, no human answer inferred"));
   pi.on("turn_end", async (event, ctx) => {
+    if (current?.budgetDenied && current.budgetAbortSignal?.aborted) return;
     if (event.outcome === "aborted" || ctx.signal?.aborted) await intervention("explicit stop");
   });
   pi.on("agent_before_settle", async (event, ctx) => {
     const r = current;
-    if (!r?.owned) return;
+    if (!r?.owned || r.budgetDenied) return;
     r.settling = true;
     r.contribution = undefined;
     if (event.outcome !== "completed") { await stop(r, "non-completed boundary", true, event.outcome === "error" ? "failed" : "interrupted"); return; }
@@ -139,7 +147,10 @@ export function delegationRuntime(pi) {
       if (r.parked) return;
       if (!live(r)) { await stop(r, "expired contribution", true); return; }
       r.contribution = receipt.identity;
-    } catch { await stop(r, "settlement admission denied/failed", true, "failed"); }
+    } catch (error) {
+      if (sharedDenial(error)) { r.budgetDenied = true; r.reason = "shared admission denied; no nudge contributed"; return; }
+      await stop(r, "settlement admission denied/failed", true, "failed");
+    }
   });
   // Pi refreshes the queue/draft preview between these ordered handlers.
   pi.on("agent_before_settle", (event, ctx) => {
@@ -156,6 +167,10 @@ export function delegationRuntime(pi) {
     if (!r) return;
     r.settling = true;
     forgetSignal(r);
+    if (r.budgetDenied) {
+      r.owned = false; r.request = undefined; r.settling = false; r.budgetAbortSignal = undefined;
+      return;
+    }
     await r.refresh?.();
     if (r.view || r.owned) {
       r.parked = true;
@@ -182,7 +197,7 @@ export function delegationRuntime(pi) {
     attach(r) { current = r; r.owned = false; r.parked = false; questions.attach(r); },
     async shutdown(r) { questions.shutdown(r); forgetSignal(r); await stop(r, "shutdown", r.owned); if (current === r) current = undefined; },
     failed(r) { if (active(r)) { void stop(r, "host unavailable", r.owned, "failed"); } },
-    status(r) { return r.questionWarning ?? (r.view ? `AFK delegation: ${r.parked ? `ended (${r.reason})` : r.view.state}; SDK reservations ${r.view.reservations_used}/${r.view.grant.requests}; nudges ${r.view.nudges_used}/${r.view.grant.settlement_nudges}; question deferrals ${r.view.question_deferrals_used ?? 0}/${r.view.grant.question_deferrals ?? 0}; one file effect; ${r.view.terminal_reason ?? "nonterminal"}; background unknown` : undefined); },
+    status(r) { return r.questionWarning ?? r.questionDenied ?? (r.budgetDenied ? `AFK shared admission denied; ordinary recovery required; no refund` : undefined) ?? (r.view ? `AFK delegation: ${r.parked ? `ended (${r.reason})` : r.view.state}; SDK reservations ${r.view.reservations_used}/${r.view.grant.requests}; nudges ${r.view.nudges_used}/${r.view.grant.settlement_nudges}; question deferrals ${r.view.question_deferrals_used ?? 0}/${r.view.grant.question_deferrals ?? 0}; one file effect; ${r.view.terminal_reason ?? "nonterminal"}; background unknown` : undefined); },
     async poll(r, view, probe, guards) {
       questions.restoreGuards(r, guards);
       if (view && r.window !== view.window) {
@@ -190,6 +205,7 @@ export function delegationRuntime(pi) {
         if (r.owned) { await stop(r, "replacement during owned episode", true); return; }
         questions.newWindow(r);
         r.window = view.window; r.externalMessages = undefined; r.queueAbort = undefined;
+        r.budgetDenied = false; r.budgetAbortSignal = undefined; r.questionDenied = undefined;
         r.parked = false; r.request = undefined; r.reason = undefined; r.questionUnavailable = false;
         if (!qualified) { r.view = view; await stop(r, "unsupported SDK; executable activation refused"); return; }
         r.delegateDeadline = performance.now() + Math.max(0, Math.min(view.expires_at_ms - view.issued_at_ms, view.expires_at_ms - Date.now()));
@@ -197,7 +213,7 @@ export function delegationRuntime(pi) {
       if (!view && r.view) await stop(r, "delegation disappeared", r.owned);
       r.view = view;
       if (view && (view.state === "ended" || !live(r))) await stop(r, "ended or expired");
-      if (view?.state === "pending" && (view.grant.settlement_nudges > 0 || view.grant.question_deferrals > 0)) {
+      if (view?.state === "pending" && (view.grant.settlement_nudges > 0 || view.grant.question_deferrals > 0 || view.batch?.shared_requests != null)) {
         if (typeof r.ctx.abortPreservingQueue !== "function") {
           await stop(r, "settlement nudges unavailable: queue-preserving abort capability required");
           return;
@@ -210,8 +226,8 @@ export function delegationRuntime(pi) {
       }
       await questions.poll(r);
       if (r.parked && view?.state === "pending") return;
-      if (probe && qualified && (!probe.window || !r.questionUnavailable) && (!probe.window || (!view?.grant.settlement_nudges && !view?.grant.question_deferrals) || typeof r.ctx.abortPreservingQueue === "function") && probe.version === 4 && JSON.stringify(probe.binding) === JSON.stringify(r.bootstrap.binding)
-        && (!probe.window || (probe.window === view?.window && probe.grant_hash === view?.grant_hash))) {
+      if (probe && qualified && (!probe.window || !r.questionUnavailable) && (!probe.window || (!view?.grant.settlement_nudges && !view?.grant.question_deferrals && !probe.budgeted) || typeof r.ctx.abortPreservingQueue === "function") && probe.version === 5 && JSON.stringify(probe.binding) === JSON.stringify(r.bootstrap.binding)
+        && (!probe.window || (probe.window === view?.window && probe.grant_hash === view?.grant_hash && probe.budgeted === (view?.batch?.shared_requests != null)))) {
         const ack = { ...probe, generation: r.generation, sdk: VERSION, coverage: COVERAGE };
         const signature = JSON.stringify(ack);
         if (r.runtimeAck !== signature) {
@@ -233,6 +249,7 @@ export function delegationRuntime(pi) {
       try { question = await questions.guard(r, messages, ctx); }
       catch { question = await questions.block(r, ctx); }
       if (question.blocked || question.ordinary) return { messages };
+      if (r.budgetDenied) { policyAbort(r, ctx); return { messages }; }
       const w = r.view;
       if (!qualified || (!r.owned && (r.parked || !w || w.state !== "pending" || !w.confirmed))) return;
       // Context is emitted after the prior tool batch settles, never in a tool callback.
@@ -259,9 +276,12 @@ export function delegationRuntime(pi) {
         r.externalMessages = externalMessages(messages);
         r.expectedContinuation = undefined; r.contribution = undefined;
         return { messages: [...messages, ...(continuation ? [continuation] : []), { role: "custom", customType: "aoe-afk-delegation", content: `${REMINDER}\nHost grant: ${JSON.stringify(receipt)}`, display: false, timestamp: Date.now() }] };
-      } catch { await stop(r, "reservation denied/failed", true, "failed"); return { messages }; }
+      } catch (error) {
+        if (sharedDenial(error)) { policyAbort(r, ctx); return { messages }; }
+        await stop(r, "reservation denied/failed", true, "failed"); return { messages };
+      }
     },
   };
 }
 
-export default function (pi) { registerAfk(pi, { protocol: 4, delegation: delegationRuntime(pi) }); }
+export default function (pi) { registerAfk(pi, { protocol: 5, delegation: delegationRuntime(pi) }); }

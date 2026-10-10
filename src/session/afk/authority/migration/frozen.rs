@@ -1,7 +1,7 @@
 //! Frozen migration-40 field order, defaults, revocation serialization and namespace.
 use super::super::super::{delegation::Book, Policy, Store, MAX_BYTES};
 use super::super::{scope, Evidence};
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,14 +25,6 @@ impl Session {
             book: Book::empty(),
             evidence: vec![],
         }
-    }
-    pub fn revoke(&mut self) -> Result<()> {
-        self.epoch = self
-            .epoch
-            .checked_add(1)
-            .context("control epoch overflow")?;
-        self.book.end_all();
-        Ok(())
     }
 }
 

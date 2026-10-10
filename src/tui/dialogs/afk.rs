@@ -145,7 +145,7 @@ impl AfkDialog {
         } else {
             ""
         };
-        let text = format!("{}\n\n{}{}\n\nExpiry in minutes: {}\nEnter: control-only on   o: off   r: inspect   Esc: close\nQuestions remain open; delegation requires a CLI grant.", self.title, stale, self.message, self.minutes.value());
+        let text = format!("{}\n\n{}{}\n\nExpiry in minutes: {}\nEnter: control-only on   o: off + bulk exclude   r: inspect   Esc: close\nQuestions remain open; delegation requires an explicit grant.\nCLI allow-bulk clears only the exclusion, never grants authority.", self.title, stale, self.message, self.minutes.value());
         frame.render_widget(
             Paragraph::new(text)
                 .wrap(Wrap { trim: false })

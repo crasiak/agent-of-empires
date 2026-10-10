@@ -23,11 +23,16 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe session afk`↴](#aoe-session-afk)
 * [`aoe session afk batch`↴](#aoe-session-afk-batch)
 * [`aoe session afk batch preview`↴](#aoe-session-afk-batch-preview)
+* [`aoe session afk batch apply`↴](#aoe-session-afk-batch-apply)
+* [`aoe session afk batch status`↴](#aoe-session-afk-batch-status)
+* [`aoe session afk batch off`↴](#aoe-session-afk-batch-off)
 * [`aoe session afk overview`↴](#aoe-session-afk-overview)
 * [`aoe session afk on`↴](#aoe-session-afk-on)
 * [`aoe session afk delegate`↴](#aoe-session-afk-delegate)
 * [`aoe session afk audit`↴](#aoe-session-afk-audit)
 * [`aoe session afk off`↴](#aoe-session-afk-off)
+* [`aoe session afk opt-out`↴](#aoe-session-afk-opt-out)
+* [`aoe session afk allow-bulk`↴](#aoe-session-afk-allow-bulk)
 * [`aoe session afk status`↴](#aoe-session-afk-status)
 * [`aoe session report-launch`↴](#aoe-session-report-launch)
 * [`aoe session report-ledger-launch`↴](#aoe-session-report-ledger-launch)
@@ -497,31 +502,36 @@ Inspect AFK presence or explicitly delegate one bounded file cycle for Pi
 
 ###### **Subcommands:**
 
-* `batch` — Inspect a frozen profile-scoped selection; no executable batch controls
+* `batch` — Preview, explicitly apply, inspect or stop a frozen profile-scoped batch
 * `overview` — Read stored AFK summaries across all profiles, without probing or enabling sessions
 * `on` — Request control-only AFK. Does not authorize autonomous work
 * `delegate` — One-file delegation during active work; nudges and question deferral require qualified native support
 * `audit` — Export scoped profile-authority audit and legacy evidence references, without payloads or preimages
-* `off` — Record AFK off even if the integration is unavailable
+* `off` — Revoke AFK and persist a bulk exclusion even if integration is unavailable
+* `opt-out` — Revoke AFK and exclude the session from future batch selections
+* `allow-bulk` — Clear only the bulk exclusion; grants no authority and requires a fresh preview
 * `status` — Probe the current integration; does not enable or renew AFK
 
 
 
 ## `aoe session afk batch`
 
-Inspect a frozen profile-scoped selection; no executable batch controls
+Preview, explicitly apply, inspect or stop a frozen profile-scoped batch
 
 **Usage:** `aoe session afk batch <COMMAND>`
 
 ###### **Subcommands:**
 
-* `preview` — Export private non-authorizing inspection-v1; apply is unavailable
+* `preview` — Export private preview-v2; never activates on its own
+* `apply` — Apply the exact reviewed preview; retries only report the original operation
+* `status` — Read an operation in the selected profile, without probing members
+* `off` — Stop only this operation's original windows, never later replacements
 
 
 
 ## `aoe session afk batch preview`
 
-Export private non-authorizing inspection-v1; apply is unavailable
+Export private preview-v2; never activates on its own
 
 **Usage:** `aoe session afk batch preview --manifest <MANIFEST> --output <OUTPUT>`
 
@@ -529,6 +539,43 @@ Export private non-authorizing inspection-v1; apply is unavailable
 
 * `--manifest <MANIFEST>` — Private manifest-v1 with one profile, 1..16 exact IDs and explicit protocol-4 grants
 * `--output <OUTPUT>` — New private artifact outside app state; never overwrites an existing file
+
+
+
+## `aoe session afk batch apply`
+
+Apply the exact reviewed preview; retries only report the original operation
+
+**Usage:** `aoe session afk batch apply --preview <PREVIEW> --digest <DIGEST>`
+
+###### **Options:**
+
+* `--preview <PREVIEW>`
+* `--digest <DIGEST>`
+
+
+
+## `aoe session afk batch status`
+
+Read an operation in the selected profile, without probing members
+
+**Usage:** `aoe session afk batch status <OPERATION>`
+
+###### **Arguments:**
+
+* `<OPERATION>`
+
+
+
+## `aoe session afk batch off`
+
+Stop only this operation's original windows, never later replacements
+
+**Usage:** `aoe session afk batch off <OPERATION>`
+
+###### **Arguments:**
+
+* `<OPERATION>`
 
 
 
@@ -591,9 +638,33 @@ Export scoped profile-authority audit and legacy evidence references, without pa
 
 ## `aoe session afk off`
 
-Record AFK off even if the integration is unavailable
+Revoke AFK and persist a bulk exclusion even if integration is unavailable
 
 **Usage:** `aoe session afk off <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>`
+
+
+
+## `aoe session afk opt-out`
+
+Revoke AFK and exclude the session from future batch selections
+
+**Usage:** `aoe session afk opt-out <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>`
+
+
+
+## `aoe session afk allow-bulk`
+
+Clear only the bulk exclusion; grants no authority and requires a fresh preview
+
+**Usage:** `aoe session afk allow-bulk <SESSION>`
 
 ###### **Arguments:**
 

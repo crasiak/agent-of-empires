@@ -1,4 +1,5 @@
-//! Inspection-only exports. This format is never executable authority.
+//! Bounded batch manifests and operator exports.
+pub(super) mod state;
 use super::*;
 use crate::session::{anchored_fs::FilePublication, AnchoredDir};
 use delegation::{Grant, Workspace};
@@ -11,11 +12,11 @@ use std::path::Path;
 
 const ARTIFACT_BYTES: usize = 256 * 1024;
 const MAX_MEMBERS: usize = 16;
-const CAPABILITY_LIMIT: &str = "Two fresh null-window acknowledgements observe base protocol4 SDK coverage and generation only; active work and requested nudge/question capabilities are unproven. No member is apply-eligible.";
+const CAPABILITY_LIMIT: &str = "Two fresh null-window acknowledgements observe base SDK coverage and generation only; active work and requested optional capabilities remain unproven until grant-specific apply qualification.";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Manifest {
+pub(in crate::session::afk) struct Manifest {
     version: u32,
     profile: String,
     minutes: u32,
@@ -60,15 +61,16 @@ impl Manifest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum Exclusion {
+pub(in crate::session::afk) enum Exclusion {
     Missing,
     Stopped,
     Archived,
     Trashed,
     Unsupported,
     Uninitialized,
+    BulkExcluded,
     AlreadyDelegating,
     UnresolvedHuman,
     UnsafeWorkspace,
@@ -79,19 +81,20 @@ enum Exclusion {
     StaleWorkspace,
     StaleGeneration,
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
-struct Host {
-    title: String,
-    tool: String,
-    command: String,
-    activity: String,
-    archived: bool,
-    trashed: bool,
-    project_path: String,
-    binding: Option<Binding>,
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::session::afk) struct Host {
+    pub title: String,
+    pub tool: String,
+    pub command: String,
+    pub activity: String,
+    pub archived: bool,
+    pub trashed: bool,
+    pub project_path: String,
+    pub binding: Option<Binding>,
 }
 impl Host {
-    fn from_instance(row: &Instance) -> Self {
+    pub(in crate::session::afk) fn from_instance(row: &Instance) -> Self {
         Self {
             title: row.title.clone(),
             tool: row.tool.clone(),
@@ -104,28 +107,33 @@ impl Host {
         }
     }
 }
-#[derive(Clone, PartialEq, Eq, Serialize)]
-struct AuthorityObservation {
-    profile_revision: u64,
-    control_epoch: u64,
-    policy_revision: Option<u64>,
-    session_hash: String,
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::session::afk) struct AuthorityObservation {
+    pub profile_revision: u64,
+    pub control_epoch: u64,
+    pub policy_revision: Option<u64>,
+    pub session_hash: String,
+    pub exception_epoch: u64,
+    pub preference: state::Preference,
 }
-#[derive(Serialize)]
-struct Observation {
-    generation: String,
-    observed_at_ms: i64,
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::session::afk) struct Observation {
+    pub generation: String,
+    pub observed_at_ms: i64,
 }
-#[derive(Serialize)]
-struct InspectedMember {
-    session_id: String,
-    grant: Grant,
-    grant_hash: String,
-    host: Option<Host>,
-    authority: Option<AuthorityObservation>,
-    workspace: Option<Workspace>,
-    observations: Vec<Observation>,
-    exclusions: Vec<Exclusion>,
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::session::afk) struct InspectedMember {
+    pub session_id: String,
+    pub grant: Grant,
+    pub grant_hash: String,
+    pub host: Option<Host>,
+    pub authority: Option<AuthorityObservation>,
+    pub workspace: Option<Workspace>,
+    pub observations: Vec<Observation>,
+    pub exclusions: Vec<Exclusion>,
 }
 impl InspectedMember {
     fn exclude(&mut self, reason: Exclusion) {
@@ -134,29 +142,30 @@ impl InspectedMember {
         }
     }
 }
-#[derive(Serialize)]
-struct Inspection {
-    format: &'static str,
-    version: u32,
-    apply_available: bool,
-    operation_id: String,
-    captured_at_ms: i64,
-    completed_at_ms: i64,
-    profile: String,
-    minutes: u32,
-    shared_requests: Option<u16>,
-    shared_budget: &'static str,
-    bulk_exclusion: &'static str,
-    expiry: &'static str,
-    capability_limit: &'static str,
-    future_apply: &'static str,
-    members: Vec<InspectedMember>,
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::session::afk) struct Inspection {
+    pub format: String,
+    pub version: u32,
+    pub apply_available: bool,
+    pub operation_id: String,
+    pub captured_at_ms: i64,
+    pub completed_at_ms: i64,
+    pub profile: String,
+    pub minutes: u32,
+    pub shared_requests: Option<u16>,
+    pub shared_budget: String,
+    pub bulk_exclusion: String,
+    pub expiry: String,
+    pub capability_limit: String,
+    pub future_apply: String,
+    pub members: Vec<InspectedMember>,
 }
-#[derive(Serialize)]
-struct Artifact {
-    digest: String,
+#[derive(Clone, Serialize, Deserialize)]
+pub(in crate::session::afk) struct Artifact {
+    pub digest: String,
     #[serde(flatten)]
-    content: Inspection,
+    pub content: Inspection,
 }
 #[derive(Serialize)]
 pub struct Receipt {
@@ -178,7 +187,7 @@ fn private_parent(path: &Path) -> Result<(AnchoredDir, PathBuf)> {
         .context("inspection files require an existing private owned directory (0700)")?;
     Ok((dir, PathBuf::from(leaf)))
 }
-fn read_manifest(path: &Path) -> Result<Manifest> {
+fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let (dir, leaf) = private_parent(path)?;
     let stat = dir
         .entry_stat(&leaf)?
@@ -208,8 +217,10 @@ fn read_manifest(path: &Path) -> Result<Manifest> {
         bytes.len() <= ARTIFACT_BYTES,
         "oversized inspection manifest"
     );
-    let manifest: Manifest =
-        serde_json::from_slice(&bytes).context("invalid inspection manifest")?;
+    serde_json::from_slice(&bytes).context("invalid private AFK document")
+}
+fn read_manifest(path: &Path) -> Result<Manifest> {
+    let manifest: Manifest = read_private(path)?;
     manifest.validate()?;
     Ok(manifest)
 }
@@ -221,9 +232,9 @@ fn digest(content: &Inspection) -> Result<String> {
     canonical_digest(serde_json::to_value(content)?)
 }
 
-struct Capture {
-    registry: BTreeMap<String, Instance>,
-    snapshot: Option<authority::Snapshot>,
+pub(in crate::session::afk) struct Capture {
+    pub registry: BTreeMap<String, Instance>,
+    pub snapshot: Option<authority::Snapshot>,
 }
 impl Capture {
     fn observation(&self, id: &str) -> Result<Option<AuthorityObservation>> {
@@ -239,47 +250,30 @@ impl Capture {
                     control_epoch: session.epoch,
                     policy_revision: session.policy.as_ref().map(|p| p.revision),
                     session_hash: delegation::hash(serde_json::to_vec(session)?),
+                    exception_epoch: session.exception_epoch,
+                    preference: session.preference,
                 })
             })
             .transpose()
     }
 }
-fn capture(app: &Path, profile: &str) -> Result<Capture> {
+pub(in crate::session::afk) fn capture(app: &Path, profile: &str) -> Result<Capture> {
     authority::ready(app)?;
-    let mut dir = AnchoredDir::open(app)?;
-    let mut existing = true;
-    for component in [authority::NAMESPACE, "profiles", profile] {
-        if dir.entry_stat(Path::new(component))?.is_none() {
-            existing = false;
-            break;
-        }
-        dir = dir.child(Path::new(component))?;
-        store::private_dir(&dir)?;
-    }
-    let store = existing
-        .then(|| authority::profile_store(app, profile, false))
-        .transpose()?;
-    let has_snapshot = store
+    let store = authority::existing_profile_store(app, profile)?;
+    let _lock = store
         .as_ref()
-        .map(|s| s.dir.entry_stat(Path::new("snapshot.json")))
-        .transpose()?
-        .flatten()
-        .is_some();
-    let _lock = if has_snapshot {
-        Some(store.as_ref().unwrap().lock_existing(TIMEOUT)?)
-    } else {
-        None
-    };
-    let snapshot: Option<authority::Snapshot> = if has_snapshot {
-        Some(
-            store
-                .as_ref()
-                .unwrap()
-                .read("snapshot.json")?
-                .context("profile authority disappeared during capture")?,
-        )
-    } else {
-        None
+        .map(|s| s.lock_existing(TIMEOUT))
+        .transpose()?;
+    let snapshot: Option<authority::Snapshot> = match &store {
+        Some(store) => {
+            authority::unparked(store)?;
+            Some(
+                store
+                    .read("snapshot.json")?
+                    .context("profile authority disappeared during capture")?,
+            )
+        }
+        None => None,
     };
     authority::validate_existing_snapshot(app, profile, snapshot.as_ref())?;
     Ok(Capture {
@@ -326,6 +320,9 @@ fn member_at(app: &Path, member: &Member, captured: &Capture) -> Result<Inspecte
         .as_ref()
         .and_then(|s| s.sessions.get(&member.session_id))
     {
+        if session.preference == state::Preference::Excluded {
+            result.exclude(Exclusion::BulkExcluded);
+        }
         let (active, unresolved) = session.book.inspection_flags();
         if active {
             result.exclude(Exclusion::AlreadyDelegating);
@@ -342,8 +339,16 @@ fn member_at(app: &Path, member: &Member, captured: &Capture) -> Result<Inspecte
     }
     Ok(result)
 }
-fn recheck(app: &Path, member: &mut InspectedMember, captured: &Capture) -> Result<()> {
-    if captured.observation(&member.session_id)? != member.authority {
+pub(in crate::session::afk) fn recheck(
+    app: &Path,
+    member: &mut InspectedMember,
+    captured: &Capture,
+) -> Result<()> {
+    let mut current_authority = captured.observation(&member.session_id)?;
+    if let (Some(current), Some(expected)) = (&mut current_authority, &member.authority) {
+        current.profile_revision = expected.profile_revision;
+    }
+    if current_authority != member.authority {
         member.exclude(Exclusion::StaleAuthority);
     }
     let current = captured.registry.get(&member.session_id);
@@ -373,7 +378,7 @@ fn recheck(app: &Path, member: &mut InspectedMember, captured: &Capture) -> Resu
     }
     Ok(())
 }
-fn inspect_at(
+pub(in crate::session::afk) fn inspect_at(
     app: &Path,
     manifest: Manifest,
     mut observe: impl FnMut(&Store, &Binding) -> Result<String>,
@@ -435,19 +440,134 @@ fn inspect_at(
         recheck(app, member, &final_capture)?;
     }
     let content = Inspection {
-        format:"aoe-afk-batch-inspection", version:1, apply_available:false,
+        format:"aoe-afk-batch-preview".into(), version:2, apply_available:true,
         operation_id:uuid::Uuid::new_v4().to_string(), captured_at_ms, completed_at_ms:now_ms(),
         profile:manifest.profile, minutes:manifest.minutes, shared_requests:manifest.shared_requests,
-        shared_budget:if manifest.shared_requests.is_some() { "Proposed shared request ceiling only; not enforced or charged" } else { "No shared budget" },
-        bulk_exclusion:"unrecorded/not implemented", expiry:"No active expiry; duration starts only at a future first actual apply",
-        capability_limit:CAPABILITY_LIMIT,
-        future_apply:"Inspection-v1 cannot authorize apply; a new executable format and fresh complete exception, budget and grant-specific qualification are required",
+        shared_budget:if manifest.shared_requests.is_some() { "Proposed shared request ceiling; enforced only after explicit apply" } else { "No shared budget" }.into(),
+        bulk_exclusion:"Per-member preference and exception epoch are frozen; unrecorded is not an inherited opt-in or opt-out".into(), expiry:"No active expiry; duration starts at first explicit apply".into(),
+        capability_limit:CAPABILITY_LIMIT.into(),
+        future_apply:"Explicit apply must revalidate frozen members and obtain exact grant-specific acknowledgement; this preview itself grants nothing".into(),
         members,
     };
     Ok(Artifact {
         digest: digest(&content)?,
         content,
     })
+}
+
+pub(in crate::session::afk) fn executable(path: &Path, expected_digest: &str) -> Result<Artifact> {
+    let mut value: Value = read_private(path)?;
+    ensure!(
+        value["format"] == "aoe-afk-batch-preview"
+            && value["version"] == 2
+            && value["apply_available"] == true,
+        "inspection-v1 and unqualified formats cannot authorize apply; create a fresh preview-v2"
+    );
+    let recorded = value
+        .as_object_mut()
+        .context("invalid preview")?
+        .remove("digest")
+        .context("missing preview digest")?;
+    ensure!(
+        recorded.as_str() == Some(expected_digest)
+            && canonical_digest(value.clone())? == expected_digest,
+        "reviewed preview digest changed"
+    );
+    let content: Inspection = serde_json::from_value(value)?;
+    ensure!(
+        uuid::Uuid::parse_str(&content.operation_id).is_ok()
+            && content.captured_at_ms > 0
+            && content.completed_at_ms >= content.captured_at_ms,
+        "invalid preview identity/time"
+    );
+    let manifest = Manifest {
+        version: 1,
+        profile: content.profile.clone(),
+        minutes: content.minutes,
+        shared_requests: content.shared_requests,
+        members: content
+            .members
+            .iter()
+            .map(|m| Member {
+                session_id: m.session_id.clone(),
+                grant: m.grant.clone(),
+            })
+            .collect(),
+    };
+    manifest.validate()?;
+    for member in &content.members {
+        ensure!(
+            member.grant_hash == delegation::hash(serde_json::to_vec(&member.grant)?),
+            "preview grant hash changed"
+        );
+        if member.exclusions.is_empty() {
+            let binding = member
+                .host
+                .as_ref()
+                .and_then(|h| h.binding.as_ref())
+                .context("candidate missing binding")?;
+            ensure!(
+                binding.profile == content.profile
+                    && binding.instance_id == member.session_id
+                    && member.authority.is_some()
+                    && member.workspace.is_some(),
+                "incomplete candidate scope"
+            );
+            ensure!(
+                member.observations.len() == 2
+                    && member.observations[0].generation == member.observations[1].generation
+                    && uuid::Uuid::parse_str(&member.observations[0].generation).is_ok(),
+                "candidate generation unobserved"
+            );
+        }
+    }
+    Ok(Artifact {
+        digest: expected_digest.into(),
+        content,
+    })
+}
+
+pub fn review(preview: &Path) -> Result<Value> {
+    let raw: Value = read_private(preview)?;
+    let digest = raw["digest"].as_str().context("missing preview digest")?;
+    let artifact = executable(preview, digest)?;
+    serde_json::to_value(artifact).context("preview cannot be displayed")
+}
+
+pub fn apply(preview: &Path, digest: &str) -> Result<Value> {
+    let artifact = executable(preview, digest)?;
+    authority::publication_result(|| {
+        delegation::batch_control::apply(&super::super::get_app_dir_path()?, artifact)
+    })
+}
+pub fn status(profile: &str, operation: &str) -> Result<Value> {
+    delegation::batch_control::status(&super::super::get_app_dir_path()?, profile, operation)
+}
+pub fn off(profile: &str, operation: &str) -> Result<Value> {
+    authority::publication_result(|| {
+        delegation::batch_control::off(&super::super::get_app_dir_path()?, profile, operation)
+    })
+}
+
+pub fn allow_bulk(instance: &Instance) -> Result<Value> {
+    authority::publication_result(|| allow_bulk_inner(instance))
+}
+fn allow_bulk_inner(instance: &Instance) -> Result<Value> {
+    let app = super::super::get_app_dir_path()?;
+    let profile = instance.effective_profile();
+    ensure!(
+        registry::load(&app, &profile)?.contains_key(&instance.id),
+        "session no longer exists"
+    );
+    let store = Store::authority(&app, &profile, &instance.id, true)?;
+    let _lock = store.lock_existing(TIMEOUT)?;
+    let mut session = store.session()?;
+    session.preference(state::Preference::Allowed)?;
+    let epoch = session.exception_epoch;
+    store.publish_session(session)?;
+    Ok(
+        serde_json::json!({"session_id":instance.id,"bulk_preference":"allowed","exception_epoch":epoch,"authority_created":false,"window_changed":false}),
+    )
 }
 
 pub fn preview(manifest: &Path, output: &Path) -> Result<Receipt> {
@@ -513,7 +633,7 @@ fn preview_with(
         output: output.into(),
         operation_id: artifact.content.operation_id,
         digest: artifact.digest,
-        apply_available: false,
+        apply_available: true,
         members: artifact.content.members.len(),
     })
 }

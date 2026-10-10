@@ -33,7 +33,7 @@ export async function runQuestionCase(scenario, host) {
   const binding = { instance_id: "test", profile: "default", native_id: sessionManager.getSessionId(), launch_id: randomUUID() };
   const grant = { version: 4, task: "independent scratch", scope: "read scratch.txt independently of the unanswered question", files: [{ path: "scratch.txt", capability: "read" }], requests: 1, question_deferrals: scenario === "zero" ? 0 : 1, settlement_nudges: 0, assurance: "stock-sdk-main-loop-reservations" };
   const view = { version: 4, window: randomUUID(), state: "pending", confirmed: true, grant, generation: "", reservations_used: 0, issued_at_ms: Date.now(), expires_at_ms: Date.now() + 60000 };
-  const bootstrap = { version: 4, app_dir: cwd, aoe_bin: "/unused", binding };
+  const bootstrap = { version: 5, app_dir: cwd, aoe_bin: "/unused", binding };
   let guards = [], hostFailed = false, delayedReply;
   const request = async packet => {
     ops.push(packet);
@@ -104,7 +104,7 @@ export async function runQuestionCase(scenario, host) {
   const fixture = join(cwd, "extension.mjs");
   await writeFile(fixture, `import { registerAfk } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk.mjs")).href)};
 import { delegationRuntime } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk-runtime.mjs")).href)};
-export default function(pi) {const f=globalThis.__aoeQuestion; pi.on("input",f.earlyInput); pi.on("input",f.earlyRevert); const d=delegationRuntime(pi); registerAfk(pi,{protocol:4,delegation:{...d,attach(r){d.attach(r);f.capture(r);}},bridge:f.bridge,schedule:()=>()=>{}}); pi.on("ui_prompt_end",f.end); pi.on("input",f.input);}`);
+export default function(pi) {const f=globalThis.__aoeQuestion; pi.on("input",f.earlyInput); pi.on("input",f.earlyRevert); const d=delegationRuntime(pi); registerAfk(pi,{protocol:5,delegation:{...d,attach(r){d.attach(r);f.capture(r);}},bridge:f.bridge,schedule:()=>()=>{}}); pi.on("ui_prompt_end",f.end); pi.on("input",f.input);}`);
   let runtime = createExtensionRuntime(); runtime.flagValues.set("aoe-afk-binding", JSON.stringify(bootstrap));
   let loaded = await loadExtensions([fixture, join(packageRoot, "index.ts")], cwd, bus, runtime);
   assert.deepEqual(loaded.errors, []);

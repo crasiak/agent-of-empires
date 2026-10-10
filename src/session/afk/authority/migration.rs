@@ -239,7 +239,7 @@ pub(super) fn validate_import(app: &Path, snapshot: &Snapshot) -> Result<()> {
 pub(super) fn expected_profile(app: &Path, profile: &str) -> Result<bool> {
     Ok(manifest(app)?.imports.contains_key(profile))
 }
-pub(in crate::session::afk) fn overview_metadata(
+pub(super) fn historical_metadata(
     app: &Path,
     remaining: &mut usize,
 ) -> Result<(Vec<Evidence>, Vec<String>)> {
@@ -249,7 +249,11 @@ pub(in crate::session::afk) fn overview_metadata(
         .read_budgeted("manifest.json", remaining)?
         .context("missing migration 40 manifest")?;
     m.validate()?;
-    ready_manifest(app, &m)?;
+    ensure!(
+        m.phase == Phase::Complete,
+        "incomplete migration 40 provenance"
+    );
+    verify_roots(app, &m)?;
     Ok((m.entries, m.imports.into_keys().collect()))
 }
 #[cfg(test)]
@@ -422,6 +426,75 @@ thread_local! { static INTERRUPT: std::cell::Cell<Option<Phase>> = const { std::
 pub(crate) fn run_at(app: &Path) -> Result<()> {
     let store = migration_store(app, true)?;
     let _migration_lock = store.lock(Duration::from_secs(30))?;
+    ensure!(
+        !super::migration_v2::started(app)?,
+        "migration 41 has begun; v040 reconstruction is forbidden"
+    );
+    run_locked(app, &store)
+}
+
+pub(super) fn prepare_upgrade(app: &Path, start: impl FnOnce() -> Result<()>) -> Result<()> {
+    let store = migration_store(app, true)?;
+    let _migration_lock = store.lock(Duration::from_secs(30))?;
+    ensure!(
+        !super::migration_v2::started(app)?,
+        "migration 41 already started"
+    );
+    run_locked(app, &store)?;
+    ready(app)?;
+    verify_history(app)?;
+    start()
+}
+
+pub(super) fn verify_history(app: &Path) -> Result<(Vec<Evidence>, Vec<String>)> {
+    let m = manifest(app)?;
+    ensure!(
+        m.phase == Phase::Complete,
+        "incomplete migration 40 provenance"
+    );
+    verify_roots(app, &m)?;
+    let store = migration_store(app, false)?;
+    let mut remaining = ORIGINAL_BYTES;
+    for (index, entry) in m.entries.iter().enumerate() {
+        let bytes = store
+            .bytes(&original_leaf(index))?
+            .context("missing migration 40 original")?;
+        ensure!(
+            bytes.len() <= remaining,
+            "legacy evidence capacity exceeded"
+        );
+        remaining -= bytes.len();
+        ensure!(
+            hash(&bytes) == entry.sha256,
+            "migration 40 original hash changed"
+        );
+        let mut profiles = owners(&bytes, &entry.namespace, &entry.instance)?;
+        if profiles.is_empty() {
+            profiles = m
+                .entries
+                .iter()
+                .find(|e| e.version == 1 && e.instance == entry.instance)
+                .map(|e| e.profiles.clone())
+                .unwrap_or_default();
+        }
+        ensure!(profiles == entry.profiles, "migration 40 ownership changed");
+        ensure!(
+            legacy_store(app, &entry.namespace, &entry.instance)?.bytes(leaf(&entry.namespace))?
+                == Some(serde_json::to_vec(&fence(entry))?),
+            "migration 40 fence changed"
+        );
+    }
+    for entry in &m.absent {
+        ensure!(
+            legacy_store(app, &entry.namespace, &entry.instance)?.bytes(leaf(&entry.namespace))?
+                == Some(serde_json::to_vec(&absent_fence(entry))?),
+            "migration 40 absence fence changed"
+        );
+    }
+    Ok((m.entries, m.imports.into_keys().collect()))
+}
+
+fn run_locked(app: &Path, store: &Store) -> Result<()> {
     let mut m = match store.read::<Manifest>("manifest.json")? {
         Some(m) => {
             m.validate()?;
@@ -449,7 +522,7 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
                 entries: vec![],
                 imports: BTreeMap::new(),
             };
-            save_phase(&store, &mut m, Phase::Roots)?;
+            save_phase(store, &mut m, Phase::Roots)?;
             m
         }
     };
@@ -478,7 +551,7 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
     }
     verify_roots(app, &m)?;
     if m.phase < Phase::Sealed {
-        save_phase(&store, &mut m, Phase::Sealed)?;
+        save_phase(store, &mut m, Phase::Sealed)?;
     }
     let dirs = directories(app)?;
     let stores = dirs
@@ -536,7 +609,7 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
             .collect::<Result<_>>()?;
         m.entries = entries;
         m.imports = imports;
-        save_phase(&store, &mut m, Phase::Inventory)?;
+        save_phase(store, &mut m, Phase::Inventory)?;
     }
     let actual: BTreeSet<_> = dirs.iter().cloned().collect();
     let expected: BTreeSet<_> = m
@@ -629,7 +702,7 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
         "import plan conflicts with verified originals"
     );
     if m.phase < Phase::Originals {
-        save_phase(&store, &mut m, Phase::Originals)?;
+        save_phase(store, &mut m, Phase::Originals)?;
     }
     for entry in &m.entries {
         legacy_store(app, &entry.namespace, &entry.instance)?
@@ -640,7 +713,7 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
             .write(leaf(&entry.namespace), &absent_fence(entry))?;
     }
     if m.phase < Phase::Fences {
-        save_phase(&store, &mut m, Phase::Fences)?;
+        save_phase(store, &mut m, Phase::Fences)?;
     }
     for (profile, snapshot) in &snapshots {
         let target = profile_store(app, profile, true)?;
@@ -690,7 +763,7 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
         }
     }
     if m.phase < Phase::Imports {
-        save_phase(&store, &mut m, Phase::Imports)?;
+        save_phase(store, &mut m, Phase::Imports)?;
     }
     for entry in &m.entries {
         ensure!(
@@ -712,10 +785,10 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
         "legacy stores appeared during migration"
     );
     if m.phase < Phase::Verified {
-        save_phase(&store, &mut m, Phase::Verified)?;
+        save_phase(store, &mut m, Phase::Verified)?;
     }
     if m.phase < Phase::Complete {
-        save_phase(&store, &mut m, Phase::Complete)?;
+        save_phase(store, &mut m, Phase::Complete)?;
     }
     tracing::info!("Migration 40 preserved originals, fenced legacy leaves and imported non-authorizing profile history");
     Ok(())
@@ -723,12 +796,11 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
 
 #[cfg(test)]
 pub(crate) fn initialize_test(app: &Path) {
-    run_at(app).unwrap();
-    std::fs::write(app.join(".schema_version"), "40").unwrap();
+    super::migration_v2::initialize_test(app);
 }
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
-mod golden;
+pub(super) mod golden;

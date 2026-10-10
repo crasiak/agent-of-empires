@@ -1209,6 +1209,7 @@ impl HomeView {
             info_dialog,
             afk_dialog,
             afk_overview_dialog,
+            afk_batch_dialog,
             snooze_duration_dialog,
             profile_picker_dialog,
             group_picker_dialog,
@@ -1678,6 +1679,7 @@ impl HomeView {
             || self.skills_manager_dialog.is_some()
             || self.afk_dialog.is_some()
             || self.afk_overview_dialog.is_some()
+            || self.afk_batch_dialog.is_some()
             || self.command_palette.is_some()
             || self.send_message_dialog.is_some()
             || self.update_confirm_dialog.is_some()

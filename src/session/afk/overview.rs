@@ -1,7 +1,7 @@
 //! Read-only host summaries. Stored acknowledgements never establish current authority.
 use super::*;
 use crate::session::AnchoredDir;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::io::Read;
 use std::path::Path;
 
@@ -44,6 +44,7 @@ pub struct HistoricalAuthority {
 pub struct ProfileOverview {
     pub profile: String,
     pub sessions: Vec<SessionOverview>,
+    pub batches: Vec<Value>,
     pub errors: Vec<String>,
 }
 
@@ -61,6 +62,10 @@ pub struct SessionOverview {
     pub presence_acknowledgement: String,
     pub delegation: Option<DelegationSummary>,
     pub legacy_evidence: Vec<Value>,
+    pub bulk_preference: String,
+    pub exception_epoch: Option<u64>,
+    pub batch: Option<Value>,
+    pub batch_membership: &'static str,
     pub errors: Vec<String>,
 }
 
@@ -106,10 +111,10 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
         migration_evidence: vec![],
         historical_authority: vec![],
         profiles: Vec::new(),
-        shared_budget: "No shared budget; batch budget controls are not implemented",
-        batch_membership: "Outside batches; only individual windows are implemented",
+        shared_budget: "No shared budget",
+        batch_membership: "Exact original-window membership; other windows remain outside batches",
         bulk_exclusions:
-            "Not recorded by this storage version; Off is not a persistent bulk opt-out",
+            "Per-session unrecorded/excluded/allowed preference; allow-bulk grants no authority",
         account_coverage: "unknown; not an account-wide or profile-wide budget",
         observation:
             "Stored host summaries only; activity and acknowledgements are not live observations",
@@ -122,14 +127,24 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
     }
     let app = AnchoredDir::open(app_path)?;
     let mut remaining_bytes = SCAN_BYTES;
-    let metadata = authority::migration::overview_metadata(app_path, &mut remaining_bytes);
+    let metadata = authority::migration_v2::overview_metadata(app_path, &mut remaining_bytes);
     let readiness = metadata.as_ref().map(|_| ());
-    if let Ok((evidence, _)) = &metadata {
-        result.migration_evidence = evidence
+    if let Ok(metadata) = &metadata {
+        result.migration_evidence = metadata
+            .evidence
             .iter()
             .filter(|e| e.profiles.is_empty())
             .map(serde_json::to_value)
             .collect::<std::result::Result<_, _>>()?;
+        result
+            .migration_evidence
+            .extend(metadata.absent_profiles.iter().map(|profile| {
+                serde_json::json!({
+                    "kind":"prepared_profile_absence", "profile":profile,
+                    "original_absent":true, "authority_imported":false,
+                    "observation":"No v1 snapshot existed; no session or v2 import was fabricated"
+                })
+            }));
     }
     let profiles = if app.entry_stat(Path::new("profiles"))?.is_some() {
         Some(app.child(Path::new("profiles"))?)
@@ -174,8 +189,8 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
             }
         }
     }
-    if let Ok((_, profiles)) = &metadata {
-        names.extend(profiles.iter().cloned());
+    if let Ok(metadata) = &metadata {
+        names.extend(metadata.profiles.iter().cloned());
         ensure!(
             names.len() <= MAX_PROFILES,
             "overview profile capacity exceeded (128)"
@@ -195,6 +210,7 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
         let mut profile = ProfileOverview {
             profile: escaped(&name),
             sessions: vec![],
+            batches: vec![],
             errors: vec![],
         };
         let authority = (|| -> Result<SummaryProfile> {
@@ -204,15 +220,35 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
                     error.root_cause()
                 );
             }
-            let snapshot: SummaryProfile = authority::profile_store(app_path, &name, false)?
+            let store = authority::profile_store(app_path, &name, false)?;
+            authority::unparked(&store)?;
+            let snapshot: SummaryProfile = store
                 .read_budgeted("snapshot.json", &mut remaining_bytes)?
                 .context("missing profile authority")?;
+            authority::unparked(&store)?;
             ensure!(
-                snapshot.version == 1 && snapshot.profile == name && snapshot.revision > 0,
+                snapshot.version == 2 && snapshot.profile == name && snapshot.revision > 0,
                 "invalid profile authority identity"
             );
-            if let Ok((evidence, _)) = &metadata {
-                for expected in evidence.iter().filter(|e| e.profiles.contains(&name)) {
+            if let Ok(metadata) = &metadata {
+                if let Some(expected) = metadata.imports.get(&name) {
+                    ensure!(
+                        snapshot.origin == expected.origin
+                            && Some(snapshot.revision) >= expected.revision,
+                        "missing or changed imported authority provenance"
+                    );
+                    for id in &expected.sessions {
+                        ensure!(
+                            snapshot.sessions.contains_key(id),
+                            "missing imported session authority; repair required"
+                        );
+                    }
+                }
+                for expected in metadata
+                    .evidence
+                    .iter()
+                    .filter(|e| e.profiles.contains(&name))
+                {
                     let session = snapshot
                         .sessions
                         .get(&expected.instance)
@@ -229,6 +265,27 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
             profile
                 .errors
                 .push(format!("Authority: {}", shown(&error.to_string())));
+        }
+        let mut membership_available = false;
+        if let Ok(snapshot) = &authority {
+            match snapshot.batch_summaries(now) {
+                Ok(summaries) => {
+                    membership_available = true;
+                    if snapshot
+                        .batches
+                        .values()
+                        .any(|b| b.shared_requests.is_some())
+                    {
+                        result.shared_budget =
+                            "Recorded per-batch shared allowances; not a global or account budget";
+                    }
+                    profile.batches = summaries;
+                }
+                Err(error) => profile.errors.push(format!(
+                    "Batch membership unavailable: {}",
+                    shown(&error.to_string())
+                )),
+            }
         }
         let rows = (|| -> Result<Vec<Value>> {
             let Some(profiles) = &profiles else {
@@ -284,6 +341,27 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
                         now,
                         &mut remaining_bytes,
                     );
+                    if let Some(window) = summary.delegation.as_ref().map(|w| &w.window) {
+                        summary.batch = profile
+                            .batches
+                            .iter()
+                            .find(|b| {
+                                b["members"].as_array().is_some_and(|members| {
+                                    members.iter().any(|m| {
+                                        m["session_id"] == instance.id
+                                            && m["window"].as_str() == Some(window)
+                                    })
+                                })
+                            })
+                            .cloned();
+                    }
+                    summary.batch_membership = if !membership_available {
+                        "unavailable; profile membership not verified"
+                    } else if summary.batch.is_some() {
+                        "stored original-window membership; not a fresh observation"
+                    } else {
+                        "outside original batch windows"
+                    };
                     if !ids.insert(instance.id.clone()) {
                         summary
                             .errors
@@ -343,6 +421,9 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
         }
         result.profiles.push(profile);
     }
+    if !result.complete() && result.shared_budget == "No shared budget" {
+        result.shared_budget = "Shared budgets unobserved; incomplete snapshot";
+    }
     Ok(result)
 }
 
@@ -376,6 +457,16 @@ fn session_summary(
                 .map(|e| serde_json::to_value(e).expect("evidence serializes"))
                 .collect()
         }),
+        bulk_preference: authority
+            .map_or("unknown", |s| match s.preference {
+                batch::state::Preference::Unrecorded => "unrecorded",
+                batch::state::Preference::Excluded => "excluded",
+                batch::state::Preference::Allowed => "allowed",
+            })
+            .into(),
+        exception_epoch: authority.map(|s| s.exception_epoch),
+        batch: None,
+        batch_membership: "unavailable",
         errors: vec![],
     };
     let presence = (|| -> Result<()> {
@@ -443,7 +534,7 @@ fn session_summary(
             Store::existing_transport(app, &instance.source_profile, &instance.id)?
         {
             if let Some(ack) = control.read_budgeted::<SummaryAck>("runtime-ack.json", remaining)? {
-                acknowledgement = if ack.version == 4
+                acknowledgement = if ack.version == BRIDGE_VERSION
                     && current
                     && ack.binding == w.binding
                     && ack.generation == w.generation
@@ -485,16 +576,137 @@ struct SummaryProfile {
     version: u32,
     profile: String,
     revision: u64,
+    origin: Option<authority::Origin>,
     sessions: std::collections::BTreeMap<String, SummarySession>,
+    batches: std::collections::BTreeMap<String, SummaryBatch>,
+}
+impl SummaryProfile {
+    fn batch_summaries(&self, now: i64) -> Result<Vec<Value>> {
+        ensure!(self.batches.len() <= 64, "batch summary capacity exceeded");
+        let mut membership = std::collections::BTreeSet::new();
+        let mut summaries = Vec::new();
+        for (id, operation) in &self.batches {
+            let summary = operation.summary(id, now)?;
+            for (session, member) in &operation.members {
+                let Some(window) = &member.window else {
+                    continue;
+                };
+                let original = self
+                    .sessions
+                    .get(session)
+                    .and_then(|s| s.book.windows.iter().find(|w| w.id == *window))
+                    .context("original member window missing")?;
+                original.validate(&self.profile, session)?;
+                ensure!(
+                    membership.insert((session, window)),
+                    "duplicate original-window membership"
+                );
+                if operation.shared_requests.is_some() {
+                    let tickets: Vec<_> = operation
+                        .tickets
+                        .iter()
+                        .filter(|t| t.session == *session && t.window == *window)
+                        .collect();
+                    let mut requests = std::collections::BTreeSet::new();
+                    for ticket in &tickets {
+                        if let Some(request) = &ticket.request {
+                            ensure!(
+                                original.reservations.contains(request) && requests.insert(request),
+                                "ticket request is absent or repeated"
+                            );
+                        }
+                    }
+                    ensure!(
+                        requests.len() == original.reservations.len(),
+                        "reservation lacks shared ticket"
+                    );
+                    ensure!(
+                        original.reservations.len()
+                            + tickets.iter().filter(|t| t.request.is_none()).count()
+                            <= usize::from(original.grant.requests),
+                        "held and reserved slots exceed local limit"
+                    );
+                }
+            }
+            summaries.push(summary);
+        }
+        Ok(summaries)
+    }
 }
 #[derive(Deserialize)]
 struct SummarySession {
     policy: Option<Policy>,
     book: SummaryBook,
     evidence: Vec<authority::Evidence>,
+    preference: batch::state::Preference,
+    exception_epoch: u64,
 }
 
-// Project only host fields; decision bodies, grants' task text and file payloads are discarded.
+#[derive(Deserialize)]
+struct SummaryBatch {
+    id: String,
+    preview_digest: String,
+    expires_at_ms: i64,
+    shared_requests: Option<u16>,
+    stopped: bool,
+    members: std::collections::BTreeMap<String, SummaryMember>,
+    tickets: Vec<SummaryTicket>,
+}
+#[derive(Deserialize)]
+struct SummaryMember {
+    window: Option<String>,
+    outcome: batch::state::Outcome,
+    reason: Option<String>,
+}
+#[derive(Deserialize)]
+struct SummaryTicket {
+    session: String,
+    window: String,
+    request: Option<String>,
+}
+impl SummaryBatch {
+    fn summary(&self, key: &str, now: i64) -> Result<Value> {
+        ensure!(
+            self.id == key && uuid::Uuid::parse_str(key).is_ok(),
+            "invalid operation identity"
+        );
+        ensure!(
+            self.preview_digest.len() == 64
+                && self.preview_digest.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid operation digest"
+        );
+        ensure!(
+            !self.members.is_empty() && self.members.len() <= 16,
+            "invalid operation members"
+        );
+        ensure!(
+            self.shared_requests
+                .is_none_or(|cap| (1..=128).contains(&cap))
+                && self.tickets.len() <= self.shared_requests.map_or(0, usize::from),
+            "invalid shared counters"
+        );
+        for (id, member) in &self.members {
+            super::super::validate_instance_id(id)?;
+            if let Some(window) = &member.window {
+                uuid::Uuid::parse_str(window)?;
+            }
+        }
+        for ticket in &self.tickets {
+            ensure!(
+                self.members
+                    .get(&ticket.session)
+                    .and_then(|m| m.window.as_ref())
+                    == Some(&ticket.window),
+                "ticket outside original membership"
+            );
+        }
+        Ok(
+            json!({"operation_id":self.id,"preview_digest":self.preview_digest,"expires_at_ms":self.expires_at_ms,"expired":now>=self.expires_at_ms,"stopped":self.stopped,"shared_requests":self.shared_requests,"shared_charges":self.shared_requests.map(|_|self.tickets.len()),"held_unbound":self.shared_requests.map(|_|self.tickets.iter().filter(|t|t.request.is_none()).count()),"members":self.members.iter().map(|(id,m)|json!({"session_id":id,"window":m.window,"outcome":m.outcome,"reason":m.reason.as_ref().map(|r|shown(r))})).collect::<Vec<_>>(),"observation":"stored host summary; no fresh acknowledgement"}),
+        )
+    }
+}
+
+// Discard task text, decision bodies and file payloads.
 #[derive(Deserialize)]
 struct SummaryBook {
     version: u32,

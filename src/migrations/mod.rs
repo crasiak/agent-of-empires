@@ -48,6 +48,7 @@ mod v037_afk_runtime;
 mod v038_afk_settlement;
 mod v039_afk_questions;
 mod v040_afk_authority;
+mod v041_afk_batches;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -93,7 +94,7 @@ use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 40;
+const CURRENT_VERSION: u32 = 41;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -228,6 +229,7 @@ const MIGRATIONS: &[Migration] = &[
     (38, "afk_settlement", v038_afk_settlement::run),
     (39, "afk_questions", v039_afk_questions::run),
     (40, "afk_authority", v040_afk_authority::run),
+    (41, "afk_batches", v041_afk_batches::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -396,11 +398,14 @@ mod tests {
         for peer in peers {
             peer.join().unwrap();
         }
-        assert_eq!(get_current_version(), 40);
-        crate::session::afk::authority::migration::run_at(&app).unwrap();
-        assert!(app
-            .join("afk-authority-v1/migration/manifest.json")
-            .is_file());
+        assert_eq!(get_current_version(), CURRENT_VERSION);
+        assert!(crate::session::afk::authority::migration::run_at(&app).is_err());
+        crate::session::afk::authority::migration_v2::run_at(&app).unwrap();
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(app.join("afk-authority-v2/migration/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["phase"], "complete");
         fs::remove_file(app.join(".migration-runner.lock")).unwrap();
         std::os::unix::fs::symlink("/missing", app.join(".migration-runner.lock")).unwrap();
         assert!(run_migrations().is_err());

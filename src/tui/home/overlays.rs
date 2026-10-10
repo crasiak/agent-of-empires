@@ -24,6 +24,10 @@ impl HomeView {
             .afk_overview_dialog
             .as_mut()
             .is_some_and(|dialog| dialog.tick());
+        changed |= self
+            .afk_batch_dialog
+            .as_mut()
+            .is_some_and(|dialog| dialog.tick());
         if let Some(dialog) = &mut self.new_dialog {
             changed |= dialog.tick();
             if dialog.is_loading() {
@@ -107,6 +111,7 @@ impl HomeView {
             || self.info_dialog.is_some()
             || self.afk_dialog.is_some()
             || self.afk_overview_dialog.is_some()
+            || self.afk_batch_dialog.is_some()
             || self.snooze_duration_dialog.is_some()
             || self.profile_picker_dialog.is_some()
             || self.project_session_picker_dialog.is_some()

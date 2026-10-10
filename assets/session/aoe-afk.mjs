@@ -35,8 +35,11 @@ export function spawnBridge(bootstrap, generation) {
     buffer = "";
     try {
       const result = JSON.parse(line);
-      if (result.ok !== true) waiter.reject(new Error("AFK bridge refused request"));
-      else waiter.resolve(result.value);
+      if (result.ok !== true) {
+        const error = new Error("AFK bridge refused request");
+        if (result.code === "shared_budget_exhausted") error.code = result.code;
+        waiter.reject(error);
+      } else waiter.resolve(result.value);
     } catch { waiter.reject(new Error("Invalid AFK bridge reply")); fail(); }
   });
   let queue = Promise.resolve();
@@ -98,7 +101,15 @@ export function registerAfk(pi, options = {}) {
       || !same(bootstrap.binding, bootstrap.binding) || !uuid(bootstrap.binding.launch_id)
       || ctx.sessionManager.getSessionId() !== bootstrap.binding.native_id) return;
     const generation = randomUUID();
-    const r = { ctx, bootstrap, generation, bridge: bridgeFactory(bootstrap, generation), state: "off", revision: 0, deadline: 0, lastAck: "", policy: null };
+    const bridge = bridgeFactory(bootstrap, generation);
+    const r = { ctx, bootstrap, generation, bridge: {
+      close: () => bridge.close(),
+      async request(packet) {
+        const value = await bridge.request(packet);
+        if (value?.publication_warnings?.length) r.publicationWarning = value.publication_warnings.join("; ");
+        return value;
+      },
+    }, state: "off", revision: 0, deadline: 0, lastAck: "", policy: null };
     runtime = r;
     options.delegation?.attach(r);
     const refresh = () => {
@@ -139,7 +150,7 @@ export function registerAfk(pi, options = {}) {
           }
         } catch { r.state = "unavailable"; options.delegation?.failed(r); }
         finally {
-          if (runtime === r && ctx.hasUI) ctx.ui.setStatus("aoe-afk", options.delegation?.status(r) ?? (r.state === "off" ? undefined : `AFK: ${r.state} (no autonomy)`));
+          if (runtime === r && ctx.hasUI) ctx.ui.setStatus("aoe-afk", r.publicationWarning ?? options.delegation?.status(r) ?? (r.state === "off" ? undefined : `AFK: ${r.state} (no autonomy)`));
           r.refreshing = undefined;
         }
       })();

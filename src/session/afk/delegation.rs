@@ -17,6 +17,7 @@ const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 #[cfg(test)]
 thread_local! { static FAIL_AFTER_ATTEMPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 const PROTOCOL: u32 = 4;
+pub(super) mod batch_control;
 pub(super) mod questions;
 pub(super) mod settlement;
 use questions::{Question, QuestionIdentity, QuestionOutcome};
@@ -302,11 +303,44 @@ impl Book {
         );
         Ok(())
     }
+    pub(in crate::session::afk) fn batch_facts(&self, id: &str) -> Option<batch::state::Facts> {
+        let window = self.windows.iter().find(|w| w.id == id)?;
+        let mut admissions = window.question_ticket().into_iter().collect::<Vec<_>>();
+        admissions.extend(window.nudge_tickets());
+        Some(batch::state::Facts {
+            binding: window.binding.clone(),
+            generation: window.generation.clone(),
+            grant_hash: hash(serde_json::to_vec(&window.grant).expect("grant serializes")),
+            expires_at_ms: window.expires_at_ms,
+            confirmed: window.confirmed,
+            ended: window.state == "ended",
+            requests: usize::from(window.grant.requests),
+            reservations: window.reservations.clone(),
+            admissions,
+        })
+    }
+    pub(in crate::session::afk) fn nudge_origin(
+        &self,
+        window: &str,
+        checkpoint: usize,
+    ) -> Result<batch::state::Origin> {
+        self.windows
+            .iter()
+            .find(|w| w.id == window)
+            .context("unknown batch window")?
+            .nudge_ticket(checkpoint)
+    }
     pub(super) fn inspection_flags(&self) -> (bool, bool) {
         (
             self.windows.iter().any(|w| w.state != "ended"),
             self.windows.iter().any(Window::unresolved_question),
         )
+    }
+    pub(super) fn retire_for_upgrade(&mut self) {
+        for window in &mut self.windows {
+            window.end(TerminalReason::DeliveryUnknown);
+            window.confirmed = false;
+        }
     }
     pub(super) fn end_all(&mut self) {
         for w in &mut self.windows {
@@ -539,7 +573,8 @@ impl Window {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Workspace {
     root: PathBuf,
     control_root: PathBuf,
@@ -703,22 +738,126 @@ pub(super) enum Request {
         decision: String,
     },
 }
-pub(super) fn poll(store: &Store, binding: &Binding, generation: &str, now: i64) -> Result<Value> {
-    let _lock = store.lock(TIMEOUT)?;
+#[derive(Clone)]
+pub(in crate::session::afk) enum Admission {
+    Reserve {
+        window: String,
+        request: String,
+        question: Option<QuestionIdentity>,
+        continuation: Option<Continuation>,
+    },
+    Question {
+        window: String,
+        identity: QuestionIdentity,
+    },
+    Nudge {
+        window: String,
+        checkpoint: usize,
+    },
+}
+impl Admission {
+    fn from_request(request: &Request) -> Option<Self> {
+        match request {
+            Request::Reserve {
+                window,
+                request,
+                question,
+                continuation,
+            } => Some(Self::Reserve {
+                window: window.clone(),
+                request: request.clone(),
+                question: question.clone(),
+                continuation: continuation.clone(),
+            }),
+            Request::QuestionAdmit { window, identity } => Some(Self::Question {
+                window: window.clone(),
+                identity: identity.clone(),
+            }),
+            Request::Nudge {
+                window, checkpoint, ..
+            } => Some(Self::Nudge {
+                window: window.clone(),
+                checkpoint: *checkpoint,
+            }),
+            _ => None,
+        }
+    }
+    pub fn ticket(&self, book: &Book) -> Result<(String, batch::state::Origin, Option<String>)> {
+        use batch::state::Origin;
+        Ok(match self {
+            Self::Reserve {
+                window,
+                request,
+                question,
+                continuation,
+            } => {
+                ensure!(
+                    question.is_none() || continuation.is_none(),
+                    "request cannot bind two admissions"
+                );
+                let origin = if let Some(q) = question {
+                    Origin::Question(q.clone())
+                } else if let Some(n) = continuation {
+                    Origin::Nudge(n.clone())
+                } else {
+                    Origin::Request(request.clone())
+                };
+                (window.clone(), origin, Some(request.clone()))
+            }
+            Self::Question { window, identity } => {
+                (window.clone(), Origin::Question(identity.clone()), None)
+            }
+            Self::Nudge { window, checkpoint } => (
+                window.clone(),
+                book.nudge_origin(window, *checkpoint)?,
+                None,
+            ),
+        })
+    }
+}
+
+pub(super) fn poll(
+    store: &Store,
+    binding: &Binding,
+    generation: &str,
+    now: i64,
+    validate: impl Fn() -> Result<()>,
+) -> Result<Value> {
+    let _lock = store.lock_existing(TIMEOUT)?;
+    validate()?;
     let mut session = store.session()?;
     if session.book.reconcile(binding, generation, now) {
         store.publish_session(session.clone())?;
     }
+    let delegated = session
+        .book
+        .windows
+        .last()
+        .map(|w| view_with_batch(store, w, now))
+        .transpose()?
+        .unwrap_or(Value::Null);
     Ok(json!({"policy":session.policy,
-        "delegation":session.book.windows.last().map_or(Value::Null, |w| w.view(now)),
+        "delegation":delegated,
         "question_guards":questions::guards_in(&session.book, binding)}))
 }
 pub(super) fn snapshot(store: &Store) -> Result<Value> {
+    let _lock = store.lock_existing(TIMEOUT)?;
     let book = Book::load(store)?;
     Ok(book
         .windows
         .last()
-        .map_or(Value::Null, |w| w.view(now_ms())))
+        .map(|w| view_with_batch(store, w, now_ms()))
+        .transpose()?
+        .unwrap_or(Value::Null))
+}
+fn view_with_batch(store: &Store, window: &Window, now: i64) -> Result<Value> {
+    let mut view = window.view(now);
+    view["batch"] = batch_control::budget_view(
+        &store.authority_snapshot()?,
+        &window.binding.instance_id,
+        &window.id,
+    );
+    Ok(view)
 }
 #[cfg(test)]
 pub(super) fn stop(store: &Store) -> Result<()> {
@@ -749,9 +888,10 @@ pub(super) fn execute_checked(
     validate: impl Fn() -> Result<()>,
 ) -> Result<Value> {
     let started = Instant::now();
-    let _lock = store.lock(TIMEOUT)?;
+    let mut transaction = authority::SessionTransaction::open(store)?;
+    let admission = Admission::from_request(&command);
     validate()?;
-    let mut book = Book::load(store)?;
+    let mut book = transaction.book()?.clone();
     let id = match &command {
         Request::Reserve { window, .. }
         | Request::QuestionAdmit { window, .. }
@@ -778,7 +918,7 @@ pub(super) fn execute_checked(
             _ => w.settlement_reason(),
         };
         w.end(reason);
-        book.save(store)?;
+        transaction.commit_book(book.clone())?.warn();
         return Ok(json!({"ended":true}));
     }
     if let Request::Checkpoint {
@@ -802,7 +942,7 @@ pub(super) fn execute_checked(
             "stale question outcome"
         );
         let result = w.question_outcome(identity, *outcome, now)?;
-        book.save(store)?;
+        transaction.commit_book(book.clone())?.warn();
         return Ok(result);
     }
     w.live(
@@ -827,7 +967,7 @@ pub(super) fn execute_checked(
             );
             if w.reservations.len() >= usize::from(w.grant.requests) {
                 w.end(TerminalReason::Exhausted);
-                book.save(store)?;
+                transaction.commit_book(book.clone())?.warn();
                 anyhow::bail!("request reservations exhausted");
             }
             w.observe_question(question.as_ref(), &request)?;
@@ -846,11 +986,11 @@ pub(super) fn execute_checked(
             ensure!(w.reads < READ_LIMIT, "read operations exhausted");
             w.reads += 1;
             // Consumption is durable even when the read subsequently fails.
-            book.save(store)?;
+            transaction.commit_book(book.clone())?.warn();
             let w = book.windows.last_mut().unwrap();
             let (_, _, body, _) = w.file(&path)?;
             let evidence = w.read_fact(path.clone(), &body);
-            book.save(store)?;
+            transaction.commit_book(book.clone())?.warn();
             return Ok(
                 json!({"path":path,"hash":body.as_ref().map(hash),"content":body,"evidence":evidence}),
             );
@@ -993,7 +1133,7 @@ pub(super) fn execute_checked(
             p.outcomes.push("unknown".into());
             w.end(TerminalReason::Failed);
             // This durable commitment serializes revocation. A failed acknowledgement never refunds it.
-            book.save(store)?;
+            transaction.commit_book(book.clone())?.warn();
             #[cfg(test)]
             if FAIL_AFTER_ATTEMPT.with(|flag| flag.replace(false)) {
                 anyhow::bail!("injected crash after durable attempt");
@@ -1027,7 +1167,7 @@ pub(super) fn execute_checked(
                     .unwrap()
                     .outcomes
                     .push("observed_applied".into());
-                book.save(store)?;
+                transaction.commit_book(book.clone())?.warn();
                 return Ok(json!({"outcome":"observed_applied"}));
             }
             anyhow::bail!("action outcome unknown; permit consumed, inspect private ledger")
@@ -1036,7 +1176,7 @@ pub(super) fn execute_checked(
             request, claims, ..
         } => {
             let receipt = w.checkpoint(&request, claims, now)?;
-            book.save(store)?;
+            transaction.commit_book(book.clone())?.warn();
             return Ok(receipt);
         }
         Request::Nudge {
@@ -1047,7 +1187,7 @@ pub(super) fn execute_checked(
             Ok(receipt) => receipt,
             Err(error) => {
                 w.end(w.settlement_reason());
-                book.save(store)?;
+                transaction.commit_book(book.clone())?.warn();
                 return Err(error);
             }
         },
@@ -1059,7 +1199,11 @@ pub(super) fn execute_checked(
         generation,
         now.saturating_add(started.elapsed().as_millis() as i64),
     )?;
-    book.save(store)?;
+    if let Some(admission) = admission {
+        transaction.commit_admission(book, admission, now)?.warn();
+    } else {
+        transaction.commit_book(book)?.warn();
+    }
     Ok(result)
 }
 
@@ -1094,6 +1238,7 @@ pub(super) struct RuntimeProbe {
     challenge: String,
     window: Option<String>,
     grant_hash: Option<String>,
+    budgeted: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1103,6 +1248,7 @@ pub(super) struct RuntimeAck {
     challenge: String,
     window: Option<String>,
     grant_hash: Option<String>,
+    budgeted: bool,
     generation: String,
     sdk: String,
     coverage: String,
@@ -1117,8 +1263,8 @@ pub(super) fn acknowledge(
         .read::<RuntimeProbe>("runtime-probe.json")?
         .context("no runtime probe")?;
     ensure!(
-        probe.version == PROTOCOL
-            && ack.version == PROTOCOL
+        probe.version == BRIDGE_VERSION
+            && ack.version == BRIDGE_VERSION
             && ack.binding == *binding
             && probe.binding == *binding
             && ack.generation == generation
@@ -1126,7 +1272,8 @@ pub(super) fn acknowledge(
             && ack.coverage == COVERAGE
             && ack.challenge == probe.challenge
             && ack.window == probe.window
-            && ack.grant_hash == probe.grant_hash,
+            && ack.grant_hash == probe.grant_hash
+            && ack.budgeted == probe.budgeted,
         "incompatible/stale runtime acknowledgement"
     );
     store.write("runtime-ack.json", &ack)
@@ -1135,23 +1282,26 @@ fn exchange_runtime(
     store: &Store,
     binding: &Binding,
     window: Option<&Window>,
+    budgeted: bool,
 ) -> Result<RuntimeAck> {
     let probe = RuntimeProbe {
-        version: PROTOCOL,
+        version: BRIDGE_VERSION,
         binding: binding.clone(),
         challenge: uuid::Uuid::new_v4().to_string(),
         window: window.map(|w| w.id.clone()),
         grant_hash: window.map(|w| hash(serde_json::to_vec(&w.grant).unwrap())),
+        budgeted,
     };
     store.write("runtime-probe.json", &probe)?;
     let deadline = Instant::now() + TIMEOUT;
     loop {
         if let Some(ack) = store.read::<RuntimeAck>("runtime-ack.json")? {
             if ack.challenge == probe.challenge
-                && ack.version == PROTOCOL
+                && ack.version == BRIDGE_VERSION
                 && ack.binding == *binding
                 && ack.window == probe.window
                 && ack.grant_hash == probe.grant_hash
+                && ack.budgeted == probe.budgeted
                 && ack.sdk == "0.87.1"
                 && ack.coverage == COVERAGE
                 && uuid::Uuid::parse_str(&ack.generation).is_ok()
@@ -1167,9 +1317,49 @@ fn exchange_runtime(
     }
 }
 pub(super) fn observe_base_runtime(store: &Store, binding: &Binding) -> Result<String> {
-    Ok(exchange_runtime(store, binding, None)?.generation)
+    Ok(exchange_runtime(store, binding, None, false)?.generation)
 }
+fn pending_window(
+    instance: &Instance,
+    app: &Path,
+    grant: Grant,
+    binding: Binding,
+    generation: String,
+    issued: i64,
+    expires: i64,
+) -> Result<Window> {
+    grant.validate()?;
+    let workspace = Workspace::inspect(instance, app, &grant)?;
+    Ok(Window {
+        version: PROTOCOL,
+        binding,
+        generation,
+        id: uuid::Uuid::new_v4().to_string(),
+        revision: 1,
+        root: workspace.root,
+        control_root: workspace.control_root,
+        root_identity: workspace.root_identity,
+        grant,
+        issued_at_ms: issued,
+        expires_at_ms: expires,
+        state: "pending".into(),
+        confirmed: false,
+        reservations: vec![],
+        reads: 0,
+        records: vec![],
+        permit: None,
+        read_facts: vec![],
+        checkpoints: vec![],
+        nudges: vec![],
+        terminal_reason: None,
+        question: None,
+    })
+}
+
 pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<Value> {
+    authority::publication_result(|| delegate_inner(instance, minutes, grant_file))
+}
+fn delegate_inner(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<Value> {
     ensure!((1..=1440).contains(&minutes), "invalid expiry");
     use std::os::unix::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
@@ -1187,36 +1377,23 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
     current_instance(&binding)?;
     let app_dir = super::super::get_app_dir()?;
     let runtime = Store::authority(&app_dir, &binding.profile, &instance.id, true)?;
-    let epoch = runtime.session()?.epoch;
+    let epoch = {
+        let _lock = runtime.lock_existing(TIMEOUT)?;
+        runtime.session()?.epoch
+    };
     let control = Store::transport(&app_dir, &binding.profile, &instance.id, true)?;
     let _control_lock = control.lock(TIMEOUT)?;
-    let ack = exchange_runtime(&control, &binding, None)?;
-    let workspace = Workspace::inspect(instance, &app_dir, &grant)?;
+    let ack = exchange_runtime(&control, &binding, None, false)?;
     let issued_at_ms = now_ms();
-    let mut w = Window {
-        version: PROTOCOL,
-        binding,
-        generation: ack.generation,
-        id: uuid::Uuid::new_v4().to_string(),
-        revision: 1,
-        root: workspace.root,
-        control_root: workspace.control_root,
-        root_identity: workspace.root_identity,
+    let mut w = pending_window(
+        instance,
+        &app_dir,
         grant,
+        binding,
+        ack.generation,
         issued_at_ms,
-        expires_at_ms: issued_at_ms + i64::from(minutes) * 60_000,
-        state: "pending".into(),
-        confirmed: false,
-        reservations: vec![],
-        reads: 0,
-        records: vec![],
-        permit: None,
-        read_facts: vec![],
-        checkpoints: vec![],
-        nudges: vec![],
-        terminal_reason: None,
-        question: None,
-    };
+        issued_at_ms + i64::from(minutes) * 60_000,
+    )?;
     let epoch = {
         let _lock = runtime.lock(TIMEOUT)?;
         current_instance(&w.binding)?;
@@ -1251,15 +1428,14 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
         epoch
     };
     // Capability acknowledgement does not take the ledger lock.
-    if let Err(error) = exchange_runtime(&control, &w.binding, Some(&w)).and_then(|ack| {
+    if let Err(error) = exchange_runtime(&control, &w.binding, Some(&w), false).and_then(|ack| {
         ensure!(
             ack.generation == w.generation,
             "runtime generation changed during acknowledgement"
         );
         Ok(())
     }) {
-        end_attempt(&runtime, &w.id, epoch)?;
-        return Err(error);
+        return Err(failed_attempt(&runtime, &w.id, epoch, error));
     }
     let confirmation = (|| -> Result<()> {
         let _lock = runtime.lock(TIMEOUT)?;
@@ -1267,10 +1443,18 @@ pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<
         confirm_attempt(&runtime, &w, epoch)
     })();
     if let Err(error) = confirmation {
-        end_attempt(&runtime, &w.id, epoch)?;
-        return Err(error);
+        return Err(failed_attempt(&runtime, &w.id, epoch, error));
     }
     snapshot(&runtime)
+}
+fn failed_attempt(store: &Store, window: &str, epoch: u64, error: anyhow::Error) -> anyhow::Error {
+    if error.is::<authority::journal::Parked>() {
+        return error;
+    }
+    match end_attempt(store, window, epoch) {
+        Ok(()) => error,
+        Err(cleanup) => cleanup.context(format!("Original attempt failed: {error:#}")),
+    }
 }
 fn end_attempt(store: &Store, window: &str, epoch: u64) -> Result<()> {
     let _lock = store.lock(TIMEOUT)?;
@@ -1296,6 +1480,9 @@ fn confirm_attempt(store: &Store, w: &Window, epoch: u64) -> Result<()> {
     store.publish_session(session)
 }
 pub fn audit(instance: &Instance) -> Result<Value> {
+    authority::publication_result(|| audit_inner(instance))
+}
+fn audit_inner(instance: &Instance) -> Result<Value> {
     let store = Store::authority(
         &super::super::get_app_dir()?,
         &instance.effective_profile(),
@@ -1313,7 +1500,10 @@ pub fn audit(instance: &Instance) -> Result<Value> {
 }
 
 pub(super) fn inspect(instance: &Instance, store: &Store) -> Result<Value> {
-    let book = Book::load(store)?;
+    let book = {
+        let _lock = store.lock_existing(TIMEOUT)?;
+        Book::load(store)?
+    };
     let Some(w) = book.windows.last() else {
         return Ok(Value::Null);
     };
@@ -1329,7 +1519,18 @@ pub(super) fn inspect(instance: &Instance, store: &Store) -> Result<Value> {
             false,
         )?;
         let _lock = control.lock(TIMEOUT)?;
-        exchange_runtime(&control, &binding, Some(w))
+        let budgeted = {
+            let _lock = store.lock_existing(TIMEOUT)?;
+            store.authority_snapshot()?.batches.values().any(|op| {
+                op.shared_requests.is_some()
+                    && op
+                        .members
+                        .get(&binding.instance_id)
+                        .and_then(|m| m.window.as_ref())
+                        == Some(&w.id)
+            })
+        };
+        exchange_runtime(&control, &binding, Some(w), budgeted)
     })();
     match observation {
         Ok(ack) if ack.generation == w.generation => {

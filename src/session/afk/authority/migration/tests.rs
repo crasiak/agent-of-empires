@@ -12,7 +12,7 @@ impl Drop for Isolated {
     fn drop(&mut self) {
         use std::os::unix::fs::PermissionsExt;
         // Discard the isolated fixture only after its legacy handles have been dropped.
-        for ns in NAMESPACES {
+        for ns in NAMESPACES.into_iter().chain(["afk-authority-v1/profiles"]) {
             let _ = std::fs::set_permissions(
                 self.path().join(ns),
                 std::fs::Permissions::from_mode(0o700),
@@ -113,6 +113,8 @@ fn every_phase_resumes_with_exact_originals_stable_legacy_handles_and_question_r
             lock_inodes
         );
         std::fs::write(app.path().join(".schema_version"), "40").unwrap();
+        super::super::migration_v2::run_at(app.path()).unwrap();
+        std::fs::write(app.path().join(".schema_version"), "41").unwrap();
         let authority = Store::authority(app.path(), "alpha", "test", false).unwrap();
         let mut expected = book.clone();
         expected["windows"][0]["state"] = json!("ended");
@@ -125,7 +127,7 @@ fn every_phase_resumes_with_exact_originals_stable_legacy_handles_and_question_r
         );
         let policy = session.policy.unwrap();
         assert!(!policy.enabled);
-        assert_eq!(policy.revision, 8);
+        assert_eq!(policy.revision, 9);
         let binding: Binding =
             serde_json::from_value(book["windows"][0]["binding"].clone()).unwrap();
         let guards = delegation::questions::guards(&authority, &binding).unwrap();
@@ -147,7 +149,8 @@ fn every_phase_resumes_with_exact_originals_stable_legacy_handles_and_question_r
             .unwrap()
             .is_empty());
         let advanced = authority.bytes("snapshot.json").unwrap();
-        run_at(app.path()).unwrap();
+        assert!(run_at(app.path()).is_err());
+        super::super::migration_v2::run_at(app.path()).unwrap();
         assert_eq!(authority.bytes("snapshot.json").unwrap(), advanced);
     }
 }
@@ -202,6 +205,8 @@ fn legacy_evidence_has_exact_ownership_without_protocol_promotion_or_empty_defau
     assert_eq!(associated.profiles, ["alpha"]);
     assert_eq!(unassigned(app.path()).unwrap()[0].instance, "unassigned");
     std::fs::write(app.path().join(".schema_version"), "40").unwrap();
+    super::super::migration_v2::run_at(app.path()).unwrap();
+    std::fs::write(app.path().join(".schema_version"), "41").unwrap();
     let beta = Store::authority(app.path(), "beta", "test", false)
         .unwrap()
         .session()
@@ -303,10 +308,12 @@ fn concurrent_migration_attempts_serialize_and_missing_imports_cannot_be_recreat
         peer.join().unwrap();
     }
     std::fs::write(app.path().join(".schema_version"), "40").unwrap();
-    let store = profile_store(app.path(), "alpha", false).unwrap();
+    super::super::migration_v2::run_at(app.path()).unwrap();
+    std::fs::write(app.path().join(".schema_version"), "41").unwrap();
+    let store = super::super::profile_store(app.path(), "alpha", false).unwrap();
     let original = store.bytes("snapshot.json").unwrap().unwrap();
     for missing in ["session", "evidence"] {
-        let mut snapshot: Snapshot = serde_json::from_slice(&original).unwrap();
+        let mut snapshot: super::super::Snapshot = serde_json::from_slice(&original).unwrap();
         snapshot.revision += 1;
         if missing == "session" {
             snapshot.sessions.clear();
@@ -323,7 +330,7 @@ fn concurrent_migration_attempts_serialize_and_missing_imports_cannot_be_recreat
             super::super::super::overview::tests::tree(app.path())
         );
         assert!(Store::authority(app.path(), "alpha", "test", true).is_err());
-        assert!(run_at(app.path()).is_err());
+        assert!(super::super::migration_v2::run_at(app.path()).is_err());
         assert_eq!(
             store.bytes("snapshot.json").unwrap().unwrap(),
             serde_json::to_vec(&snapshot).unwrap()
