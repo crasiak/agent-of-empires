@@ -8,8 +8,8 @@ pub struct RestartRequest {
     /// cascade and hands the post-cascade snapshot back in `RestartResult`.
     pub instance: Instance,
     pub size: Option<(u16, u16)>,
-    /// Keys to send once the pane is live again. Empty disables the wake-up
-    /// (the documented opt-out via `session.restart_wake_message`).
+    /// Configured continuation; Pi receives typed automation, other agents receive keys.
+    /// Empty disables wake-up.
     pub wake_message: String,
     /// Skip on_launch hooks that already ran in the background creation poller.
     pub skip_on_launch: bool,
@@ -46,8 +46,6 @@ pub fn perform_restart(request: RestartRequest) -> RestartResult {
         conversation_carry,
     } = request;
 
-    let title = instance.title.clone();
-    let tool = instance.tool.clone();
     let before = instance.clone();
 
     // With `bound_hooks`, honor the on_launch / before_start hook timeout the startup-recovery
@@ -69,12 +67,9 @@ pub fn perform_restart(request: RestartRequest) -> RestartResult {
             .map_err(|e| e.to_string())
     };
 
-    // On a successful restart, send the wake-up keys on a detached thread so the result (and the
-    // row's status update) propagate back immediately rather than waiting out the up-to-3s
-    // pane-readiness probe.
-    let should_wake = launched_agent(&outcome);
-    if should_wake && !wake_message.is_empty() {
-        spawn_wake_worker(session_id.clone(), title, tool, wake_message);
+    // Publish the result before any readiness wait in the detached wake worker.
+    if launched_agent(&outcome) && !wake_message.is_empty() {
+        spawn_wake_worker(instance.clone(), wake_message);
     }
 
     RestartResult {
@@ -95,14 +90,63 @@ pub(crate) fn launched_agent(outcome: &Result<StartOutcome, String>) -> bool {
     )
 }
 
-/// Wait for the restarted pane to become live and past its boot shell, then send the wake-up
-/// message.
-fn spawn_wake_worker(session_id: String, title: String, tool: String, wake_message: String) {
+pub(crate) fn configured_wake(profile: &str) -> anyhow::Result<String> {
+    crate::session::resolve_config(profile).map(|c| c.session.restart_wake_message.clone())
+}
+
+pub(crate) fn send_wake(instance: &Instance, message: &str) -> anyhow::Result<bool> {
+    if message.is_empty() {
+        return Ok(false);
+    }
+    if instance.tool == "pi" {
+        crate::session::afk::wake::post(instance, message)?;
+        return Ok(false); // Queued automation is not confirmed terminal input.
+    }
+    let session = crate::tmux::Session::new(&instance.id, &instance.title)?;
+    if !session.exists() {
+        return Ok(false);
+    }
+    let _input = instance.lock_for_input()?;
+    let storage = crate::session::Storage::new_unwatched(&instance.effective_profile())?;
+    let Some(current) = storage
+        .load()?
+        .into_iter()
+        .find(|row| row.id == instance.id)
+    else {
+        return Ok(false);
+    };
+    if current.tool != instance.tool
+        || current.view != instance.view
+        || current.command != instance.command
+        || !instance.active_execution.as_ref().is_some_and(|expected| {
+            !expected.launch_id.is_empty() && current.active_execution.as_ref() == Some(expected)
+        })
+    {
+        return Ok(false);
+    }
+    session.send_keys_with_delay(
+        message,
+        crate::agents::send_keys_enter_delay(&instance.tool),
+    )?;
+    Ok(true)
+}
+
+fn spawn_wake_worker(instance: Instance, wake_message: String) {
     let spawn_result = std::thread::Builder::new()
-        .name(format!("aoe-restart-wake/{}", session_id))
-        .stack_size(128 * 1024)
+        .name(format!("aoe-restart-wake/{}", instance.id))
+        .stack_size(if instance.tool == "pi" {
+            2 * 1024 * 1024
+        } else {
+            128 * 1024
+        })
         .spawn(move || {
-            let Ok(tmux_session) = crate::tmux::Session::new(&session_id, &title) else {
+            if instance.tool == "pi" {
+                if let Err(error) = send_wake(&instance, &wake_message) {
+                    tracing::warn!(target:"session.restart", %error, "Pi automatic wake suppressed; no terminal-input fallback");
+                }
+                return;
+            }
+            let Ok(tmux_session) = crate::tmux::Session::new(&instance.id, &instance.title) else {
                 return;
             };
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(3000);
@@ -111,7 +155,7 @@ fn spawn_wake_worker(session_id: String, title: String, tool: String, wake_messa
                     return;
                 }
                 let pane_alive = !tmux_session.is_pane_dead();
-                let hook_active = crate::hooks::read_hook_status(&session_id).is_some();
+                let hook_active = crate::hooks::read_hook_status(&instance.id).is_some();
                 if pane_alive && (hook_active || !tmux_session.is_pane_running_shell()) {
                     break;
                 }
@@ -124,8 +168,7 @@ fn spawn_wake_worker(session_id: String, title: String, tool: String, wake_messa
             if !tmux_session.exists() {
                 return;
             }
-            let delay = crate::agents::send_keys_enter_delay(&tool);
-            if let Err(e) = tmux_session.send_keys_with_delay(&wake_message, delay) {
+            if let Err(e) = send_wake(&instance, &wake_message) {
                 tracing::warn!(target: "session.restart", "failed to send wake-up message after restart: {}", e);
             }
         });
@@ -140,6 +183,96 @@ mod tests {
 
     fn test_instance() -> Instance {
         Instance::new("Test Session", "/tmp/test-project")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn delayed_terminal_wake_cannot_enter_a_replacement_launch() {
+        use crate::session::{ActiveExecution, ExecutionBinding, Status, View};
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let calls = temp.path().join("tmux-calls");
+        let tmux = bin.join("tmux");
+        std::fs::write(
+            &tmux,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _path = crate::session::test_support::path_prepended(&bin);
+        let storage = crate::session::Storage::new_unwatched("wake-binding").unwrap();
+        let mut scheduled = test_instance();
+        scheduled.source_profile = "wake-binding".into();
+        scheduled.tool = "codex".into();
+        scheduled.status = Status::Running;
+        scheduled.active_execution = Some(ActiveExecution {
+            launch_id: uuid::Uuid::new_v4().to_string(),
+            binding: ExecutionBinding {
+                agent: "codex".into(),
+                stores: vec![],
+                configuration: vec![],
+                cwd: temp.path().into(),
+                cwd_filesystem: "host".into(),
+                filesystem: "host".into(),
+                exported_default_store: None,
+            },
+            capture: None,
+            container: None,
+        });
+        for mode in [
+            "unchanged",
+            "replacement-pi",
+            "replacement-codex",
+            "tool",
+            "command",
+            "view",
+            "binding",
+            "missing-current",
+            "missing-scheduled",
+        ] {
+            let mut expected = scheduled.clone();
+            let mut current = scheduled.clone();
+            match mode {
+                "replacement-pi" | "replacement-codex" => {
+                    current.active_execution.as_mut().unwrap().launch_id =
+                        uuid::Uuid::new_v4().to_string();
+                    if mode == "replacement-pi" {
+                        current.tool = "pi".into();
+                        current.active_execution.as_mut().unwrap().binding.agent = "pi".into();
+                    }
+                }
+                "tool" => current.tool = "pi".into(),
+                "command" => current.command = "pi".into(),
+                "view" => current.view = View::Structured,
+                "binding" => current.active_execution.as_mut().unwrap().binding.agent = "pi".into(),
+                "missing-current" => current.active_execution = None,
+                "missing-scheduled" => expected.active_execution = None,
+                _ => {}
+            }
+            storage
+                .update(|rows, _| {
+                    *rows = vec![current];
+                    Ok(())
+                })
+                .unwrap();
+            std::fs::write(&calls, "").unwrap();
+            let sent = send_wake(&expected, "AUTOMATIC WAKE").unwrap();
+            let commands = std::fs::read_to_string(&calls).unwrap_or_default();
+            assert_eq!(sent, mode == "unchanged", "{mode}: {commands}");
+            assert_eq!(
+                commands.contains("send-keys"),
+                mode == "unchanged",
+                "{mode}: {commands}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -226,6 +359,25 @@ mod tests {
                 removals, expected_removals,
                 "peer_reserved={peer_reserved}: {error}"
             );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn configured_wake_does_not_invent_input_on_config_failure() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let path = crate::session::get_app_dir().unwrap().join("config.toml");
+        assert!(!configured_wake("default").unwrap().is_empty());
+        for (body, expected) in [
+            (
+                "[session]\nrestart_wake_message = \"custom wake\"\n",
+                Some("custom wake"),
+            ),
+            ("[session]\nrestart_wake_message = \"\"\n", Some("")),
+            ("[session]\nrestart_wake_message = 99\n", None),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert_eq!(configured_wake("default").ok().as_deref(), expected);
         }
     }
 

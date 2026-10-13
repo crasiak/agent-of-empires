@@ -16,7 +16,7 @@ function fixture(flag = true, delegation) {
     { get(target, property) { if (!(property in target)) throw new Error(`Forbidden Pi call: ${String(property)}`); return target[property]; } });
   f.ctx = { hasUI: true, sessionManager: { getSessionId: () => f.native }, ui: { setStatus: (_key, value) => f.statuses.push(value) } };
   registerAfk(api, { delegation, wall: () => f.wall, mono: () => f.mono, schedule(fn) { f.scheduled.push(fn); return () => f.scheduled.splice(f.scheduled.indexOf(fn), 1); },
-    bridge(_bootstrap, generation) { f.generations.push(generation); return { async request(packet) { f.calls.push(packet.op); if (f.failure) throw new Error("unavailable"); if (packet.op === "poll") { const snapshot = { policy: f.policy && structuredClone(f.policy), probe: f.probe && structuredClone(f.probe) }; if (f.holdNextPoll) { f.holdNextPoll = false; return new Promise(resolve => { f.releasePoll = () => resolve(snapshot); }); } return snapshot; } f.acks.push(structuredClone(packet.ack)); return { acknowledged: true, publication_warnings: f.warning ? [f.warning] : undefined }; }, async close() { f.closed++; } }; } });
+    bridge(_bootstrap, generation) { f.generations.push(generation); return { async request(packet) { f.calls.push(packet.op); if (f.failure) throw new Error("unavailable"); if (packet.op === "poll") { const snapshot = { policy: f.policy && structuredClone(f.policy), probe: f.probe && structuredClone(f.probe), automatic_wake: f.wake && structuredClone(f.wake) }; if (f.holdNextPoll) { f.holdNextPoll = false; return new Promise(resolve => { f.releasePoll = () => resolve(snapshot); }); } return snapshot; } f.acks.push(structuredClone(packet.ack)); return { acknowledged: true, publication_warnings: f.warning ? [f.warning] : undefined }; }, async close() { f.closed++; } }; } });
   f.start = () => handlers.get("session_start")({}, f.ctx);
   f.stop = () => handlers.get("session_shutdown")({}, f.ctx);
   f.context = (messages = []) => handlers.get("context")({ messages }, f.ctx);
@@ -119,6 +119,19 @@ test("idle polling observes a fresh probe without a model turn; old cleanup cann
   f.probe.challenge = randomUUID();await f.context();assert.equal(f.acks.length, count + 1);
   await f.stop();await f.stop();assert.equal(f.closed, 1);
   await f.start();assert.equal(f.scheduled.length, 1);await f.stop();
+});
+
+test("late wake replies cannot invoke a replacement runtime",async()=>{
+  for(const phase of ["reply","delegate"]){
+    let hold=false,release,entered,attached;const reached=new Promise(r=>entered=r),effects=[];
+    const delegate={attach(r){attached=r;},shutdown(){},status(){},failed(){},context(){},wakeObservation(){return {request:{version:1}};},wakeReply(r,payload){if(payload)effects.push({generation:r.generation,payload});},async poll(){if(hold){hold=false;entered();await new Promise(r=>release=r);}}};
+    const f=fixture(true,delegate);await f.start();const old=attached.generation;f.wake={id:"old-wake"};
+    if(phase==="reply")f.holdNextPoll=true;else hold=true;
+    f.scheduled[0]();if(phase==="delegate")await reached;
+    const oldRefresh=attached.refreshing;await f.stop();f.wake=undefined;await f.start();assert.notEqual(attached.generation,old);
+    if(phase==="reply")f.releasePoll();else release();await oldRefresh;
+    assert.deepEqual(effects,[]);await f.stop();
+  }
 });
 
 test("publication warnings from ignored internal receipts remain visible", async () => {

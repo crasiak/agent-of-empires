@@ -4,6 +4,9 @@ import { performance } from "node:perf_hooks";
 import { randomUUID } from "node:crypto";
 import { questionRuntime } from "./aoe-afk-questions.mjs";
 import { registerAfk } from "./aoe-afk.mjs";
+import { createCollector } from "./aoe-afk-usage.mjs";
+import { createUsageWitness, USAGE_COVERAGE } from "./aoe-afk-usage-guard.mjs";
+import { automaticWake } from "./aoe-afk-wake.mjs";
 
 const COVERAGE = "stock-sdk-main-loop-reservations";
 const NAMES = ["aoe_afk_read", "aoe_afk_record", "aoe_afk_apply", "aoe_afk_checkpoint"];
@@ -19,7 +22,10 @@ export function delegationRuntime(pi) {
   const qualified = VERSION === "0.87.1";
   const live = r => r.view && performance.now() < r.delegateDeadline && Date.now() < r.view.expires_at_ms;
   const observable = r => r.signal && !r.signal.aborted && r.ctx.signal === r.signal && !r.ctx.isIdle() && !r.settling;
-  const active = r => r && (r.owned || (live(r) && (r.budgetDenied || (!r.parked && r.view.state === "pending"))));
+  const active = r => r && (r.usageWitness?.failure || r.usageWitness?.pending || r.usageDenied || r.owned || (live(r) && (r.budgetDenied || (!r.parked && r.view.state === "pending"))));
+  const usageBlocked = r => r.usageWitness.blocked(r.view) || (r.usageWitness.pending > 0
+    && (r.parked || r.failure || !live(r) || !observable(r) || r.stoppedWindow === r.view?.window));
+  const usageDenial = error => ["usage_exhausted", "usage_stale", "usage_unavailable"].includes(error?.code);
   const sharedDenial = error => error?.code === "shared_budget_exhausted";
   const supportedQuestion = args => args && typeof args.question === "string" && args.question.length > 0
     && Buffer.byteLength(JSON.stringify(args)) <= 8192
@@ -34,6 +40,44 @@ export function delegationRuntime(pi) {
     r.reason = "shared admission denied; existing host rights retained; fresh ordinary input required";
     r.budgetAbortSignal = ctx.signal;
     abortEpisode(r, ctx);
+  };
+  const usageAbort = (r, ctx = r.ctx, reason = r.usageDenied ?? "usage_unavailable", force = false) => {
+    if (r.usageWitness?.released(r.view)) return;
+    try { r.usageWitness?.require(r.view); } catch { reason = "usage_unavailable"; }
+    r.usageDenied = reason; r.parked = true; r.reason = `observed usage guard: ${reason}`;
+    if ((!force && !r.owned) || r.questionObserved || r.questionCall) return;
+    if (typeof ctx.abortPreservingQueue === "function") ctx.abortPreservingQueue();
+    else { r.questionWarning = "Unsupported usage-guard restoration: dispatch blocked, NOT safe against native custom-queue loss; release blocked"; ctx.abort(); }
+  };
+  const refreshUsage = async (r, boundary) => { if (r.refreshing) await r.refreshing; await r.refresh?.(boundary); };
+  const closing = (r, view = r.view) => view?.usage_policy_hash != null && view.state === "ended" && view.terminal_reason === "completed"
+    && view.window === r.window && view.generation === r.generation && ["instance_id", "profile", "native_id", "launch_id"].every(k => view.binding?.[k] === r.bootstrap.binding[k])
+    && !r.failure && !r.usageDenied && !r.usageWitness.failure && !r.usageWitness.restoring
+    && ((r.owned && r.signal && !r.signal.aborted) || (r.usageCompletion?.window === view.window && r.usageCompletion.ticket.isCurrent()));
+  const completeEpisode = (r, ctx) => {
+    const ticket = ctx.endRunPreservingQueue?.();
+    if (ticket?.version !== 1 || typeof ticket.isCurrent !== "function") { usageAbort(r, ctx, "usage_unavailable", true); return; }
+    const completion = { window: r.view.window, generation: r.generation, ticket, proved: false, done: undefined };
+    r.usageCompletion = completion;
+    const currentProof = () => current === r && r.usageCompletion === completion && ticket.isCurrent()
+      && r.view?.window === completion.window && r.generation === completion.generation && !r.failure && !r.usageDenied;
+    completion.done = (async () => {
+      try {
+        if (!(await ticket.completion) || !currentProof()) return;
+        completion.proved = true;
+        for (let page = 0; page < 65; page++) {
+          if (!currentProof()) return;
+          await refreshUsage(r, "settled");
+          if (!currentProof()) return;
+          const observation = r.usageCollector.observe(r, "settled"), report = observation.report;
+          if (observation.gap || !report) return;
+          if (report.after.count === report.head.count && report.after.hash === report.head.hash) {
+            r.usageWitness.cleanEnd(r.view, { ticket, head: report.head });
+            return;
+          }
+        }
+      } catch { usageAbort(r, r.ctx, "usage_unavailable"); }
+    })();
   };
   const stop = async (r, reason, abort = false, disposition = "interrupted") => {
     if (!r) return;
@@ -53,7 +97,14 @@ export function delegationRuntime(pi) {
     await r.stopping;
     r.stopping = undefined;
   };
-  const questions = questionRuntime(pi, { current: () => current, stop, live, observable, supportedQuestion });
+  const questions = questionRuntime(pi, { current: () => current, stop, live, observable, supportedQuestion, usageDenied: (r, reason) => usageAbort(r, r.ctx, reason) });
+  const wake = automaticWake(pi, (r, received) => {
+    try {
+      return qualified && r.ctx.mode === "tui" && r.ctx.isIdle() && !r.ctx.hasPendingMessages()
+        && typeof r.ctx.ui.getEditorText === "function" && r.ctx.ui.getEditorText() === ""
+        && !active(r) && !r.failure && !r.interaction && questions.wakeClear(r) && (!received || r.state === "off");
+    } catch { return false; }
+  });
   const forgetSignal = r => {
     r.signal?.removeEventListener("abort", r.onAbort);
     r.signal = undefined;
@@ -62,6 +113,7 @@ export function delegationRuntime(pi) {
   const observe = (event, ctx) => {
     const r = current;
     if (!r) return;
+    wake.activity(r);
     if (event.type === "context") r.ordinaryExternal = externalMessages(clean(event.messages));
     if (r.signal === ctx.signal) return;
     forgetSignal(r);
@@ -79,7 +131,7 @@ export function delegationRuntime(pi) {
       abortEpisode(r, ctx); throw new Error("AFK tool has no current owned request");
     }
     try { return await r.bridge.request({ op: "runtime", command: { ...data, window: r.view.window, request: r.request } }); }
-    catch (error) { await stop(r, "host denied/failed", true, "failed"); throw error; }
+    catch (error) { if (usageDenial(error)) usageAbort(r, ctx, error.code); else await stop(r, "host denied/failed", true, "failed"); throw error; }
   };
   for (const [name, parameters, run] of [
     [NAMES[0], Type.Object({ path: Type.String({ maxLength: 256 }) }, { additionalProperties: false }), (args) => ({ kind: "read", path: args.path })],
@@ -93,6 +145,8 @@ export function delegationRuntime(pi) {
   }
   pi.on("tool_call", async (event, ctx) => {
     const r = current;
+    if (r) await refreshUsage(r, "before_tool");
+    if (r && ((r.usageDenied && r.owned) || (r.usageWitness.restoring && r.usageWitness.blocked(r.view)))) { usageAbort(r, ctx, r.usageDenied, true); return { block: true, reason: "AFK observed usage guard denied automatic effect" }; }
     if (!r?.owned) {
       if (NAMES.includes(event.toolName)) return { block: true, reason: "AFK delegation is not owned" };
       return;
@@ -117,26 +171,37 @@ export function delegationRuntime(pi) {
     return pending.finally(() => { if (r.interaction === pending) r.interaction = undefined; });
   };
   pi.on("input", async (event, ctx) => {
+    wake.activity(current);
     if (current) questions.input(current, event, ctx);
     // No abort or transformation: Pi retains the input, including queued steering.
     await intervention("human input");
     return { action: "continue" };
   });
-  pi.on("ui_prompt_end", event => questions.end(current, event) ? undefined : intervention("UI interaction; origin unknown, no human answer inferred"));
+  pi.on("ui_prompt_start", () => wake.activity(current));
+  pi.on("ui_prompt_end", event => {
+    wake.activity(current);
+    return questions.end(current, event) ? undefined : intervention("UI interaction; origin unknown, no human answer inferred");
+  });
   pi.on("turn_end", async (event, ctx) => {
+    if (current) await refreshUsage(current, "turn_end");
+    if (current && closing(current) && event.outcome === "completed" && !ctx.signal?.aborted) {
+      if (!current.usageCompletion) completeEpisode(current, ctx);
+      return;
+    }
+    if (current?.usageDenied) { usageAbort(current, ctx); return; }
     if (current?.budgetDenied && current.budgetAbortSignal?.aborted) return;
     if (event.outcome === "aborted" || ctx.signal?.aborted) await intervention("explicit stop");
   });
   pi.on("agent_before_settle", async (event, ctx) => {
     const r = current;
-    if (!r?.owned || r.budgetDenied) return;
+    if (!r?.owned || r.budgetDenied || r.usageDenied) return;
     r.settling = true;
     r.contribution = undefined;
     if (event.outcome !== "completed") { await stop(r, "non-completed boundary", true, event.outcome === "error" ? "failed" : "interrupted"); return; }
     if (r.parked || r.failure || !live(r)) { await stop(r, "ended boundary", true); return; }
     if (competing(event) || ctx.hasPendingMessages()) { await stop(r, "existing work at settlement"); return; }
     try {
-      await r.refresh();
+      await r.refresh("turn_end");
       if (r.parked || r.failure || !live(r) || r.view.state !== "owned" || r.view.generation !== r.generation) { await stop(r, "stale boundary", true); return; }
       const checkpoint = r.view.checkpoints?.at(-1);
       if (!checkpoint || checkpoint.claims.status !== "unfinished" || !r.view.grant.settlement_nudges) return;
@@ -148,6 +213,7 @@ export function delegationRuntime(pi) {
       if (!live(r)) { await stop(r, "expired contribution", true); return; }
       r.contribution = receipt.identity;
     } catch (error) {
+      if (usageDenial(error)) { usageAbort(r, ctx, error.code); return; }
       if (sharedDenial(error)) { r.budgetDenied = true; r.reason = "shared admission denied; no nudge contributed"; return; }
       await stop(r, "settlement admission denied/failed", true, "failed");
     }
@@ -167,7 +233,12 @@ export function delegationRuntime(pi) {
     if (!r) return;
     r.settling = true;
     forgetSignal(r);
-    if (r.budgetDenied) {
+    if (r.usageCompletion) {
+      r.owned = false; r.request = undefined; r.expectedContinuation = undefined; r.contribution = undefined; r.settling = false;
+      return;
+    }
+    await refreshUsage(r, "settled");
+    if (r.budgetDenied || r.usageDenied) {
       r.owned = false; r.request = undefined; r.settling = false; r.budgetAbortSignal = undefined;
       return;
     }
@@ -194,26 +265,51 @@ export function delegationRuntime(pi) {
     });
   }
   return {
-    attach(r) { current = r; r.owned = false; r.parked = false; questions.attach(r); },
-    async shutdown(r) { questions.shutdown(r); forgetSignal(r); await stop(r, "shutdown", r.owned); if (current === r) current = undefined; },
-    failed(r) { if (active(r)) { void stop(r, "host unavailable", r.owned, "failed"); } },
-    status(r) { return r.questionWarning ?? r.questionDenied ?? (r.budgetDenied ? `AFK shared admission denied; ordinary recovery required; no refund` : undefined) ?? (r.view ? `AFK delegation: ${r.parked ? `ended (${r.reason})` : r.view.state}; SDK reservations ${r.view.reservations_used}/${r.view.grant.requests}; nudges ${r.view.nudges_used}/${r.view.grant.settlement_nudges}; question deferrals ${r.view.question_deferrals_used ?? 0}/${r.view.grant.question_deferrals ?? 0}; one file effect; ${r.view.terminal_reason ?? "nonterminal"}; background unknown` : undefined); },
+    attach(r) {
+      current = r; r.owned = false; r.parked = false; r.usageCollector = createCollector(); r.recoveredUsageWindows = new Set();
+      r.usageWitness = createUsageWitness(pi, r);
+      if (r.usageWitness.failure || r.usageWitness.pending) r.usageDenied = "usage_unavailable";
+      questions.attach(r); wake.attach(r);
+    },
+    wakeObservation(r) { return wake.observation(r); },
+    wakeReply(r, reply, observation) { wake.receive(r, reply, observation); },
+    observation(r, boundary) { return r.usageCollector.observe(r, boundary); },
+    usageReply(r, reply) { r.usageCollector.accept(reply); },
+    async shutdown(r) { wake.close(r); questions.shutdown(r); forgetSignal(r); await stop(r, "shutdown", r.owned); if (current === r) current = undefined; },
+    failed(r) {
+      wake.activity(r);
+      r?.usageWitness?.revokeCompleted();
+      if (r?.usageWitness?.failure || r?.usageWitness?.pending || (r?.view?.usage_policy_hash && !r.usageWitness.released(r.view) && !r.view.usage?.ordinary_recovered && !r.recoveredUsageWindows.has(r.view.window))) usageAbort(r, r.ctx, "usage_unavailable");
+      else if (active(r)) { void stop(r, "host unavailable", r.owned, "failed"); }
+    },
+    status(r) { return (r.usageWitness?.failure ? "AFK native usage persistence/provenance unavailable; automatic work blocked" : undefined) ?? r.questionWarning ?? (r.usageDenied ? `AFK observed usage guard: ${r.usageDenied}; fresh ordinary recovery required; no refund` : undefined) ?? r.questionDenied ?? (r.budgetDenied ? `AFK shared admission denied; ordinary recovery required; no refund` : undefined) ?? (r.view ? `AFK delegation: ${r.parked ? `ended (${r.reason})` : r.view.state}; SDK reservations ${r.view.reservations_used}/${r.view.grant.requests}; nudges ${r.view.nudges_used}/${r.view.grant.settlement_nudges}; question deferrals ${r.view.question_deferrals_used ?? 0}/${r.view.grant.question_deferrals ?? 0}; one file effect; ${r.view.terminal_reason ?? "nonterminal"}; background unknown` : wake.status(r)); },
     async poll(r, view, probe, guards) {
       questions.restoreGuards(r, guards);
+      if (view?.binding && ["instance_id", "profile", "native_id"].some(k => view.binding[k] !== r.bootstrap.binding[k])) view = null;
       if (view && r.window !== view.window) {
         // Never replace a still-owned episode with a new operator window.
         if (r.owned) { await stop(r, "replacement during owned episode", true); return; }
         questions.newWindow(r);
-        r.window = view.window; r.externalMessages = undefined; r.queueAbort = undefined;
-        r.budgetDenied = false; r.budgetAbortSignal = undefined; r.questionDenied = undefined;
+        r.window = view.window; r.externalMessages = undefined; r.queueAbort = undefined; r.usageCompletion = undefined;
+        r.budgetDenied = false; r.budgetAbortSignal = undefined; r.questionDenied = undefined; r.usageDenied = undefined;
         r.parked = false; r.request = undefined; r.reason = undefined; r.questionUnavailable = false;
         if (!qualified) { r.view = view; await stop(r, "unsupported SDK; executable activation refused"); return; }
         r.delegateDeadline = performance.now() + Math.max(0, Math.min(view.expires_at_ms - view.issued_at_ms, view.expires_at_ms - Date.now()));
       }
-      if (!view && r.view) await stop(r, "delegation disappeared", r.owned);
+      if (!view && r.view) {
+        r.usageWitness.revokeCompleted();
+        await stop(r, "delegation disappeared", r.owned);
+      }
       r.view = view;
+      try {
+        if (view?.usage_policy_hash && !view.usage?.ordinary_recovered && !r.recoveredUsageWindows.has(view.window)) r.usageWitness.require(view);
+      } catch { usageAbort(r, r.ctx, "usage_unavailable"); return; }
+      const usageBlocked = view?.usage?.shared_blocked ?? view?.usage?.blocked;
+      if (usageBlocked && !r.usageWitness.released(view) && !view.usage.ordinary_recovered && !r.recoveredUsageWindows.has(view.window)) usageAbort(r, r.ctx, `usage_${usageBlocked}`);
+      if (r.usageWitness.blocked(view) && !r.usageWitness.acknowledge(view) && !closing(r, view)) usageAbort(r, r.ctx);
       if (view && (view.state === "ended" || !live(r))) await stop(r, "ended or expired");
-      if (view?.state === "pending" && (view.grant.settlement_nudges > 0 || view.grant.question_deferrals > 0 || view.batch?.shared_requests != null)) {
+      if (r.budgetDenied) return;
+      if (view?.state === "pending" && (view.grant.settlement_nudges > 0 || view.grant.question_deferrals > 0 || view.batch?.shared_requests != null || view.usage_policy_hash != null)) {
         if (typeof r.ctx.abortPreservingQueue !== "function") {
           await stop(r, "settlement nudges unavailable: queue-preserving abort capability required");
           return;
@@ -226,9 +322,11 @@ export function delegationRuntime(pi) {
       }
       await questions.poll(r);
       if (r.parked && view?.state === "pending") return;
-      if (probe && qualified && (!probe.window || !r.questionUnavailable) && (!probe.window || (!view?.grant.settlement_nudges && !view?.grant.question_deferrals && !probe.budgeted) || typeof r.ctx.abortPreservingQueue === "function") && probe.version === 5 && JSON.stringify(probe.binding) === JSON.stringify(r.bootstrap.binding)
-        && (!probe.window || (probe.window === view?.window && probe.grant_hash === view?.grant_hash && probe.budgeted === (view?.batch?.shared_requests != null)))) {
-        const ack = { ...probe, generation: r.generation, sdk: VERSION, coverage: COVERAGE };
+      if (probe && qualified && !r.usageWitness.failure && (!probe.window || !r.questionUnavailable) && (!probe.window || (!view?.grant.settlement_nudges && !view?.grant.question_deferrals && !probe.budgeted) || typeof r.ctx.abortPreservingQueue === "function") && probe.version === 6 && JSON.stringify(probe.binding) === JSON.stringify(r.bootstrap.binding)
+        && (!probe.window || (probe.window === view?.window && probe.grant_hash === view?.grant_hash && probe.budgeted === (view?.batch?.shared_requests != null)))
+        && (!probe.window || probe.usage_policy_hash === view?.usage_policy_hash)
+        && (probe.usage_policy_hash == null || (r.usageWitness.acknowledge(view) && r.usageCollector.supports(r)))) {
+        const ack = { ...probe, generation: r.generation, sdk: VERSION, coverage: COVERAGE, usage_coverage: USAGE_COVERAGE };
         const signature = JSON.stringify(ack);
         if (r.runtimeAck !== signature) {
           await r.bridge.request({ op: "runtime_ack", ack });
@@ -245,10 +343,12 @@ export function delegationRuntime(pi) {
       messages = clean(messages);
       r.settling = false;
       if (r.interaction) await r.interaction;
+      if (r.usageWitness.failure) { usageAbort(r, ctx, "usage_unavailable", true); return { messages }; }
       let question;
       try { question = await questions.guard(r, messages, ctx); }
       catch { question = await questions.block(r, ctx); }
       if (question.blocked || question.ordinary) return { messages };
+      if (r.usageDenied || usageBlocked(r)) { usageAbort(r, ctx, r.usageDenied, true); return { messages }; }
       if (r.budgetDenied) { policyAbort(r, ctx); return { messages }; }
       const w = r.view;
       if (!qualified || (!r.owned && (r.parked || !w || w.state !== "pending" || !w.confirmed))) return;
@@ -271,12 +371,14 @@ export function delegationRuntime(pi) {
         const request = randomUUID();
         const receipt = await r.bridge.request({ op: "runtime", command: { kind: "reserve", window: w.window, request, continuation: r.expectedContinuation?.identity ?? null, question: question.identity ?? null } });
         if (!observable(r) || ctx.signal?.aborted || r.parked || performance.now() >= r.delegateDeadline || Date.now() >= w.expires_at_ms) { await stop(r, "interrupted reservation", true); return { messages }; }
+        r.usageWitness.handoff(w);
         questions.reserved(r, question.identity);
         r.request = request;
         r.externalMessages = externalMessages(messages);
         r.expectedContinuation = undefined; r.contribution = undefined;
         return { messages: [...messages, ...(continuation ? [continuation] : []), { role: "custom", customType: "aoe-afk-delegation", content: `${REMINDER}\nHost grant: ${JSON.stringify(receipt)}`, display: false, timestamp: Date.now() }] };
       } catch (error) {
+        if (usageDenial(error) || r.usageWitness.failure) { usageAbort(r, ctx, error.code ?? "usage_unavailable", true); return { messages }; }
         if (sharedDenial(error)) { policyAbort(r, ctx); return { messages }; }
         await stop(r, "reservation denied/failed", true, "failed"); return { messages };
       }
@@ -284,4 +386,4 @@ export function delegationRuntime(pi) {
   };
 }
 
-export default function (pi) { registerAfk(pi, { protocol: 5, delegation: delegationRuntime(pi) }); }
+export default function (pi) { registerAfk(pi, { protocol: 6, delegation: delegationRuntime(pi) }); }

@@ -52,18 +52,7 @@ pub(in crate::session::afk) struct Ticket {
     pub request: Option<String>,
     pub charged_at_ms: i64,
 }
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(in crate::session::afk) struct Operation {
-    pub id: String,
-    pub preview_digest: String,
-    pub issued_at_ms: i64,
-    pub expires_at_ms: i64,
-    pub shared_requests: Option<u16>,
-    pub stopped: bool,
-    pub members: BTreeMap<String, Member>,
-    pub tickets: Vec<Ticket>,
-}
+pub(in crate::session::afk) use authority::migration_v2::frozen::Operation;
 #[derive(Debug)]
 pub(in crate::session::afk) struct SharedExhausted;
 impl fmt::Display for SharedExhausted {

@@ -796,7 +796,7 @@ fn run_locked(app: &Path, store: &Store) -> Result<()> {
 
 #[cfg(test)]
 pub(crate) fn initialize_test(app: &Path) {
-    super::migration_v2::initialize_test(app);
+    super::migration_v3::initialize_test(app);
 }
 
 #[cfg(test)]

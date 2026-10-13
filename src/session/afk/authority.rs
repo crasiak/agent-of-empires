@@ -24,7 +24,9 @@ pub(super) fn publication_result(run: impl FnOnce() -> Result<Value>) -> Result<
 }
 pub(crate) mod migration;
 pub(crate) mod migration_v2;
-pub(super) const NAMESPACE: &str = "afk-authority-v2";
+pub(crate) mod migration_v3;
+pub(super) use migration_v2::frozen::Session;
+pub(super) const NAMESPACE: &str = "afk-authority-v3";
 pub(super) const PROFILE_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,16 +75,6 @@ impl Evidence {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Session {
-    pub epoch: u64,
-    pub policy: Option<Policy>,
-    pub book: delegation::Book,
-    pub evidence: Vec<Evidence>,
-    pub preference: batch::state::Preference,
-    pub exception_epoch: u64,
-}
 impl From<migration::frozen::Session> for Session {
     fn from(old: migration::frozen::Session) -> Self {
         Self {
@@ -142,79 +134,69 @@ pub(super) struct Snapshot {
     pub sessions: std::collections::BTreeMap<String, Session>,
     pub origin: Option<Origin>,
     pub batches: std::collections::BTreeMap<String, batch::state::Operation>,
+    pub upgrade: Option<Origin>,
+    pub usage: usage::State,
 }
 impl Snapshot {
     pub fn empty(profile: &str) -> Self {
         Self {
-            version: 2,
+            version: 3,
             profile: profile.into(),
             revision: 1,
             sessions: Default::default(),
             origin: None,
             batches: Default::default(),
+            upgrade: None,
+            usage: Default::default(),
+        }
+    }
+    pub fn legacy(&self) -> migration_v2::frozen::Snapshot {
+        migration_v2::frozen::Snapshot {
+            version: 2,
+            profile: self.profile.clone(),
+            revision: self.revision,
+            sessions: self.sessions.clone(),
+            origin: self.origin.clone(),
+            batches: self.batches.clone(),
         }
     }
     pub fn validate(&self, profile: &str) -> Result<()> {
         ensure!(
-            self.version == 2 && self.profile == profile && self.revision > 0,
-            "invalid v2 authority identity/revision"
+            self.version == 3 && self.profile == profile && self.revision > 0,
+            "invalid v3 authority identity/revision"
         );
         ensure!(
             serde_json::to_vec(self)?.len() <= PROFILE_BYTES,
             "profile authority exceeds 32 MiB"
         );
-        migration::frozen::Snapshot {
-            version: 1,
-            profile: self.profile.clone(),
-            revision: self.revision,
-            sessions: self
-                .sessions
-                .iter()
-                .map(|(id, session)| (id.clone(), session.legacy()))
-                .collect(),
-        }
-        .validate(profile)?;
-        ensure!(
-            self.batches.len() <= 64,
-            "retained batch operation capacity exceeded"
-        );
-        let mut membership = std::collections::BTreeSet::new();
-        for (id, batch) in &self.batches {
-            ensure!(*id == batch.id, "batch map identity mismatch");
-            batch.validate(profile, &self.sessions)?;
-            for (session, member) in &batch.members {
-                if let Some(window) = &member.window {
-                    ensure!(
-                        membership.insert((session, window)),
-                        "window belongs to multiple batches"
-                    );
-                }
-            }
-        }
-        if let Some(origin) = &self.origin {
+        self.legacy().validate(profile)?;
+        if let Some(origin) = &self.upgrade {
             ensure!(
                 origin.profile == profile
                     && origin.sha256.len() == 64
                     && origin.sha256.bytes().all(|b| b.is_ascii_hexdigit()),
-                "invalid v1 authority provenance"
+                "invalid v2 authority provenance"
             );
             let index = origin
                 .original
-                .strip_prefix("afk-authority-v2/migration/original-")
+                .strip_prefix("afk-authority-v3/migration/original-")
                 .and_then(|s| s.strip_suffix(".json"))
-                .context("invalid v1 original reference")?;
+                .context("invalid v2 original reference")?;
             ensure!(
                 index.len() == 4 && index.bytes().all(|b| b.is_ascii_digit()),
-                "invalid v1 original index"
+                "invalid v2 original index"
             );
         }
-        Ok(())
+        self.usage.validate(profile, &self.sessions, &self.batches)
     }
     pub fn transition(&self, next: &Self) -> Result<()> {
         ensure!(
-            self.profile == next.profile && self.origin == next.origin,
+            self.profile == next.profile
+                && self.origin == next.origin
+                && self.upgrade == next.upgrade,
             "profile provenance changed"
         );
+        self.usage.transition(&next.usage)?;
         for (id, old) in &self.batches {
             old.transition(next.batches.get(id).context("batch operation removed")?)?;
         }
@@ -275,7 +257,7 @@ pub(super) fn existing_profile_store(app: &Path, profile: &str) -> Result<Option
 }
 
 pub(super) fn ready(app: &Path) -> Result<()> {
-    migration_v2::ready(app).context("AFK authority unavailable; run normal `aoe migrate` in this app namespace, then inspect migration evidence before reenrolling")
+    migration_v3::ready(app).context("AFK authority unavailable; run normal `aoe migrate` in this app namespace, then inspect migration evidence before reenrolling")
 }
 
 pub(super) fn validate_existing_snapshot(
@@ -285,10 +267,10 @@ pub(super) fn validate_existing_snapshot(
 ) -> Result<()> {
     if let Some(snapshot) = snapshot {
         snapshot.validate(profile)?;
-        migration_v2::validate_import(app, snapshot)
+        migration_v3::validate_import(app, snapshot)
     } else {
         ensure!(
-            !migration_v2::expected_profile(app, profile)?,
+            !migration_v3::expected_profile(app, profile)?,
             "missing imported profile authority; run normal `aoe migrate` and inspect evidence"
         );
         Ok(())
@@ -317,14 +299,14 @@ impl Store {
             Some(snapshot) => snapshot,
             None => {
                 ensure!(
-                    create && !initialized && !migration_v2::expected_profile(app, profile)?,
+                    create && !initialized && !migration_v3::expected_profile(app, profile)?,
                     "missing imported profile authority"
                 );
                 Snapshot::empty(profile)
             }
         };
         snapshot.validate(profile)?;
-        migration_v2::validate_import(app, &snapshot)?;
+        migration_v3::validate_import(app, &snapshot)?;
         if !snapshot.sessions.contains_key(id) {
             ensure!(
                 create,
@@ -377,6 +359,7 @@ impl Store {
         let prior = self.authority_snapshot()?;
         let mut snapshot = prior.clone();
         snapshot.sessions.insert(id.clone(), session);
+        snapshot.usage.sync_lifetime(&mut snapshot.sessions)?;
         snapshot.revision = snapshot
             .revision
             .checked_add(1)

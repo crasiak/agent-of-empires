@@ -108,7 +108,7 @@ fn oversized_and_unsafe_host_snapshots_are_reported_without_payloads() {
     assert!(text.contains("snapshot.json"));
     fs::set_permissions(
         app.path()
-            .join("afk-authority-v2/profiles/alpha/snapshot.json"),
+            .join("afk-authority-v3/profiles/alpha/snapshot.json"),
         fs::Permissions::from_mode(0o644),
     )
     .unwrap();

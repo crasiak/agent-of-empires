@@ -16,6 +16,7 @@ pub struct AfkOverviewDialog {
     snapshot: Option<Overview>,
     error: Option<String>,
     include_archived: bool,
+    usage_details: bool,
     selection: ListState,
 }
 impl Default for AfkOverviewDialog {
@@ -44,6 +45,7 @@ impl AfkOverviewDialog {
             snapshot: None,
             error: None,
             include_archived: true,
+            usage_details: false,
             selection: ListState::default().with_selected(Some(0)),
         };
         dialog.refresh();
@@ -83,6 +85,27 @@ impl AfkOverviewDialog {
             Err(mpsc::TryRecvError::Empty) => false,
         }
     }
+    fn usage_text(value: &serde_json::Value) -> String {
+        let amount = |v: &serde_json::Value| {
+            v.as_u64()
+                .map_or_else(|| "unknown".into(), |n| n.to_string())
+        };
+        let window = &value["window"];
+        let m = if window.is_object() {
+            &window["measurement"]
+        } else if value["measurement"].is_object() {
+            &value["measurement"]
+        } else {
+            value
+        };
+        let guard = if window.is_object() {
+            &window["guard"]
+        } else {
+            &value["guard"]
+        };
+        format!("Usage coverage: {} (stored, never a fresh observation)\nReported component tokens: {}; complete: {}\nSDK-recorded cost nanoUSD: {}; price basis/subscription billing unknown\nOperator token threshold: {}\nOperator estimate threshold nanoUSD: {}; fixed quotes, NOT an invoice\nOperator-valued amount nanoUSD: {}; complete: {}\nBaseline entry: {}; observed through: {}; cutoff: {}\nClosing: {}; attribution gap: {}; denied: {}\nIndependent work, hidden retries and descendant billing remain unknown",
+            value["coverage"].as_str().unwrap_or("unavailable"),amount(&m["reported_tokens"]),m["tokens_complete"],amount(&m["sdk_recorded_nano"]),guard["tokens"].as_u64().map_or_else(||"none (no token guard)".into(),|n|n.to_string()),guard["usd"]["limit_nano"].as_u64().map_or_else(||"none (no USD guard)".into(),|n|n.to_string()),amount(m.get("operator_estimate_nano").unwrap_or(&value["operator_estimate_nano"])),m["valuation_complete"],window["baseline"]["count"],window["observed_through"]["count"],window["cutoff"]["count"],window["closing"],window["gap"],window["blocked"])
+    }
     fn rows(&self) -> Vec<(String, String)> {
         let Some(snapshot) = &self.snapshot else {
             return vec![];
@@ -101,7 +124,11 @@ impl AfkOverviewDialog {
             }
             for batch in &profile.batches {
                 let budget = if batch["shared_requests"].is_null() {
-                    "No shared budget".into()
+                    if batch["usage"]["guard"].is_object() {
+                        "Shared usage guard; no shared request cap".into()
+                    } else {
+                        "No shared budget".into()
+                    }
                 } else {
                     format!(
                         "{}/{} SDK charges",
@@ -109,6 +136,9 @@ impl AfkOverviewDialog {
                     )
                 };
                 rows.push((format!("[{}] BATCH {} | {}", profile.profile, batch["operation_id"].as_str().unwrap_or("unknown"), budget),format!("Original operation: {}\n{}; held unbound: {}\nExpiry: {}; expired: {}; stopped: {}\n{}\nOriginal members: {}", batch["operation_id"],budget,batch["held_unbound"],batch["expires_at_ms"],batch["expired"],batch["stopped"],batch["observation"].as_str().unwrap_or("stored only"),batch["members"])));
+                if self.usage_details {
+                    rows.last_mut().unwrap().1 = Self::usage_text(&batch["usage"]);
+                }
             }
             for session in &profile.sessions {
                 if !self.include_archived
@@ -165,8 +195,29 @@ impl AfkOverviewDialog {
                         |b| format!("batch {}", b["operation_id"])
                     )
                 ));
+                detail.push_str(&format!(
+                    "\nUsage: {}; reported tokens: {}; SDK cost basis unverified",
+                    session.usage["coverage"].as_str().unwrap_or("unavailable"),
+                    session.usage["measurement"]["reported_tokens"]
+                        .as_u64()
+                        .map_or_else(|| "unknown".into(), |n| n.to_string())
+                ));
+                if let Some(guard) = session.usage["window"]
+                    .get("guard")
+                    .filter(|g| !g.is_null())
+                {
+                    detail.push_str(&format!(
+                        "\nObserved guard: {}; denial: {}; closing: {}",
+                        guard,
+                        session.usage["window"]["blocked"],
+                        session.usage["window"]["closing"]
+                    ));
+                }
                 if !session.errors.is_empty() {
                     detail = format!("ERROR: {}\n{}", session.errors.join("; "), detail);
+                }
+                if self.usage_details {
+                    detail = Self::usage_text(&session.usage);
                 }
                 rows.push((label, detail));
             }
@@ -183,6 +234,7 @@ impl AfkOverviewDialog {
         match key.code {
             KeyCode::Esc => return DialogResult::Cancel,
             KeyCode::Char('r') => self.refresh(),
+            KeyCode::Char('u') => self.usage_details = !self.usage_details,
             KeyCode::Char('a') => {
                 self.include_archived = !self.include_archived;
                 self.selection.select(Some(0));
@@ -258,7 +310,7 @@ impl AfkOverviewDialog {
                 .style(Style::default().fg(theme.text)),
             layout[2],
         );
-        let footer = format!("Up/Down: select   a: archived/trashed {}   r: reread   Esc: close\nRead-only: no activation, enrollment, renewal or budget enforcement", if self.include_archived { "shown" } else { "hidden" });
+        let footer = format!("Up/Down: select   u: usage/details   a: archived/trashed {}   r: reread   Esc: close\nRead-only: no activation, enrollment, renewal or budget enforcement", if self.include_archived { "shown" } else { "hidden" });
         frame.render_widget(
             Paragraph::new(footer).style(Style::default().fg(theme.text)),
             layout[3],
@@ -299,6 +351,7 @@ mod tests {
             exception_epoch: Some(0),
             batch: None,
             batch_membership: "outside original batch windows",
+            usage: serde_json::json!({"coverage":"not_collected"}),
             errors: vec![],
         };
         calls.lock().unwrap()[0]
@@ -387,6 +440,21 @@ mod tests {
             assert!(text.contains(expected), "missing {expected}: {text}");
         }
         assert!(!text.contains("[alpha] archived"));
+        dialog.handle_key(KeyEvent::from(KeyCode::Char('u')));
+        terminal
+            .draw(|f| dialog.render(f, f.area(), &Theme::default()))
+            .unwrap();
+        let usage = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(usage.contains("Usage coverage: not_collected"));
+        assert!(usage.contains("none (no token guard)"));
+        assert!(usage.contains("NOT an invoice"));
+        assert_eq!(calls.lock().unwrap().len(), 1);
         dialog.handle_key(KeyEvent::from(KeyCode::Char('r')));
         assert_eq!(calls.lock().unwrap().len(), 2);
         calls.lock().unwrap()[1]

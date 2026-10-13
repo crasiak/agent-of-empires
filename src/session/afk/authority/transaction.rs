@@ -93,7 +93,23 @@ impl<'a> SessionTransaction<'a> {
             .book = book;
         self.publish(proposal)
     }
+    pub fn deny_usage(&mut self, id: &str, denial: usage::Decision) -> Result<journal::Committed> {
+        let mut proposal = self.snapshot.clone();
+        usage::latch(&mut proposal, id, &denial)?;
+        if proposal.usage == self.snapshot.usage
+            && proposal
+                .sessions
+                .iter()
+                .all(|(id, s)| s.epoch == self.snapshot.sessions[id].epoch)
+        {
+            return Ok(journal::Committed {
+                cleanup_durable: true,
+            });
+        }
+        self.publish(proposal)
+    }
     pub fn publish(&mut self, mut proposal: Snapshot) -> Result<journal::Committed> {
+        proposal.usage.sync_lifetime(&mut proposal.sessions)?;
         proposal.revision = self
             .snapshot
             .revision

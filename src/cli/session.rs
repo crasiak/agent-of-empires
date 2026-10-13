@@ -1481,20 +1481,8 @@ fn pick_targets_for_restart_all(instances: &[crate::session::Instance]) -> Vec<S
         .collect()
 }
 
-/// Type the restart wake message under the input lock, so an archive or trash that landed after
-/// the relaunch wins and nothing is typed into the shelved pane.
-fn send_restart_wake(
-    working: &Instance,
-    tmux_session: &crate::tmux::Session,
-    wake_msg: &str,
-) -> Result<bool> {
-    if !tmux_session.exists() {
-        return Ok(false);
-    }
-    let _input_lock = working.lock_for_input()?;
-    let delay = crate::agents::send_keys_enter_delay(&working.tool);
-    tmux_session.send_keys_with_delay(wake_msg, delay)?;
-    Ok(true)
+fn send_restart_wake(working: &Instance, wake_msg: &str) -> Result<bool> {
+    crate::session::restart::send_wake(working, wake_msg)
 }
 
 async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
@@ -1515,23 +1503,12 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let session_id = working.id.clone();
     let tool = working.tool.clone();
 
-    let wake_msg = crate::session::resolve_config(profile)
-        .map(|c| c.session.restart_wake_message.clone())
-        .unwrap_or_else(|_| "wake up: pick up what you were doing".to_string());
-
-    let mut wake_succeeded = false;
-    if !wake_msg.is_empty() && !matches!(outcome, StartOutcome::ResumeFailed { .. }) {
-        let tmux_session = crate::tmux::Session::new(&session_id, &title)?;
-        tmux_session.wait_until_ready(
-            std::time::Duration::from_secs(5),
-            crate::agents::ready_marker(&tool),
+    let wake_msg = crate::session::restart::configured_wake(profile).unwrap_or_else(|_| {
+        eprintln!(
+            "Warning: automatic restart wake suppressed because configuration is unavailable"
         );
-
-        match send_restart_wake(&working, &tmux_session, &wake_msg) {
-            Ok(sent) => wake_succeeded = sent,
-            Err(e) => eprintln!("Warning: failed to send wake-up message: {}", e),
-        }
-    }
+        String::new()
+    });
 
     let file_watch = crate::file_watch::FileWatchService::noop();
     crate::session::sync::capture_launched_session_id_blocking(
@@ -1547,9 +1524,6 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let landed = storage.update(|instances, _groups| {
         if let Some(stored) = instances.iter_mut().find(|i| i.id == session_id) {
             stored.merge_post_restart(&working);
-            if wake_succeeded {
-                stored.touch_after_input();
-            }
             Ok(true)
         } else {
             tracing::warn!(
@@ -1560,11 +1534,38 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
             Ok(false)
         }
     })?;
+    drop(_merge_lock);
     if !landed {
         bail!(
             "Session {} was removed by another process before restart could land; tmux session is now orphan",
             title
         );
+    }
+
+    if !wake_msg.is_empty() && !matches!(outcome, StartOutcome::ResumeFailed { .. }) {
+        if tool != "pi" {
+            crate::tmux::Session::new(&session_id, &title)?.wait_until_ready(
+                std::time::Duration::from_secs(5),
+                crate::agents::ready_marker(&tool),
+            );
+        }
+        match send_restart_wake(&working, &wake_msg) {
+            Ok(true) => {
+                let _input = working.lock_for_input()?;
+                storage.update(|instances, _groups| {
+                    if let Some(stored) = instances.iter_mut().find(|i| i.id == session_id) {
+                        if stored.active_execution.as_ref().map(|e| &e.launch_id)
+                            == working.active_execution.as_ref().map(|e| &e.launch_id)
+                        {
+                            stored.touch_after_input();
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            Ok(false) => {}
+            Err(error) => eprintln!("Warning: automatic restart wake unavailable: {error}"),
+        }
     }
 
     match outcome {
@@ -3316,8 +3317,7 @@ mod start_blocked_tests {
         }
         crate::tmux::refresh_session_cache();
 
-        let session = crate::tmux::Session::new(&working.id, &working.title).unwrap();
-        let result = send_restart_wake(&working, &session, "wake-4116");
+        let result = send_restart_wake(&working, "wake-4116");
         let captured = crate::tmux::tmux_command()
             .args(["capture-pane", "-p", "-t", &pane])
             .output()

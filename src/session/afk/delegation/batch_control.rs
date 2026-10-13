@@ -17,15 +17,23 @@ fn same_operation(snapshot: &authority::Snapshot, id: &str, digest: &str) -> Res
     }
     Ok(false)
 }
-fn view(snapshot: &authority::Snapshot, id: &str) -> Result<Value> {
+fn view(app: &Path, snapshot: &authority::Snapshot, id: &str) -> Result<Value> {
     let op = snapshot
         .batches
         .get(id)
         .context("unknown batch operation in this profile")?;
+    let mut negative = false;
     let members: Vec<_> = op.members.iter().map(|(id, member)| {
         let facts = member.window.as_ref().and_then(|window| snapshot.sessions.get(id)?.book.batch_facts(window));
-        json!({"session_id":id,"window":member.window,"outcome":member.outcome,"reason":member.reason,"host_confirmed":facts.as_ref().is_some_and(|f| f.confirmed),"ended":facts.as_ref().is_none_or(|f| f.ended),"reservations_used":facts.as_ref().map_or(0,|f|f.reservations.len()),"bulk_preference":snapshot.sessions.get(id).map(|s|s.preference)})
+        let pending = member.window.as_ref().and_then(|w| snapshot.usage.windows.get(w)).and_then(|w|w.source.as_ref()).and_then(|key|snapshot.usage.sources.get(key)).is_some_and(|source|usage::transport::negative_evidence(app,source).unwrap_or(true));
+        let mut measured = member.window.as_ref().map(|w|snapshot.usage.window_view(w));
+        if pending {negative = true; if let Some(value)=&mut measured {usage::pending_projection(value);}}
+        json!({"session_id":id,"window":member.window,"outcome":member.outcome,"reason":member.reason,"host_confirmed":facts.as_ref().is_some_and(|f| f.confirmed),"ended":facts.as_ref().is_none_or(|f| f.ended),"reservations_used":facts.as_ref().map_or(0,|f|f.reservations.len()),"bulk_preference":snapshot.sessions.get(id).map(|s|s.preference),"usage":measured})
     }).collect();
+    let mut total = usage::batch_view(snapshot, id);
+    if negative {
+        usage::pending_projection(&mut total);
+    }
     let observed: usize = op
         .members
         .iter()
@@ -39,7 +47,7 @@ fn view(snapshot: &authority::Snapshot, id: &str) -> Result<Value> {
         .map(|f| f.reservations.len())
         .sum();
     Ok(
-        json!({"operation_id":id,"profile":snapshot.profile,"preview_digest":op.preview_digest,"issued_at_ms":op.issued_at_ms,"expires_at_ms":op.expires_at_ms,"stopped":op.stopped,"expired":now_ms()>=op.expires_at_ms,"shared_requests":op.shared_requests,"shared_budget":if op.shared_requests.is_some(){"Configured per-batch SDK request allowance; not delivery or billing"}else{"No shared budget"},"charged":op.shared_requests.map(|_|op.tickets.len()),"held_unobserved":op.shared_requests.map(|_|op.tickets.iter().filter(|t|t.request.is_none()).count()),"recorded_sdk_reservations":observed,"members":members,"observation":"Stored host authority; acknowledgements and model delivery are not fresh observations"}),
+        json!({"operation_id":id,"profile":snapshot.profile,"preview_digest":op.preview_digest,"issued_at_ms":op.issued_at_ms,"expires_at_ms":op.expires_at_ms,"stopped":op.stopped,"expired":now_ms()>=op.expires_at_ms,"shared_requests":op.shared_requests,"shared_budget":if op.shared_requests.is_some(){"Configured per-batch SDK request allowance; not delivery or billing"}else if snapshot.usage.batches.contains_key(id){"No shared request budget; usage guard is separate"}else{"No shared budget"},"charged":op.shared_requests.map(|_|op.tickets.len()),"held_unobserved":op.shared_requests.map(|_|op.tickets.iter().filter(|t|t.request.is_none()).count()),"recorded_sdk_reservations":observed,"usage":total,"members":members,"observation":"Stored host authority; acknowledgements and model delivery are not fresh observations"}),
     )
 }
 pub(in crate::session::afk) fn budget_view(
@@ -58,7 +66,7 @@ pub(in crate::session::afk) fn status(app: &Path, profile: &str, id: &str) -> Re
     let store = authority::profile_store(app, profile, false)?;
     let transaction = authority::SessionTransaction::profile(&store, profile)?;
     authority::validate_existing_snapshot(app, profile, Some(transaction.snapshot()))?;
-    view(transaction.snapshot(), id)
+    view(app, transaction.snapshot(), id)
 }
 pub(in crate::session::afk) fn apply(app: &Path, artifact: batch::Artifact) -> Result<Value> {
     apply_with(app, artifact, |store, binding, window, budgeted| {
@@ -78,7 +86,7 @@ fn apply_with(
         .as_ref()
         .context("no initialized profile authority")?;
     if same_operation(initial_snapshot, &preview.operation_id, &artifact.digest)? {
-        return view(initial_snapshot, &preview.operation_id);
+        return view(app, initial_snapshot, &preview.operation_id);
     }
     let mut candidates = preview.members.clone();
     for candidate in &mut candidates {
@@ -123,7 +131,7 @@ fn apply_with(
             &preview.operation_id,
             &artifact.digest,
         )? {
-            return view(transaction.snapshot(), &preview.operation_id);
+            return view(app, transaction.snapshot(), &preview.operation_id);
         }
         ensure!(
             transaction.snapshot().batches.len() < 64,
@@ -186,6 +194,22 @@ fn apply_with(
                         .checked_add(1)
                         .context("window revision overflow")?;
                 }
+                if proposal
+                    .usage
+                    .enroll(
+                        app,
+                        &window.id,
+                        &window.binding,
+                        &window.generation,
+                        candidate.usage_guard.clone(),
+                        candidate.usage_guard.is_some() || preview.shared_usage_guard.is_some(),
+                    )
+                    .is_err()
+                {
+                    member.reason = Some(format!("{:?}", batch::Exclusion::UsageUnavailable));
+                    members.insert(candidate.session_id.clone(), member);
+                    continue;
+                }
                 session.book.prune(issued);
                 session.epoch = session
                     .epoch
@@ -214,6 +238,12 @@ fn apply_with(
                 tickets: vec![],
             },
         );
+        if let Some(policy) = &preview.shared_usage_guard {
+            proposal.usage.batches.insert(
+                preview.operation_id.clone(),
+                usage::SharedGuard::new(policy.clone()),
+            );
+        }
         transaction.publish(proposal)?.warn();
     }
     for (session_id, window) in created {
@@ -233,6 +263,11 @@ fn apply_with(
             );
             let mut transaction = authority::SessionTransaction::profile(&store, &preview.profile)?;
             current_instance(&window.binding)?;
+            if let Some(denial) = usage::check(transaction.snapshot(), app, &window.id) {
+                let reason = denial.reason;
+                transaction.deny_usage(&window.id, denial)?.warn();
+                return Err(usage::Denied(reason).into());
+            }
             let mut proposal = transaction.snapshot().clone();
             let op = proposal
                 .batches
@@ -326,7 +361,7 @@ pub(in crate::session::afk) fn off(app: &Path, profile: &str, id: &str) -> Resul
         .context("unknown batch operation in this profile")?
         .clone();
     if op.stopped {
-        return view(transaction.snapshot(), id);
+        return view(app, transaction.snapshot(), id);
     }
     for (session_id, member) in &mut op.members {
         let Some(window) = &member.window else {
@@ -356,5 +391,5 @@ pub(in crate::session::afk) fn off(app: &Path, profile: &str, id: &str) -> Resul
     op.stopped = true;
     proposal.batches.insert(id.into(), op);
     transaction.publish(proposal)?.warn();
-    view(transaction.snapshot(), id)
+    view(app, transaction.snapshot(), id)
 }

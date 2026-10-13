@@ -522,7 +522,7 @@ Preview, explicitly apply, inspect or stop a frozen profile-scoped batch
 
 ###### **Subcommands:**
 
-* `preview` — Export private preview-v2; never activates on its own
+* `preview` — Export private preview-v3; never activates on its own
 * `apply` — Apply the exact reviewed preview; retries only report the original operation
 * `status` — Read an operation in the selected profile, without probing members
 * `off` — Stop only this operation's original windows, never later replacements
@@ -531,7 +531,7 @@ Preview, explicitly apply, inspect or stop a frozen profile-scoped batch
 
 ## `aoe session afk batch preview`
 
-Export private preview-v2; never activates on its own
+Export private preview-v3; never activates on its own
 
 **Usage:** `aoe session afk batch preview --manifest <MANIFEST> --output <OUTPUT>`
 
@@ -611,7 +611,7 @@ Request control-only AFK. Does not authorize autonomous work
 
 One-file delegation during active work; nudges and question deferral require qualified native support
 
-**Usage:** `aoe session afk delegate --minutes <MINUTES> --grant <GRANT> <SESSION>`
+**Usage:** `aoe session afk delegate [OPTIONS] --minutes <MINUTES> --grant <GRANT> <SESSION>`
 
 ###### **Arguments:**
 
@@ -621,6 +621,7 @@ One-file delegation during active work; nudges and question deferral require qua
 
 * `--minutes <MINUTES>`
 * `--grant <GRANT>` — Protocol-4 grant: requests 1..8; settlement_nudges 0..2; question_deferrals 0..1, both omitted=0
+* `--usage-guard <USAGE_GUARD>` — Optional private observed-token/operator-rate USD guard; no guard is implied
 
 
 

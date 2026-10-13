@@ -21,6 +21,7 @@ pub(in crate::session::afk) struct Manifest {
     profile: String,
     minutes: u32,
     shared_requests: Option<u16>,
+    shared_usage_guard: Option<usage::Policy>,
     members: Vec<Member>,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -28,6 +29,7 @@ pub(in crate::session::afk) struct Manifest {
 struct Member {
     session_id: String,
     grant: Grant,
+    usage_guard: Option<usage::Policy>,
 }
 impl Manifest {
     fn validate(&self) -> Result<()> {
@@ -45,8 +47,14 @@ impl Manifest {
             (1..=MAX_MEMBERS).contains(&self.members.len()),
             "select 1..16 exact session IDs"
         );
+        if let Some(policy) = &self.shared_usage_guard {
+            policy.validate()?;
+        }
         let mut ids = BTreeSet::new();
         for member in &self.members {
+            if let Some(policy) = &member.usage_guard {
+                policy.validate()?;
+            }
             authority::scope(&self.profile, Some(&member.session_id))?;
             ensure!(
                 ids.insert(&member.session_id),
@@ -80,6 +88,7 @@ pub(in crate::session::afk) enum Exclusion {
     StaleSelection,
     StaleWorkspace,
     StaleGeneration,
+    UsageUnavailable,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -128,6 +137,7 @@ pub(in crate::session::afk) struct Observation {
 pub(in crate::session::afk) struct InspectedMember {
     pub session_id: String,
     pub grant: Grant,
+    pub usage_guard: Option<usage::Policy>,
     pub grant_hash: String,
     pub host: Option<Host>,
     pub authority: Option<AuthorityObservation>,
@@ -154,6 +164,7 @@ pub(in crate::session::afk) struct Inspection {
     pub profile: String,
     pub minutes: u32,
     pub shared_requests: Option<u16>,
+    pub shared_usage_guard: Option<usage::Policy>,
     pub shared_budget: String,
     pub bulk_exclusion: String,
     pub expiry: String,
@@ -188,6 +199,12 @@ fn private_parent(path: &Path) -> Result<(AnchoredDir, PathBuf)> {
     Ok((dir, PathBuf::from(leaf)))
 }
 fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    read_private_bounded(path, ARTIFACT_BYTES)
+}
+pub(in crate::session::afk) fn read_private_bounded<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    limit: usize,
+) -> Result<T> {
     let (dir, leaf) = private_parent(path)?;
     let stat = dir
         .entry_stat(&leaf)?
@@ -200,8 +217,8 @@ fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
         "manifest must be an owned private regular file (0600), not a link"
     );
     let file = dir
-        .open_regular(&leaf, ARTIFACT_BYTES)?
-        .context("unsafe or oversized inspection manifest (256 KiB maximum)")?;
+        .open_regular(&leaf, limit)?
+        .context("unsafe or oversized private AFK document")?;
     let meta = file.metadata()?;
     ensure!(
         meta.uid() == unsafe { libc::geteuid() }
@@ -211,12 +228,8 @@ fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
         "manifest changed or is unsafe"
     );
     let mut bytes = Vec::new();
-    file.take((ARTIFACT_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    ensure!(
-        bytes.len() <= ARTIFACT_BYTES,
-        "oversized inspection manifest"
-    );
+    file.take((limit + 1) as u64).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= limit, "oversized private AFK document");
     serde_json::from_slice(&bytes).context("invalid private AFK document")
 }
 fn read_manifest(path: &Path) -> Result<Manifest> {
@@ -286,6 +299,7 @@ fn member_at(app: &Path, member: &Member, captured: &Capture) -> Result<Inspecte
     let mut result = InspectedMember {
         session_id: member.session_id.clone(),
         grant: member.grant.clone(),
+        usage_guard: member.usage_guard.clone(),
         grant_hash: delegation::hash(serde_json::to_vec(&member.grant)?),
         host: row.map(Host::from_instance),
         authority: captured.observation(&member.session_id)?,
@@ -439,11 +453,19 @@ pub(in crate::session::afk) fn inspect_at(
     for member in &mut members {
         recheck(app, member, &final_capture)?;
     }
+    let shared_budget = if manifest.shared_requests.is_some() {
+        "Proposed shared request ceiling; enforced only after explicit apply"
+    } else if manifest.shared_usage_guard.is_some() {
+        "No shared request budget; observed usage guard is separate"
+    } else {
+        "No shared budget"
+    }
+    .into();
     let content = Inspection {
-        format:"aoe-afk-batch-preview".into(), version:2, apply_available:true,
+        format:"aoe-afk-batch-preview".into(), version:3, apply_available:true,
         operation_id:uuid::Uuid::new_v4().to_string(), captured_at_ms, completed_at_ms:now_ms(),
-        profile:manifest.profile, minutes:manifest.minutes, shared_requests:manifest.shared_requests,
-        shared_budget:if manifest.shared_requests.is_some() { "Proposed shared request ceiling; enforced only after explicit apply" } else { "No shared budget" }.into(),
+        profile:manifest.profile, minutes:manifest.minutes, shared_requests:manifest.shared_requests,shared_usage_guard:manifest.shared_usage_guard,
+        shared_budget,
         bulk_exclusion:"Per-member preference and exception epoch are frozen; unrecorded is not an inherited opt-in or opt-out".into(), expiry:"No active expiry; duration starts at first explicit apply".into(),
         capability_limit:CAPABILITY_LIMIT.into(),
         future_apply:"Explicit apply must revalidate frozen members and obtain exact grant-specific acknowledgement; this preview itself grants nothing".into(),
@@ -459,9 +481,9 @@ pub(in crate::session::afk) fn executable(path: &Path, expected_digest: &str) ->
     let mut value: Value = read_private(path)?;
     ensure!(
         value["format"] == "aoe-afk-batch-preview"
-            && value["version"] == 2
+            && value["version"] == 3
             && value["apply_available"] == true,
-        "inspection-v1 and unqualified formats cannot authorize apply; create a fresh preview-v2"
+        "inspection-v1, preview-v2 and unqualified formats cannot authorize apply; create a fresh preview-v3"
     );
     let recorded = value
         .as_object_mut()
@@ -485,12 +507,14 @@ pub(in crate::session::afk) fn executable(path: &Path, expected_digest: &str) ->
         profile: content.profile.clone(),
         minutes: content.minutes,
         shared_requests: content.shared_requests,
+        shared_usage_guard: content.shared_usage_guard.clone(),
         members: content
             .members
             .iter()
             .map(|m| Member {
                 session_id: m.session_id.clone(),
                 grant: m.grant.clone(),
+                usage_guard: m.usage_guard.clone(),
             })
             .collect(),
     };

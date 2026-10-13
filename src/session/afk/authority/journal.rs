@@ -75,6 +75,19 @@ struct Pending {
     proposal: Snapshot,
 }
 
+pub(in crate::session::afk) fn publication_bound(proposal: &Snapshot) -> Result<usize> {
+    Ok(serde_json::to_vec(&Pending {
+        version: 1,
+        transaction: "00000000-0000-4000-8000-000000000000".into(),
+        profile: proposal.profile.clone(),
+        prior_revision: Some(u64::MAX),
+        prior_hash: Some("0".repeat(64)),
+        proposed_hash: "0".repeat(64),
+        proposal: proposal.clone(),
+    })?
+    .len())
+}
+
 pub(super) fn clear(store: &Store) -> Result<()> {
     ensure!(
         store.dir.entry_stat(Path::new(PENDING))?.is_none(),
@@ -84,7 +97,7 @@ pub(super) fn clear(store: &Store) -> Result<()> {
 }
 
 // Caller retains the profile lock until the outcome has been classified.
-pub(super) fn publish(
+pub(in crate::session::afk) fn publish(
     store: &Store,
     prior: Option<&Snapshot>,
     proposal: &Snapshot,
@@ -425,7 +438,7 @@ mod tests {
                 let mut output = Vec::new();
                 super::super::super::bridge::serve(
                     &transport,
-                    Some(&runtime),
+                    Some((&runtime, &path)),
                     &binding,
                     &uuid::Uuid::new_v4().to_string(),
                     std::io::Cursor::new(b"{\"op\":\"poll\"}\n"),

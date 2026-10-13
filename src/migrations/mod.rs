@@ -49,6 +49,7 @@ mod v038_afk_settlement;
 mod v039_afk_questions;
 mod v040_afk_authority;
 mod v041_afk_batches;
+mod v042_afk_usage_guards;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -94,7 +95,7 @@ use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 41;
+const CURRENT_VERSION: u32 = 42;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -230,6 +231,7 @@ const MIGRATIONS: &[Migration] = &[
     (39, "afk_questions", v039_afk_questions::run),
     (40, "afk_authority", v040_afk_authority::run),
     (41, "afk_batches", v041_afk_batches::run),
+    (42, "afk_usage_guards", v042_afk_usage_guards::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -400,15 +402,61 @@ mod tests {
         }
         assert_eq!(get_current_version(), CURRENT_VERSION);
         assert!(crate::session::afk::authority::migration::run_at(&app).is_err());
-        crate::session::afk::authority::migration_v2::run_at(&app).unwrap();
+        assert!(crate::session::afk::authority::migration_v2::run_at(&app).is_err());
+        crate::session::afk::authority::migration_v3::run_at(&app).unwrap();
         let state: serde_json::Value = serde_json::from_slice(
-            &fs::read(app.join("afk-authority-v2/migration/manifest.json")).unwrap(),
+            &fs::read(app.join("afk-authority-v3/migration/manifest.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(state["phase"], "complete");
         fs::remove_file(app.join(".migration-runner.lock")).unwrap();
         std::os::unix::fs::symlink("/missing", app.join(".migration-runner.lock")).unwrap();
         assert!(run_migrations().is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn wake_preparation_sync_failure_retries_before_schema_publication() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let _home = crate::session::test_support::isolate_app_dir();
+        let app = crate::session::get_app_dir().unwrap();
+        crate::session::afk::authority::migration_v2::initialize_test(&app);
+        crate::session::afk::authority::migration_v3::run_at(&app).unwrap();
+        let root = app.join("afk-authority-v3/automatic-wake");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("writer.lock"))
+            .unwrap()
+            .sync_all()
+            .unwrap();
+        let manifest = app.join("afk-authority-v3/migration/manifest.json");
+        let original = fs::read(&manifest).unwrap();
+        crate::session::anchored_fs::FAIL_SYNC_ONCE.set(Some(root.clone()));
+        assert!(run_migrations().is_err());
+        crate::session::anchored_fs::FAIL_SYNC_ONCE.set(None);
+        assert!(
+            root.join("version.json").exists(),
+            "version record rename preceded failed directory sync"
+        );
+        assert_eq!(get_current_version(), 41);
+        run_migrations().unwrap();
+        assert_eq!(get_current_version(), 42);
+        assert_eq!(fs::read(&manifest).unwrap(), original);
+        let mut instance = crate::session::Instance::new("later authority", app.to_str().unwrap());
+        instance.source_profile = "alpha".into();
+        crate::session::afk::control(&instance, crate::session::afk::Operation::Off).unwrap();
+        let snapshot = app.join("afk-authority-v3/profiles/alpha/snapshot.json");
+        let advanced = fs::read(&snapshot).unwrap();
+        crate::session::anchored_fs::FAIL_SYNC_ONCE.set(Some(root));
+        assert!(v042_afk_usage_guards::run().is_err());
+        crate::session::anchored_fs::FAIL_SYNC_ONCE.set(None);
+        v042_afk_usage_guards::run().unwrap();
+        assert_eq!(fs::read(snapshot).unwrap(), advanced);
+        assert_eq!(get_current_version(), 42);
     }
 
     #[test]

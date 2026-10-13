@@ -9,6 +9,8 @@ mod registry;
 mod store;
 #[cfg(test)]
 mod tests;
+mod usage;
+pub(crate) mod wake;
 
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,7 +26,7 @@ pub use bridge::run_bridge;
 pub(crate) use store::initialize;
 
 const VERSION: u32 = 1;
-const BRIDGE_VERSION: u32 = 5;
+const BRIDGE_VERSION: u32 = 6;
 const MODE: &str = "control-only";
 const MAX_BYTES: usize = 16 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(3);
@@ -81,6 +83,7 @@ pub(crate) struct Bootstrap {
     pub(crate) app_dir: PathBuf,
     pub(crate) aoe_bin: PathBuf,
     pub(crate) binding: Binding,
+    pub(crate) wake_clock: Option<crate::process::ReceiverClock>,
 }
 
 pub(crate) fn launch_arguments(
@@ -109,6 +112,18 @@ pub(crate) fn launch_arguments(
             include_bytes!("../../assets/session/aoe-afk-runtime.mjs").as_slice(),
         ),
         (
+            "aoe-afk-wake.mjs",
+            include_bytes!("../../assets/session/aoe-afk-wake.mjs").as_slice(),
+        ),
+        (
+            "aoe-afk-usage.mjs",
+            include_bytes!("../../assets/session/aoe-afk-usage.mjs").as_slice(),
+        ),
+        (
+            "aoe-afk-usage-guard.mjs",
+            include_bytes!("../../assets/session/aoe-afk-usage-guard.mjs").as_slice(),
+        ),
+        (
             "aoe-afk-questions.mjs",
             include_bytes!("../../assets/session/aoe-afk-questions.mjs").as_slice(),
         ),
@@ -124,6 +139,7 @@ pub(crate) fn launch_arguments(
         app_dir: app_dir.clone(),
         aoe_bin: std::env::current_exe()?,
         binding,
+        wake_clock: crate::process::receiver_clock(),
     };
     Ok(format!(
         " -e {} --aoe-afk-binding {}",

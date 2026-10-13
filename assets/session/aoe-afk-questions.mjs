@@ -17,7 +17,7 @@ const valid = e => e?.version === 1 && typeof e.toolCallId === "string" && e.too
   && typeof e.interactionId === "string" && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(e.interactionId)
   && kinds.includes(e.kind) && e.supported === true && e.uiPromptAttribution === true && owner(e, e) && e.state === "pending";
 
-export function questionRuntime(pi, { current, stop, live, observable, supportedQuestion }) {
+export function questionRuntime(pi, { current, stop, live, observable, supportedQuestion, usageDenied }) {
   const marker = (r, identity, phase, window = r.view?.window) => {
     if (!r.ctx.sessionManager.getSessionFile()) throw Error("persistent native session required");
     pi.appendEntry(MARKER, { version: 1, window, binding: r.bootstrap.binding, generation: r.generation, identity, phase });
@@ -53,7 +53,7 @@ export function questionRuntime(pi, { current, stop, live, observable, supported
     pi.events.emit(CHANNEL + "request", { version: 1, method, requestId, ...data });
   });
   const eligible = r => r.questionObserved && !r.questionAttempt && !r.markerInvalid && !r.restoredGuards.size
-    && !r.questionGuards?.length && !r.owned && !r.parked && !r.failure && live(r) && observable(r)
+    && !r.questionGuards?.length && !r.owned && !r.parked && !r.failure && !r.usageDenied && live(r) && observable(r)
     && !r.ctx.hasPendingMessages() && r.questionObserved.signal === r.signal
     && r.ctx.mode === "tui" && typeof r.ctx.abortPreservingQueue === "function" && r.ctx.inputProvenance === "pipeline-v1"
     && r.ctx.ui.uiPromptOwnership === "exclusive-v1" && r.ctx.ui.targetedDialogCancellation?.includes(r.questionObserved.kind)
@@ -140,7 +140,7 @@ export function questionRuntime(pi, { current, stop, live, observable, supported
       };
       const receipt = await cmd({ kind: "question_admit" });
       if (!same(receipt.identity, identity)) throw Error("question admission identity mismatch");
-      const ready = () => r.view.window === a.window && !r.parked && !r.failure && live(r) && observable(r) && !r.ctx.hasPendingMessages()
+      const ready = () => r.view.window === a.window && !r.parked && !r.failure && !r.usageDenied && live(r) && observable(r) && !r.ctx.hasPendingMessages()
         && r.questionObserved === observed && r.view.confirmed && r.view.state === "pending" && r.view.generation === r.generation;
       if (!ready()) throw Error("question admission interrupted");
       r.questionRecovery = undefined;
@@ -167,6 +167,10 @@ export function questionRuntime(pi, { current, stop, live, observable, supported
       if (a.outcome === "ordinary") { marker(r, identity, "ordinary", a.window); a.intent = false; await stop(r, "ordinary question outcome won"); }
       else if (a.outcome !== "accepted") await stop(r, "question cleanup unknown");
     } catch (error) {
+      if (["usage_exhausted", "usage_stale", "usage_unavailable"].includes(error?.code)) {
+        usageDenied(r, error.code); r.questionDenied = "AFK observed usage guard denied; no human answer and no question close requested";
+        if (a && !a.intent) { a.denied = true; return; }
+      }
       if (error?.code === "shared_budget_exhausted" && a && !a.intent) {
         a.denied = true;
         r.questionDenied = "AFK shared admission denied; original human question remains open";
@@ -187,6 +191,10 @@ export function questionRuntime(pi, { current, stop, live, observable, supported
   };
   return {
     block,
+    wakeClear(r) {
+      return !r.markerInvalid && !r.questionAttempt?.intent && !r.questionTask && !r.questionObserved && !r.questionCall
+        && r.restoredGuards.size === 0 && !(r.questionGuards ?? []).some(g => g.emission_intent && !r.resolvedQuestions.has(g.identity.operation));
+    },
     attach(r) {
       subscribe(); r.seenQuestionTools = new Set(); r.seenQuestionInteractions = new Set();
       r.restoredGuards = new Map(); r.resolvedQuestions = new Set();
@@ -215,7 +223,7 @@ export function questionRuntime(pi, { current, stop, live, observable, supported
     },
     input(r, event, ctx) {
       r.questionRecovery = undefined;
-      if ((r.budgetDenied || r.questionAttempt?.intent || r.restoredGuards.size || r.questionGuards?.length) && ctx.inputProvenance === "pipeline-v1" && event.provenance && event.source === "interactive" && ctx.isIdle() && !event.images?.length && event.text) {
+      if ((r.budgetDenied || r.usageDenied || r.usageWitness.pending || r.usageWitness.failure || r.questionAttempt?.intent || r.restoredGuards.size || r.questionGuards?.length) && ctx.inputProvenance === "pipeline-v1" && event.provenance && event.source === "interactive" && ctx.isIdle() && !event.images?.length && event.text) {
         r.questionRecovery = { text: event.text, provenance: event.provenance, entries: new Set(ctx.sessionManager.getEntries().map(e => e.id)) };
       }
     },
@@ -229,6 +237,7 @@ export function questionRuntime(pi, { current, stop, live, observable, supported
       if (proof?.source === "interactive" && proof.settled === true && proof.transformed === false && proof.handled === false && proof.failed === false
         && !r.markerInvalid && ctx.sessionManager.getEntries().some(e => !recovery.entries.has(e.id) && e.type === "message"
         && e.message.role === "user" && same(e.message.content, [{ type: "text", text: recovery.text }]))) {
+        await r.usageWitness.recover();
         const unique = new Map(guards.map(g => [g.identity.operation, g]));
         if (a?.intent) unique.set(a.identity.operation, { identity: a.identity, window: a.window, emission_intent: true });
         for (const g of unique.values()) {
@@ -238,10 +247,12 @@ export function questionRuntime(pi, { current, stop, live, observable, supported
         }
         r.restoredGuards.clear(); r.questionGuards = []; if (a) a.intent = false;
         r.budgetDenied = false; r.budgetAbortSignal = undefined;
+        r.usageDenied = undefined;
         await stop(r, "explicit ordinary recovery"); return { ordinary: true };
       }
       if (!a?.intent && !guards.some(g => g.emission_intent !== false && !r.resolvedQuestions.has(g.identity.operation)) && !r.markerInvalid) return {};
-      if (a?.intent && ordinaryOutcome(a) && !ctx.signal?.aborted) {
+      if (a?.intent && !a.ordinaryConsumed && ordinaryOutcome(a) && !ctx.signal?.aborted) {
+        a.ordinaryConsumed = true;
         try { await r.bridge.request({ op: "runtime", command: { kind: "question_outcome", window: a.window, identity: a.identity, outcome: "ordinary" } });
           marker(r, a.identity, "ordinary", a.window); a.intent = false; r.resolvedQuestions.add(a.identity.operation);
         } catch { /* Proven ordinary results do not acquire AFK authority. */ }

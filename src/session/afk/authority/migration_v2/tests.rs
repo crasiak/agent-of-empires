@@ -1,3 +1,4 @@
+use super::v040 as frozen;
 use super::*;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -16,6 +17,7 @@ impl Drop for App {
             "afk-runtime-v3",
             "afk-runtime-v4",
             "afk-authority-v1/profiles",
+            "afk-authority-v2/profiles",
         ] {
             let _ = fs::set_permissions(self.path().join(path), fs::Permissions::from_mode(0o700));
         }
@@ -87,11 +89,23 @@ fn every_upgrade_boundary_preserves_frozen_history_and_fences_held_handles() {
             v040["imports"]["alpha"],
             "f6ba50ee5c3f424450f90b4b1a60126d020984db2c8520c4062920ff5492bc08"
         );
+        assert_eq!(
+            hash(
+                profile_store(app.path(), "alpha", false)
+                    .unwrap()
+                    .bytes("snapshot.json")
+                    .unwrap()
+                    .unwrap()
+            ),
+            "644787c82e846a27579003d47c37add375bdcebf9edf08d4a9d0457a25084c53"
+        );
         fs::write(app.path().join(".schema_version"), "41").unwrap();
+        super::super::migration_v3::run_at(app.path()).unwrap();
+        fs::write(app.path().join(".schema_version"), "42").unwrap();
         let current = Store::authority(app.path(), "alpha", "fixture", false).unwrap();
         let session = current.session().unwrap();
-        assert_eq!(session.epoch, 2);
-        assert_eq!(session.policy.as_ref().unwrap().revision, 9);
+        assert_eq!(session.epoch, 3);
+        assert_eq!(session.policy.as_ref().unwrap().revision, 10);
         assert!(!session.policy.unwrap().enabled);
         let book = serde_json::to_value(&session.book).unwrap();
         assert_eq!(book["windows"][0]["confirmed"], false);
@@ -117,7 +131,8 @@ fn every_upgrade_boundary_preserves_frozen_history_and_fences_held_handles() {
         )
         .unwrap();
         let advanced = current.bytes("snapshot.json").unwrap();
-        run_at(app.path()).unwrap();
+        assert!(run_at(app.path()).is_err());
+        super::super::migration_v3::run_at(app.path()).unwrap();
         assert_eq!(current.bytes("snapshot.json").unwrap(), advanced);
     }
 }
@@ -135,8 +150,10 @@ fn prepared_absence_and_runtime_created_profiles_are_included() {
     fs::write(app.path().join(".schema_version"), "41").unwrap();
     assert!(prepared.read::<frozen::Snapshot>("snapshot.json").is_err());
     assert!(!expected_profile(app.path(), "prepared").unwrap());
+    super::super::migration_v3::run_at(app.path()).unwrap();
+    fs::write(app.path().join(".schema_version"), "42").unwrap();
     let current = Store::authority(app.path(), "runtime", "new-session", false).unwrap();
-    assert_eq!(current.session().unwrap().epoch, 1);
+    assert_eq!(current.session().unwrap().epoch, 2);
     assert_eq!(manifest(app.path()).unwrap().entries.len(), 3);
     assert!(!app.path().join(original_path(1)).exists());
     let before = crate::session::afk::overview::tests::tree(app.path());

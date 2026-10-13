@@ -579,14 +579,29 @@ fn handle_kernel(svc: &Arc<FileWatchService>, res: notify::Result<notify::Event>
         return;
     };
     for path in &ev.paths {
-        dispatch_path(svc, path, kind, EventSource::Kernel);
+        let path = canonical_event_path(path);
+        dispatch_path(svc, &path, kind, EventSource::Kernel);
         #[cfg(any(test, debug_assertions))]
-        if let Some(observers) = svc.kernel_observers.lock().unwrap().remove(path) {
+        if let Some(observers) = svc.kernel_observers.lock().unwrap().remove(&path) {
             for observer in observers {
                 let _ = observer.send(());
             }
         }
     }
+}
+
+fn canonical_event_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
+        let Some(parent) = path.parent() else {
+            return path.to_path_buf();
+        };
+        let Some(name) = path.file_name() else {
+            return path.to_path_buf();
+        };
+        std::fs::canonicalize(parent)
+            .map(|parent| parent.join(name))
+            .unwrap_or_else(|_| path.to_path_buf())
+    })
 }
 
 fn dispatch_path(

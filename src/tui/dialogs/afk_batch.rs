@@ -60,7 +60,7 @@ impl AfkBatchDialog {
             attempted: false,
             pending: None,
             dispatch,
-            message: "Load a private CLI preview-v2 file. Loading never activates sessions.".into(),
+            message: "Load a private CLI preview-v3 file. Loading never activates sessions.".into(),
             scroll: 0,
         }
     }
@@ -147,7 +147,7 @@ impl AfkBatchDialog {
             }
         } else if key.code == KeyCode::Enter {
             if self.path.value().is_empty() {
-                self.message = "Enter a private preview-v2 path".into();
+                self.message = "Enter a private preview-v3 path".into();
             } else {
                 self.start(Request::Load(self.path.value().into()));
             }
@@ -168,7 +168,7 @@ impl AfkBatchDialog {
             horizontal: 1,
             vertical: 0,
         }));
-        let heading = self.reviewed.as_ref().map_or_else(|| format!("Private preview-v2 path: {}\nEnter loads for review only; inspection-v1 is refused.", self.path.value()), |(_, p)| format!("Profile: {} | frozen members: {} | requested duration: {} minutes\n{} | first-apply expiry is never renewed on retry\nReviewed digest: {}", p["profile"].as_str().unwrap_or("unknown"), p["members"].as_array().map_or(0, Vec::len), p["minutes"], if p["shared_requests"].is_null() { "No shared budget".into() } else { format!("Proposed shared allowance: {} SDK reservations",p["shared_requests"]) }, p["digest"].as_str().unwrap_or("unknown")));
+        let heading = self.reviewed.as_ref().map_or_else(|| format!("Private preview-v3 path: {}\nEnter loads for review only; inspection-v1 is refused.", self.path.value()), |(_, p)| format!("Profile: {} | frozen members: {} | requested duration: {} minutes\n{} | first-apply expiry is never renewed on retry\nReviewed digest: {}", p["profile"].as_str().unwrap_or("unknown"), p["members"].as_array().map_or(0, Vec::len), p["minutes"], if p["shared_requests"].is_null() { "No shared budget".into() } else { format!("Proposed shared allowance: {} SDK reservations",p["shared_requests"]) }, p["digest"].as_str().unwrap_or("unknown")));
         frame.render_widget(
             Paragraph::new(heading).style(Style::default().fg(theme.text)),
             layout[0],
@@ -215,7 +215,7 @@ mod tests {
         dialog.handle_key(KeyEvent::from(KeyCode::Enter));
         dialog.handle_key(KeyEvent::from(KeyCode::Char('a')));
         assert_eq!(calls.lock().unwrap().len(), 1);
-        calls.lock().unwrap()[0].1.send(Ok(serde_json::json!({"version":2,"apply_available":true,"profile":"alpha","operation_id":"op","digest":"a".repeat(64),"minutes":2,"shared_requests":null,"members":[{"session_id":"exact-member","exclusions":[]}]}))).unwrap();
+        calls.lock().unwrap()[0].1.send(Ok(serde_json::json!({"version":3,"apply_available":true,"profile":"alpha","operation_id":"op","digest":"a".repeat(64),"minutes":2,"shared_requests":null,"members":[{"session_id":"exact-member","exclusions":[]}]}))).unwrap();
         assert!(dialog.tick());
         dialog.handle_key(KeyEvent::from(KeyCode::Enter));
         dialog.handle_key(KeyEvent::from(KeyCode::Down));

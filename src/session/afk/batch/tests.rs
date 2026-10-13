@@ -129,7 +129,7 @@ fn preview_freezes_selection_and_never_creates_authority() {
     let other_bytes = other_profile.bytes("snapshot.json").unwrap();
     let snapshot = app
         .path()
-        .join("afk-authority-v2/profiles/alpha/snapshot.json");
+        .join("afk-authority-v3/profiles/alpha/snapshot.json");
     let before = fs::read(&snapshot).unwrap();
     let generation = uuid::Uuid::new_v4().to_string();
     let mut calls = 0;
@@ -157,7 +157,7 @@ fn preview_freezes_selection_and_never_creates_authority() {
     .unwrap();
     assert_eq!(calls, 2);
     assert!(artifact.content.apply_available);
-    assert_eq!(artifact.content.version, 2);
+    assert_eq!(artifact.content.version, 3);
     assert_eq!(artifact.content.shared_budget, "No shared budget");
     assert_eq!(
         artifact.content.members[0]
@@ -274,7 +274,7 @@ fn output_is_private_exclusive_and_unready_inspection_does_not_initialize() {
     assert_eq!(fs::read_dir(app.path()).unwrap().count(), 0);
     assert!(!output.exists());
     authority::migration::initialize_test(app.path());
-    let migration = app.path().join("afk-authority-v2/migration/manifest.json");
+    let migration = app.path().join("afk-authority-v3/migration/manifest.json");
     let original = fs::read(&migration).unwrap();
     for state in ["older", "partial"] {
         if state == "older" {
@@ -292,7 +292,7 @@ fn output_is_private_exclusive_and_unready_inspection_does_not_initialize() {
             .contains("aoe migrate"));
         assert_eq!(before, super::super::overview::tests::tree(app.path()));
         assert!(!output.exists());
-        fs::write(app.path().join(".schema_version"), "41").unwrap();
+        fs::write(app.path().join(".schema_version"), "42").unwrap();
         fs::write(&migration, &original).unwrap();
     }
     let receipt = preview_at(app.path(), &input, &output).unwrap();

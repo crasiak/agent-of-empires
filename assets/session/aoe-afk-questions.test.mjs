@@ -26,19 +26,25 @@ export async function runQuestionCase(scenario, host) {
   let session, r, armed = false, calls = 0, emitted = 0, closed, generation, mixed;
   const openedEvents = [];
   const reused = scenario === "reused-id-siblings";
+  const usageDenied = ["usage-before-admit","usage-before-intent"].includes(scenario);
   const recoveryFailure = scenario.startsWith("restore-recovery-failed");
   let recoverFailed = recoveryFailure;
   const ops = [], errors = [], contexts = [], replies = [], endings = [], opened = latch(), intent = latch(), release = latch();
   let sessionManager = scenario === "memory" ? sdk.SessionManager.inMemory(cwd) : sdk.SessionManager.create(cwd, join(cwd, "sessions"));
   const binding = { instance_id: "test", profile: "default", native_id: sessionManager.getSessionId(), launch_id: randomUUID() };
   const grant = { version: 4, task: "independent scratch", scope: "read scratch.txt independently of the unanswered question", files: [{ path: "scratch.txt", capability: "read" }], requests: 1, question_deferrals: scenario === "zero" ? 0 : 1, settlement_nudges: 0, assurance: "stock-sdk-main-loop-reservations" };
-  const view = { version: 4, window: randomUUID(), state: "pending", confirmed: true, grant, generation: "", reservations_used: 0, issued_at_ms: Date.now(), expires_at_ms: Date.now() + 60000 };
-  const bootstrap = { version: 5, app_dir: cwd, aoe_bin: "/unused", binding };
+  const view = { version: 4, binding, usage_policy_hash: usageDenied ? "a".repeat(64) : null, shared_usage_guard: null, usage: {guard: usageDenied ? {version:1,basis:"observed-native-entries",tokens:100,usd:null} : null, blocked:null, ordinary_recovered:false}, window: randomUUID(), state: "pending", confirmed: true, grant, generation: "", reservations_used: 0, issued_at_ms: Date.now(), expires_at_ms: Date.now() + 60000 };
+  const bootstrap = { version: 6, app_dir: cwd, aoe_bin: "/unused", binding };
   let guards = [], hostFailed = false, delayedReply;
   const request = async packet => {
     ops.push(packet);
     if (hostFailed) throw Error("host unavailable");
     if (packet.op === "question_recover" && recoverFailed) throw Error("transient recovery failure");
+    if ((scenario === "usage-before-admit" && packet.command?.kind === "question_admit") || (scenario === "usage-before-intent" && packet.command?.kind === "question_intent")) {
+      view.state="ended";view.usage={...view.usage,blocked:"exhausted",ordinary_recovered:false};
+      const error=Error("observed usage threshold");error.code="usage_exhausted";throw error;
+    }
+    if (scenario === "usage-before-intent" && packet.command?.kind === "question_outcome") throw Error("question not emitted");
     let value;
     if (host) value = await host({ packet, generation, binding, grant });
     else if (packet.op === "poll") value = { delegation: armed ? { ...view } : null, question_guards: guards };
@@ -104,7 +110,7 @@ export async function runQuestionCase(scenario, host) {
   const fixture = join(cwd, "extension.mjs");
   await writeFile(fixture, `import { registerAfk } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk.mjs")).href)};
 import { delegationRuntime } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk-runtime.mjs")).href)};
-export default function(pi) {const f=globalThis.__aoeQuestion; pi.on("input",f.earlyInput); pi.on("input",f.earlyRevert); const d=delegationRuntime(pi); registerAfk(pi,{protocol:5,delegation:{...d,attach(r){d.attach(r);f.capture(r);}},bridge:f.bridge,schedule:()=>()=>{}}); pi.on("ui_prompt_end",f.end); pi.on("input",f.input);}`);
+export default function(pi) {const f=globalThis.__aoeQuestion; pi.on("input",f.earlyInput); pi.on("input",f.earlyRevert); const d=delegationRuntime(pi); registerAfk(pi,{protocol:6,delegation:{...d,attach(r){d.attach(r);f.capture(r);}},bridge:f.bridge,schedule:()=>()=>{}}); pi.on("ui_prompt_end",f.end); pi.on("input",f.input);}`);
   let runtime = createExtensionRuntime(); runtime.flagValues.set("aoe-afk-binding", JSON.stringify(bootstrap));
   let loaded = await loadExtensions([fixture, join(packageRoot, "index.ts")], cwd, bus, runtime);
   assert.deepEqual(loaded.errors, []);
@@ -115,7 +121,7 @@ export default function(pi) {const f=globalThis.__aoeQuestion; pi.on("input",f.e
   const positive = ["input", "options", "fullscreen"].includes(scenario);
   modelRuntime.registerProvider(model.provider, { api: model.api, apiKey: "offline-not-a-credential", models: [model], streamSimple(_model, context, options) {
     assert.equal(options.signal.aborted, false); calls++; contexts.push(context.messages);
-    assert.ok(calls <= (positive ? 2 : recoveryFailure ? 5 : 3), "unbudgeted provider leak");
+    assert.ok(calls <= (positive ? 2 : recoveryFailure || usageDenied ? 5 : 3), "unbudgeted provider leak");
     const args = ["options", "select", "inline"].includes(scenario) ? { ...(scenario === "inline" ? { displayMode: "inline" } : {}), question: "Human prerequisite unrelated to scratch?", options: [{ title: "Alpha" }, { title: "Beta" }] } : { question: "Human prerequisite unrelated to scratch?" };
     const tools = reused && calls === 2 ? [{ name: "ask_user", arguments: { question: "Changed reused question?" } }, { name: "ask_user", arguments: { question: "Unrelated sibling?" } }] : calls === 1 ? [{ name: "ask_user", arguments: args }, ...(scenario === "siblings" ? [{ name: "ask_user", arguments: args }] : [])]
       : positive && calls === 2 ? [{ name: "aoe_afk_read", arguments: { path: "scratch.txt" } }] : [];
@@ -166,6 +172,11 @@ export default function(pi) {const f=globalThis.__aoeQuestion; pi.on("input",f.e
       }
       release.resolve();
     }
+    if (usageDenied) {
+      await r.questionTask;assert.equal(r.usageDenied,"usage_exhausted");assert.equal(emitted,0);assert.equal(closed,undefined);assert.notEqual(ui.getFocusedComponent(),editor);assert.equal(r.signal.aborted,false,"spending refusal must not abort the open human UI");
+      assert.equal(sessionManager.getEntries().filter(e=>e.customType==="aoe-afk-question-v1").length,scenario==="usage-before-intent"?1:0);
+      ui.getFocusedComponent().handleInput("human");ui.getFocusedComponent().handleInput("\r");
+    }
     if (ordinary && !["answer-first", "cancel-first", "off-intent"].includes(scenario)) {
       if (r.questionTask) await r.questionTask;
       assert.equal(emitted, 0, "ineligible grant cannot mutate UI");
@@ -187,6 +198,14 @@ export default function(pi) {const f=globalThis.__aoeQuestion; pi.on("input",f.e
       if (scenario !== "missing-closed") assert.equal(closed.state, "deferred"); assert.equal(calls, positive ? 2 : 1, `${scenario}: ${r.reason}`);
       assert.equal(ops.filter(p => p.command?.kind === "reserve").length, positive ? 2 : 0);
       if (positive) { assert.ok(JSON.stringify(contexts[1]).includes("unanswered_gate")); assert.ok(session.messages.some(m => m.role === "toolResult" && m.toolName === "aoe_afk_read" && !m.isError)); }
+    } else if (usageDenied) {
+      assert.equal(results[0].details.reason,undefined);assert.equal(results[0].details.cancelled,false);assert.equal(emitted,0);
+      assert.equal(r.usageWitness.pending,1,"real human question outcome does not discharge unrelated financial protection");
+      assert.equal(ops.filter(p=>p.command?.kind==="reserve").length,0);
+      const before=calls, queued={role:"custom",customType:"preserved-financial-question-work",content:"original queued object",display:true,timestamp:Date.now()};session.agent.followUp(queued);
+      await session.sendCustomMessage({customType:"after-human-outcome",content:"unrelated automatic work",display:true},{triggerTurn:true});await session.waitForIdle();
+      assert.equal(calls,before,"old human outcome cannot repeatedly bypass financial protection");assert.ok(session.agent.peekQueuedMessages().includes(queued),"original queued work remains preserved");
+      await session.prompt("fresh ordinary usage recovery");await session.waitForIdle();assert.equal(r.usageDenied,undefined);assert.equal(emitted,0);
     } else if (scenario === "stop-intent") assert.equal(calls, 1);
     else { assert.equal(calls, reused ? 3 : 2, `${scenario}: ordinary winner preserved, ${r.reason}`); assert.equal(results[0].details.reason, undefined); }
     assert.equal(endings[0]?.owner?.id, scenario === "mixed" ? undefined : openedEvent.interactionId);
@@ -304,9 +323,12 @@ if (process.argv.includes("--host")) {
   const lines = createInterface({ input: process.stdin })[Symbol.asyncIterator]();
   const result = await runQuestionCase(process.argv[process.argv.indexOf("--host") + 1], async value => {
     process.stdout.write(JSON.stringify(value) + "\n"); const line = await lines.next(); assert.equal(line.done, false);
-    const result = JSON.parse(line.value); if (!result.ok) throw Error(result.error); return result.value;
+    const result = JSON.parse(line.value); if (!result.ok) {const error=Error(result.error);error.code=result.code;throw error;} return result.value;
   });
   process.stdout.write(JSON.stringify({ result }) + "\n"); process.exit(0);
-} else test("actual source SDK/package/native UI controlled question return", { skip: !core || !packageRoot, timeout: 60000 }, async () => {
+} else {
+  test("usage refusal before question intent preserves native human UI",{skip:!core||!packageRoot,timeout:60000},async()=>{for(const scenario of ["usage-before-admit","usage-before-intent"])console.log(JSON.stringify(await runQuestionCase(scenario)));});
+  test("actual source SDK/package/native UI controlled question return", { skip: !core || !packageRoot, timeout: 60000 }, async () => {
   for (const scenario of ["input", "options", "select", "fullscreen", "answer-first", "cancel-first", "zero", "control", "missing-capability", "memory", "siblings", "mixed", "admission-failed", "off-intent", "stop-intent", "lost-reply", "ledger-failed", "off-after-intent", "expiry-after-intent", "late-reply", "conflicting-reply", "missing-closed", "truncated", "stale-capability", "extra-pending", "marker-failed", "startup-snapshot", "human-input", "restore-readable", "restore-unavailable", "restore-corrupt", "restore-conflict", "restore-unsupported", "restore-no-provenance", "restore-recovery-failed", "restore-recovery-failed-reopen", "reused-id-siblings", "missing-provenance", "rpc", "inline"]) console.log(JSON.stringify(await runQuestionCase(scenario)));
-});
+  });
+}

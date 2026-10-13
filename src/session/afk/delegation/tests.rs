@@ -63,6 +63,15 @@ fn apply(store: &Store, w: &Window, request: &str, d: &Value, now: i64) -> Resul
 }
 
 #[test]
+fn retained_native_history_still_excludes_automatic_wake_after_pruning() {
+    let (_app, _root, store, w) = setup(1);
+    let mut book = Book::load(&store).unwrap();
+    book.prune(w.expires_at_ms + RETENTION_MS + 1);
+    assert!(book.has_native_history(&w.binding.native_id));
+    assert!(!book.has_native_history(&uuid::Uuid::new_v4().to_string()));
+}
+
+#[test]
 fn record_later_apply_outcome_and_last_slot_are_durable() {
     let (_app, root, store, w) = setup(2);
     let first = reserve(&store, &w);
@@ -380,7 +389,7 @@ fn real_pi_sdk_records_then_applies_through_host_bridge() {
             let mut reply = Vec::new();
             super::super::bridge::serve(
                 &control,
-                Some(&store),
+                Some((&store, &w.control_root)),
                 &w.binding,
                 &w.generation,
                 Cursor::new(packet),
@@ -505,7 +514,7 @@ fn replacement_preimage_store_failure_caps_and_expired_body_pruning() {
     // An unsafe store must deny record and therefore deny all dependent effects.
     let ledger = app
         .path()
-        .join("afk-authority-v2/profiles/default/snapshot.json");
+        .join("afk-authority-v3/profiles/default/snapshot.json");
     std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(record(&store, &w, &first, d.clone()).is_err());
     std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -711,23 +720,31 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
                             }
                         }
                         previous = probe.challenge.clone();
-                        acknowledge(
+                        let ack = RuntimeAck {
+                            version: BRIDGE_VERSION,
+                            binding: binding.clone(),
+                            challenge: probe.challenge,
+                            window: probe.window,
+                            grant_hash: probe.grant_hash,
+                            budgeted: probe.budgeted,
+                            usage_policy_hash: probe.usage_policy_hash,
+                            usage_coverage: "native-entries-terminal-v2".into(),
+                            generation: generation.clone(),
+                            sdk: "0.87.1".into(),
+                            coverage: COVERAGE.into(),
+                        };
+                        let before = control.bytes("runtime-ack.json").unwrap();
+                        let mut weak = serde_json::to_value(&ack).unwrap();
+                        weak["usage_coverage"] = json!("native-entries-v1");
+                        assert!(acknowledge(
                             &control,
                             &binding,
                             &generation,
-                            RuntimeAck {
-                                version: BRIDGE_VERSION,
-                                binding: binding.clone(),
-                                challenge: probe.challenge,
-                                window: probe.window,
-                                grant_hash: probe.grant_hash,
-                                budgeted: probe.budgeted,
-                                generation: generation.clone(),
-                                sdk: "0.87.1".into(),
-                                coverage: COVERAGE.into(),
-                            },
+                            serde_json::from_value(weak).unwrap()
                         )
-                        .unwrap();
+                        .is_err());
+                        assert_eq!(control.bytes("runtime-ack.json").unwrap(), before);
+                        acknowledge(&control, &binding, &generation, ack).unwrap();
                         acks += 1;
                     }
                 }
@@ -739,7 +756,7 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
             }
             off_worker
         });
-        let result = delegate(&instance, 1, &file);
+        let result = delegate(&instance, 1, &file, None);
         if let Some(off_worker) = peer.join().unwrap() {
             let off = off_worker.join().unwrap();
             assert!(!off.requested_on);
@@ -768,7 +785,9 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
 }
 
 mod batches;
+mod completion;
 mod settlement;
+mod usage;
 
 mod questions;
 

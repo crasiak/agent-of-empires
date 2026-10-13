@@ -48,9 +48,10 @@ turn sessions into tenants or impose a profile-wide budget.
 
 ## Explicit profile-scoped batches
 
-`batch preview` exports private **preview-v2**, without activating sessions.
+`batch preview` exports private **preview-v3**, without activating sessions.
 An explicit apply of its reviewed digest is a separate operation. Old
-inspection-v1 artifacts are always refused, even if edited and rehashed.
+inspection-v1 and preview-v2 artifacts are refused, even if rehashed; use status
+for their retained operations and collect a fresh preview for new enrollment.
 Global visibility remains independent of this one-profile selection. This
 candidate workflow does not authorize runtime installation or release.
 
@@ -105,7 +106,7 @@ Previewing never charges the proposed allowance. First apply freezes the absolut
 expiry; retries cannot renew it. A configured shared budget additionally requires
 the qualified queue-preserving stop capability, not unmodified stock Pi.
 
-The artifact identifies itself as `aoe-afk-batch-preview`, version 2, with
+The artifact identifies itself as `aoe-afk-batch-preview`, version 3, with
 `apply_available: true`. This means an apply attempt is available, not that a
 member is activated or guaranteed acceptance. It records a new operation UUID,
 collection interval, exact frozen members, grant hashes, host bindings, control
@@ -166,6 +167,147 @@ review all grants, exclusions and the digest, then press `a` to explicitly apply
 Up/Down and PageUp/PageDown scroll. After an attempt, `r` inspects its original
 operation and `o` stops its original windows. Closing does not undo a requested
 operation. No automatic apply retry is offered.
+
+## Optional observed usage guards
+
+Usage visibility is independent of enforcement. Omitting a guard preserves the
+request/expiry/file limits above and imposes no spending-based veto. A per-window
+`usage_guard` and a frozen batch's `shared_usage_guard` are separately optional;
+they are not global profile/account budgets. A shared request cap remains a
+separate reservation bound, not a financial reservation.
+
+This candidate supports two explicitly chosen measures:
+
+- Reported native SDK component tokens: input + output + cache read + cache write.
+  Reasoning is already in output; one-hour cache writes are a subset of cache writes.
+- Those observed components valued at **frozen operator-supplied USD rates**.
+  This is an authorized estimate, not an invoice, subscription bill, SDK-certified
+  price or physical-request ceiling. Unsupported stronger assurances are refused.
+
+For an individual window, create a private owned `0700` directory and a `0600`
+policy file. Example values below are assumptions to replace, not current prices:
+
+```json
+{
+  "version": 1,
+  "basis": "observed-native-entries",
+  "tokens": 25000,
+  "usd": {
+    "currency": "USD",
+    "basis": "operator-fixed-rates",
+    "limit_nano": 500000000,
+    "quotes": [{
+      "model": {"provider": "PROVIDER_ID", "model": "EXACT_MODEL_ID"},
+      "input": 5000000000,
+      "output": 15000000000,
+      "cache_read": 500000000,
+      "cache_write": 6250000000,
+      "cache_write_1h": 10000000000
+    }]
+  }
+}
+```
+
+```sh
+aoe session afk delegate SESSION --minutes 10 --grant scratch-grant.json --usage-guard afk-usage/guard.json
+```
+
+Amounts are integer nanoUSD; one billion nanoUSD is one USD. Quotes are nanoUSD
+per million tokens, not prices fetched from a catalog. Each source entry's total
+weighted value is rounded upward once, then summed. Report pagination and replay
+do not change rounding. Missing or null `tokens`/`usd` disables that measure;
+a policy must select at least one. Explicit zero quotations remain visible
+operator assumptions and never fill missing usage or model identity. At most16
+exact model quotations and8KiB serialized policy are accepted. Tiered/subscription
+billing and non-USD currency are not silently approximated.
+
+For a batch, put a policy object in each selected member's optional `usage_guard`
+and/or the manifest's optional `shared_usage_guard`. The existing manifest version
+remains1; preview-v3 includes these policies in the reviewed digest. Grant-specific
+wire6 acknowledgement binds their immutable policy hash. A guarded window requires
+proven queue-preserving stop and a fresh, reconciled persisted native source.
+Wire5-only or unmodified stock runtime capability cannot qualify it. Financial
+acknowledgement requires `native-entries-terminal-v2`, including the qualified
+`endRunPreservingQueue()` operation; the older preserving-abort capability alone
+is insufficient.
+
+The baseline cursor is frozen at first durable window creation, not preview.
+Finalized ordinary work already in flight can fall after that baseline and is
+included conservatively. Stop/expiry/terminal transitions revoke work immediately;
+accounting may still be closing. A fixed qualified closing watermark must precede
+later ordinary dispatch. Unattributable late work/restart remains a gap, not a
+moving cutoff that charges all future conversation or a claimed final zero.
+
+The reader uses raw native entries, including abandoned branches, compacted and
+context-edited history. It does not use context occupancy as cumulative spending.
+Surfaced assistant attempts and qualified independent usage are kept; ambiguous
+nested tool/descendant rollups are excluded with a gap instead of double-counted.
+A summary can report tokens without a priceable model. Synthetic abort/error
+entries are not extra physical requests or proof of free transport. SDK-recorded
+cost is shown separately with unverified rate/subscription basis; it does not
+govern the operator-rate guard.
+
+Incomplete, contradictory, stale or unmeasurable chosen evidence blocks a required
+guard. No guard does not turn those conditions into a financial veto. Genuine
+publication quarantine still blocks authority. Host-issued five-second leases
+bind boot, helper incarnation and the exact committed source watermark. Heartbeats
+refresh transport evidence only; unchanged observations do not publish the entire
+profile. Global overview remains stored-only and never promises current liveness.
+
+Observed thresholds block new automatic admission, question/nudge intent and
+subsequent file effects. Existing count tickets are retained, not refunded or
+permission to override a spending guard. Already admitted concurrent requests may
+overshoot before their results are reported; supported cancellation is best effort.
+A committed action attempt keeps its existing revocation boundary. No predicted
+financial slots or exact bill ceiling are claimed.
+
+A spending-denial latch also suppresses automatic continuation/cache warming after
+terminal state or expiry until qualified ordinary recovery or fresh explicit
+enrollment. Successful file completion remains protected while the SDK episode
+closes. Automatic local release requires a current terminal ticket after awaited
+final handlers, quiescent SDK warming and complete accounting through the exact
+native head. Polling or a tool result alone cannot release it. Queued work remains
+intact; no reporting request is added.
+
+Later native changes, negative or missing host evidence, and obsolete tickets
+revoke a live completed exemption. On native reopen, a historical completed
+marker alone remains protective until qualified ordinary recovery or a confirmed
+new handoff. Shared-policy automatic completion release is not qualified. A question not yet closed by cooperative deferral remains open. Ordinary
+recovery records no human answer, restores no AFK authority and refunds nothing.
+Unknown auxiliary work and descendants remain outside complete-account assurance;
+AFK cannot launch descendants.
+
+Use `status`, `audit`, batch status and the global overview for the stored amounts,
+coverage, baselines/cutoffs, policies and gaps. In the global TUI overview, `u`
+toggles usage detail for the selected row. `partial_or_unavailable`, missing price
+and stale freshness are not zero actual spending. Unsupported/unobserved sessions
+remain visible. These are candidate capabilities, not permission to install,
+migrate a live app or claim D014/S5/S9 release acceptance.
+
+### Restart wake is automation
+
+Direct Pi restart wake uses a labelled native custom message, never terminal
+keystrokes or a human-input entry. Both CLI and TUI use the same private one-shot
+transport. Empty `session.restart_wake_message` disables it; invalid configuration,
+unsupported receivers or uncertain binding/clock evidence suppress it without
+substitute text or a raw-input fallback. A queued/attempted receipt does not prove
+model execution, and failed or lost delivery is not retried for that launch.
+
+Control-only presence and any AFK history for the current native conversation
+suppress automatic wake, even after a window ends. Unresolved native guards,
+write-failure custody, draft/input/UI activity or a busy receiver also suppress it.
+Use fresh ordinary input yourself when appropriate; restart is not recovery or a
+human answer. A positively established unrelated NoGuard conversation can receive
+one configured wake. Requests expire on host boot/continuous time, and receiver
+age is checked from before Poll without renewal on receipt.
+
+The initial Darwin receiver-clock qualification is Node24.13.0/libuv1.51.0;
+unknown combinations disable wake only. Linux uses bounded `/proc/uptime` reads
+with conservative precision. Native usage intents preserve denial across compatible
+restoration; failed native writes stay blocked across extension reload. These are
+unreleased candidate paths requiring final S7 and release qualification, not
+permission to install them. Incompatible-runtime preservation remains a separate
+gate below.
 
 ## Control-only presence
 
@@ -402,10 +544,11 @@ dispatch and never refunded on failures. Denied/failed reservations explicitly
 abort through the SDK; tool blocking alone is not a dispatch gate.
 
 Owned automatic compaction is cancelled; navigation pauses instead of creating
-a tree summary. Cache warming is suppressed only while delegation is pending
-or owns work, including owned settlement. Ended, off, expired and reloaded-ended
-windows no longer override native warming decisions once unowned. No global
-warming setting is changed. Provider retries,
+a tree summary. Cache warming is suppressed during pending/owned work, including
+owned settlement, and while required usage protection or failed-write custody
+remains unresolved. Terminal state and expiry do not clear that protection.
+Unguarded, unowned terminal windows otherwise leave native warming unchanged.
+No global warming setting is changed. Provider retries,
 independent extensions, pre-existing descendants and unrelated background work
 remain outside this count and are displayed as independent/unknown coverage.
 Other extensions are trusted same-process code, not sandboxed adversaries.
@@ -433,6 +576,10 @@ It omits action payloads and private preimages. Review before sharing.
 | Profile authority snapshot, including pending-publication envelope | 32 MiB |
 | Batch members / retained operations | 16 / 64 |
 | Optional shared SDK requests per batch | Explicit 1 to 128; omitted/null has no cap or charge |
+| Native source entry identities | 8192 per source |
+| Usage report | 128 entries / 128 KiB |
+| Reported provider/model groups | 16 per source |
+| Usage policy | 8 KiB / 16 exact quotations |
 | Runtime stdio frame | 256 KiB |
 | Presence/control object | 16 KiB, unchanged |
 
@@ -453,10 +600,10 @@ new grants. There is no automatic reconciliation or quota-reset shortcut.
 
 Presence, individual history, batch membership, preferences and optional shared
 tickets share one private snapshot at
-`<app_dir>/afk-authority-v2/profiles/<profile>/snapshot.json` and one stable
+`<app_dir>/afk-authority-v3/profiles/<profile>/snapshot.json` and one stable
 profile writer lock. Session IDs are scoped to their exact profile. Transport
 probes and acknowledgements cannot grant authority. The launch/stdio bridge and
-runtime acknowledgement use wire 5. Policy remains 1; Book/Window/grants remain 4;
+runtime acknowledgement use wire 6. Policy remains 1; Book/Window/grants remain 4;
 native question markers and cooperative events remain version 1.
 
 Before each canonical publication a private pending journal durably records its
@@ -499,6 +646,13 @@ preferences. Migration 40 must finish before the first durable v41 start; after
 that, retries verify its frozen historical evidence without reopening or
 reconstructing the old active namespace. A completed newer snapshot is never
 overwritten by replay.
+
+Migration42 first freezes migration41's v2 serialization, then preserves its
+verified originals, permanently seals v2 profile creation and fences populated
+and prepared-absent leaves under stable locks. The new v3 snapshot preserves
+preferences, batches, charged/held tickets and human guards, with no active import
+or invented usage. Pending publication journals remain vetoes, not repair input.
+After durable start, historical retries cannot reconstruct the old namespace.
 
 An interrupted migration resumes from verified originals and refuses conflicts,
 missing evidence, unsafe files or capacity overflow. Never delete its manifest,

@@ -66,6 +66,7 @@ pub struct SessionOverview {
     pub exception_epoch: Option<u64>,
     pub batch: Option<Value>,
     pub batch_membership: &'static str,
+    pub usage: Value,
     pub errors: Vec<String>,
 }
 
@@ -127,7 +128,7 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
     }
     let app = AnchoredDir::open(app_path)?;
     let mut remaining_bytes = SCAN_BYTES;
-    let metadata = authority::migration_v2::overview_metadata(app_path, &mut remaining_bytes);
+    let metadata = authority::migration_v3::overview_metadata(app_path, &mut remaining_bytes);
     let readiness = metadata.as_ref().map(|_| ());
     if let Ok(metadata) = &metadata {
         result.migration_evidence = metadata
@@ -142,9 +143,10 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
                 serde_json::json!({
                     "kind":"prepared_profile_absence", "profile":profile,
                     "original_absent":true, "authority_imported":false,
-                    "observation":"No v1 snapshot existed; no session or v2 import was fabricated"
+                    "observation":"No v2 snapshot existed; no session or v3 import was fabricated"
                 })
             }));
+        result.migration_evidence.extend(metadata.legacy_absent_profiles.iter().map(|profile|serde_json::json!({"kind":"legacy_prepared_profile_absence","namespace":"afk-authority-v1","profile":profile,"observation":"Migration41 found no v1 snapshot; later v2 history is separate"})));
     }
     let profiles = if app.entry_stat(Path::new("profiles"))?.is_some() {
         Some(app.child(Path::new("profiles"))?)
@@ -227,13 +229,13 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
                 .context("missing profile authority")?;
             authority::unparked(&store)?;
             ensure!(
-                snapshot.version == 2 && snapshot.profile == name && snapshot.revision > 0,
+                snapshot.version == 3 && snapshot.profile == name && snapshot.revision > 0,
                 "invalid profile authority identity"
             );
             if let Ok(metadata) = &metadata {
                 if let Some(expected) = metadata.imports.get(&name) {
                     ensure!(
-                        snapshot.origin == expected.origin
+                        snapshot.upgrade == expected.origin
                             && Some(snapshot.revision) >= expected.revision,
                         "missing or changed imported authority provenance"
                     );
@@ -244,6 +246,14 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
                         );
                     }
                 }
+                ensure!(
+                    snapshot.origin
+                        == metadata
+                            .legacy_imports
+                            .get(&name)
+                            .and_then(|e| e.origin.clone()),
+                    "missing or changed v1 provenance"
+                );
                 for expected in metadata
                     .evidence
                     .iter()
@@ -259,6 +269,26 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
                     );
                 }
             }
+            snapshot.usage.validate_refs(
+                &name,
+                |id| snapshot.sessions.contains_key(id),
+                |session, id| {
+                    snapshot
+                        .sessions
+                        .get(session)
+                        .and_then(|s| s.book.windows.iter().find(|w| w.id == id))
+                        .filter(|w| w.validate(&name, session).is_ok())
+                        .map(|w| (w.binding.clone(), w.generation.clone(), w.state == "ended"))
+                },
+                |id| {
+                    snapshot.batches.get(id).map(|b| {
+                        b.members
+                            .values()
+                            .filter_map(|m| m.window.clone())
+                            .collect()
+                    })
+                },
+            )?;
             Ok(snapshot)
         })();
         if let Err(error) = &authority {
@@ -271,13 +301,14 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
             match snapshot.batch_summaries(now) {
                 Ok(summaries) => {
                     membership_available = true;
-                    if snapshot
-                        .batches
-                        .values()
-                        .any(|b| b.shared_requests.is_some())
+                    if !snapshot.usage.batches.is_empty()
+                        || snapshot
+                            .batches
+                            .values()
+                            .any(|b| b.shared_requests.is_some())
                     {
                         result.shared_budget =
-                            "Recorded per-batch shared allowances; not a global or account budget";
+                            "Recorded per-batch request/usage guards; not a global or account budget";
                     }
                     profile.batches = summaries;
                 }
@@ -341,6 +372,18 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
                         now,
                         &mut remaining_bytes,
                     );
+                    if let Ok(snapshot) = &authority {
+                        let negative = summary.usage["negative_evidence_pending"] == true;
+                        summary.usage = snapshot
+                            .usage
+                            .session_view(&instance.id, instance.agent_session_id.as_deref());
+                        if let Some(window) = summary.delegation.as_ref().map(|w| &w.window) {
+                            summary.usage["window"] = snapshot.usage.window_view(window);
+                        }
+                        if negative {
+                            usage::pending_projection(&mut summary.usage);
+                        }
+                    }
                     if let Some(window) = summary.delegation.as_ref().map(|w| &w.window) {
                         summary.batch = profile
                             .batches
@@ -419,6 +462,17 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
                 }
             }
         }
+        for batch in &mut profile.batches {
+            if batch["members"].as_array().is_some_and(|members| {
+                members.iter().any(|m| {
+                    profile.sessions.iter().any(|s| {
+                        s.id == m["session_id"] && s.usage["negative_evidence_pending"] == true
+                    })
+                })
+            }) {
+                usage::pending_projection(&mut batch["usage"]);
+            }
+        }
         result.profiles.push(profile);
     }
     if !result.complete() && result.shared_budget == "No shared budget" {
@@ -467,6 +521,7 @@ fn session_summary(
         exception_epoch: authority.map(|s| s.exception_epoch),
         batch: None,
         batch_membership: "unavailable",
+        usage: serde_json::json!({"coverage":"unavailable"}),
         errors: vec![],
     };
     let presence = (|| -> Result<()> {
@@ -498,6 +553,13 @@ fn session_summary(
         else {
             return Ok(());
         };
+        if store
+            .dir
+            .entry_stat(Path::new(usage::transport::UNRESOLVED))?
+            .is_some()
+        {
+            row.usage["negative_evidence_pending"] = Value::Bool(true);
+        }
         let ack = store.read_budgeted::<Ack>("ack.json", remaining)?;
         let probe = store.read_budgeted::<Probe>("request.json", remaining)?;
         if let Some(ack) = ack {
@@ -577,8 +639,10 @@ struct SummaryProfile {
     profile: String,
     revision: u64,
     origin: Option<authority::Origin>,
+    upgrade: Option<authority::Origin>,
     sessions: std::collections::BTreeMap<String, SummarySession>,
     batches: std::collections::BTreeMap<String, SummaryBatch>,
+    usage: usage::State,
 }
 impl SummaryProfile {
     fn batch_summaries(&self, now: i64) -> Result<Vec<Value>> {
@@ -586,7 +650,7 @@ impl SummaryProfile {
         let mut membership = std::collections::BTreeSet::new();
         let mut summaries = Vec::new();
         for (id, operation) in &self.batches {
-            let summary = operation.summary(id, now)?;
+            let mut summary = operation.summary(id, now)?;
             for (session, member) in &operation.members {
                 let Some(window) = &member.window else {
                     continue;
@@ -628,6 +692,15 @@ impl SummaryProfile {
                     );
                 }
             }
+            summary["usage"] = self.usage.members_view(
+                operation
+                    .members
+                    .values()
+                    .filter_map(|m| m.window.as_deref()),
+                self.usage.batches.get(id).map(|g| &g.policy),
+            );
+            summary["usage"]["blocked"] =
+                serde_json::to_value(self.usage.batches.get(id).and_then(|g| g.blocked))?;
             summaries.push(summary);
         }
         Ok(summaries)

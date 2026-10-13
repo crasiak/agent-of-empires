@@ -2,7 +2,9 @@
 use super::*;
 use crate::session::{backup_before_migration, AnchoredDir};
 use delegation::hash;
-use migration::frozen;
+use migration::frozen as v040;
+pub(in crate::session::afk) mod frozen;
+use self::frozen::{profile_store, Session, Snapshot, NAMESPACE};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
@@ -205,7 +207,7 @@ pub(super) fn validate_import(app: &Path, snapshot: &Snapshot) -> Result<()> {
     }
     migration::validate_import(
         app,
-        &frozen::Snapshot {
+        &v040::Snapshot {
             version: 1,
             profile: snapshot.profile.clone(),
             revision: snapshot.revision.max(2),
@@ -220,25 +222,19 @@ pub(super) fn validate_import(app: &Path, snapshot: &Snapshot) -> Result<()> {
 
 pub(in crate::session::afk) struct Metadata {
     pub evidence: Vec<Evidence>,
-    pub profiles: Vec<String>,
     pub absent_profiles: Vec<String>,
     pub imports: BTreeMap<String, Entry>,
 }
-pub(in crate::session::afk) fn overview_metadata(
+pub(in crate::session::afk) fn historical_metadata(
     app: &Path,
     remaining: &mut usize,
 ) -> Result<Metadata> {
     let m: Manifest =
         read_manifest(&store(app, false)?, remaining)?.context("missing migration 41 manifest")?;
     m.validate()?;
-    ready_manifest(app, &m)?;
+    ensure!(m.phase == Phase::Complete, "incomplete migration41 history");
+    verify_seal(app, &m)?;
     let (evidence, _) = migration::historical_metadata(app, remaining)?;
-    let profiles = m
-        .entries
-        .iter()
-        .filter(|e| e.origin.is_some())
-        .map(|e| e.profile.clone())
-        .collect();
     let absent_profiles = m
         .entries
         .iter()
@@ -247,7 +243,6 @@ pub(in crate::session::afk) fn overview_metadata(
         .collect();
     Ok(Metadata {
         evidence,
-        profiles,
         absent_profiles,
         imports: m
             .entries
@@ -287,7 +282,7 @@ fn profiles(app: &Path, m: &Manifest) -> Result<Vec<String>> {
     Ok(profiles)
 }
 fn import(bytes: &[u8], origin: &Origin) -> Result<Snapshot> {
-    let old: frozen::Snapshot = serde_json::from_slice(bytes)?;
+    let old: v040::Snapshot = serde_json::from_slice(bytes)?;
     old.validate(&origin.profile)?;
     let mut sessions: BTreeMap<String, Session> = old
         .sessions
@@ -339,11 +334,82 @@ thread_local! { static INTERRUPT: std::cell::Cell<Option<Phase>> = const { std::
 
 pub(crate) fn run_at(app: &Path) -> Result<()> {
     ensure!(
+        !super::migration_v3::started(app)?,
+        "migration42 has begun; v041 reconstruction is forbidden"
+    );
+    ensure!(
         matches!(schema(app)?.as_str(), "40" | "41"),
         "migration 41 requires schema40 prerequisite or schema41 replay"
     );
     let state = store(app, true)?;
     let _upgrade_lock = state.lock(Duration::from_secs(30))?;
+    ensure!(
+        !super::migration_v3::started(app)?,
+        "migration42 has begun; v041 reconstruction is forbidden"
+    );
+    run_locked(app, state)
+}
+pub(super) fn prepare_upgrade(app: &Path, start: impl FnOnce() -> Result<()>) -> Result<()> {
+    let state = store(app, true)?;
+    let _lock = state.lock(Duration::from_secs(30))?;
+    ensure!(
+        !super::migration_v3::started(app)?,
+        "migration42 already started"
+    );
+    run_locked(app, state)?;
+    ready(app)?;
+    verify_history(app)?;
+    start()
+}
+pub(super) fn verify_history(app: &Path) -> Result<(Vec<Evidence>, Vec<String>)> {
+    let m = manifest(app)?;
+    ensure!(m.phase == Phase::Complete, "incomplete migration41 history");
+    verify_seal(app, &m)?;
+    let (evidence, _) = migration::verify_history(app)?;
+    ensure!(
+        profiles(app, &m)?
+            == m.entries
+                .iter()
+                .map(|e| e.profile.clone())
+                .collect::<Vec<_>>(),
+        "migration41 historical inventory changed"
+    );
+    let state = store(app, false)?;
+    let mut remaining = TOTAL_ORIGINAL_BYTES;
+    for (index, entry) in m.entries.iter().enumerate() {
+        ensure!(
+            old_store(app, &entry.profile)?.bytes("snapshot.json")?
+                == Some(serde_json::to_vec(&fence(entry))?),
+            "migration41 fence changed"
+        );
+        if let Some(origin) = &entry.origin {
+            let bytes = state
+                .bytes(&original_name(index))?
+                .context("missing migration41 original")?;
+            ensure!(
+                bytes.len() <= remaining && hash(&bytes) == origin.sha256,
+                "migration41 original changed"
+            );
+            remaining -= bytes.len();
+            let old: v040::Snapshot = serde_json::from_slice(&bytes)?;
+            old.validate(&entry.profile)?;
+            migration::validate_import(app, &old)?;
+            ensure!(
+                Some(hash(serde_json::to_vec(&import(&bytes, origin)?)?)) == entry.imported_hash,
+                "frozen migration41 import changed"
+            );
+        }
+    }
+    Ok((
+        evidence,
+        m.entries
+            .into_iter()
+            .filter(|e| e.origin.is_some())
+            .map(|e| e.profile)
+            .collect(),
+    ))
+}
+fn run_locked(app: &Path, state: Store) -> Result<()> {
     let mut manifest_budget = MANIFEST_BYTES;
     let mut m = match read_manifest(&state, &mut manifest_budget)? {
         Some(m) => {
@@ -354,7 +420,7 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
             let mut prepared = None;
             migration::prepare_upgrade(app, || {
                 let root = AnchoredDir::open(app)?
-                    .child(Path::new(frozen::NAMESPACE))?
+                    .child(Path::new(v040::NAMESPACE))?
                     .create_child(Path::new("profiles"))?;
                 super::super::store::private_dir(&root)?;
                 let (dev, ino) = root.identity()?;
@@ -411,7 +477,7 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
             if let Some(bytes) = source.bytes("snapshot.json")? {
                 ensure!(bytes.len() <= remaining, "v1 original capacity exceeded");
                 remaining -= bytes.len();
-                let old: frozen::Snapshot = serde_json::from_slice(&bytes)?;
+                let old: v040::Snapshot = serde_json::from_slice(&bytes)?;
                 old.validate(profile)?;
                 migration::validate_import(app, &old)?;
                 ensure!(
@@ -581,5 +647,7 @@ pub(crate) fn initialize_test(app: &Path) {
     run_at(app).unwrap();
     std::fs::write(app.join(".schema_version"), "41").unwrap();
 }
+#[cfg(test)]
+pub(super) mod golden;
 #[cfg(test)]
 mod tests;

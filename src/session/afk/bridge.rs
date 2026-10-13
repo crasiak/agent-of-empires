@@ -4,7 +4,15 @@ use std::io::{BufRead, Write};
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
-    Poll,
+    Poll {
+        #[serde(default)]
+        usage: Option<usage::Observation>,
+        #[serde(default)]
+        wake: Option<wake::Capability>,
+    },
+    UsageRecover {
+        window: String,
+    },
     QuestionRecover {
         window: String,
         identity: delegation::questions::QuestionIdentity,
@@ -47,7 +55,7 @@ pub fn run_bridge(raw: &str, generation: &str) -> Result<()> {
     )?;
     serve(
         &store,
-        Some(&runtime),
+        Some((&runtime, &bootstrap.app_dir)),
         &bootstrap.binding,
         generation,
         std::io::stdin().lock(),
@@ -58,13 +66,16 @@ pub fn run_bridge(raw: &str, generation: &str) -> Result<()> {
 
 pub(super) fn serve(
     store: &Store,
-    runtime: Option<&Store>,
+    runtime: Option<(&Store, &std::path::Path)>,
     binding: &Binding,
     generation: &str,
     mut input: impl BufRead,
     mut output: impl Write,
     validate: impl Fn() -> Result<()>,
 ) -> Result<()> {
+    let (runtime, app) = runtime.map_or((None, None), |(store, app)| (Some(store), Some(app)));
+    let mut meter = usage::transport::Server::new();
+    let mut automatic_wake = wake::Server::new();
     loop {
         let mut line = Vec::new();
         use std::io::Read;
@@ -83,6 +94,12 @@ pub(super) fn serve(
             validate()?;
             let command: Command = serde_json::from_slice(&line)?;
             match command {
+                Command::UsageRecover { window } => usage::recover(
+                    runtime.context("runtime unavailable")?,
+                    binding,
+                    &window,
+                    &validate,
+                ),
                 Command::QuestionRecover { window, identity } => delegation::questions::recover(
                     runtime.context("runtime unavailable")?,
                     binding,
@@ -90,7 +107,15 @@ pub(super) fn serve(
                     &identity,
                     &validate,
                 ),
-                Command::Poll => {
+                Command::Poll { usage, wake } => {
+                    let usage_report = meter.observe(
+                        store,
+                        runtime.context("runtime unavailable")?,
+                        binding,
+                        generation,
+                        usage,
+                        &validate,
+                    )?;
                     let mut view = delegation::poll(
                         runtime.context("runtime unavailable")?,
                         binding,
@@ -98,6 +123,19 @@ pub(super) fn serve(
                         now_ms(),
                         &validate,
                     )?;
+                    view["usage_report"] = usage_report;
+                    if let (Some(app), Some(runtime)) = (app, runtime) {
+                        view["automatic_wake"] = automatic_wake.observe(
+                            wake::Peer {
+                                app,
+                                runtime,
+                                binding,
+                                generation,
+                            },
+                            wake,
+                            &validate,
+                        );
+                    }
                     let revision = view["policy"]["revision"].as_u64().unwrap_or(0);
                     view["probe"] =
                         serde_json::to_value(matching_probe(store, binding, revision)?)?;
@@ -156,7 +194,8 @@ pub(super) fn serve(
                 serde_json::json!({"ok":true,"value":value})
             }
             Err(error) => {
-                serde_json::json!({"ok":false,"code":if error.is::<batch::state::SharedExhausted>() {Some("shared_budget_exhausted")}else{None},"error":error.to_string()})
+                automatic_wake.park();
+                serde_json::json!({"ok":false,"code":if error.is::<batch::state::SharedExhausted>() {Some("shared_budget_exhausted")}else if let Some(denied)=error.downcast_ref::<usage::Denied>() {Some(match denied.0 {usage::Denial::Exhausted=>"usage_exhausted",usage::Denial::Stale=>"usage_stale",usage::Denial::Unavailable=>"usage_unavailable"})}else{None},"error":error.to_string()})
             }
         };
         serde_json::to_writer(&mut output, &value)?;
@@ -183,6 +222,7 @@ mod tests {
             version: BRIDGE_VERSION,
             app_dir: app.clone(),
             aoe_bin: "/worktree/aoe".into(),
+            wake_clock: None,
             binding: Binding {
                 instance_id: "test".into(),
                 profile: "alpha".into(),
@@ -195,10 +235,10 @@ mod tests {
         for state in ["schema39", "partial", "corrupt", "missing-import"] {
             std::fs::write(
                 app.join(".schema_version"),
-                if state == "schema39" { "39" } else { "41" },
+                if state == "schema39" { "39" } else { "42" },
             )
             .unwrap();
-            let path = app.join("afk-authority-v2/migration/manifest.json");
+            let path = app.join("afk-authority-v3/migration/manifest.json");
             let original = std::fs::read(&path).unwrap();
             if state == "partial" {
                 let mut m: serde_json::Value = serde_json::from_slice(&original).unwrap();
@@ -214,9 +254,9 @@ mod tests {
                 super::super::overview::tests::tree(&app),
                 "{state}: {error:#}"
             );
-            assert!(!app.join("afk-authority-v2/profiles").exists());
+            assert!(!app.join("afk-authority-v3/profiles").exists());
             std::fs::write(&path, &original).unwrap();
-            std::fs::write(app.join(".schema_version"), "41").unwrap();
+            std::fs::write(app.join(".schema_version"), "42").unwrap();
         }
     }
     #[test]

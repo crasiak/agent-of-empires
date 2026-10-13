@@ -304,7 +304,7 @@ fn actual_native_question_sdk_and_rust_ledger() {
             let mut reply = Vec::new();
             super::super::super::bridge::serve(
                 &control,
-                Some(&store),
+                Some((&store, &w.control_root)),
                 &w.binding,
                 generation,
                 Cursor::new(serde_json::to_string(&value["packet"]).unwrap() + "\n"),

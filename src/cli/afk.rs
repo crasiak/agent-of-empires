@@ -52,6 +52,9 @@ enum AfkCommand {
         /// Protocol-4 grant: requests 1..8; settlement_nudges 0..2; question_deferrals 0..1, both omitted=0
         #[arg(long)]
         grant: std::path::PathBuf,
+        /// Optional private observed-token/operator-rate USD guard; no guard is implied
+        #[arg(long)]
+        usage_guard: Option<std::path::PathBuf>,
     },
     /// Export scoped profile-authority audit and legacy evidence references, without payloads or preimages
     Audit { session: String },
@@ -67,7 +70,7 @@ enum AfkCommand {
 
 #[derive(Subcommand)]
 enum BatchCommand {
-    /// Export private preview-v2; never activates on its own
+    /// Export private preview-v3; never activates on its own
     Preview {
         /// Private manifest-v1 with one profile, 1..16 exact IDs and explicit protocol-4 grants
         #[arg(long)]
@@ -171,9 +174,17 @@ pub async fn run(profile: &str, args: AfkArgs) -> Result<()> {
         }
         let instance = super::resolve_session(session, &rows)?.clone();
         let result = tokio::task::spawn_blocking(move || match args.command {
-            AfkCommand::Delegate { minutes, grant, .. } => {
-                crate::session::afk::delegation::delegate(&instance, minutes, &grant)
-            }
+            AfkCommand::Delegate {
+                minutes,
+                grant,
+                usage_guard,
+                ..
+            } => crate::session::afk::delegation::delegate(
+                &instance,
+                minutes,
+                &grant,
+                usage_guard.as_deref(),
+            ),
             AfkCommand::Audit { .. } => crate::session::afk::delegation::audit(&instance),
             AfkCommand::AllowBulk { .. } => crate::session::afk::batch::allow_bulk(&instance),
             _ => unreachable!(),

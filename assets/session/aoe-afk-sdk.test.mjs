@@ -23,6 +23,9 @@ async function runCase(scenario, externalHost) {
   let session, supportsNudges = false;
   const nudging = scenario.startsWith("nudge-");
   const budgeted = scenario === "shared-reserve-denied" || scenario === "nudge-shared-denied";
+  const usageFault = ["usage-intent-deferred", "usage-intent-failed"].includes(scenario);
+  const usageGuarded = usageFault || ["usage-host-failure", "usage-restore-unavailable", "usage-first-denied", "usage-preack-denied", "usage-monotonic-expiry", "usage-local-stop", "usage-local-failure"].includes(scenario);
+  let firstUsageDenied = false, persistFault = false, retirementInjected = false;
   const twice = scenario === "nudge-two";
   const liveCustom = scenario === "nudge-late-extension-live";
   const lateCustom = scenario === "nudge-late-extension" || liveCustom;
@@ -31,9 +34,9 @@ async function runCase(scenario, externalHost) {
   let enter, release;
   const entered = new Promise(resolve => enter = resolve), gate = new Promise(resolve => release = resolve);
   try {
-    const sessionManager = sdk.SessionManager.inMemory(cwd);
+    let sessionManager = usageGuarded ? sdk.SessionManager.create(cwd,join(cwd,"sessions")) : sdk.SessionManager.inMemory(cwd);
     const binding = { instance_id: "test", profile: "default", native_id: sessionManager.getSessionId(), launch_id: randomUUID() };
-    const bootstrap = { version: 5, app_dir: cwd, aoe_bin: "/unused/aoe", binding };
+    const bootstrap = { version: 6, app_dir: cwd, aoe_bin: "/unused/aoe", binding };
     const d = claims();
     if (scenario === "question") { d.human_required = true; d.action = null; }
     const grant = { version: 4, task: "scratch", scope: "scratch text", files: [{ path: "scratch.txt", capability: "create" }], requests: nudging ? (twice || liveCustom ? 8 : 4) : scenario === "limit-one" ? 1 : 2, settlement_nudges: nudging ? (twice ? 2 : 1) : 0, question_deferrals: scenario === "question-capability" ? 1 : 0, assurance: coverage };
@@ -42,18 +45,36 @@ async function runCase(scenario, externalHost) {
     const challenge = randomUUID();
     const warming = action => session.extensionRunner.emitCacheWarmingDecision({ type: "cache_warming_decision", action, warmCost: 0, missCost: 1, continuationProbability: 1 });
     const assertNativeWarming = async () => { for (const action of ["warm", "stop"]) assert.equal(await warming(action), action, `${scenario}: ordinary warming passes through`); };
-    const view = { batch: budgeted ? { shared_requests: nudging ? 3 : 1 } : null, version: 4, revision: 1, window: randomUUID(), binding, generation: "", state: "pending", confirmed: true, issued_at_ms: Date.now(), expires_at_ms: Date.now() + 60000, grant, grant_hash: sha(JSON.stringify(grant)), reservations_used: 0 };
+    const view = { ...(usageGuarded ? {usage_policy_hash:"a".repeat(64),usage:{guard:{version:1,basis:"observed-native-entries",tokens:100,usd:null},blocked:null,ordinary_recovered:false}} : {}), batch: budgeted ? { shared_requests: nudging ? 3 : 1 } : null, version: 4, revision: 1, window: randomUUID(), binding, generation: "", state: "pending", confirmed: !usageGuarded, issued_at_ms: Date.now(), expires_at_ms: Date.now() + 60000, grant, grant_hash: sha(JSON.stringify(grant)), reservations_used: 0 };
     const hostOperation = async packet => {
       ops.push(packet);
       if (externalHost) return externalHost({ packet, generation, binding, decision: d });
-      if (packet.op === "poll" && recordRequest && scenario === "failed-refresh") throw Error("poll failed after ownership");
+      if (packet.op === "poll" && (firstUsageDenied || (recordRequest && ["failed-refresh", "usage-host-failure", "usage-restore-unavailable"].includes(scenario)))) throw Error("required host unavailable");
       if (packet.op === "poll" && recordRequest && scenario === "missing-ledger") return { policy: null, probe: null, delegation: null, runtime_probe: null };
       if (packet.op === "poll") {
-        const result = { policy: null, probe: null, delegation: armed ? { ...view, state: stale ? "pending" : stopped ? "ended" : view.state, generation, reservations_used: requestNumber } : null, runtime_probe: armed ? { version: 5, binding, challenge, window: view.window, grant_hash: view.grant_hash, budgeted } : null };
+        if (!retirementInjected && armed && ["usage-monotonic-expiry", "usage-local-stop", "usage-local-failure"].includes(scenario) && packet.usage?.boundary === "before_request") {
+          const r=globalThis.__aoeAfkFixture.current;assert.equal(r.owned,false);assert.equal(r.usageWitness.pending,1);assert.equal(view.confirmed,true);assert.ok(view.expires_at_ms>Date.now());
+          if(scenario==="usage-monotonic-expiry") r.delegateDeadline=-1;
+          if(scenario==="usage-local-stop") {r.parked=true;r.stoppedWindow=view.window;}
+          if(scenario==="usage-local-failure") r.failure=true;
+          retirementInjected=true;
+        }
+        if (armed && usageFault && !persistFault) {
+          persistFault = true; const persist = sessionManager._persist.bind(sessionManager);
+          sessionManager._persist = entry => { if (entry.customType === "aoe-afk-usage-v1") { if (scenario === "usage-intent-failed") throw Error("injected native usage append failure"); return; } persist(entry); };
+        }
+        if (armed && scenario === "usage-preack-denied") { firstUsageDenied = true; view.state = "ended"; view.confirmed = false; view.usage.blocked = "stale"; }
+        const result = { policy: null, probe: null, usage_report: usageGuarded ? {fresh: true} : undefined, delegation: armed ? { ...view, state: stale ? "pending" : stopped ? "ended" : view.state, generation, reservations_used: requestNumber } : null, runtime_probe: armed ? { version: 6, binding, challenge, window: view.window, grant_hash: view.grant_hash, budgeted, usage_policy_hash: view.usage_policy_hash } : null };
         if (scenario === "pending-poll-stop" && armed && !stopped) void session.abort();
         return result;
       }
       if (packet.op === "runtime_ack" && scenario === "pending-ack-stop") void session.abort();
+      if (packet.op === "runtime_ack" && usageGuarded) {
+        assert.equal(packet.ack.usage_coverage, "native-entries-terminal-v2");
+        const persisted = sdk.SessionManager.open(sessionManager.getSessionFile()).getEntries().find(e => e.customType === "aoe-afk-usage-v1" && e.data.window === view.window);
+        assert.equal(persisted?.data.phase, "required", "required intent must be on disk before financial ACK");
+        view.confirmed = true;
+      }
       if (packet.op !== "runtime") return { acknowledged: true };
       const cmd = packet.command;
       if (["stop", "settle"].includes(cmd.kind)) { stopped = true; return { ended: true }; }
@@ -63,6 +84,7 @@ async function runCase(scenario, externalHost) {
         const error = Error("shared admission exhausted"); error.code = "shared_budget_exhausted"; throw error;
       }
       if (cmd.kind === "reserve") {
+        if (scenario === "usage-first-denied") { firstUsageDenied = true; const error = Error("first required admission stale"); error.code = "usage_stale"; throw error; }
         reserves++;
         if (scenario === "failed-store") throw Error("injected failed store");
         assert.ok(requestNumber < grant.requests, "request cap");
@@ -120,6 +142,10 @@ async function runCase(scenario, externalHost) {
         if (nudging && calls === 4 && lateCustom) await session.sendCustomMessage({ customType: "other", content: "late queued extension", display: true }, { deliverAs: "followUp", triggerTurn: true });
         if (nudging && calls === 4 && scenario === "nudge-late") return { entries: [...event.entries, { type: "custom_message", customType: "other", content: "late contribution", display: true }], continue: true };
       },
+      guardInput(event) {
+        if (event.text === "usage transformed recovery") return {action:"transform",text:"changed recovery"};
+        if (event.text === "usage handled recovery") return {action:"handled"};
+      },
       observe(event) { if (event.type === "agent_settled") settled++; if (event.type === "ui_prompt_end") uiEnded++; if (event.type === "session_compact_failed" && event.aborted) compactCancelled++; },
       async noop(_id, _args, _signal, _update, ctx) {
         toolExecutions++;
@@ -150,10 +176,10 @@ async function runCase(scenario, externalHost) {
     await writeFile(fixture, `import { registerAfk } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk.mjs")).href)};
 import { delegationRuntime } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk-runtime.mjs")).href)};
 import { Type } from "@sinclair/typebox";
-export default function(pi) { const f=globalThis.__aoeAfkFixture; pi.on("agent_before_settle",f.before); pi.on("context",f.context); const delegate=delegationRuntime(pi); registerAfk(pi,{protocol:5,delegation:{...delegate,attach(r){delegate.attach(r);f.capture(r);f.refresh=()=>r.refresh();}},bridge:f.bridge,schedule:()=>()=>{}}); pi.on("agent_before_settle",f.after); pi.on("agent_settled",f.observe); pi.on("ui_prompt_end",f.observe); pi.on("session_compact_failed",f.observe); pi.registerTool({name:"noop",label:"noop",description:"ordinary tool",parameters:Type.Object({}),execute:f.noop}); pi.registerTool({name:"ask_user",label:"Ask User",description:"0.12 compatible question shape",parameters:Type.Object({question:Type.String()}),execute:async()=>{throw Error("question must never execute");}}); }
+export default function(pi) { const f=globalThis.__aoeAfkFixture; pi.on("agent_before_settle",f.before); pi.on("context",f.context); const delegate=delegationRuntime(pi); registerAfk(pi,{protocol:6,delegation:{...delegate,attach(r){delegate.attach(r);f.capture(r);f.refresh=()=>r.refresh();}},bridge:f.bridge,schedule:()=>()=>{}}); pi.on("input",f.guardInput); pi.on("agent_before_settle",f.after); pi.on("agent_settled",f.observe); pi.on("ui_prompt_end",f.observe); pi.on("session_compact_failed",f.observe); pi.registerTool({name:"noop",label:"noop",description:"ordinary tool",parameters:Type.Object({}),execute:f.noop}); pi.registerTool({name:"ask_user",label:"Ask User",description:"0.12 compatible question shape",parameters:Type.Object({question:Type.String()}),execute:async()=>{throw Error("question must never execute");}}); }
 `);
-    const runtime = createExtensionRuntime(); runtime.flagValues.set("aoe-afk-binding", JSON.stringify(bootstrap));
-    const loaded = await loadExtensions([fixture], cwd, sdk.createEventBus(), runtime);
+    let runtime = createExtensionRuntime(); runtime.flagValues.set("aoe-afk-binding", JSON.stringify(bootstrap));
+    let loaded = await loadExtensions([fixture], cwd, sdk.createEventBus(), runtime);
     assert.deepEqual(loaded.errors, [], "actual Pi loader resolves core and TypeBox peers");
     const resourceLoader = { getExtensions: () => loaded, getSkills: () => ({ skills: [], diagnostics: [] }), getPrompts: () => ({ prompts: [], diagnostics: [] }), getThemes: () => ({ themes: [], diagnostics: [] }), getAgentsFiles: () => ({ agentsFiles: [] }), getSystemPrompt: () => "Offline AFK fixture", getSystemPromptSource: () => undefined, getAppendSystemPrompt: () => [], getAppendSystemPromptSources: () => [], extendResources: () => {}, reload: async () => {} };
     const model = { id: "fake", name: "fake", provider: "afk-fixture", api: "afk-fixture", baseUrl: "http://invalid.invalid", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 };
@@ -239,7 +265,51 @@ export default function(pi) { const f=globalThis.__aoeAfkFixture; pi.on("agent_b
       await running; await stopping; await session.waitForIdle();
     }
     await Promise.all(warmingChecks);
-    assert.notEqual(session.messages.find(m => m.role === "toolResult" && m.toolName === "noop")?.isError, true, "ordinary tool fixture assertions must not be swallowed by the SDK");
+    const ordinaryResult=session.messages.find(m => m.role === "toolResult" && m.toolName === "noop");
+    if (["pending-poll-stop","pending-ack-stop"].includes(scenario)) {
+      assert.equal(toolExecutions,0,"stop at the pre-tool usage refresh must veto the effect");
+      assert.equal(ordinaryResult?.isError,true);assert.match(JSON.stringify(ordinaryResult.content),/abort/i);
+    } else if (usageFault) {
+      assert.equal(toolExecutions,0);assert.equal(ordinaryResult?.isError,true);
+    } else assert.notEqual(ordinaryResult?.isError, true, "ordinary tool fixture assertions must not be swallowed by the SDK");
+    if (usageFault) {
+      const r = globalThis.__aoeAfkFixture.current;
+      assert.equal(calls,1);assert.equal(reserves,0);assert.equal(ops.filter(p=>p.op==="runtime_ack").length,0);
+      assert.ok(r.usageWitness.failure);assert.equal(await warming("warm"),"stop");
+      assert.equal(sessionManager.getEntries().filter(e=>e.customType==="aoe-afk-usage-v1").length,1,"failed append left memory evidence");
+      assert.equal(sdk.SessionManager.open(sessionManager.getSessionFile()).getEntries().filter(e=>e.customType==="aoe-afk-usage-v1").length,0,"memory evidence was not accepted as persistence");
+      const queued={role:"custom",customType:"kept-after-append-failure",content:"original object",display:true,timestamp:Date.now()};session.agent.followUp(queued);later="done";
+      await session.sendCustomMessage({customType:"auto-after-append-failure",content:"not human",display:true},{triggerTurn:true});await session.waitForIdle();assert.equal(calls,1);assert.ok(session.agent.peekQueuedMessages().includes(queued));
+      assert.equal(ops.filter(p=>p.command?.kind==="reserve").length,0);assert.deepEqual(errors,[]);
+      return {scenario,calls,noFinancialAck:true,noAdmission:true,preservedQueue:true};
+    }
+    if (usageGuarded) {
+      let r=globalThis.__aoeAfkFixture.current;const before=calls;assert.equal(before,["usage-first-denied", "usage-preack-denied", "usage-monotonic-expiry", "usage-local-stop", "usage-local-failure"].includes(scenario) ? 1 : 2);
+      if (["usage-restore-unavailable", "usage-first-denied", "usage-preack-denied"].includes(scenario)) {
+        const file=sessionManager.getSessionFile();assert.ok(file);await session.extensionRunner.emit({type:"session_shutdown",reason:"reload"});session.dispose();
+        sessionManager=sdk.SessionManager.open(file);runtime=createExtensionRuntime();runtime.flagValues.set("aoe-afk-binding",JSON.stringify(bootstrap));loaded=await loadExtensions([fixture],cwd,sdk.createEventBus(),runtime);assert.deepEqual(loaded.errors,[]);
+        ({session}=await sdk.createAgentSession({cwd,agentDir:cwd,model,modelRuntime,resourceLoader,settingsManager:sdk.SettingsManager.inMemory({compaction:{enabled:false},retry:{enabled:false},cacheWarming:"off"}),sessionManager,tools:["noop","aoe_afk_record","aoe_afk_apply","aoe_afk_read","aoe_afk_checkpoint","ask_user"]}));
+        await session.bindExtensions({onError:e=>errors.push(e)});r=globalThis.__aoeAfkFixture.current;
+        later="done";await session.sendCustomMessage({customType:"restored-automatic-usage-work",content:"not new human authority",display:true},{triggerTurn:true});await session.waitForIdle();
+        assert.equal(calls,before,"restored usage-controlled work dispatched without its unavailable host guard");
+      }
+      assert.equal(await warming("warm"),"stop","unavailable required usage must retain warming veto after settlement");
+      view.expires_at_ms=Date.now()-1;r.view={...r.view,state:"ended",expires_at_ms:view.expires_at_ms};
+      assert.equal(await warming("warm"),"stop","usage denial must outlive expiry and terminal projection");
+      const queued={role:"custom",customType:"retained-usage-work",content:"original queued object",display:true,timestamp:Date.now()};session.agent.followUp(queued);later="done";
+      await session.sendCustomMessage({customType:"auto-after-usage-failure",content:"not human recovery",display:true},{triggerTurn:true});await session.waitForIdle();
+      assert.equal(calls,before);assert.ok(session.agent.peekQueuedMessages().includes(queued));
+      for (const text of ["usage transformed recovery","usage handled recovery"]) { await session.prompt(text); await session.waitForIdle(); assert.equal(calls,before); assert.equal(r.usageWitness.pending,1); }
+      await session.prompt("extension supplied recovery",{source:"extension"});await session.waitForIdle();assert.equal(calls,before);assert.equal(r.usageWitness.pending,1);
+      await session.prompt("fresh ordinary usage recovery");await session.waitForIdle();
+      assert.ok(calls>before);assert.equal(r.usageDenied,undefined);assert.equal(r.usageWitness.pending,0);assert.equal(await warming("warm"),"warm");
+      const disk = sdk.SessionManager.open(sessionManager.getSessionFile());assert.equal(disk.getEntries().filter(e=>e.customType==="aoe-afk-usage-v1").at(-1).data.reason,"ordinary");
+      assert.equal(ops.filter(p=>p.command?.kind==="reserve").length,["usage-preack-denied", "usage-monotonic-expiry", "usage-local-stop", "usage-local-failure"].includes(scenario) ? 0 : 1,"ordinary recovery did not restore AFK slots");
+      if (scenario === "usage-preack-denied") assert.equal(ops.filter(p => p.op === "runtime_ack").length, 0);
+      else assert.ok(ops.some(p => p.op === "runtime_ack"), "financial ACK was exercised after verified native intent");
+      assert.deepEqual(errors,[]);
+      return {scenario,calls:before,ordinaryRecovered:true,preservedQueue:true,warmingVetoSurvivedExpiry:true};
+    }
     if (!budgeted) await assertNativeWarming();
     if (budgeted) {
       const r = globalThis.__aoeAfkFixture.current;
@@ -346,6 +416,10 @@ if (process.argv.includes("--host")) {
   });
   process.stdout.write(JSON.stringify({ result }) + "\n"); process.exit(0);
 } else {
+  test("monotonic expiry cannot make a protected pending window ordinary work", {skip:!sourceRoot,timeout:60000},async()=>{for(const scenario of ["usage-monotonic-expiry","usage-local-stop","usage-local-failure"])console.log(JSON.stringify(await runCase(scenario)));});
+  test("failed native usage append withholds actual SDK financial ACK and dispatch", {skip:!sourceRoot,timeout:60000}, async()=>{for(const scenario of ["usage-intent-deferred","usage-intent-failed"])console.log(JSON.stringify(await runCase(scenario)));});
+  test("required usage denial before first admission survives native reopen", {skip: !sourceRoot, timeout: 60000}, async () => {for (const scenario of ["usage-first-denied", "usage-preack-denied"]) console.log(JSON.stringify(await runCase(scenario)));});
+  test("actual candidate SDK required-usage failure latch survives terminal expiry", { skip: !sourceRoot, timeout: 60000 }, async()=>{for(const scenario of ["usage-host-failure","usage-restore-unavailable"])console.log(JSON.stringify(await runCase(scenario)));});
   test("actual candidate SDK nonterminal shared denial and ordinary recovery", { skip: !sourceRoot, timeout: 60000 }, async () => {
     for (const scenario of ["shared-reserve-denied", "nudge-shared-denied"]) console.log(JSON.stringify(await runCase(scenario)));
   });

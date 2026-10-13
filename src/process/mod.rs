@@ -419,6 +419,44 @@ pub fn processes_matching(
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ReceiverClock {
+    Hrtime { node: String, uv: String },
+    UptimeFile { path: String, resolution_ns: u64 },
+}
+
+pub(crate) fn receiver_clock() -> Option<ReceiverClock> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(linux::receiver_clock())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(macos::receiver_clock())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Cross-process monotonic milliseconds within one boot, including suspend time.
+pub fn monotonic_millis() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::monotonic_millis()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::monotonic_millis()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
 pub fn boot_id() -> Option<String> {
     #[cfg(target_os = "linux")]
     {

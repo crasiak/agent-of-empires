@@ -1471,12 +1471,10 @@ pub struct SessionConfig {
     )]
     pub prevent_sleep_idle_grace_minutes: u32,
 
-    /// Text sent to the agent after a successful `aoe session restart` /
-    /// `e`-keybind restart, once the post-restart readiness probe says the
-    /// pane is alive. Restart re-execs the agent at a blank prompt; this
-    /// nudge tells the agent to pick up where it left off. Set to an
-    /// empty string to disable the wake-up message entirely (the restart
-    /// itself still runs).
+    /// Continuation after a successful CLI/TUI restart. Empty disables it.
+    /// Direct Pi uses qualified non-human delivery and suppresses wake for
+    /// AFK-related or uncertain conversations. Other agents receive the text
+    /// after pane readiness; suppressing wake never cancels the restart.
     #[serde(default = "default_restart_wake_message")]
     #[setting(label = "Restart Wake Message", widget = "text")]
     pub restart_wake_message: String,

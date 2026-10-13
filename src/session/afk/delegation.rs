@@ -303,6 +303,11 @@ impl Book {
         );
         Ok(())
     }
+    pub(in crate::session::afk) fn effect_completed(&self, id: &str) -> bool {
+        self.windows.iter().any(|w| {
+            w.id == id && w.state == "ended" && w.terminal_reason == Some(TerminalReason::Completed)
+        })
+    }
     pub(in crate::session::afk) fn batch_facts(&self, id: &str) -> Option<batch::state::Facts> {
         let window = self.windows.iter().find(|w| w.id == id)?;
         let mut admissions = window.question_ticket().into_iter().collect::<Vec<_>>();
@@ -335,6 +340,18 @@ impl Book {
             self.windows.iter().any(|w| w.state != "ended"),
             self.windows.iter().any(Window::unresolved_question),
         )
+    }
+    pub(super) fn stop_for_usage(&mut self, id: &str) -> bool {
+        if let Some(w) = self
+            .windows
+            .iter_mut()
+            .find(|w| w.id == id && w.state != "ended")
+        {
+            w.end(TerminalReason::Interrupted);
+            true
+        } else {
+            false
+        }
     }
     pub(super) fn retire_for_upgrade(&mut self) {
         for window in &mut self.windows {
@@ -501,6 +518,9 @@ impl Book {
     fn save(&self, store: &Store) -> Result<()> {
         self.validate()?;
         store.write("ledger.json", self)
+    }
+    pub(super) fn has_native_history(&self, native: &str) -> bool {
+        self.windows.iter().any(|w| w.binding.native_id == native)
     }
     fn prune(&mut self, now: i64) {
         for w in &mut self.windows {
@@ -823,12 +843,21 @@ pub(super) fn poll(
     now: i64,
     validate: impl Fn() -> Result<()>,
 ) -> Result<Value> {
-    let _lock = store.lock_existing(TIMEOUT)?;
+    let mut tx = authority::SessionTransaction::open(store)?;
     validate()?;
-    let mut session = store.session()?;
-    if session.book.reconcile(binding, generation, now) {
-        store.publish_session(session.clone())?;
+    let mut book = tx.book()?.clone();
+    if let Some(window) = book.windows.last() {
+        if window.state != "ended" || usage::shared_denial(tx.snapshot(), &window.id).is_some() {
+            if let Some(denial) = usage::check(tx.snapshot(), &window.control_root, &window.id) {
+                tx.deny_usage(&window.id, denial)?.warn();
+                book = tx.book()?.clone();
+            }
+        }
     }
+    if book.reconcile(binding, generation, now) {
+        tx.commit_book(book)?.warn();
+    }
+    let session = &tx.snapshot().sessions[&binding.instance_id];
     let delegated = session
         .book
         .windows
@@ -852,11 +881,27 @@ pub(super) fn snapshot(store: &Store) -> Result<Value> {
 }
 fn view_with_batch(store: &Store, window: &Window, now: i64) -> Result<Value> {
     let mut view = window.view(now);
-    view["batch"] = batch_control::budget_view(
-        &store.authority_snapshot()?,
+    let snapshot = store.authority_snapshot()?;
+    view["usage"] = snapshot.usage.window_view(&window.id);
+    view["usage"]["shared_blocked"] =
+        serde_json::to_value(usage::shared_denial(&snapshot, &window.id))?;
+    if let Some(transport) = Store::existing_transport(
+        &window.control_root,
+        &window.binding.profile,
         &window.binding.instance_id,
-        &window.id,
-    );
+    )? {
+        if !matches!(
+            transport
+                .dir
+                .entry_stat(Path::new(usage::transport::UNRESOLVED)),
+            Ok(None)
+        ) {
+            usage::pending_projection(&mut view["usage"]);
+        }
+    }
+    view["usage_policy_hash"] = serde_json::to_value(usage::policy_hash(&snapshot, &window.id)?)?;
+    view["shared_usage_guard"] = serde_json::to_value(usage::shared_policy(&snapshot, &window.id))?;
+    view["batch"] = batch_control::budget_view(&snapshot, &window.binding.instance_id, &window.id);
     Ok(view)
 }
 #[cfg(test)]
@@ -950,6 +995,11 @@ pub(super) fn execute_checked(
         generation,
         now.saturating_add(started.elapsed().as_millis() as i64),
     )?;
+    if let Some(denial) = usage::check(transaction.snapshot(), &w.control_root, id) {
+        let reason = denial.reason;
+        transaction.deny_usage(id, denial)?.warn();
+        return Err(usage::Denied(reason).into());
+    }
     let result = match command {
         Request::Reserve {
             request,
@@ -1128,6 +1178,11 @@ pub(super) fn execute_checked(
                 generation,
                 now.saturating_add(started.elapsed().as_millis() as i64),
             )?;
+            if let Some(denial) = usage::check(transaction.snapshot(), &w.control_root, &w.id) {
+                let reason = denial.reason;
+                transaction.deny_usage(&w.id, denial)?.warn();
+                return Err(usage::Denied(reason).into());
+            }
             let p = w.permit.as_mut().unwrap();
             p.attempted_at_ms = Some(now);
             p.outcomes.push("unknown".into());
@@ -1239,6 +1294,7 @@ pub(super) struct RuntimeProbe {
     window: Option<String>,
     grant_hash: Option<String>,
     budgeted: bool,
+    usage_policy_hash: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1249,6 +1305,8 @@ pub(super) struct RuntimeAck {
     window: Option<String>,
     grant_hash: Option<String>,
     budgeted: bool,
+    usage_policy_hash: Option<String>,
+    usage_coverage: String,
     generation: String,
     sdk: String,
     coverage: String,
@@ -1273,7 +1331,9 @@ pub(super) fn acknowledge(
             && ack.challenge == probe.challenge
             && ack.window == probe.window
             && ack.grant_hash == probe.grant_hash
-            && ack.budgeted == probe.budgeted,
+            && ack.budgeted == probe.budgeted
+            && ack.usage_policy_hash == probe.usage_policy_hash
+            && ack.usage_coverage == "native-entries-terminal-v2",
         "incompatible/stale runtime acknowledgement"
     );
     store.write("runtime-ack.json", &ack)
@@ -1284,6 +1344,18 @@ fn exchange_runtime(
     window: Option<&Window>,
     budgeted: bool,
 ) -> Result<RuntimeAck> {
+    let usage_policy_hash = if let Some(window) = window {
+        let runtime = Store::authority(
+            &window.control_root,
+            &binding.profile,
+            &binding.instance_id,
+            false,
+        )?;
+        let _lock = runtime.lock_existing(TIMEOUT)?;
+        usage::policy_hash(&runtime.authority_snapshot()?, &window.id)?
+    } else {
+        None
+    };
     let probe = RuntimeProbe {
         version: BRIDGE_VERSION,
         binding: binding.clone(),
@@ -1291,6 +1363,7 @@ fn exchange_runtime(
         window: window.map(|w| w.id.clone()),
         grant_hash: window.map(|w| hash(serde_json::to_vec(&w.grant).unwrap())),
         budgeted,
+        usage_policy_hash,
     };
     store.write("runtime-probe.json", &probe)?;
     let deadline = Instant::now() + TIMEOUT;
@@ -1302,6 +1375,8 @@ fn exchange_runtime(
                 && ack.window == probe.window
                 && ack.grant_hash == probe.grant_hash
                 && ack.budgeted == probe.budgeted
+                && ack.usage_policy_hash == probe.usage_policy_hash
+                && ack.usage_coverage == "native-entries-terminal-v2"
                 && ack.sdk == "0.87.1"
                 && ack.coverage == COVERAGE
                 && uuid::Uuid::parse_str(&ack.generation).is_ok()
@@ -1356,10 +1431,20 @@ fn pending_window(
     })
 }
 
-pub fn delegate(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<Value> {
-    authority::publication_result(|| delegate_inner(instance, minutes, grant_file))
+pub fn delegate(
+    instance: &Instance,
+    minutes: u32,
+    grant_file: &Path,
+    usage_file: Option<&Path>,
+) -> Result<Value> {
+    authority::publication_result(|| delegate_inner(instance, minutes, grant_file, usage_file))
 }
-fn delegate_inner(instance: &Instance, minutes: u32, grant_file: &Path) -> Result<Value> {
+fn delegate_inner(
+    instance: &Instance,
+    minutes: u32,
+    grant_file: &Path,
+    usage_file: Option<&Path>,
+) -> Result<Value> {
     ensure!((1..=1440).contains(&minutes), "invalid expiry");
     use std::os::unix::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
@@ -1373,6 +1458,7 @@ fn delegate_inner(instance: &Instance, minutes: u32, grant_file: &Path) -> Resul
     ensure!(bytes.len() <= RECORD_BYTES, "grant too large");
     let grant: Grant = serde_json::from_slice(&bytes)?;
     grant.validate()?;
+    let usage_policy = usage_file.map(usage::Policy::load).transpose()?;
     let binding = Binding::for_instance(instance)?;
     current_instance(&binding)?;
     let app_dir = super::super::get_app_dir()?;
@@ -1395,9 +1481,13 @@ fn delegate_inner(instance: &Instance, minutes: u32, grant_file: &Path) -> Resul
         issued_at_ms + i64::from(minutes) * 60_000,
     )?;
     let epoch = {
-        let _lock = runtime.lock(TIMEOUT)?;
+        let mut tx = authority::SessionTransaction::open(&runtime)?;
         current_instance(&w.binding)?;
-        let mut session = runtime.session()?;
+        let mut next = tx.snapshot().clone();
+        let session = next
+            .sessions
+            .get_mut(&instance.id)
+            .context("missing session authority")?;
         ensure!(
             session.epoch == epoch,
             "control changed during capability acknowledgement"
@@ -1424,7 +1514,15 @@ fn delegate_inner(instance: &Instance, minutes: u32, grant_file: &Path) -> Resul
             .context("control epoch overflow")?;
         session.book = book;
         let epoch = session.epoch;
-        runtime.publish_session(session)?;
+        next.usage.enroll(
+            &app_dir,
+            &w.id,
+            &w.binding,
+            &w.generation,
+            usage_policy.clone(),
+            usage_policy.is_some(),
+        )?;
+        tx.publish(next)?.warn();
         epoch
     };
     // Capability acknowledgement does not take the ledger lock.
@@ -1468,6 +1566,18 @@ fn end_attempt(store: &Store, window: &str, epoch: u64) -> Result<()> {
     Ok(())
 }
 fn confirm_attempt(store: &Store, w: &Window, epoch: u64) -> Result<()> {
+    let prior = store.authority_snapshot()?;
+    if let Some(denial) = usage::check(&prior, &w.control_root, &w.id) {
+        let reason = denial.reason;
+        let mut next = prior.clone();
+        usage::latch(&mut next, &w.id, &denial)?;
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .context("snapshot revision overflow")?;
+        authority::journal::publish(store, Some(&prior), &next)?.warn();
+        return Err(usage::Denied(reason).into());
+    }
     let mut session = store.session()?;
     let latest = session
         .book
@@ -1493,7 +1603,32 @@ fn audit_inner(instance: &Instance) -> Result<Value> {
     let mut book = Book::load(&store)?;
     book.prune(now_ms());
     book.save(&store)?;
-    let views: Vec<_> = book.windows.iter().map(|w| w.view(now_ms())).collect();
+    let snapshot = store.authority_snapshot()?;
+    let pending = Store::existing_transport(
+        &super::super::get_app_dir()?,
+        &instance.effective_profile(),
+        &instance.id,
+    )?
+    .is_some_and(|s| {
+        !matches!(
+            s.dir.entry_stat(Path::new(usage::transport::UNRESOLVED)),
+            Ok(None)
+        )
+    });
+    let views = book
+        .windows
+        .iter()
+        .map(|w| -> Result<Value> {
+            let mut value = w.view(now_ms());
+            value["usage"] = snapshot.usage.window_view(&w.id);
+            if pending {
+                usage::pending_projection(&mut value["usage"]);
+            }
+            value["shared_usage_guard"] =
+                serde_json::to_value(usage::shared_policy(&snapshot, &w.id))?;
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>>>()?;
     let output = json!({"windows":views,"legacy_evidence":store.session()?.evidence});
     bounded(&output, SESSION_BYTES)?;
     Ok(output)

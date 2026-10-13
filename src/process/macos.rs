@@ -359,6 +359,37 @@ Pages wired down:                        300000.
     }
 }
 
+pub(super) fn receiver_clock() -> super::ReceiverClock {
+    super::ReceiverClock::Hrtime {
+        node: "v24.13.0".into(),
+        uv: "1.51.0".into(),
+    }
+}
+
+pub(super) fn monotonic_millis() -> Option<u64> {
+    #[repr(C)]
+    struct Timebase {
+        numer: u32,
+        denom: u32,
+    }
+    unsafe extern "C" {
+        fn mach_continuous_time() -> u64;
+        fn mach_timebase_info(info: *mut Timebase) -> i32;
+    }
+    static TIMEBASE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    let (numer, denom) = (*TIMEBASE.get_or_init(|| {
+        let mut info = Timebase { numer: 0, denom: 0 };
+        (unsafe { mach_timebase_info(&mut info) } == 0 && info.denom > 0)
+            .then_some((info.numer, info.denom))
+    }))?;
+    u64::try_from(
+        u128::from(unsafe { mach_continuous_time() }) * u128::from(numer)
+            / u128::from(denom)
+            / 1_000_000,
+    )
+    .ok()
+}
+
 /// `kern.boottime` shifts on clock steps; the session UUID does not.
 pub(super) fn boot_id() -> Option<String> {
     let out = Command::new("sysctl")
