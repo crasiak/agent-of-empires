@@ -1,14 +1,22 @@
-use super::DialogResult;
+use super::{afk_review::AfkReviewDialog, DialogResult};
 use crate::{
-    session::afk::overview::{self, Overview},
+    session::afk::{
+        overview::{self, Overview},
+        review::{self, Selection},
+    },
     tui::styles::Theme,
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
-use std::sync::mpsc::{self, Receiver};
+use std::{
+    collections::BTreeSet,
+    sync::mpsc::{self, Receiver},
+};
 
 type Reply = anyhow::Result<Overview>;
 type Dispatch = Box<dyn Fn() -> Receiver<Reply> + Send>;
+type ReviewFactory = Box<dyn Fn(Vec<Selection>) -> AfkReviewDialog + Send>;
+type Row = (String, String, Vec<Selection>);
 
 pub struct AfkOverviewDialog {
     dispatch: Dispatch,
@@ -18,6 +26,10 @@ pub struct AfkOverviewDialog {
     include_archived: bool,
     usage_details: bool,
     selection: ListState,
+    marked: BTreeSet<Selection>,
+    review: Option<AfkReviewDialog>,
+    review_factory: ReviewFactory,
+    notice: Option<String>,
 }
 impl Default for AfkOverviewDialog {
     fn default() -> Self {
@@ -47,9 +59,50 @@ impl AfkOverviewDialog {
             include_archived: true,
             usage_details: false,
             selection: ListState::default().with_selected(Some(0)),
+            marked: BTreeSet::new(),
+            review: None,
+            review_factory: Box::new(AfkReviewDialog::new),
+            notice: None,
         };
         dialog.refresh();
         dialog
+    }
+    #[cfg(test)]
+    pub(crate) fn with_review_for_test(
+        report: review::Report,
+        submissions: std::sync::Arc<std::sync::Mutex<Vec<review::annotations::Request>>>,
+    ) -> Self {
+        use super::afk_review::{Reply as ReviewReply, Request as ReviewRequest};
+        let selections = report
+            .selections
+            .iter()
+            .map(|row| row.selection.clone())
+            .collect();
+        let mut child = AfkReviewDialog::with_dispatch(
+            selections,
+            Box::new(move |request| {
+                let (reply, result) = mpsc::channel();
+                match request {
+                    ReviewRequest::Read(_) => {
+                        assert!(reply.send(ReviewReply::Read(Ok(report.clone()))).is_ok());
+                    }
+                    ReviewRequest::Annotate(request) => submissions.lock().unwrap().push(request),
+                    ReviewRequest::Export(..) => panic!("unexpected export in paste fixture"),
+                }
+                result
+            }),
+        );
+        assert!(child.tick());
+        let mut overview = Self::with_dispatch(Box::new(|| mpsc::channel().1));
+        overview.pending = None;
+        overview.review = Some(child);
+        overview
+    }
+    #[cfg(test)]
+    pub(crate) fn review_editor_text_for_test(&self) -> Option<&str> {
+        self.review
+            .as_ref()
+            .and_then(AfkReviewDialog::editor_text_for_test)
     }
     fn refresh(&mut self) {
         if self.pending.is_none() {
@@ -57,8 +110,9 @@ impl AfkOverviewDialog {
         }
     }
     pub fn tick(&mut self) -> bool {
+        let child_changed = self.review.as_mut().is_some_and(AfkReviewDialog::tick);
         let Some(rx) = &self.pending else {
-            return false;
+            return child_changed;
         };
         match rx.try_recv() {
             Ok(result) => {
@@ -82,7 +136,7 @@ impl AfkOverviewDialog {
                 self.snapshot = None;
                 true
             }
-            Err(mpsc::TryRecvError::Empty) => false,
+            Err(mpsc::TryRecvError::Empty) => child_changed,
         }
     }
     fn usage_text(value: &serde_json::Value) -> String {
@@ -106,20 +160,22 @@ impl AfkOverviewDialog {
         format!("Usage coverage: {} (stored, never a fresh observation)\nReported component tokens: {}; complete: {}\nSDK-recorded cost nanoUSD: {}; price basis/subscription billing unknown\nOperator token threshold: {}\nOperator estimate threshold nanoUSD: {}; fixed quotes, NOT an invoice\nOperator-valued amount nanoUSD: {}; complete: {}\nBaseline entry: {}; observed through: {}; cutoff: {}\nClosing: {}; attribution gap: {}; denied: {}\nIndependent work, hidden retries and descendant billing remain unknown",
             value["coverage"].as_str().unwrap_or("unavailable"),amount(&m["reported_tokens"]),m["tokens_complete"],amount(&m["sdk_recorded_nano"]),guard["tokens"].as_u64().map_or_else(||"none (no token guard)".into(),|n|n.to_string()),guard["usd"]["limit_nano"].as_u64().map_or_else(||"none (no USD guard)".into(),|n|n.to_string()),amount(m.get("operator_estimate_nano").unwrap_or(&value["operator_estimate_nano"])),m["valuation_complete"],window["baseline"]["count"],window["observed_through"]["count"],window["cutoff"]["count"],window["closing"],window["gap"],window["blocked"])
     }
-    fn rows(&self) -> Vec<(String, String)> {
+    fn rows(&self) -> Vec<Row> {
         let Some(snapshot) = &self.snapshot else {
             return vec![];
         };
         let mut rows = Vec::new();
         for historical in &snapshot.historical_authority {
             rows.push((format!("[{}] HISTORICAL AUTHORITY {}", historical.profile, historical.instance_id),
-                format!("{}; {} evidence references; {} retained windows. Inspect CLI overview JSON for redacted identities and guards.", historical.observation, historical.evidence.len(), historical.windows.len())));
+                format!("{}; {} evidence references; {} retained windows.\nReturn review exact window: {}", historical.observation, historical.evidence.len(), historical.windows.len(), historical.review_windows.last().map_or("unavailable", |s| s.window_id.as_str())), historical.review_windows.last().cloned().into_iter().collect()));
+            Self::older_windows(&mut rows, &historical.review_windows);
         }
         for profile in &snapshot.profiles {
             for error in &profile.errors {
                 rows.push((
                     format!("[{}] PROFILE ERROR", profile.profile),
                     error.clone(),
+                    vec![],
                 ));
             }
             for batch in &profile.batches {
@@ -135,7 +191,7 @@ impl AfkOverviewDialog {
                         batch["shared_charges"], batch["shared_requests"]
                     )
                 };
-                rows.push((format!("[{}] BATCH {} | {}", profile.profile, batch["operation_id"].as_str().unwrap_or("unknown"), budget),format!("Original operation: {}\n{}; held unbound: {}\nExpiry: {}; expired: {}; stopped: {}\n{}\nOriginal members: {}", batch["operation_id"],budget,batch["held_unbound"],batch["expires_at_ms"],batch["expired"],batch["stopped"],batch["observation"].as_str().unwrap_or("stored only"),batch["members"])));
+                rows.push((format!("[{}] BATCH {} | {}", profile.profile, batch["operation_id"].as_str().unwrap_or("unknown"), budget),format!("Original operation: {}\n{}; held unbound: {}\nExpiry: {}; expired: {}; stopped: {}\n{}\nOriginal members: {}", batch["operation_id"],budget,batch["held_unbound"],batch["expires_at_ms"],batch["expired"],batch["stopped"],batch["observation"].as_str().unwrap_or("stored only"),batch["members"]), profile.review_batches.get(batch["operation_id"].as_str().unwrap_or("")).cloned().unwrap_or_default()));
                 if self.usage_details {
                     rows.last_mut().unwrap().1 = Self::usage_text(&batch["usage"]);
                 }
@@ -219,19 +275,103 @@ impl AfkOverviewDialog {
                 if self.usage_details {
                     detail = Self::usage_text(&session.usage);
                 }
-                rows.push((label, detail));
+                if let Some(window) = session.review_windows.last() {
+                    detail.push_str(&format!(
+                        "\nReturn review exact window: {}",
+                        review::terminal_text(&window.window_id)
+                    ));
+                }
+                rows.push((
+                    label,
+                    detail,
+                    session.review_windows.last().cloned().into_iter().collect(),
+                ));
+                Self::older_windows(&mut rows, &session.review_windows);
             }
             if profile.sessions.is_empty() && profile.errors.is_empty() {
                 rows.push((
                     format!("[{}] No stored sessions", profile.profile),
                     "Read-only profile snapshot".into(),
+                    vec![],
                 ));
             }
         }
         rows
     }
+    fn older_windows(rows: &mut Vec<Row>, windows: &[Selection]) {
+        for window in windows.iter().rev().skip(1) {
+            rows.push((
+                format!(
+                    "  [{}] {} | historical window {}",
+                    review::terminal_text(&window.profile),
+                    review::terminal_text(&window.session_id),
+                    review::terminal_text(&window.window_id)
+                ),
+                "Exact stored history; Space marks this original window, v opens passive review"
+                    .into(),
+                vec![window.clone()],
+            ));
+        }
+    }
+    fn current_windows(&self) -> Vec<Selection> {
+        self.selection
+            .selected()
+            .and_then(|index| self.rows().get(index).map(|row| row.2.clone()))
+            .unwrap_or_default()
+    }
+    fn mark_current(&mut self) {
+        let windows = self.current_windows();
+        if windows.is_empty() {
+            self.notice = Some("No exact stored window on this row".into());
+            return;
+        }
+        if windows.iter().all(|window| self.marked.contains(window)) {
+            for window in windows {
+                self.marked.remove(&window);
+            }
+        } else {
+            let proposed: BTreeSet<_> = self.marked.iter().cloned().chain(windows).collect();
+            if proposed.len() > review::MAX_SELECTIONS {
+                self.notice = Some("At most 16 exact windows; no marks changed".into());
+                return;
+            }
+            self.marked = proposed;
+        }
+        self.notice = None;
+    }
+    fn open_review(&mut self) {
+        let windows: BTreeSet<_> = if self.marked.is_empty() {
+            self.current_windows().into_iter().collect()
+        } else {
+            self.marked.clone()
+        };
+        if windows.is_empty() || windows.len() > review::MAX_SELECTIONS {
+            self.notice =
+                Some("Select 1..16 exact stored windows first; no partial selection opened".into());
+            return;
+        }
+        self.review = Some((self.review_factory)(windows.into_iter().collect()));
+        self.notice = None;
+    }
+    pub fn handle_paste(&mut self, text: &str) {
+        if let Some(review) = &mut self.review {
+            review.handle_paste(text);
+        }
+    }
     pub fn handle_key(&mut self, key: KeyEvent) -> DialogResult<()> {
+        if let Some(review) = &mut self.review {
+            if matches!(review.handle_key(key), DialogResult::Cancel) {
+                self.review = None;
+            }
+            return DialogResult::Continue;
+        }
         match key.code {
+            KeyCode::Char(' ') => self.mark_current(),
+            KeyCode::Char('v') => self.open_review(),
+            KeyCode::Char('x') => {
+                self.marked.clear();
+                self.notice = None;
+            }
             KeyCode::Esc => return DialogResult::Cancel,
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('u') => self.usage_details = !self.usage_details,
@@ -249,6 +389,10 @@ impl AfkOverviewDialog {
         DialogResult::Continue
     }
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        if let Some(review) = &mut self.review {
+            review.render(frame, area, theme);
+            return;
+        }
         let block = super::dialog_block(" Global AFK overview (read-only) ", theme);
         let (_, inner) = super::render_dialog_frame(frame, area, 116, 32, block);
         let inner = inner.inner(Margin {
@@ -259,7 +403,7 @@ impl AfkOverviewDialog {
             Constraint::Length(5),
             Constraint::Min(2),
             Constraint::Length(12),
-            Constraint::Length(2),
+            Constraint::Length(3),
         ])
         .split(inner);
         let captured = self.snapshot.as_ref().map_or_else(
@@ -274,19 +418,31 @@ impl AfkOverviewDialog {
         );
         let header = format!("All profiles | stored snapshot: {captured} | acknowledgements not fresh\n{}\n{}\nAccount coverage unknown; SDK reservations are not delivery or billing\n{}", self.snapshot.as_ref().map_or("Shared budgets unobserved",|s|s.shared_budget),self.snapshot.as_ref().map_or("Bulk preferences unobserved",|s|s.bulk_exclusions),if self.pending.is_some() { "Reading host summaries (no runtime probes)..." } else { "Activity is stored, not a live process or authority check" });
         frame.render_widget(
-            Paragraph::new(header).style(Style::default().fg(theme.text)),
+            Paragraph::new(super::afk_review::safe_lines(&header))
+                .style(Style::default().fg(theme.text)),
             layout[0],
         );
         let rows = self.rows();
         let items: Vec<_> = rows
             .iter()
-            .map(|(label, _)| ListItem::new(label.as_str()))
+            .map(|(label, _, selections)| {
+                let mark = if !selections.is_empty()
+                    && selections.iter().all(|s| self.marked.contains(s))
+                {
+                    "[x] "
+                } else {
+                    ""
+                };
+                ListItem::new(format!("{mark}{}", review::terminal_text(label)))
+            })
             .collect();
         if rows.is_empty() {
             frame.render_widget(
-                Paragraph::new(self.error.as_deref().unwrap_or("No sessions in this view"))
-                    .wrap(Wrap { trim: false })
-                    .style(Style::default().fg(theme.text)),
+                Paragraph::new(review::terminal_text(
+                    self.error.as_deref().unwrap_or("No sessions in this view"),
+                ))
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(theme.text)),
                 layout[1],
             );
         } else {
@@ -303,16 +459,17 @@ impl AfkOverviewDialog {
             .selection
             .selected()
             .and_then(|index| rows.get(index))
-            .map_or("", |(_, detail)| detail.as_str());
+            .map_or("", |(_, detail, _)| detail.as_str());
         frame.render_widget(
-            Paragraph::new(detail)
+            Paragraph::new(super::afk_review::safe_lines(detail))
                 .wrap(Wrap { trim: false })
                 .style(Style::default().fg(theme.text)),
             layout[2],
         );
-        let footer = format!("Up/Down: select   u: usage/details   a: archived/trashed {}   r: reread   Esc: close\nRead-only: no activation, enrollment, renewal or budget enforcement", if self.include_archived { "shown" } else { "hidden" });
+        let footer = format!("Space: mark | v: return review | x: clear marks | {}/16 original windows marked\nUp/Down: select | u: usage/details | a: archived/trashed {} | r: reread | Esc: close\n{}", self.marked.len(), if self.include_archived { "shown" } else { "hidden" }, self.notice.as_deref().unwrap_or("Read-only: no activation, enrollment, renewal or budget enforcement"));
         frame.render_widget(
-            Paragraph::new(footer).style(Style::default().fg(theme.text)),
+            Paragraph::new(super::afk_review::safe_lines(&footer))
+                .style(Style::default().fg(theme.text)),
             layout[3],
         );
     }
@@ -335,6 +492,7 @@ mod tests {
         dialog.handle_key(KeyEvent::from(KeyCode::Char('r')));
         assert_eq!(calls.lock().unwrap().len(), 1);
         let row = |title: &str, archived| SessionOverview {
+            review_windows: vec![],
             id: title.into(),
             title: title.into(),
             tool: "unsupported".into(),
@@ -361,12 +519,14 @@ mod tests {
                 captured_at_ms: 1000,
                 profiles: vec![
                     ProfileOverview {
+                        review_batches: Default::default(),
                         profile: "alpha".into(),
                         sessions: vec![row("workstream", false), row("archived", true)],
                         batches: vec![],
                         errors: vec![],
                     },
                     ProfileOverview {
+                        review_batches: Default::default(),
                         profile: "beta".into(),
                         sessions: vec![],
                         batches: vec![],
@@ -469,3 +629,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod review_tests;

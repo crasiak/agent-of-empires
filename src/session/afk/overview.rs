@@ -33,6 +33,8 @@ impl Overview {
 
 #[derive(Debug, Serialize)]
 pub struct HistoricalAuthority {
+    #[serde(skip)]
+    pub review_windows: Vec<review::Selection>,
     pub profile: String,
     pub instance_id: String,
     pub observation: &'static str,
@@ -42,6 +44,8 @@ pub struct HistoricalAuthority {
 
 #[derive(Debug, Serialize)]
 pub struct ProfileOverview {
+    #[serde(skip)]
+    pub review_batches: std::collections::BTreeMap<String, Vec<review::Selection>>,
     pub profile: String,
     pub sessions: Vec<SessionOverview>,
     pub batches: Vec<Value>,
@@ -50,6 +54,8 @@ pub struct ProfileOverview {
 
 #[derive(Debug, Serialize)]
 pub struct SessionOverview {
+    #[serde(skip)]
+    pub review_windows: Vec<review::Selection>,
     pub id: String,
     pub title: String,
     pub tool: String,
@@ -210,6 +216,7 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
     let mut remaining_sessions = MAX_SESSIONS;
     for name in names {
         let mut profile = ProfileOverview {
+            review_batches: Default::default(),
             profile: escaped(&name),
             sessions: vec![],
             batches: vec![],
@@ -311,6 +318,26 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
                             "Recorded per-batch request/usage guards; not a global or account budget";
                     }
                     profile.batches = summaries;
+                    for (operation, batch) in &snapshot.batches {
+                        let selections = batch
+                            .members
+                            .iter()
+                            .filter_map(|(session, member)| {
+                                member
+                                    .window
+                                    .as_ref()
+                                    .map(|window| exact_selection(&name, session, window))
+                            })
+                            .collect::<Result<Vec<_>>>();
+                        match selections {
+                            Ok(selections) => {
+                                profile.review_batches.insert(operation.clone(), selections);
+                            }
+                            Err(error) => profile
+                                .errors
+                                .push(format!("Review selection: {}", shown(&error.to_string()))),
+                        }
+                    }
                 }
                 Err(error) => profile.errors.push(format!(
                     "Batch membership unavailable: {}",
@@ -438,6 +465,15 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
                         .push("Invalid historical authority summary".into());
                     continue;
                 }
+                let review_windows = match session.book.review_selections(&name, id) {
+                    Ok(selections) => selections,
+                    Err(error) => {
+                        profile
+                            .errors
+                            .push(format!("Review selection: {}", shown(&error.to_string())));
+                        vec![]
+                    }
+                };
                 let evidence = session
                     .evidence
                     .iter()
@@ -449,6 +485,7 @@ pub(super) fn snapshot_at(app_path: &Path, now: i64) -> Result<Overview> {
                 match evidence {
                     Err(error) => profile.errors.push(format!("Historical authority: {}", shown(&error.to_string()))),
                     Ok(evidence) => result.historical_authority.push(HistoricalAuthority {
+                        review_windows,
                         profile: escaped(&name), instance_id: shown(id),
                         observation: "Historical authority only; no validated registry row, no live eligibility inferred",
                         evidence,
@@ -490,6 +527,7 @@ fn session_summary(
 ) -> SessionOverview {
     let binding = Binding::for_instance(instance);
     let mut row = SessionOverview {
+        review_windows: vec![],
         id: shown(&instance.id),
         title: shown(&instance.title),
         tool: shown(&instance.tool),
@@ -524,6 +562,17 @@ fn session_summary(
         usage: serde_json::json!({"coverage":"unavailable"}),
         errors: vec![],
     };
+    if let Some(session) = authority {
+        match session
+            .book
+            .review_selections(&instance.source_profile, &instance.id)
+        {
+            Ok(selections) => row.review_windows = selections,
+            Err(error) => row
+                .errors
+                .push(format!("Review selection: {}", shown(&error.to_string()))),
+        }
+    }
     let presence = (|| -> Result<()> {
         let session =
             authority.context("missing/unavailable session authority; no authority inferred")?;
@@ -784,6 +833,21 @@ impl SummaryBatch {
 struct SummaryBook {
     version: u32,
     windows: Vec<SummaryWindow>,
+}
+fn exact_selection(profile: &str, session: &str, window: &str) -> Result<review::Selection> {
+    format!("{profile}/{session}/{window}").parse()
+}
+impl SummaryBook {
+    fn review_selections(&self, profile: &str, session: &str) -> Result<Vec<review::Selection>> {
+        ensure!(self.version == 4, "unsupported ledger version");
+        self.windows
+            .iter()
+            .map(|window| {
+                window.validate(profile, session)?;
+                exact_selection(profile, session, &window.id)
+            })
+            .collect()
+    }
 }
 #[derive(Deserialize)]
 struct SummaryWindow {

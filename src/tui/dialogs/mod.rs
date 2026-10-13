@@ -10,6 +10,7 @@ use crate::tui::styles::Theme;
 pub mod afk;
 pub mod afk_batch;
 pub mod afk_overview;
+pub mod afk_review;
 pub mod attach_project;
 mod changelog;
 mod cheats;

@@ -307,3 +307,56 @@ fn older_partial_and_missing_authority_keep_rows_and_leave_files_unchanged() {
         fs::write(app.path().join(".schema_version"), "41").unwrap();
     }
 }
+
+#[test]
+fn review_navigation_metadata_keeps_raw_historical_scope_out_of_serialized_overview() {
+    let app = tempfile::tempdir().unwrap();
+    let profile = "historical\u{202e}\u{7f}";
+    let windows = [
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    ];
+    let book = serde_json::json!({"version":4,"windows":windows.iter().map(|id| serde_json::json!({
+        "version":4,"binding":{"profile":profile,"instance_id":"exact","native_id":"native","launch_id":uuid::Uuid::new_v4().to_string()},
+        "generation":uuid::Uuid::new_v4().to_string(),"id":id,"state":"ended","confirmed":true,"expires_at_ms":61000,
+        "reservations":[],"grant":{"version":4,"requests":2},"nudges":[],"question":null,"records":[],"permit":null
+    })).collect::<Vec<_>>()});
+    let authority: SummarySession = serde_json::from_value(serde_json::json!({"policy":null,"book":book,"evidence":[],"preference":"unrecorded","exception_epoch":0})).unwrap();
+    let mut instance = Instance::new("historical title", "/unused");
+    instance.id = "exact".into();
+    instance.source_profile = profile.into();
+    let before = tree(app.path());
+    let row = session_summary(app.path(), &instance, Some(&authority), 1000, &mut 1024);
+    assert_eq!(row.review_windows.len(), 2);
+    assert_eq!(row.review_windows[0].profile, profile);
+    assert_eq!(row.review_windows[0].session_id, "exact");
+    assert_eq!(row.review_windows[0].window_id, windows[0]);
+    assert_eq!(row.review_windows[1].window_id, windows[1]);
+    let historical = HistoricalAuthority {
+        profile: escaped(profile),
+        instance_id: "exact".into(),
+        observation: "stored only",
+        evidence: vec![],
+        windows: vec![],
+        review_windows: row.review_windows.clone(),
+    };
+    let batch_links =
+        std::collections::BTreeMap::from([("operation".into(), row.review_windows.clone())]);
+    let profile_row = ProfileOverview {
+        profile: escaped(profile),
+        sessions: vec![row],
+        batches: vec![],
+        errors: vec![],
+        review_batches: batch_links,
+    };
+    for value in [
+        serde_json::to_value(historical).unwrap(),
+        serde_json::to_value(profile_row).unwrap(),
+    ] {
+        let text = serde_json::to_string(&value).unwrap();
+        assert!(!text.contains(['\u{202e}', '\u{7f}']));
+        assert!(!text.contains("review_windows"));
+        assert!(!text.contains("review_batches"));
+    }
+    assert_eq!(before, tree(app.path()));
+}

@@ -145,7 +145,7 @@ fn verify_seal(app: &Path, m: &Manifest) -> Result<()> {
     );
     Ok(())
 }
-fn schema(app: &Path) -> Result<String> {
+pub(in crate::session::afk) fn schema(app: &Path) -> Result<String> {
     let file = AnchoredDir::open(app)?
         .open_regular(Path::new(".schema_version"), 16)?
         .context("missing schema version")?;
@@ -155,8 +155,8 @@ fn schema(app: &Path) -> Result<String> {
 }
 fn ready_manifest(app: &Path, m: &Manifest) -> Result<()> {
     ensure!(
-        schema(app)? == "42" && m.phase == Phase::Complete,
-        "completed migration 42 and schema42 required"
+        matches!(schema(app)?.as_str(), "42" | "43") && m.phase == Phase::Complete,
+        "completed migration 42 and supported schema42/43 required"
     );
     verify_seal(app, m)
 }
@@ -214,6 +214,76 @@ pub(in crate::session::afk) struct Metadata {
     pub imports: BTreeMap<String, Entry>,
     pub legacy_imports: BTreeMap<String, previous::Entry>,
     pub legacy_absent_profiles: Vec<String>,
+}
+impl Metadata {
+    pub(in crate::session::afk) fn validate_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
+        snapshot.validate(&snapshot.profile)?;
+        let profile = &snapshot.profile;
+        ensure!(
+            snapshot.upgrade == self.imports.get(profile).and_then(|e| e.origin.clone()),
+            "changed v2 provenance"
+        );
+        ensure!(
+            snapshot.origin
+                == self
+                    .legacy_imports
+                    .get(profile)
+                    .and_then(|e| e.origin.clone()),
+            "changed v1 provenance"
+        );
+        if let Some(entry) = self.imports.get(profile) {
+            ensure!(
+                Some(snapshot.revision) >= entry.revision,
+                "v3 import revision regressed"
+            );
+            if Some(snapshot.revision) == entry.revision {
+                ensure!(
+                    Some(hash(serde_json::to_vec(snapshot)?)) == entry.imported_hash,
+                    "v3 import differs from manifest"
+                );
+            }
+        }
+        if let Some(entry) = self.imports.get(profile) {
+            for id in &entry.sessions {
+                ensure!(
+                    snapshot.sessions.contains_key(id),
+                    "missing imported session"
+                );
+            }
+        }
+        if let Some(entry) = self.legacy_imports.get(profile) {
+            ensure!(
+                Some(snapshot.revision) >= entry.revision,
+                "v2 import revision regressed"
+            );
+            if Some(snapshot.revision) == entry.revision {
+                ensure!(
+                    Some(hash(serde_json::to_vec(&snapshot.legacy())?)) == entry.imported_hash,
+                    "v2 import differs from manifest"
+                );
+            }
+            for id in &entry.sessions {
+                ensure!(
+                    snapshot.sessions.contains_key(id),
+                    "missing legacy imported session"
+                );
+            }
+        }
+        for expected in self
+            .evidence
+            .iter()
+            .filter(|e| e.profiles.contains(profile))
+        {
+            ensure!(
+                snapshot
+                    .sessions
+                    .get(&expected.instance)
+                    .is_some_and(|s| s.evidence.contains(expected)),
+                "missing imported evidence"
+            );
+        }
+        Ok(())
+    }
 }
 pub(in crate::session::afk) fn overview_metadata(
     app: &Path,
@@ -331,6 +401,10 @@ fn save(store: &Store, m: &mut Manifest, phase: Phase) -> Result<()> {
 thread_local! { static INTERRUPT: std::cell::Cell<Option<Phase>> = const { std::cell::Cell::new(None) }; }
 
 pub(crate) fn run_at(app: &Path) -> Result<()> {
+    if schema(app)? == "43" {
+        // Additive review storage does not reopen the frozen authority import.
+        return ready(app);
+    }
     ensure!(
         matches!(schema(app)?.as_str(), "41" | "42"),
         "migration 42 requires schema41 prerequisite or schema42 replay"

@@ -21,6 +21,9 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe killall`↴](#aoe-killall)
 * [`aoe session`↴](#aoe-session)
 * [`aoe session afk`↴](#aoe-session-afk)
+* [`aoe session afk review`↴](#aoe-session-afk-review)
+* [`aoe session afk export`↴](#aoe-session-afk-export)
+* [`aoe session afk annotate`↴](#aoe-session-afk-annotate)
 * [`aoe session afk batch`↴](#aoe-session-afk-batch)
 * [`aoe session afk batch preview`↴](#aoe-session-afk-batch-preview)
 * [`aoe session afk batch apply`↴](#aoe-session-afk-batch-apply)
@@ -502,6 +505,9 @@ Inspect AFK presence or explicitly delegate one bounded file cycle for Pi
 
 ###### **Subcommands:**
 
+* `review` — Inspect exact stored historical windows, without migrations, probes or authority writes
+* `export` — Publish a private redacted return review, never overwriting a file
+* `annotate` — Append an operator note/correction/reviewed claim, never an approval or answer
 * `batch` — Preview, explicitly apply, inspect or stop a frozen profile-scoped batch
 * `overview` — Read stored AFK summaries across all profiles, without probing or enabling sessions
 * `on` — Request control-only AFK. Does not authorize autonomous work
@@ -511,6 +517,47 @@ Inspect AFK presence or explicitly delegate one bounded file cycle for Pi
 * `opt-out` — Revoke AFK and exclude the session from future batch selections
 * `allow-bulk` — Clear only the bulk exclusion; grants no authority and requires a fresh preview
 * `status` — Probe the current integration; does not enable or renew AFK
+
+
+
+## `aoe session afk review`
+
+Inspect exact stored historical windows, without migrations, probes or authority writes
+
+**Usage:** `aoe session afk review --select <SELECTIONS>`
+
+###### **Options:**
+
+* `--select <SELECTIONS>` — Repeat for up to 16 exact PROFILE/SESSION_ID/WINDOW_UUID identities
+
+
+
+## `aoe session afk export`
+
+Publish a private redacted return review, never overwriting a file
+
+**Usage:** `aoe session afk export --select <SELECTIONS> --format <FORMAT> --output <OUTPUT>`
+
+###### **Options:**
+
+* `--select <SELECTIONS>`
+* `--format <FORMAT>`
+
+  Possible values: `json`, `markdown`
+
+* `--output <OUTPUT>` — New file in an existing owned 0700 directory outside app state
+
+
+
+## `aoe session afk annotate`
+
+Append an operator note/correction/reviewed claim, never an approval or answer
+
+**Usage:** `aoe session afk annotate --request <REQUEST>`
+
+###### **Options:**
+
+* `--request <REQUEST>` — Private 0600 JSON request: id, target {selection, decision, original_hash}, kind, body, prior
 
 
 

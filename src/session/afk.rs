@@ -6,6 +6,7 @@ mod bridge;
 pub mod delegation;
 pub mod overview;
 mod registry;
+pub mod review;
 mod store;
 #[cfg(test)]
 mod tests;

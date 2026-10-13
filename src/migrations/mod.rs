@@ -50,6 +50,7 @@ mod v039_afk_questions;
 mod v040_afk_authority;
 mod v041_afk_batches;
 mod v042_afk_usage_guards;
+mod v043_afk_return_review;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -95,7 +96,7 @@ use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 42;
+const CURRENT_VERSION: u32 = 43;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -232,6 +233,7 @@ const MIGRATIONS: &[Migration] = &[
     (40, "afk_authority", v040_afk_authority::run),
     (41, "afk_batches", v041_afk_batches::run),
     (42, "afk_usage_guards", v042_afk_usage_guards::run),
+    (43, "afk_return_review", v043_afk_return_review::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -444,7 +446,7 @@ mod tests {
         );
         assert_eq!(get_current_version(), 41);
         run_migrations().unwrap();
-        assert_eq!(get_current_version(), 42);
+        assert_eq!(get_current_version(), CURRENT_VERSION);
         assert_eq!(fs::read(&manifest).unwrap(), original);
         let mut instance = crate::session::Instance::new("later authority", app.to_str().unwrap());
         instance.source_profile = "alpha".into();
@@ -456,7 +458,7 @@ mod tests {
         crate::session::anchored_fs::FAIL_SYNC_ONCE.set(None);
         v042_afk_usage_guards::run().unwrap();
         assert_eq!(fs::read(snapshot).unwrap(), advanced);
-        assert_eq!(get_current_version(), 42);
+        assert_eq!(get_current_version(), CURRENT_VERSION);
     }
 
     #[test]

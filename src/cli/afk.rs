@@ -16,6 +16,8 @@ impl AfkArgs {
         matches!(
             self.command,
             AfkCommand::Overview { .. }
+                | AfkCommand::Review { .. }
+                | AfkCommand::Export { .. }
                 | AfkCommand::Batch {
                     command: BatchCommand::Preview { .. }
                 }
@@ -25,6 +27,28 @@ impl AfkArgs {
 
 #[derive(Subcommand)]
 enum AfkCommand {
+    /// Inspect exact stored historical windows, without migrations, probes or authority writes
+    Review {
+        /// Repeat for up to 16 exact PROFILE/SESSION_ID/WINDOW_UUID identities
+        #[arg(long = "select", required = true)]
+        selections: Vec<crate::session::afk::review::Selection>,
+    },
+    /// Publish a private redacted return review, never overwriting a file
+    Export {
+        #[arg(long = "select", required = true)]
+        selections: Vec<crate::session::afk::review::Selection>,
+        #[arg(long, value_enum)]
+        format: crate::session::afk::review::Format,
+        /// New file in an existing owned 0700 directory outside app state
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
+    /// Append an operator note/correction/reviewed claim, never an approval or answer
+    Annotate {
+        /// Private 0600 JSON request: id, target {selection, decision, original_hash}, kind, body, prior
+        #[arg(long)]
+        request: std::path::PathBuf,
+    },
     /// Preview, explicitly apply, inspect or stop a frozen profile-scoped batch
     Batch {
         #[command(subcommand)]
@@ -93,6 +117,51 @@ enum BatchCommand {
 }
 
 pub async fn run(profile: &str, args: AfkArgs) -> Result<()> {
+    if let AfkCommand::Review { selections } | AfkCommand::Export { selections, .. } = &args.command
+    {
+        let selections = selections.clone();
+        let report =
+            tokio::task::spawn_blocking(move || crate::session::afk::review::collect(&selections))
+                .await??;
+        let complete = report.complete;
+        match args.command {
+            AfkCommand::Review { .. } => {
+                let bytes = crate::session::afk::review::render(
+                    &report,
+                    crate::session::afk::review::Format::Json,
+                )?;
+                use std::io::Write;
+                std::io::stdout().lock().write_all(&bytes)?;
+            }
+            AfkCommand::Export { format, output, .. } => {
+                tokio::task::spawn_blocking(move || {
+                    crate::session::afk::review::export(&report, format, &output)
+                })
+                .await??;
+                println!(
+                    "{}",
+                    serde_json::json!({"exported":true,"complete":complete})
+                );
+            }
+            _ => unreachable!(),
+        }
+        anyhow::ensure!(
+            complete,
+            "AFK review is incomplete; inspect per-selection errors"
+        );
+        return Ok(());
+    }
+    if let AfkCommand::Annotate { request } = args.command {
+        let annotation = tokio::task::spawn_blocking(move || -> Result<_> {
+            let request = crate::session::afk::review::read_annotation_request(&request)?;
+            crate::session::afk::review::annotations::append(request)
+        })
+        .await??;
+        let bytes = crate::session::afk::review::render_annotation(&annotation)?;
+        use std::io::Write;
+        std::io::stdout().lock().write_all(&bytes)?;
+        return Ok(());
+    }
     if matches!(
         &args.command,
         AfkCommand::Batch {
@@ -227,6 +296,46 @@ fn require_acknowledged_activation(
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    #[derive(clap::Parser)]
+    struct InspectionArgs {
+        #[command(flatten)]
+        afk: super::AfkArgs,
+    }
+    #[test]
+    fn review_export_bypass_startup_but_annotation_is_deliberate() {
+        let target = "default/orphan/00000000-0000-4000-8000-000000000001";
+        for args in [
+            vec!["afk", "review", "--select", target],
+            vec![
+                "afk",
+                "export",
+                "--select",
+                target,
+                "--format",
+                "markdown",
+                "--output",
+                "private/review.md",
+            ],
+        ] {
+            assert!(InspectionArgs::try_parse_from(args)
+                .unwrap()
+                .afk
+                .is_inspection());
+        }
+        assert!(
+            !InspectionArgs::try_parse_from(["afk", "annotate", "--request", "note.json"])
+                .unwrap()
+                .afk
+                .is_inspection()
+        );
+        for args in [
+            vec!["afk", "review"],
+            vec!["afk", "review", "--select", "title"],
+            vec!["afk", "export", "--select", target, "--format", "json"],
+        ] {
+            assert!(InspectionArgs::try_parse_from(args).is_err());
+        }
+    }
     #[test]
     fn batch_requires_explicit_preview_files_and_reviewed_apply_digest() {
         for args in [

@@ -26,7 +26,8 @@ Stored activity is not a live process check. Acknowledgement freshness is
 **unknown**; rereading does not make an acknowledgement fresh. Use the targeted
 `status SESSION` command for a runtime probe. The overview discards decision
 bodies, grant task text and file payloads from its output; it is not a full
-ledger validation or a substitute for `audit` and ordinary question recovery.
+ledger validation. Use return review for passive decision detail; ordinary
+question recovery remains a separate operation.
 Question review remains flagged even after a controlled return is observed or
 its guard is recovered: AFK does not record the human's answer. Guard recovery
 clears quarantine, not the underlying question.
@@ -45,6 +46,94 @@ no aggregate charge or cap, not zero requests. Recorded batch counters are not
 fresh runtime observations. Billing/account attribution remains unknown; SDK
 reservations do not prove provider delivery or cost. Global visibility does not
 turn sessions into tenants or impose a profile-wide budget.
+
+## Passive return review and annotations
+
+Opening review does **not** stop a window, answer a question or grant authority.
+Use a separate explicit Off command when revocation is intended. Review reads
+stored facts only; it does not probe runtimes or reread native transcripts.
+
+In **AFK global overview**, Space marks an exact stored window or an original
+batch's windows; `v` opens review, using the current row when no marks exist.
+`x` clears marks. Select at most16 distinct windows across profiles. Marks keep
+original IDs across refresh, never replacement windows or new batch members.
+Older stored windows and orphaned history remain selectable.
+
+In return review, Up/Down selects a window or decision; PgUp/PgDn scrolls detail.
+`r` rereads the same selections. Host disposition, model recommendation, window
+action observation and human-required status remain separate. A failed terminal
+state does not prove an attempted effect failed. Alternatives, weights and
+assumptions are not reconstructed when the original body is unavailable. Usage
+estimates and coverage are not an invoice or protection against in-flight overshoot.
+
+The CLI uses exact identities, not titles or the current default profile:
+
+```sh
+aoe session afk review --select PROFILE/SESSION_ID/WINDOW_UUID
+umask 077
+mkdir -m 700 afk-review
+aoe session afk export --select PROFILE/SESSION_ID/WINDOW_UUID \
+  --format markdown --output afk-review/window.md
+```
+
+Repeat `--select` for additional windows; use `--format json` for structured output.
+TUI `j`/`m` opens an explicit JSON/Markdown export-path editor. Output must be a
+new file in an existing owned `0700` directory outside the app directory; exports
+are `0600` and never overwrite files or links. Keep the parent in place during
+publication. A durability error may leave a file; inspect before retrying.
+Incomplete reports retain errors. CLI review/export exits nonzero even when it
+prints or publishes the incomplete report.
+
+Reads allow32 MiB per profile authority and64 MiB total input; formatted exports
+allow8 MiB. Capacity failures are explicit, not truncation. Review/export do not
+run startup migration. Missing/unmigrated storage stays unavailable; export also
+requires the app directory to exist to verify its exclusion boundary. Intentionally
+migrate the selected isolated namespace separately when needed. Schema43 adds only
+the separate review store, not new execution authority.
+
+TUI `n`, `c` and `v` open note, correction and reviewed-claim editors. Enter appends
+explicitly; Escape before submission cancels. PgUp/PgDn inspects long input. A
+reviewed claim is **not an answer, approval, guard recovery or deferred-action
+execution**. Corrections append instead of replacing originals. Each claim retains
+its exact window/decision target and original hash, including body tombstones.
+
+For CLI annotation, save a private owned `0600` request file and run
+`aoe session afk annotate --request afk-review/note.json`. Its shape is:
+
+```json
+{
+  "id": "NEW_CANONICAL_UUID",
+  "target": {
+    "selection": { "profile": "PROFILE", "session_id": "SESSION_ID", "window_id": "WINDOW_UUID" },
+    "decision": null,
+    "original_hash": "EXACT_GRANT_HASH_FROM_REVIEW"
+  },
+  "kind": "note",
+  "body": "Operator observation, not authorization",
+  "prior": null
+}
+```
+
+For a decision, set `decision` to its UUID and use its original `payload_hash`.
+Kinds are `note`, `correction` and `reviewed`; only a correction may name a prior
+annotation on the same exact target. Use one canonical lowercase UUID per claim.
+Retry the identical request with the same UUID; changed content conflicts within
+that profile. Submitted TUI notes remain fixed for exact retry. Closing an editor
+or application cannot undo a dispatched write. After an uncertain result, inspect
+retained notes before creating a new claim.
+
+Bodies allow2 KiB UTF-8,16 entries per exact target and1 MiB per profile; tombstones
+still count. Registration allows128 profiles and64 KiB encoded index data.
+Historical profile names allow240 UTF-8 bytes; identities are never truncated or
+renamed. Interrupted first-profile registration can fail closed as unavailable
+storage. Preserve it for inspection, not deletion or a new-UUID workaround.
+
+Review applies retention in memory without editing authority. Annotation bodies
+expire after seven days beyond the later of window expiry and note creation,
+unless ambiguity requires preservation. Explicit append may prune eligible note
+bodies, never execution records or counters. Exports omit structured workspace
+bindings, grant file lists, action content/preimages and checkpoint next-step
+paths. Free-text filtering is heuristic; inspect exports before sharing.
 
 ## Explicit profile-scoped batches
 

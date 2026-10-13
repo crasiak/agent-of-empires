@@ -607,52 +607,12 @@ fn preview_with(
     observe: impl FnMut(&Store, &Binding) -> Result<String>,
 ) -> Result<Receipt> {
     let manifest = read_manifest(manifest)?;
-    let (parent, leaf) = private_parent(output)?;
-    ensure!(
-        parent.entry_stat(&leaf)?.is_none(),
-        "inspection output already exists; never overwrite a reviewed artifact"
-    );
+    let publication = PrivateOutput::prepare(app, output)?;
     authority::ready(app)?;
-    let expected_parent = std::fs::canonicalize(parent.path())?;
-    ensure!(
-        !expected_parent.starts_with(std::fs::canonicalize(app)?),
-        "inspection output must be outside the application state directory"
-    );
-    let validate_output = || -> Result<()> {
-        let (current, _) = private_parent(output)?;
-        ensure!(
-            current.identity()? == parent.identity()?,
-            "inspection output parent identity changed"
-        );
-        let location = std::fs::canonicalize(current.path())?;
-        ensure!(
-            location == expected_parent && !location.starts_with(std::fs::canonicalize(app)?),
-            "inspection output parent location changed"
-        );
-        Ok(())
-    };
     let artifact = inspect_at(app, manifest, observe)?;
     let mut bytes = serde_json::to_vec_pretty(&artifact)?;
     bytes.push(b'\n');
-    ensure!(
-        bytes.len() <= ARTIFACT_BYTES,
-        "inspection artifact exceeds 256 KiB; nothing published"
-    );
-    validate_output().context("inspection output directory changed; nothing published")?;
-    ensure!(
-        parent.publish_file(
-            &leaf,
-            &mut Cursor::new(bytes),
-            Permissions::from_mode(0o600),
-            false,
-            Some(FilePublication {
-                staging: &parent,
-                validate: &validate_output,
-            })
-        )?,
-        "inspection output already exists; never overwrite a reviewed artifact"
-    );
-    validate_output().context("inspection output directory changed during publication; a private artifact may exist, inspect before retrying")?;
+    publication.publish(&bytes, ARTIFACT_BYTES)?;
     Ok(Receipt {
         output: output.into(),
         operation_id: artifact.content.operation_id,
@@ -660,6 +620,83 @@ fn preview_with(
         apply_available: true,
         members: artifact.content.members.len(),
     })
+}
+
+pub(in crate::session::afk) fn publish_private(
+    app: &Path,
+    output: &Path,
+    bytes: &[u8],
+    limit: usize,
+) -> Result<()> {
+    PrivateOutput::prepare(app, output)?.publish(bytes, limit)
+}
+
+// Batch observation must retain this original directory binding until publication.
+struct PrivateOutput {
+    app: PathBuf,
+    output: PathBuf,
+    parent: AnchoredDir,
+    leaf: PathBuf,
+    location: PathBuf,
+}
+impl PrivateOutput {
+    fn prepare(app: &Path, output: &Path) -> Result<Self> {
+        let (parent, leaf) = private_parent(output)?;
+        ensure!(
+            parent.entry_stat(&leaf)?.is_none(),
+            "inspection output already exists; never overwrite a reviewed artifact"
+        );
+        let location = std::fs::canonicalize(parent.path())?;
+        ensure!(
+            !location.starts_with(std::fs::canonicalize(app)?),
+            "inspection output must be outside the application state directory"
+        );
+        Ok(Self {
+            app: app.into(),
+            output: output.into(),
+            parent,
+            leaf,
+            location,
+        })
+    }
+    fn validate(&self) -> Result<()> {
+        let (current, _) = private_parent(&self.output)?;
+        ensure!(
+            current.identity()? == self.parent.identity()?,
+            "inspection output parent identity changed"
+        );
+        let location = std::fs::canonicalize(current.path())?;
+        ensure!(
+            location == self.location && !location.starts_with(std::fs::canonicalize(&self.app)?),
+            "inspection output parent location changed"
+        );
+        Ok(())
+    }
+    fn publish(self, bytes: &[u8], limit: usize) -> Result<()> {
+        ensure!(
+            bytes.len() <= limit,
+            "inspection artifact exceeds {} KiB output capacity; nothing published",
+            limit / 1024
+        );
+        self.validate()
+            .context("inspection output directory changed; nothing published")?;
+        let validate = || self.validate();
+        ensure!(
+            self.parent.publish_file(
+                &self.leaf,
+                &mut Cursor::new(bytes),
+                Permissions::from_mode(0o600),
+                false,
+                Some(FilePublication {
+                    staging: &self.parent,
+                    validate: &validate
+                })
+            )?,
+            "inspection output already exists; never overwrite a reviewed artifact"
+        );
+        self.validate().context("inspection output directory changed during publication; a private artifact may exist, inspect before retrying")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

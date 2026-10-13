@@ -13,12 +13,13 @@ pub(super) const WINDOW_BYTES: usize = 1024 * 1024;
 pub(super) const RECORD_BYTES: usize = 8 * 1024;
 const FILE_BYTES: usize = 64 * 1024;
 const READ_LIMIT: u8 = 16;
-const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+pub(super) const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 #[cfg(test)]
 thread_local! { static FAIL_AFTER_ATTEMPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 const PROTOCOL: u32 = 4;
 pub(super) mod batch_control;
 pub(super) mod questions;
+mod review;
 pub(super) mod settlement;
 use questions::{Question, QuestionIdentity, QuestionOutcome};
 use settlement::{Checkpoint, CheckpointClaims, Continuation, Nudge, ReadFact, TerminalReason};
@@ -168,7 +169,7 @@ fn bounded(value: &impl Serialize, limit: usize) -> Result<()> {
     );
     Ok(())
 }
-fn text(value: &str) -> Result<()> {
+pub(super) fn text(value: &str) -> Result<()> {
     ensure!(
         !value
             .chars()
@@ -524,13 +525,7 @@ impl Book {
     }
     fn prune(&mut self, now: i64) {
         for w in &mut self.windows {
-            let ambiguous = w.unresolved_question()
-                || w.unresolved_nudge()
-                || w.permit.as_ref().is_some_and(|p| {
-                    p.attempted_at_ms.is_some()
-                        && !p.outcomes.iter().any(|o| o == "observed_applied")
-                });
-            if now.saturating_sub(w.expires_at_ms) > RETENTION_MS && !ambiguous {
+            if w.bodies_expired(now) {
                 for r in &mut w.records {
                     r.claims = None;
                 }
@@ -545,6 +540,16 @@ impl Book {
     }
 }
 impl Window {
+    fn ambiguous(&self) -> bool {
+        self.unresolved_question()
+            || self.unresolved_nudge()
+            || self.permit.as_ref().is_some_and(|p| {
+                p.attempted_at_ms.is_some() && !p.outcomes.iter().any(|o| o == "observed_applied")
+            })
+    }
+    fn bodies_expired(&self, now: i64) -> bool {
+        now.saturating_sub(self.expires_at_ms) > RETENTION_MS && !self.ambiguous()
+    }
     fn live(&self, binding: &Binding, generation: &str, now: i64) -> Result<()> {
         ensure!(
             self.binding == *binding && self.generation == generation,
