@@ -58,6 +58,18 @@ pub mod runner;
 
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PROCESS_GROUP_TERMINATION_GRACE: Duration = Duration::from_millis(250);
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) struct TimeoutStartGate {
+    pub program: &'static str,
+    pub spawned: std::sync::mpsc::Sender<()>,
+    pub start: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+thread_local! {
+    pub(crate) static TIMEOUT_START_GATE: std::cell::RefCell<Option<TimeoutStartGate>> = const { std::cell::RefCell::new(None) };
+}
 /// Atomically publish a directory entry without replacing an existing entry.
 /// Both names are relative to retained directory descriptors; there is no
 /// check-then-rename fallback on platforms without an exclusive rename syscall.
@@ -258,6 +270,21 @@ fn run_with_timeout_inner(
     cmd.stdout(Stdio::from(stdout_file.reopen()?));
     cmd.stderr(Stdio::from(stderr_file.reopen()?));
     let mut child = cmd.spawn()?;
+
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    TIMEOUT_START_GATE.with(|slot| {
+        let targeted = slot.borrow().as_ref().is_some_and(|gate| {
+            std::path::Path::new(cmd.get_program()).file_name()
+                == Some(std::ffi::OsStr::new(gate.program))
+        });
+        if targeted {
+            if let Some(gate) = slot.borrow_mut().take() {
+                if gate.spawned.send(()).is_ok() {
+                    let _ = gate.start.recv();
+                }
+            }
+        }
+    });
 
     let Some(status) = wait_with_timeout_inner(&mut child, timeout, kill_process_group, cancel)?
     else {

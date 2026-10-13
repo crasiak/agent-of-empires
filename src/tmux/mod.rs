@@ -2246,7 +2246,7 @@ pub(crate) fn probe_agents_available(
     }
 
     // A queued caller must consume the preceding probe's publication before starting another.
-    let _probe_guard = AGENT_PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _probe_guard = lock_agent_probe();
     let (already_found, uncached) = partition_cached_agents(&uncached);
     found.extend(already_found);
     if uncached.is_empty() {
@@ -2563,27 +2563,74 @@ mod tests {
             std::thread::scope(|scope| {
                 let _release = ReleaseProbe(release);
                 let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let (spawned_tx, spawned_rx) = std::sync::mpsc::channel();
+                let (start_timeout_tx, start_timeout_rx) = std::sync::mpsc::channel();
+                let setup_deadline = Instant::now() + Duration::from_secs(5);
                 let holder_tx = done_tx.clone();
                 scope.spawn(move || {
+                    crate::process::TIMEOUT_START_GATE.with(|slot| {
+                        *slot.borrow_mut() = Some(crate::process::TimeoutStartGate {
+                            program: executable,
+                            spawned: spawned_tx,
+                            start: start_timeout_rx,
+                        });
+                    });
                     let found =
                         probe_agents_available(&[crate::agents::get_agent("vibe").unwrap()]);
                     let _ = holder_tx.send(("holder", Some(found)));
                 });
-                let deadline = Instant::now() + Duration::from_secs(5);
-                while !ready.exists() {
-                    assert!(Instant::now() < deadline, "probe child never started");
+                spawned_rx
+                    .recv_timeout(setup_deadline.saturating_duration_since(Instant::now()))
+                    .expect("targeted probe must spawn before arming its timeout");
+                let pids = loop {
+                    if let Ok(record) = std::fs::read_to_string(&ready) {
+                        let pids = record
+                            .split_whitespace()
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>();
+                        if pids.len() == 2
+                            && pids[0] != pids[1]
+                            && pids
+                                .iter()
+                                .all(|pid| pid.parse::<u32>().is_ok_and(|id| id > 0))
+                        {
+                            break pids;
+                        }
+                    }
+                    assert!(
+                        Instant::now() < setup_deadline,
+                        "probe did not publish both PIDs"
+                    );
                     std::thread::sleep(Duration::from_millis(5));
-                }
+                };
+                let (contended_tx, contended_rx) = std::sync::mpsc::channel();
+                let waiter_contended = contended_tx.clone();
                 let waiter_tx = done_tx.clone();
                 scope.spawn(move || {
-                    let found =
-                        probe_agents_available(&[crate::agents::get_agent("claude").unwrap()]);
+                    AGENT_PROBE_LOCK_CONTENDED
+                        .with(|slot| *slot.borrow_mut() = Some(waiter_contended));
+                    // Time only the held probe, not an unrelated positive-control process startup.
+                    let waiter = crate::agents::agent("claude", "/bin/sh", "fixture");
+                    let found = probe_agents_available(&[&waiter]);
                     let _ = waiter_tx.send(("waiter", Some(found)));
                 });
                 scope.spawn(move || {
+                    AGENT_PROBE_LOCK_CONTENDED.with(|slot| *slot.borrow_mut() = Some(contended_tx));
                     invalidate_agent_availability();
                     let _ = done_tx.send(("invalidator", None));
                 });
+                for _ in 0..2 {
+                    contended_rx
+                        .recv_timeout(setup_deadline.saturating_duration_since(Instant::now()))
+                        .expect("both callers must observe the held probe lock");
+                }
+                assert!(matches!(
+                    done_rx.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ));
+                start_timeout_tx
+                    .send(())
+                    .expect("holder is awaiting the real timeout");
                 let deadline = Instant::now() + timeout * 2 + Duration::from_secs(2);
                 let mut completed = Vec::new();
                 for _ in 0..3 {
@@ -2602,11 +2649,7 @@ mod tests {
                 }
                 completed.sort_unstable();
                 assert_eq!(completed, ["holder", "invalidator", "waiter"]);
-                for (index, pid) in std::fs::read_to_string(&ready)
-                    .unwrap()
-                    .split_whitespace()
-                    .enumerate()
-                {
+                for (index, pid) in pids.iter().enumerate() {
                     let output = Command::new("/bin/ps")
                         .args(["-o", "stat=", "-p", pid])
                         .output()
