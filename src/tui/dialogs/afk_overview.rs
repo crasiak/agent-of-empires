@@ -1,4 +1,7 @@
-use super::{afk_review::AfkReviewDialog, DialogResult};
+use super::{
+    afk_review::{AfkReviewDialog, ReviewLabels},
+    DialogResult,
+};
 use crate::{
     session::afk::{
         overview::{self, Overview},
@@ -15,7 +18,7 @@ use std::{
 
 type Reply = anyhow::Result<Overview>;
 type Dispatch = Box<dyn Fn() -> Receiver<Reply> + Send>;
-type ReviewFactory = Box<dyn Fn(Vec<Selection>) -> AfkReviewDialog + Send>;
+type ReviewFactory = Box<dyn Fn(Vec<Selection>, ReviewLabels) -> AfkReviewDialog + Send>;
 type Row = (String, String, Vec<Selection>);
 
 pub struct AfkOverviewDialog {
@@ -80,6 +83,7 @@ impl AfkOverviewDialog {
             .collect();
         let mut child = AfkReviewDialog::with_dispatch(
             selections,
+            ReviewLabels::default(),
             Box::new(move |request| {
                 let (reply, result) = mpsc::channel();
                 match request {
@@ -339,6 +343,36 @@ impl AfkOverviewDialog {
         }
         self.notice = None;
     }
+    fn review_labels(&self) -> ReviewLabels {
+        let mut labels = ReviewLabels::default();
+        let Some(snapshot) = &self.snapshot else {
+            return labels;
+        };
+        for historical in &snapshot.historical_authority {
+            labels
+                .historical
+                .extend(historical.review_windows.iter().cloned());
+        }
+        for profile in &snapshot.profiles {
+            for session in &profile.sessions {
+                let title = review::terminal_text(&session.title);
+                let name = (!session.title.trim().is_empty()).then_some(title);
+                for selection in &session.review_windows {
+                    // Display IDs are escaped; only hidden selections carry exact keys.
+                    labels
+                        .names
+                        .entry((selection.profile.clone(), selection.session_id.clone()))
+                        .and_modify(|existing| {
+                            if existing != &name {
+                                *existing = None;
+                            }
+                        })
+                        .or_insert_with(|| name.clone());
+                }
+            }
+        }
+        labels
+    }
     fn open_review(&mut self) {
         let windows: BTreeSet<_> = if self.marked.is_empty() {
             self.current_windows().into_iter().collect()
@@ -350,7 +384,10 @@ impl AfkOverviewDialog {
                 Some("Select 1..16 exact stored windows first; no partial selection opened".into());
             return;
         }
-        self.review = Some((self.review_factory)(windows.into_iter().collect()));
+        self.review = Some((self.review_factory)(
+            windows.into_iter().collect(),
+            self.review_labels(),
+        ));
         self.notice = None;
     }
     pub fn handle_paste(&mut self, text: &str) {

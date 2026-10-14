@@ -59,12 +59,39 @@ batch's windows; `v` opens review, using the current row when no marks exist.
 original IDs across refresh, never replacement windows or new batch members.
 Older stored windows and orphaned history remain selectable.
 
-In return review, Up/Down selects a window or decision; PgUp/PgDn scrolls detail.
-`r` rereads the same selections. Host disposition, model recommendation, window
-action observation and human-required status remain separate. A failed terminal
-state does not prove an attempted effect failed. Alternatives, weights and
-assumptions are not reconstructed when the original body is unavailable. Usage
-estimates and coverage are not an invoice or protection against in-flight overshoot.
+Return review opens in **Summary**: select a window with Up/Down to see its
+outcome, observed effect, human attention and local/shared usage warnings. Names
+come from the already-loaded overview, not the historical grant. Profile and
+review-local window numbers distinguish duplicate names; missing names have an
+explicit fallback. Names never select an operation.
+
+Press Enter for **Decisions** in that window. Up/Down selects a stored decision
+or Window context for task, scope and operator notes. Host disposition and model
+recommendation remain separate. Alternatives, criteria, weights, scores and
+assumptions are not reconstructed when the original claim body is unavailable.
+Press `d` for **Diagnostics**, including exact identities, source revisions,
+ordered action observations, annotation provenance and usage accounting. This
+is the existing redacted report, not raw authority or native transcripts.
+`d` or Escape returns from Diagnostics; Escape from Decisions returns to Summary.
+PgUp/PgDn scrolls content without changing the target. `?` shows annotation and
+export shortcuts; `?` or Escape closes this help without changing the target.
+The direct shortcuts work with help closed too.
+
+`r` rereads only the original selections and retains the exact selected window
+and decision. A disappeared target stays unavailable rather than selecting a
+replacement. Failed rereads retain an explicitly older snapshot; a failed first
+read says no snapshot is available. Escape still moves back one disclosure level
+while a read or write is pending; it does not cancel the operation. Navigation
+never submits an operation. Summary annotations target the window; decision annotations
+target the selected record; Diagnostics keeps the target it was opened from.
+
+A failed terminal state does not prove an effect failed or did not occur.
+An initial unknown attempt followed by an observed-applied outcome is displayed
+as applied; an unknown-only attempt stays unknown. Missing observations are not
+proof of no effect. Question history and reviewed claims do not answer questions
+or clear host gates. Complete collection does not mean complete accounting.
+Local and original shared usage overlap and must not be summed. Usage estimates
+and coverage are not an invoice or protection against in-flight overshoot.
 
 The CLI uses exact identities, not titles or the current default profile:
 
@@ -77,8 +104,10 @@ aoe session afk export --select PROFILE/SESSION_ID/WINDOW_UUID \
 ```
 
 Repeat `--select` for additional windows; use `--format json` for structured output.
-TUI `j`/`m` opens an explicit JSON/Markdown export-path editor. Output must be a
-new file in an existing owned `0700` directory outside the app directory; exports
+TUI `j`/`m` opens an explicit JSON/Markdown export-path editor at any disclosure
+level. Export always includes the full captured report, not just visible detail.
+Output must be a new file in an existing owned `0700` directory outside the app
+directory; exports
 are `0600` and never overwrite files or links. Keep the parent in place during
 publication. A durability error may leave a file; inspect before retrying.
 Incomplete reports retain errors. CLI review/export exits nonzero even when it
@@ -96,6 +125,11 @@ explicitly; Escape before submission cancels. PgUp/PgDn inspects long input. A
 reviewed claim is **not an answer, approval, guard recovery or deferred-action
 execution**. Corrections append instead of replacing originals. Each claim retains
 its exact window/decision target and original hash, including body tombstones.
+A confirmed submission shows a visible saved receipt, including incomplete export
+status. An unrelated successful write does not resolve an earlier uncertain one.
+If an uncertain editor is abandoned or an uncertain export is changed, its warning
+remains for this review dialog's lifetime. Inspect the destination before retrying;
+no automatic retry occurs.
 
 For CLI annotation, save a private owned `0600` request file and run
 `aoe session afk annotate --request afk-review/note.json`. Its shape is:
