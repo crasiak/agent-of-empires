@@ -24,6 +24,14 @@ pub fn global_entries(snapshot: &UiSnapshot, slot: UiSlot) -> impl Iterator<Item
         .filter(move |e| e.slot == slot && e.session_id.is_none())
 }
 
+/// Entries by payload `order` (default 0, lowest first), keeping input order
+/// among ties.
+pub fn by_order<'a>(entries: impl Iterator<Item = &'a UiEntry>) -> Vec<&'a UiEntry> {
+    let mut entries: Vec<&UiEntry> = entries.collect();
+    entries.sort_by_key(|e| e.payload.get("order").and_then(Value::as_i64).unwrap_or(0));
+    entries
+}
+
 /// Per-session entries for `slot` whose `session_id` matches exactly. Exact, as
 /// a tearing guard: a snapshot can momentarily carry another session's entries,
 /// and showing those would mislabel its state as this one's.
@@ -277,6 +285,15 @@ fn block_lines(block: &Value, indent: usize, theme: &Theme) -> Vec<Line<'static>
             )],
             None => vec![],
         },
+        // The TUI cannot render rich markdown: show the source, markers kept.
+        Some("markdown") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim_end()
+            .lines()
+            .map(|l| indented_line(indent, l.to_string(), tone_style(block_tone(block), theme)))
+            .collect(),
         Some("divider") => vec![indented_line(
             indent,
             "─".repeat(DIVIDER_WIDTH),
@@ -781,6 +798,38 @@ mod tests {
     }
 
     #[test]
+    fn chip_entries_sort_by_order_then_snapshot_order() {
+        let snap = snapshot(
+            json!([
+                {"plugin_id": "p", "slot": "header-start", "id": "a", "payload": {"text": "a"}},
+                {"plugin_id": "p", "slot": "header-start", "id": "b", "payload": {"text": "b", "order": -1}},
+                {"plugin_id": "p", "slot": "header-start", "id": "c", "payload": {"text": "c", "order": 5}},
+                {"plugin_id": "p", "slot": "header-start", "id": "d", "payload": {"text": "d"}},
+                {"plugin_id": "p", "slot": "status-bar", "id": "e", "payload": {"text": "e", "order": -9}}
+            ]),
+            json!([]),
+        );
+        let texts: Vec<&str> = by_order(global_entries(&snap, UiSlot::HeaderStart))
+            .into_iter()
+            .filter_map(entry_text)
+            .collect();
+        assert_eq!(texts, vec!["b", "a", "d", "c"]);
+
+        let snap = snapshot(
+            json!([
+                {"plugin_id": "p", "slot": "detail-badge", "id": "a", "session_id": "s", "payload": {"text": "a", "order": 2}},
+                {"plugin_id": "p", "slot": "detail-badge", "id": "b", "session_id": "s", "payload": {"text": "b"}}
+            ]),
+            json!([]),
+        );
+        let detail: Vec<&str> = by_order(session_entries(&snap, UiSlot::DetailBadge, "s"))
+            .into_iter()
+            .filter_map(entry_text)
+            .collect();
+        assert_eq!(detail, vec!["b", "a"]);
+    }
+
+    #[test]
     fn items_only_badge_renders_its_first_item() {
         let snap = snapshot(
             json!([
@@ -967,6 +1016,14 @@ mod tests {
                     &divider,
                     "[action] Refresh",
                 ],
+            ),
+            (
+                "markdown keeps its source markers, one line per source line",
+                pane_entry(json!({"blocks": [
+                    {"kind": "markdown", "text": "# Title\n\n- [x] done\n- `code`\n\n", "tone": "info"},
+                    {"kind": "markdown"}
+                ]})),
+                vec!["p", "# Title", "", "- [x] done", "- `code`"],
             ),
             (
                 "nested section indents",

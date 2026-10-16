@@ -36,19 +36,31 @@ vi.mock("@assistant-ui/react-markdown", () => ({
     className?: string;
     components?: PrimitiveCall["components"];
   }) => {
+    const text = props.preprocess();
     primitiveCalls.push({
-      text: props.preprocess(),
+      text,
       smooth: !!props.smooth,
       remarkPlugins: props.remarkPlugins ?? [],
       components: props.components ?? {},
     });
-    return <div data-testid="markdown-primitive" className={props.className} />;
+    return (
+      <div data-testid="markdown-primitive" className={props.className}>
+        <ReactMarkdown remarkPlugins={props.remarkPlugins as never} components={props.components as never}>
+          {text}
+        </ReactMarkdown>
+      </div>
+    );
   },
+}));
+
+vi.mock("../../lib/clipboard", () => ({
+  writeClipboard: vi.fn().mockResolvedValue(true),
 }));
 
 import { Markdown, remarkPluginsFor } from "./Markdown";
 import { AcpFileRefContext } from "./AcpFileRefContext";
 import { highlightSnippet } from "../../lib/snippetHighlighter";
+import { writeClipboard } from "../../lib/clipboard";
 import type { SyntaxHighlighterProps } from "@assistant-ui/react-markdown";
 import { renderWithLateResolution } from "../../__tests__/lateResolution";
 
@@ -225,6 +237,42 @@ describe("anchor override", () => {
   });
 });
 
+describe("table copy button", () => {
+  beforeEach(() => {
+    vi.mocked(writeClipboard).mockClear();
+  });
+
+  it("copies the table's markdown without its blockquote prefix, then confirms", async () => {
+    const { getByRole } = render(<Markdown text={"> | a |\n> |---|\n> | 1 |"} />);
+    fireEvent.click(getByRole("button", { name: "Copy table as markdown" }));
+    await waitFor(() => expect(getByRole("button", { name: "Copied" })).toBeTruthy());
+    expect(writeClipboard).toHaveBeenCalledWith("| a |\n|---|\n| 1 |");
+  });
+
+  it("gives each table its own button and source", () => {
+    const { getAllByRole } = render(<Markdown text={"| a |\n|---|\n| 1 |\n\ntext\n\n| b |\n|---|\n| 2 |"} />);
+    const buttons = getAllByRole("button", { name: "Copy table as markdown" });
+    expect(buttons).toHaveLength(2);
+    fireEvent.click(buttons[1]!);
+    expect(writeClipboard).toHaveBeenCalledWith("| b |\n|---|\n| 2 |");
+  });
+
+  it("offers no button on a streaming message until the table's last line is terminated", () => {
+    const table = "| a |\n|---|\n| 1 |";
+    expect(render(<Markdown text={table} smooth />).queryByRole("button")).toBeNull();
+    cleanup();
+    expect(render(<Markdown text={`${table}\n`} smooth />).queryByRole("button", { name: /copy table/i })).toBeTruthy();
+    cleanup();
+    expect(render(<Markdown text={table} />).queryByRole("button", { name: /copy table/i })).toBeTruthy();
+  });
+
+  it("offers no button without the markdown source", () => {
+    const Table = override<React.ComponentPropsWithoutRef<"table">>("table");
+    const { queryByRole } = render(<Table />);
+    expect(queryByRole("button")).toBeNull();
+  });
+});
+
 describe("code block header", () => {
   it.each([
     ["rust", "rust"],
@@ -237,6 +285,14 @@ describe("code block header", () => {
     expect(container.textContent).toContain(label);
     fireEvent.click(getByText("copy"));
     expect(writeText).toHaveBeenCalledWith("alert('hi')");
+  });
+
+  it("keeps the header and the code in one bordered box", () => {
+    const Highlighter = override<{ language?: string; code: string }>("SyntaxHighlighter");
+    const { container, getByText } = render(<Highlighter code="one" />);
+    const box = container.querySelector(".acp-code-block");
+    expect(box?.contains(getByText("copy"))).toBe(true);
+    expect(box?.querySelector("pre")?.textContent).toBe("one");
   });
 
   it("wraps the code per line when the header toggle is pressed", () => {
@@ -295,19 +351,19 @@ describe("ShikiSyntaxHighlighter stale-content transitions (#3974)", () => {
   });
 
   it("ignores a late resolution from a superseded request (pending A → committed B → late A)", async () => {
-    let resolveA!: (v: string | null) => void;
-    vi.mocked(highlightSnippet).mockReturnValueOnce(
-      new Promise<string | null>((res) => {
-        resolveA = res;
-      }),
-    );
+    const pending = Promise.withResolvers<string | null>();
+    const started = Promise.withResolvers<void>();
+    vi.mocked(highlightSnippet).mockImplementationOnce(() => {
+      started.resolve();
+      return pending.promise;
+    });
     const Comp = getSyntaxHighlighter();
 
     const { html, text } = await renderWithLateResolution({
       a: <Comp language="rust" code="fn a() {}" />,
       b: <Comp language={undefined} code="plain b text" />,
-      bText: "plain b text",
-      resolveStale: () => resolveA('<pre class="shiki">OLD_A</pre>'),
+      requestStarted: started.promise,
+      resolveStale: () => pending.resolve('<pre class="shiki">OLD_A</pre>'),
     });
 
     expect(text).toContain("plain b text");

@@ -99,8 +99,7 @@ struct ManagedCaptureLease(std::fs::File);
 
 impl Drop for ManagedCaptureLease {
     fn drop(&mut self) {
-        // Spelled through the trait: `File`'s inherent `unlock` is newer than
-        // this crate's MSRV.
+        // Through the trait, so the release matches the `fs2` lock.
         let _ = fs2::FileExt::unlock(&self.0);
     }
 }
@@ -534,12 +533,23 @@ impl Instance {
         if reads_sidecar {
             let sidecar_id = self.id.clone();
             let active = self.active_execution.clone();
+            let reserved = super::execution::ReservedClaudeConfirmation::for_instance(self);
             let poll_fn: crate::session::poller::SessionIdPollFn = Box::new(move |_| {
-                super::execution::hook_session_observation(
+                let sidecar = super::execution::hook_session_observation(
                     &sidecar_id,
                     active.as_ref(),
                     Some(std::time::Duration::from_secs(300)),
-                )
+                );
+                match &reserved {
+                    Some(reserved) => reserved.observe(sidecar, || {
+                        super::execution::hook_session_observation(
+                            &sidecar_id,
+                            active.as_ref(),
+                            None,
+                        )
+                    }),
+                    None => sidecar,
+                }
             });
             let on_change = log_observed_session_id(&self.id);
             let initial = initial_known.map(|sid| {
@@ -622,9 +632,9 @@ impl Instance {
                 let Some(plan) = prime_plan else {
                     return PollerStart::NotApplicable;
                 };
-                let preferred_sidecar = self.prime_root_sidecar_poll_fn(plan.clone());
+                let root_publication = self.prime_root_poll_fn(plan.clone());
                 Box::new(prime_agent_poll_fn_sandboxed(
-                    preferred_sidecar,
+                    root_publication,
                     plan,
                     self.id.clone(),
                     capture_floor_ms,
@@ -867,11 +877,11 @@ impl Instance {
     }
 
     pub(super) fn stop_and_flush_poller_lifecycle_locked(&mut self) {
-        // A Pi pane's last word is in its sidecar, which no poller may have read: a CLI-only pane
-        // has none, and a restart tears the pane down before the next one starts.
-        self.flush_published_if_present();
-        // stop_poller() signals the thread but leaves the handle in place, so this is_some() means
-        // "a poller existed and may have queued a final observation".
+        let native_prime = self.prime_runtime().is_some();
+        if !native_prime {
+            self.flush_published_if_present();
+        }
+        // Stop and discard queued observations before the final native root read.
         self.stop_poller();
         if self.session_id_poller.is_some() {
             let file_watch = self.resolve_file_watch();
@@ -896,6 +906,9 @@ impl Instance {
             }
         }
         self.session_id_poller = None;
+        if native_prime {
+            self.flush_published_if_present();
+        }
     }
 }
 
@@ -1252,6 +1265,65 @@ mod tests {
             Some(published),
             "the path must be durable while the pane lives, not only at teardown"
         );
+    }
+
+    /// #4320: a live Claude pane whose sidecar never reports its reserved id
+    /// becomes forkable once the transcript is written after its poller has
+    /// already run, with no relaunch.
+    #[test]
+    #[serial_test::serial]
+    fn a_live_claude_poller_confirms_its_reserved_id_once_the_transcript_appears() {
+        let home = tempfile::tempdir().unwrap();
+        let _home_guard = crate::session::test_support::isolate_app_dir_at(home.path());
+        let _budget = crate::session::poller::test_support::IsolatedBudget::with_ceiling(1);
+        let sid = "019342ab-1234-7def-8901-abcdef012345";
+        let mut inst = reserved_claude_instance(home.path(), sid);
+        inst.source_profile = "claude-late-transcript".into();
+        let storage =
+            crate::session::storage::Storage::new_unwatched(&inst.source_profile).unwrap();
+        let seed = inst.clone();
+        storage
+            .update(|instances, _| {
+                *instances = vec![seed.clone()];
+                Ok(())
+            })
+            .unwrap();
+        let file_watch = crate::file_watch::FileWatchService::noop();
+        let mut instances = [inst];
+
+        // Joining the poller runs its final poll, so each start-and-stop is one
+        // deterministic pass over the pane.
+        let poll_once = |instances: &mut [Instance; 1]| {
+            instances[0].session_id_poller = None;
+            assert_eq!(instances[0].maybe_start_poller(), PollerStart::Started);
+            instances[0].stop_poller();
+            crate::session::sync::drain_and_persist_session_ids(instances, &file_watch).touched()
+        };
+        let forkable = |row: &Instance| {
+            crate::session::fork::terminal_fork_seed(row.fork_parent_ref().unwrap(), "child".into())
+                .is_ok()
+        };
+
+        assert!(
+            !poll_once(&mut instances),
+            "nothing to confirm before the transcript"
+        );
+        assert!(!forkable(&storage.load().unwrap()[0]));
+
+        write_reserved_claude_transcript(&instances[0], sid);
+        assert!(poll_once(&mut instances));
+        let disk = storage.load().unwrap();
+        for row in [&instances[0], &disk[0]] {
+            assert_eq!(row.agent_session_id.as_deref(), Some(sid));
+            assert_eq!(
+                row.agent_session_binding.as_ref().unwrap().execution,
+                instances[0]
+                    .active_execution
+                    .as_ref()
+                    .map(|active| active.binding.clone())
+            );
+            assert!(forkable(row));
+        }
     }
 
     const CODEX_PUBLISHED: &str = "01a0cfe1-7a89-7e01-b9c0-f57b5f6f86f0";

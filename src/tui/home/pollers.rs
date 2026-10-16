@@ -33,6 +33,7 @@ impl HomeView {
                             current.lifecycle_generation = retained.lifecycle_generation;
                             current.status = retained.status;
                             current.trashed_at = retained.trashed_at;
+                            current.trash_lifecycle_id = retained.trash_lifecycle_id;
                             current.project_path = retained.project_path;
                             current.pre_trash_project_path = retained.pre_trash_project_path;
                             current.lifecycle_reservation = retained.lifecycle_reservation;
@@ -513,6 +514,28 @@ impl HomeView {
             }
         }
         touched
+    }
+
+    pub fn request_serve_probe(&mut self) {
+        if !self.serve_probe_in_flight {
+            self.serve_probe_in_flight = true;
+            self.serve_probe.request(());
+        }
+    }
+
+    /// True when the badge changed.
+    pub fn apply_serve_probe(&mut self) -> bool {
+        match self.serve_probe.try_recv() {
+            Ok(badge) => {
+                self.serve_probe_in_flight = false;
+                std::mem::replace(&mut self.serve_badge, badge) != badge
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.serve_probe_in_flight = false;
+                false
+            }
+        }
     }
 
     pub fn take_restarted_attaches(&mut self) -> Vec<String> {

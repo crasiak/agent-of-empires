@@ -43,6 +43,7 @@ mod live_takeover;
 mod logs;
 mod new_session;
 mod opencode_preassign_no_runtime_panic;
+mod opencode_store_fork;
 mod permission_response_e2e;
 mod pi_fork_e2e;
 mod pinned_session_id_e2e;
@@ -61,6 +62,8 @@ mod serve;
 mod settings;
 mod skills_tui;
 mod stop_confirm;
+#[cfg(target_os = "linux")]
+mod systemd_scope;
 mod tool_sessions;
 mod unified_view;
 mod update_command;

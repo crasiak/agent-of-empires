@@ -48,7 +48,7 @@ fn clear_reported_session_creates(reported: u32, outcome: crate::telemetry::Send
         return;
     }
     use std::sync::atomic::Ordering;
-    // `try_update` needs Rust 1.99; this keeps the 1.85 MSRV and the Nix toolchain building.
+    // `try_update` needs Rust 1.99, newer than the MSRV and the Nix toolchain.
     #[allow(deprecated)]
     let _ = TUI_SESSION_CREATES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_sub(reported))
@@ -129,6 +129,8 @@ pub struct App {
     pending_view_switch: Option<String>,
     pending_daemon_start_open: Option<String>,
     pending_smart_rename: Option<String>,
+    /// Outcome line of an in-flight "Auto-name now", which waits for the agent's one-shot.
+    smart_rename_rx: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
     /// Debounce for structured preview-on-select, so fast navigation doesn't
     /// connect a WebSocket per keystroke.
     preview_mount_pending: Option<(String, std::time::Instant)>,
@@ -359,6 +361,7 @@ impl App {
             preview_mount_pending: None,
             pending_view_switch: None,
             pending_smart_rename: None,
+            smart_rename_rx: None,
             pending_install_version: None,
             last_installed_version_in_session: None,
         })
@@ -598,6 +601,7 @@ impl App {
         let mut last_spinner_redraw = std::time::Instant::now();
         let mut last_heartbeat = std::time::Instant::now();
         let mut last_presence_refresh = std::time::Instant::now();
+        let mut last_serve_probe = std::time::Instant::now();
         let mut last_session_idle_reap = std::time::Instant::now();
         let mut last_update_eval = std::time::Instant::now();
         const STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
@@ -611,6 +615,7 @@ impl App {
         const SPINNER_REDRAW_INTERVAL: Duration = Duration::from_millis(120);
         const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
         const PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+        const SERVE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
         // Auto-stop for idle plain tmux sessions; the storage lock prevents
         // double stops when serve runs its own reaper.
         const SESSION_IDLE_REAP_INTERVAL: Duration = Duration::from_secs(60);
@@ -620,6 +625,7 @@ impl App {
         crate::session::write_tui_heartbeat();
         crate::session::write_tui_activity();
         self.home.active_tui_count = crate::session::count_active_tuis(PRESENCE_FRESH_WINDOW);
+        self.home.request_serve_probe();
 
         // Telemetry is opt-in; sends are detached and swallow errors.
         let telemetry_snapshot_interval = crate::telemetry::snapshot_interval();
@@ -1195,7 +1201,8 @@ impl App {
             let banner_changed = self.poll_update_check()
                 | self.poll_update_status()
                 | self.poll_image_update_check()
-                | self.poll_image_pull_status();
+                | self.poll_image_pull_status()
+                | self.poll_smart_rename();
             if banner_changed {
                 self.needs_redraw = true;
                 full = true;
@@ -1325,6 +1332,7 @@ impl App {
             full |= self.home.try_clear_recovered_reload_dialog();
             // Another surface took the size-owner lock: leave live mode.
             full |= self.home.poll_live_send_takeover();
+            full |= self.home.try_present_shortcut_bar_tip();
 
             if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
                 crate::session::write_tui_heartbeat();
@@ -1335,6 +1343,12 @@ impl App {
                 last_telemetry_snapshot = std::time::Instant::now();
                 self.emit_telemetry_snapshot();
             }
+
+            if last_serve_probe.elapsed() >= SERVE_PROBE_INTERVAL {
+                last_serve_probe = std::time::Instant::now();
+                self.home.request_serve_probe();
+            }
+            refresh_needed |= self.home.apply_serve_probe();
 
             if last_presence_refresh.elapsed() >= PRESENCE_REFRESH_INTERVAL {
                 last_presence_refresh = std::time::Instant::now();
@@ -2139,6 +2153,11 @@ impl App {
     async fn perform_smart_rename(&mut self, session_id: &str) {
         use crate::acp::client::{require_daemon, HttpClient, ManagerError};
 
+        // A second request would replace the receiver and lose the first one's result.
+        if self.smart_rename_rx.is_some() {
+            self.set_status("auto-name already in progress");
+            return;
+        }
         let title = self
             .home
             .get_instance(session_id)
@@ -2165,10 +2184,39 @@ impl App {
                 return;
             }
         };
-        self.set_status(match http.smart_rename(session_id).await {
-            Ok(()) => format!("auto-naming \"{title}\"…"),
-            Err(e) => format!("auto-name failed: {e}"),
+        self.set_status(format!("auto-naming \"{title}\"…"));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.smart_rename_rx = Some(rx);
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            let outcome = http
+                .smart_rename(&session_id)
+                .await
+                .map_err(|e| smart_rename_failure(&e));
+            let _ = tx.send(outcome);
         });
+    }
+
+    /// Surfaces a failed "Auto-name now"; success shows as the new title.
+    fn poll_smart_rename(&mut self) -> bool {
+        let Some(mut rx) = self.smart_rename_rx.take() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(Ok(())) => false,
+            Ok(Err(failure)) => {
+                self.set_status(failure);
+                true
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                self.smart_rename_rx = Some(rx);
+                false
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                self.set_status("auto-name ended unexpectedly");
+                true
+            }
+        }
     }
 
     /// POST the view switch, starting a local daemon first if needed: the user
@@ -3101,11 +3149,49 @@ pub enum Action {
     SmartRenameNow(String),
 }
 
+/// Leads with the API `message` so the agent's reason fits the one-row banner.
+fn smart_rename_failure(e: &crate::acp::client::HttpError) -> String {
+    let message = match e {
+        crate::acp::client::HttpError::Server { body, .. } => {
+            serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|v| v["message"].as_str().map(str::to_owned))
+        }
+        _ => None,
+    };
+    format!(
+        "auto-name failed: {}",
+        message.unwrap_or_else(|| e.to_string())
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::telemetry::SendOutcome;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn smart_rename_failure_leads_with_the_api_message() {
+        use crate::acp::client::HttpError;
+        use reqwest::StatusCode;
+        for (body, want) in [
+            (
+                r#"{"error":"smart_rename_failed","message":"`opencode` failed: token expired"}"#,
+                "auto-name failed: `opencode` failed: token expired",
+            ),
+            (
+                "upstream down",
+                "auto-name failed: daemon returned HTTP 502 Bad Gateway: upstream down",
+            ),
+        ] {
+            let e = HttpError::Server {
+                status: StatusCode::BAD_GATEWAY,
+                body: body.to_string(),
+            };
+            assert_eq!(smart_rename_failure(&e), want);
+        }
+    }
 
     /// Read a signal's disposition; `sigaction` sets while reading, so restore it.
     #[cfg(unix)]

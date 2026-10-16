@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { ProjectStep } from "../steps/ProjectStep";
 import { initialData, type WizardData } from "../wizardReducer";
@@ -12,7 +12,7 @@ import { agent, mockSession } from "./fixtures";
 vi.mock("../../../lib/api", () => ({
   fetchSessions: vi.fn(),
   fetchRecentProjects: vi.fn(),
-  fetchProjects: vi.fn(),
+  fetchProjectRegistry: vi.fn(),
   cloneRepo: vi.fn(),
   getHomePath: vi.fn(),
   browseFilesystem: vi.fn(),
@@ -21,7 +21,7 @@ vi.mock("../../../lib/api", () => ({
 
 import {
   browseFilesystem,
-  fetchProjects,
+  fetchProjectRegistry,
   fetchRecentProjects,
   fetchSessions,
   getHomePath,
@@ -31,7 +31,7 @@ import {
 beforeEach(() => {
   vi.mocked(fetchSessions).mockResolvedValue({ sessions: [], workspace_ordering: [] });
   vi.mocked(fetchRecentProjects).mockResolvedValue({ projects: [] });
-  vi.mocked(fetchProjects).mockResolvedValue([]);
+  vi.mocked(fetchProjectRegistry).mockResolvedValue([]);
   vi.mocked(getHomePath).mockResolvedValue(null);
   vi.mocked(browseFilesystem).mockResolvedValue({ ok: false, entries: [] } as never);
 });
@@ -55,7 +55,7 @@ const sessions = (...list: ReturnType<typeof mockSession>[]) =>
   vi.mocked(fetchSessions).mockResolvedValue({ sessions: list, workspace_ordering: [] });
 const savedProjects = (...paths: string[]) =>
   vi
-    .mocked(fetchProjects)
+    .mocked(fetchProjectRegistry)
     .mockResolvedValue(
       paths.map((path) => ({ name: path.split("/").pop()!, path, scope: "global", pinned: false }) as ProjectInfo),
     );
@@ -122,8 +122,8 @@ describe("recent and saved projects", () => {
     expect(onPicked).toHaveBeenCalledTimes(1);
   });
 
-  it("reports each selection's saved worktree override, undefined when there is none", async () => {
-    vi.mocked(fetchProjects).mockResolvedValue([
+  it("reports each selection's saved overrides, undefined when there are none", async () => {
+    vi.mocked(fetchProjectRegistry).mockResolvedValue([
       { name: "alpha", path: "/repo/alpha", scope: "global", pinned: false, overrides: { worktree_enabled: true } },
       { name: "beta", path: "/repo/beta", scope: "global", pinned: false },
     ] as ProjectInfo[]);
@@ -131,7 +131,21 @@ describe("recent and saved projects", () => {
     render(<ProjectStep data={initialData} onChange={vi.fn()} onSelectSavedProject={onSelectSavedProject} />);
     fireEvent.click((await screen.findByText("/repo/alpha")).closest("button")!);
     fireEvent.click((await screen.findByText("/repo/beta")).closest("button")!);
-    expect(onSelectSavedProject.mock.calls).toEqual([[true], [undefined]]);
+    expect(onSelectSavedProject.mock.calls).toEqual([
+      [{ worktree_enabled: true }, "/repo/alpha"],
+      [undefined, "/repo/beta"],
+    ]);
+  });
+
+  it("reports null, not undefined, when the registry could not be loaded", async () => {
+    vi.mocked(fetchRecentProjects).mockResolvedValue({
+      projects: [{ path: "/repo/alpha", display_name: "alpha", last_used_at: null, tool: "claude" }],
+    } as Awaited<ReturnType<typeof fetchRecentProjects>>);
+    vi.mocked(fetchProjectRegistry).mockResolvedValue(null);
+    const onSelectSavedProject = vi.fn();
+    render(<ProjectStep data={initialData} onChange={vi.fn()} onSelectSavedProject={onSelectSavedProject} />);
+    fireEvent.click((await screen.findByText("/repo/alpha")).closest("button")!);
+    expect(onSelectSavedProject.mock.calls).toEqual([[null, "/repo/alpha"]]);
   });
 
   it("falls back to the Browse tab with nothing to pick", async () => {
@@ -283,19 +297,37 @@ describe("Import session tab", () => {
     await waitFor(() => expect(listImportableSessions).toHaveBeenLastCalledWith("claude", "home"));
   });
 
-  it("says when the agent cannot list or the list was cut", async () => {
-    vi.mocked(listImportableSessions).mockResolvedValue({
-      ok: false,
-      error: "list_unsupported",
-      message: "agent does not advertise session/list and session/load",
-    });
-    renderImport();
-    expect(await screen.findByText("This agent can't list sessions.")).toBeTruthy();
-    cleanup();
-
-    listed(SESSIONS, true);
-    renderImport();
-    expect(await screen.findByText("Showing newest 200.")).toBeTruthy();
+  it("reports partial returned counts independently of visible rows and only for truncated results", async () => {
+    for (const sessions of [SESSIONS, []]) {
+      for (const truncated of [true, false]) {
+        listed(sessions, truncated);
+        await act(async () => {
+          renderImport();
+        });
+        const notice = screen.queryByRole("status");
+        if (truncated) {
+          expect(notice).not.toBeNull();
+          expect(notice!.textContent).toMatch(/partial/i);
+          expect(notice!.textContent).toMatch(/more sessions/i);
+          expect(notice!.textContent?.match(/\d+/g)).toEqual([String(sessions.length)]);
+          if (sessions.length > 0) {
+            fireEvent.click(screen.getByLabelText("Show sessions with missing directories"));
+            await row("Old work");
+            expect(notice!.textContent?.match(/\d+/g)).toEqual(["2"]);
+            fireEvent.change(screen.getByLabelText("Filter sessions"), { target: { value: "zzznomatch" } });
+            expect(screen.getByRole("list", { name: "Importable sessions" }).querySelectorAll("button")).toHaveLength(
+              0,
+            );
+            expect(notice!.textContent?.match(/\d+/g)).toEqual(["2"]);
+          } else {
+            expect(screen.queryByText(/no existing .+ sessions found/i)).toBeNull();
+          }
+        } else {
+          expect(notice).toBeNull();
+        }
+        cleanup();
+      }
+    }
   });
 
   it("asks before importing a recent session or one with unknown activity", async () => {

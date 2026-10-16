@@ -4,6 +4,18 @@ use super::config::SandboxConfig;
 use super::instance::SandboxInfo;
 use crate::containers::container_interface::EnvEntry;
 
+/// Process essentials shared by host agent launchers.
+pub(crate) const HOST_BASE_ENV_KEYS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "USER",
+    "SSH_AUTH_SOCK",
+];
+
 /// Terminal environment variables that are always passed through for proper UI/theming
 pub(crate) const DEFAULT_TERMINAL_ENV_VARS: &[&str] =
     &["TERM", "COLORTERM", "FORCE_COLOR", "NO_COLOR"];
@@ -74,7 +86,22 @@ const FORWARDED_DESKTOP_VARS: &[&str] = &[
     "XAUTHORITY",
     "DBUS_SESSION_BUS_ADDRESS",
     "SSH_AUTH_SOCK",
+    "COLORFGBG",
 ];
+
+pub(crate) fn host_env_key_inherited(key: &std::ffi::OsStr, passthrough: bool) -> bool {
+    let bytes = key.as_encoded_bytes();
+    if bytes.starts_with(b"AOE_")
+        || bytes.starts_with(b"AGENT_OF_EMPIRES_")
+        || key == std::ffi::OsStr::new("TERM")
+    {
+        return false;
+    }
+    passthrough
+        || key
+            .to_str()
+            .is_some_and(|key| key.starts_with("XDG_") || FORWARDED_DESKTOP_VARS.contains(&key))
+}
 
 /// Why the wholesale passthrough ([`inherited_host_env`] with `session.inherit_host_environment`
 /// on) refuses a key, or `None` when it may be forwarded.
@@ -82,25 +109,42 @@ fn passthrough_denyreason(key: &str) -> Option<&'static str> {
     if !is_valid_env_key(key) {
         return Some("not a valid environment variable name");
     }
-    if key.starts_with("AOE_") || key.starts_with("AGENT_OF_EMPIRES_") {
-        return Some("aoe-internal wiring or credential");
-    }
-    if key == "TERM" {
-        return Some("terminal type is owned by tmux and the spawn allowlists");
+    if !host_env_key_inherited(std::ffi::OsStr::new(key), true) {
+        return Some(if key == "TERM" {
+            "terminal type is owned by tmux and the spawn allowlists"
+        } else {
+            "aoe-internal wiring or credential"
+        });
     }
     None
 }
 
 /// The environment a host session inherits from aoe, as `(KEY, VALUE)` pairs.
 pub(crate) fn inherited_host_env(profile: &str) -> Vec<(String, String)> {
-    let passthrough = super::config::profile_config::resolve_config_or_warn(
+    let config = super::config::profile_config::resolve_config_or_warn(
         &super::config::effective_profile(profile),
-    )
-    .session
-    .inherit_host_environment;
+    );
     let vars = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
-    inherited_host_env_from(vars, passthrough)
+    let mut env = inherited_host_env_from(vars, config.session.inherit_host_environment);
+    // The agent starts before a client attaches, so tmux has no outer background to report
+    // via OSC 11; agents such as OMP then fall back to `COLORFGBG`.
+    if !env.iter().any(|(key, _)| key == "COLORFGBG") {
+        let appearance =
+            crate::tui::styles::resolve_theme(&super::config::resolve_theme_name()).appearance;
+        env.push((
+            "COLORFGBG".to_string(),
+            colorfgbg_for(appearance).to_string(),
+        ));
+    }
+    env
+}
+
+fn colorfgbg_for(appearance: crate::tui::styles::ThemeAppearance) -> &'static str {
+    match appearance {
+        crate::tui::styles::ThemeAppearance::Light => "0;15",
+        crate::tui::styles::ThemeAppearance::Dark => "15;0",
+    }
 }
 
 /// Pure core of [`inherited_host_env`], split out so the filtering is unit-tested without mutating
@@ -113,7 +157,7 @@ where
         if passthrough {
             passthrough_denyreason(key).is_none()
         } else {
-            key.starts_with("XDG_") || FORWARDED_DESKTOP_VARS.contains(&key)
+            host_env_key_inherited(std::ffi::OsStr::new(key), false)
         }
     };
     let mut pairs: Vec<(String, String)> = vars
@@ -579,6 +623,36 @@ pub(crate) struct DockerExecEnv {
 pub(crate) const CONTAINER_EXEC_ENV_FD: u8 = 9;
 pub(crate) const CONTAINER_EXEC_ENV_PATH: &str = "/dev/fd/9";
 
+pub(crate) fn container_env_file<'a>(
+    environment: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> anyhow::Result<tempfile::NamedTempFile> {
+    use std::io::Write;
+    let mut file = tempfile::Builder::new()
+        .prefix("aoe-container-env-")
+        .tempfile()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    for (key, value) in environment {
+        anyhow::ensure!(
+            is_valid_env_key(key),
+            "invalid container environment key {key:?}"
+        );
+        anyhow::ensure!(
+            !value
+                .bytes()
+                .any(|byte| matches!(byte, b'\0' | b'\n' | b'\r')),
+            "container environment value for {key} cannot be represented in an env-file"
+        );
+        writeln!(file, "{key}={value}")?;
+    }
+    file.flush()?;
+    Ok(file)
+}
+
 /// Build docker exec environment transport from config and optional
 /// per-session extra entries.
 #[cfg(test)]
@@ -703,6 +777,7 @@ mod tests {
     fn inherited_host_env_filtering() {
         let vars = owned(&[
             ("DISPLAY", ":0"),
+            ("COLORFGBG", "0;15"),
             ("XDG_RUNTIME_DIR", "/run/user/1000"),
             ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
             ("WAYLAND_DISPLAY", ""),
@@ -716,6 +791,7 @@ mod tests {
         assert_eq!(
             inherited_host_env_from(vars.clone(), false),
             owned(&[
+                ("COLORFGBG", "0;15"),
                 ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
                 ("DISPLAY", ":0"),
                 ("XDG_RUNTIME_DIR", "/run/user/1000"),
@@ -724,6 +800,7 @@ mod tests {
         assert_eq!(
             inherited_host_env_from(vars, true),
             owned(&[
+                ("COLORFGBG", "0;15"),
                 ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
                 ("DISPLAY", ":0"),
                 ("GOPATH", "/home/me/go"),
@@ -761,6 +838,32 @@ mod tests {
             custom(&inherited_host_env("")).as_deref(),
             Some("custom-value")
         );
+    }
+
+    #[test]
+    #[serial]
+    fn inherited_host_env_derives_colorfgbg_from_theme() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _app_dir = crate::session::test_support::isolate_app_dir_at(tmp.path());
+        let config_path = crate::session::config::config_path().expect("config path");
+        std::fs::create_dir_all(config_path.parent().expect("app dir")).expect("app dir");
+        let colorfgbg = || {
+            inherited_host_env("")
+                .into_iter()
+                .find(|(k, _)| k == "COLORFGBG")
+                .map(|(_, v)| v)
+        };
+
+        for (host, theme, want) in [
+            (None, "catppuccin-latte", "0;15"),
+            (None, "dracula", "15;0"),
+            (Some("7;0"), "catppuccin-latte", "7;0"),
+        ] {
+            std::fs::write(&config_path, format!("[theme]\nname = \"{theme}\"\n"))
+                .expect("write config");
+            let _env = EnvGuard::set(&[("COLORFGBG", host.unwrap_or(""))]);
+            assert_eq!(colorfgbg().as_deref(), Some(want), "{host:?} {theme}");
+        }
     }
 
     #[test]

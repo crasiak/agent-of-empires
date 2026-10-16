@@ -92,6 +92,13 @@
       "components": ["web/src/components/MobileLiveTerminal.tsx", "web/src/components/LiveTerminalView.tsx"]
     },
     {
+      "id": "terminal.live-scroll-anchor",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/live-terminal-scroll-anchor.spec.ts", "src/components/live-terminal/pacing.test.ts"],
+      "components": ["web/src/components/MobileLiveTerminal.tsx", "web/src/components/live-terminal/pacing.ts"]
+    },
+    {
       "id": "terminal.mobile-ime-syllable-rewrite",
       "kind": "mocked-playwright",
       "risk": "medium",
@@ -254,7 +261,6 @@
       "risk": "high",
       "specs": [
         "tests/live-terminal-compose.spec.ts",
-        "tests/live/acp-stories/mobile-toolbar-keys.spec.ts",
         "src/components/__tests__/TerminalComposeSheet.test.tsx",
         "src/components/__tests__/LiveTerminalView.compose.test.tsx",
         "src/components/__tests__/MobileTerminalToolbar.test.tsx",
@@ -272,6 +278,18 @@
         "web/src/lib/terminalToolbarKeys.ts",
         "web/src/lib/arrowJoystick.ts"
       ]
+    },
+    {
+      "id": "terminal.mobile-ctrl-consumption",
+      "kind": "live-playwright",
+      "risk": "high",
+      "specs": ["tests/live/acp-stories/mobile-toolbar-keys.spec.ts"],
+      "components": [
+        "web/src/components/MobileTerminalToolbar.tsx",
+        "web/src/components/LiveTerminalView.tsx",
+        "web/src/components/MobileLiveTerminal.tsx"
+      ],
+      "reason": "Checks received terminal bytes and real input focus after ordinary, interrupt, and held toolbar keys consume Ctrl."
     },
     {
       "id": "terminal.selection-hold",
@@ -482,6 +500,13 @@
       ]
     },
     {
+      "id": "settings.list-field",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/settings-list-field.spec.ts", "src/components/settings/__tests__/StructuredWidgets.test.tsx"],
+      "components": ["web/src/components/settings/FormFields.tsx", "web/src/components/settings/SchemaSection.tsx"]
+    },
+    {
       "id": "settings.mobile-header",
       "kind": "mocked-playwright",
       "risk": "medium",
@@ -616,11 +641,25 @@
       "components": ["web/src/components/SettingsView.tsx", "web/src/components/settings/SchemaSection.tsx"]
     },
     {
+      "id": "settings.tui-shortcut-bar",
+      "kind": "live-playwright",
+      "risk": "medium",
+      "specs": ["tests/live/settings-persistence.spec.ts"],
+      "components": ["web/src/components/SettingsView.tsx", "web/src/components/settings/SchemaSection.tsx"]
+    },
+    {
       "id": "settings.tmux-persistence",
       "kind": "vitest",
       "risk": "medium",
       "specs": ["src/components/settings/__tests__/SchemaFieldPatches.test.tsx"],
       "components": []
+    },
+    {
+      "id": "settings.systemd-persistence",
+      "kind": "live-playwright",
+      "risk": "medium",
+      "specs": ["tests/live/settings-persistence.spec.ts"],
+      "components": ["web/src/components/SettingsView.tsx", "web/src/components/settings/SchemaSection.tsx"]
     },
     {
       "id": "settings.acp-persistence",
@@ -731,7 +770,7 @@
     {
       "id": "notifications.push-subscription",
       "kind": "vitest",
-      "risk": "medium",
+      "risk": "high",
       "specs": ["src/hooks/usePushSubscription.test.ts", "src/lib/pushHealth.test.ts"],
       "components": ["web/src/hooks/usePushSubscription.ts", "web/src/lib/pushHealth.ts"]
     },
@@ -797,6 +836,19 @@
       ]
     },
     {
+      "id": "sidebar.terminal-focus-handoff",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/terminal-focus-shortcut.spec.ts", "src/hooks/useKeyboardShortcuts.test.ts"],
+      "components": [
+        "web/src/App.tsx",
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/SessionRow.tsx",
+        "web/src/hooks/useKeyboardShortcuts.ts",
+        "web/src/lib/shortcuts.ts"
+      ]
+    },
+    {
       "id": "app-shell.topbar-dev-badge",
       "kind": "vitest",
       "risk": "low",
@@ -823,6 +875,13 @@
       ]
     },
     {
+      "id": "app-shell.topbar-header-start",
+      "kind": "vitest",
+      "risk": "low",
+      "specs": ["src/components/__tests__/TopBar.test.tsx", "src/components/plugin/__tests__/PluginSlots.test.tsx"],
+      "components": ["web/src/components/TopBar.tsx", "web/src/components/plugin/PluginSlots.tsx"]
+    },
+    {
       "id": "app-shell.activity-bar",
       "kind": "vitest",
       "risk": "low",
@@ -844,13 +903,16 @@
       "components": [
         "web/src/components/SettingsView.tsx",
         "web/src/components/settings/SchemaSection.tsx",
+        "web/src/components/settings/FormFields.tsx",
+        "web/src/lib/api.ts",
         "web/src/components/settings/PluginsSettings.tsx",
         "web/src/components/McpServers.tsx",
         "web/src/components/session-wizard/SessionWizard.tsx",
         "web/src/components/session-wizard/LaunchFooter.tsx",
         "web/src/components/WorkspaceSidebar.tsx",
         "web/src/components/Dashboard.tsx"
-      ]
+      ],
+      "reason": "Curates CityHall settings and wizard; writes 15-minute trash retention through the profile PATCH and retains it after a full reload and profile-qualified settings GET."
     },
     {
       "id": "tips.panel",
@@ -952,7 +1014,11 @@
       "id": "wizard",
       "kind": "mocked-playwright",
       "risk": "high",
-      "specs": ["tests/wizard.spec.ts", "tests/wizard-project.spec.ts"],
+      "specs": [
+        "tests/wizard.spec.ts",
+        "tests/wizard-project.spec.ts",
+        "src/components/session-wizard/__tests__/SessionWizard.test.tsx"
+      ],
       "components": [
         "web/src/components/DirectoryBrowser.tsx",
         "web/src/components/session-wizard/SessionWizard.tsx",
@@ -1015,6 +1081,27 @@
         "web/src/components/session-wizard/SessionWizard.tsx",
         "web/src/components/session-wizard/sessionNames.ts",
         "web/src/lib/types.ts"
+      ]
+    },
+    {
+      "id": "wizard.project-sandbox-override",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": [
+        "src/components/session-wizard/wizardReducer.test.ts",
+        "src/components/session-wizard/__tests__/SessionWizard.projectWorktreeOverride.test.tsx",
+        "src/components/session-wizard/__tests__/useProjectPicker.test.tsx",
+        "src/components/__tests__/ProjectFormModal.test.tsx",
+        "src/lib/api.test.ts"
+      ],
+      "components": [
+        "web/src/components/session-wizard/SessionWizard.tsx",
+        "web/src/components/session-wizard/wizardReducer.ts",
+        "web/src/components/session-wizard/steps/ProjectStep.tsx",
+        "web/src/components/session-wizard/steps/projectPicker.ts",
+        "web/src/components/ProjectFormModal.tsx",
+        "web/src/lib/registeredProjects.ts",
+        "web/src/lib/api.ts"
       ]
     },
     {
@@ -1258,7 +1345,8 @@
       "components": [
         "web/src/components/session-wizard/steps/ProjectStep.tsx",
         "web/src/components/session-wizard/steps/ImportSessionPicker.tsx"
-      ]
+      ],
+      "reason": "Covers partial-list disclosure for empty and nonempty results, with received counts independent of missing-directory and search filters."
     },
     {
       "id": "wizard.scratch-delete-cleans-tempdir",
@@ -1740,7 +1828,8 @@
       "kind": "vitest",
       "risk": "low",
       "specs": ["src/components/__tests__/SessionRowTriage.test.tsx"],
-      "components": ["web/src/components/WorkspaceSidebar.tsx"]
+      "components": ["web/src/components/WorkspaceSidebar.tsx", "web/src/components/sidebar/SessionRow.tsx"],
+      "reason": "Favorite markers remain distinct from pin in normal and compact rows, including favorite-to-nonfavorite updates."
     },
     {
       "id": "sidebar.unread-indicator",
@@ -1830,6 +1919,20 @@
         "web/src/App.tsx"
       ],
       "notes": "A plugin-supplied UI link's internal/external classification and path resolution (src/lib/pluginHref.ts) is unit-tested in src/lib/__tests__/pluginHref.test.ts; this covers the browser-level click behavior: an internal relative href navigates via the router (no full page load), a session-shaped href goes through the same session-selection flow a sidebar click uses, an external href opens a new tab, and a modified click is not intercepted."
+    },
+    {
+      "id": "plugins.pages",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/plugin-pages.spec.ts"],
+      "components": [
+        "web/src/components/plugin/PluginPagesMenu.tsx",
+        "web/src/components/plugin/PluginPageView.tsx",
+        "web/src/lib/pluginBridge.ts",
+        "web/src/components/TopBar.tsx",
+        "web/src/App.tsx"
+      ],
+      "notes": "Pages menu and palette entries appear only with a declared page; the route hides the sidebar, mints a page ticket before framing, and Back pops history. A fixture page served under the daemon's page CSP proves the sandboxed frame cannot read storage, cookies or call the API. A bridge fixture page round-trips ready, sessions.list, plugins.uiState, its own action and openSession, and receives a theme change without reloading; a page that navigates to another plugin's page before ready never hands that page the bridge. Mint ordering, empty states, the nonce-checked ready-only channel handoff, theme pushes, teardown on a second load and remount resets are unit-tested in PluginPageView.test.tsx; envelope validation and gating in pluginBridge.test.ts; the ticket's server side in src/server/api/plugins.rs."
     },
     {
       "id": "sidebar.plugin-row-slots",
@@ -2023,6 +2126,31 @@
       "notes": "The shared Dialog links its body as the accessible description; bodies with controls point it at their prompt, and ScratchOverridesModal opts out."
     },
     {
+      "id": "acp.compaction-summary",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/components/acp/ThreadMessages.test.tsx"],
+      "components": ["web/src/components/acp/activityMessages.ts", "web/src/components/acp/ThreadMessages.tsx"],
+      "notes": "The summary an agent retains on /compact renders as a collapsed card under the compaction divider; replacement and clearing are server-side row patches covered by Rust tests."
+    },
+    {
+      "id": "acp.plugin-message-origin",
+      "kind": "vitest",
+      "risk": "low",
+      "specs": [
+        "src/components/acp/ThreadMessages.test.tsx",
+        "src/lib/acpTypes.reducer.test.ts",
+        "src/hooks/useAcpSession.test.ts"
+      ],
+      "components": [
+        "web/src/components/acp/activityMessages.ts",
+        "web/src/components/acp/ThreadMessages.tsx",
+        "web/src/hooks/useAcpSession.ts",
+        "web/src/lib/acpTypes.ts"
+      ],
+      "notes": "A prompt a plugin sent through sessions.message.send carries a \"Sent by plugin\" label instead of passing for the user's own; the server stamps the sender on the row, and Send now on a queued row names it so the daemon keeps that sender."
+    },
+    {
       "id": "acp.tool-group-chunking",
       "kind": "vitest",
       "risk": "medium",
@@ -2075,7 +2203,8 @@
       "kind": "live-playwright",
       "risk": "medium",
       "specs": ["tests/live/right-panel.spec.ts"],
-      "components": ["web/src/components/diff/FileContextMenu.tsx", "web/src/lib/openInNewTab.ts"]
+      "components": ["web/src/components/diff/FileContextMenu.tsx", "web/src/lib/openInNewTab.ts"],
+      "reason": "Opens worktree text and a decodable PNG with positive intrinsic width; saves active HTML and refuses deleted files."
     },
     {
       "id": "right-panel.diff",
@@ -2126,7 +2255,8 @@
       "kind": "live-playwright",
       "risk": "medium",
       "specs": ["tests/live/right-panel.spec.ts"],
-      "components": ["web/src/components/FilesPane.tsx", "web/src/components/diff/FileContextMenu.tsx"]
+      "components": ["web/src/components/FilesPane.tsx", "web/src/components/diff/FileContextMenu.tsx"],
+      "reason": "Opens unchanged text and a decodable PNG with positive intrinsic width from the Files pane."
     },
     {
       "id": "right-panel.files-pane-live",
@@ -2154,6 +2284,38 @@
       ]
     },
     {
+      "id": "diff-comments.terminal-send-flow",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/diff-comments.spec.ts"],
+      "components": [
+        "web/src/App.tsx",
+        "web/src/components/MobileMainPane.tsx",
+        "web/src/components/diff/DiffFileViewer.tsx",
+        "web/src/components/diff/comments/SendCommentsDialog.tsx"
+      ]
+    },
+    {
+      "id": "diff-comments.terminal-live-delivery",
+      "kind": "live-playwright",
+      "risk": "high",
+      "specs": ["tests/live/diff-comments-terminal.spec.ts"],
+      "components": [
+        "web/src/App.tsx",
+        "web/src/components/MobileMainPane.tsx",
+        "web/src/components/diff/DiffFileViewer.tsx",
+        "web/src/components/diff/comments/SendCommentsDialog.tsx"
+      ]
+    },
+    {
+      "id": "terminal.http-send-normalization",
+      "kind": "live-playwright",
+      "risk": "medium",
+      "specs": ["tests/live/live-terminal.spec.ts"],
+      "components": ["src/server/api/sessions/send.rs"],
+      "reason": "Captures real HTTP terminal input bytes after suffix normalization, including internal content and empty rejection."
+    },
+    {
       "id": "diff-comments.typed-event",
       "kind": "vitest",
       "risk": "high",
@@ -2179,10 +2341,12 @@
         "src/lib/acpHistoryWindow.test.ts",
         "src/hooks/__tests__/useHistoryWindow.test.tsx",
         "src/lib/historyScroll.test.ts",
-        "src/hooks/useAcpSession.test.ts"
+        "src/hooks/useAcpSession.test.ts",
+        "src/hooks/acpSession/replay.test.ts"
       ],
       "components": [
         "web/src/lib/acpHistoryWindow.ts",
+        "web/src/hooks/acpSession/replay.ts",
         "web/src/lib/historyScroll.ts",
         "web/src/hooks/useHistoryWindow.ts",
         "web/src/hooks/useAcpSession.ts",
@@ -2446,7 +2610,8 @@
       "components": [
         "web/src/components/acp/AcpRuntime.tsx",
         "web/src/components/acp/Composer.tsx",
-        "web/src/lib/acpDrafts.ts"
+        "web/src/lib/acpDrafts.ts",
+        "web/src/lib/attachmentStore.ts"
       ]
     },
     {
@@ -2592,6 +2757,9 @@
       ],
       "components": [
         "web/src/components/acp/Composer.tsx",
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/hooks/useKeyboardShortcuts.ts",
+        "web/src/lib/shortcuts.ts",
         "web/src/components/acp/recallNav.ts",
         "web/src/components/acp/ComposerControls.tsx"
       ]
@@ -2856,8 +3024,8 @@
       "id": "acp.ws-reconnect-liveness",
       "kind": "vitest",
       "risk": "high",
-      "specs": ["src/hooks/useAcpSession.test.ts"],
-      "components": ["web/src/hooks/useAcpSession.ts"]
+      "specs": ["src/hooks/useAcpSession.test.ts", "tests/acp-reconnect-hung-dial.spec.ts"],
+      "components": ["web/src/hooks/useAcpSession.ts", "web/src/hooks/acpSession/useAcpConnection.ts"]
     },
     {
       "id": "acp.args",
@@ -2939,6 +3107,34 @@
       "components": ["web/src/components/acp/WrapToggle.tsx"]
     },
     {
+      "id": "acp.tool-run-folding",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": [
+        "tests/acp-structured-view.spec.ts",
+        "src/components/acp/ToolExpansion.test.tsx",
+        "src/components/acp/activityMessages.test.ts",
+        "src/lib/toolAnchor.test.ts"
+      ],
+      "components": [
+        "web/src/components/acp/ToolExpansion.tsx",
+        "web/src/components/acp/GroupToolCards.tsx",
+        "web/src/lib/toolAnchor.ts"
+      ]
+    },
+    {
+      "id": "acp.table-copy",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": [
+        "src/lib/tableMarkdown.test.tsx",
+        "src/components/acp/Markdown.test.tsx",
+        "src/components/acp/ThreadMessages.test.tsx",
+        "tests/acp-table-copy.spec.ts"
+      ],
+      "components": ["web/src/components/acp/Markdown.tsx"]
+    },
+    {
       "id": "acp.queued-prompt-expand-bounds",
       "kind": "vitest",
       "risk": "medium",
@@ -2957,7 +3153,8 @@
         "web/src/hooks/useAcpSession.ts",
         "web/src/hooks/acpSession/reducer.ts",
         "web/src/lib/acpTypes.ts"
-      ]
+      ],
+      "notes": "#4475: notice_timeout_secs is capped at 2147483 so its millisecond delay fits a browser setTimeout, and PromptStrips clamps the delay for older configs above the cap. SessionNoticesStrip.test.tsx covers the boundary: a timeout past the timer limit does not dismiss at once and fires only after the clamped delay."
     },
     {
       "id": "acp.queue-send-now",
@@ -2989,6 +3186,13 @@
       "risk": "medium",
       "specs": ["tests/acp-submit-repin.spec.ts"],
       "components": ["web/src/components/acp/StructuredView.tsx"]
+    },
+    {
+      "id": "acp.typing-keeps-transcript-pinned",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/acp-typing-keeps-pin.spec.ts"],
+      "components": ["web/src/components/acp/Composer.tsx", "web/src/components/acp/composerInput.ts"]
     },
     {
       "id": "acp.mobile-jump-to-bottom",
@@ -4351,9 +4555,10 @@
         "web/src/components/plugin/PluginSlots.tsx",
         "web/src/components/plugin/PluginPane.tsx",
         "web/src/components/plugin/SlotChrome.tsx",
-        "web/src/components/plugin/paneBlocks.tsx"
+        "web/src/components/plugin/paneBlocks.tsx",
+        "web/src/components/plugin/BlockMarkdown.tsx"
       ],
-      "notes": "The api_version 12 pane block vocabulary: callout, bar and columns, plus the interactive row (clicking a row fires its `method` with the block's `params`, e.g. github.select_pr) and the pinned pane footer. api_version 13 adds the sparkline block (per-sample band coloring) and the global home-pane slot (PluginHomePanes), covered by the sparkline and home-pane cases in PluginSlots.test.tsx."
+      "notes": "The api_version 12 pane block vocabulary: callout, bar and columns, plus the interactive row (clicking a row fires its `method` with the block's `params`, e.g. github.select_pr) and the pinned pane footer. api_version 13 adds the sparkline block (per-sample band coloring) and the global home-pane slot (PluginHomePanes), covered by the sparkline and home-pane cases in PluginSlots.test.tsx. api_version 15 adds the sanitised markdown block (BlockMarkdown: no raw HTML, no remote images, href-policy links), covered by the markdown block cases there."
     },
     {
       "id": "plugins.composer-actions",

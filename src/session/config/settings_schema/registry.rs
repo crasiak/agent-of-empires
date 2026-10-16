@@ -3,7 +3,8 @@
 use super::FieldDescriptor;
 use crate::session::config::{
     AcpConfig, AuthConfig, DiffConfig, LoggingConfig, SandboxConfig, SessionConfig, SkillsConfig,
-    TelemetryConfig, ThemeConfig, TmuxConfig, UpdatesConfig, WebConfig, WorktreeConfig,
+    SystemdSettings, TelemetryConfig, ThemeConfig, TmuxConfig, UpdatesConfig, WebConfig,
+    WorktreeConfig,
 };
 use crate::sound::SoundConfig;
 use crate::status_hooks::StatusHookConfig;
@@ -27,6 +28,7 @@ fn build_schema() -> Vec<FieldDescriptor> {
     out.extend(WorktreeConfig::settings_descriptors());
     out.extend(SandboxConfig::settings_descriptors());
     out.extend(TmuxConfig::settings_descriptors());
+    out.extend(SystemdSettings::settings_descriptors());
     out.extend(SessionConfig::settings_descriptors());
     out.extend(SoundConfig::settings_descriptors());
     out.extend(StatusHookConfig::settings_descriptors());
@@ -65,7 +67,31 @@ pub fn section_in_schema(section: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::config::settings_schema::{WebWritePolicy, WidgetKind};
+    use crate::session::config::settings_schema::{ValidationKind, WebWritePolicy, WidgetKind};
+
+    #[test]
+    fn notice_timeout_is_capped_below_the_browser_timer_limit() {
+        // The web dashboard passes this value to setTimeout in milliseconds,
+        // which overflows above 2^31 - 1 ms (#4475).
+        let d = descriptor("acp", "notice_timeout_secs").unwrap();
+        assert_eq!(
+            d.validation,
+            ValidationKind::RangeU64 {
+                min: 1,
+                max: Some(2_147_483),
+            }
+        );
+        assert!(crate::session::config::settings_schema::validate_value(
+            &d.validation,
+            &serde_json::json!(2_147_483)
+        )
+        .is_ok());
+        assert!(crate::session::config::settings_schema::validate_value(
+            &d.validation,
+            &serde_json::json!(2_147_484)
+        )
+        .is_err());
+    }
 
     #[test]
     fn schema_has_no_duplicate_paths() {
@@ -108,6 +134,63 @@ mod tests {
                 max: None
             }
         );
+    }
+
+    #[test]
+    fn systemd_section_is_a_global_only_schema_section() {
+        use super::super::ValidationKind;
+        // (field, widget, validation, advanced)
+        let cases = [
+            ("enabled", WidgetKind::Toggle, ValidationKind::None, false),
+            (
+                "slice",
+                WidgetKind::Text {
+                    multiline: false,
+                    mono: false,
+                },
+                ValidationKind::SystemdSlice,
+                false,
+            ),
+            (
+                "survive_daemon_restart",
+                WidgetKind::Toggle,
+                ValidationKind::None,
+                false,
+            ),
+            (
+                "memory_max",
+                WidgetKind::OptionalText { mono: false },
+                ValidationKind::MemoryLimit,
+                true,
+            ),
+            (
+                "tasks_max",
+                WidgetKind::Number {
+                    min: Some(0),
+                    max: Some(4194304),
+                },
+                ValidationKind::RangeU64 {
+                    min: 0,
+                    max: Some(4194304),
+                },
+                true,
+            ),
+        ];
+        let fields: Vec<&str> = schema_ref()
+            .iter()
+            .filter(|d| d.section == "systemd")
+            .map(|d| d.field.as_str())
+            .collect();
+        assert_eq!(fields, cases.iter().map(|c| c.0).collect::<Vec<_>>());
+        for (field, widget, validation, advanced) in cases {
+            let d = descriptor("systemd", field).unwrap();
+            assert_eq!(d.category, "Systemd", "{field}");
+            assert_eq!(d.widget, widget, "{field}");
+            assert_eq!(d.validation, validation, "{field}");
+            assert_eq!(d.advanced, advanced, "{field}");
+            assert!(!d.profile_overridable, "{field} is global-only");
+            assert!(matches!(d.web_write, WebWritePolicy::Allow), "{field}");
+        }
     }
 
     #[test]

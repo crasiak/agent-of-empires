@@ -1077,9 +1077,17 @@ fn render_status(
     }
     // Plugin status-bar segments and this session's badges; icons, tooltips,
     // and links have no terminal surface.
-    for entry in plugin_ui::global_entries(&state.plugin_ui, UiSlot::StatusBar).chain(
-        plugin_ui::session_entries(&state.plugin_ui, UiSlot::DetailBadge, &state.session_id),
-    ) {
+    let chips = |slot| plugin_ui::by_order(plugin_ui::global_entries(&state.plugin_ui, slot));
+    let detail = plugin_ui::by_order(plugin_ui::session_entries(
+        &state.plugin_ui,
+        UiSlot::DetailBadge,
+        &state.session_id,
+    ));
+    for entry in chips(UiSlot::HeaderStart)
+        .into_iter()
+        .chain(chips(UiSlot::StatusBar))
+        .chain(detail)
+    {
         if let Some(text) = plugin_ui::entry_text(entry) {
             spans.push(Span::styled(
                 format!(" {text} "),
@@ -1370,11 +1378,13 @@ fn transcript_lines(
             }
             TranscriptRowKind::UserPrompt => {
                 // Note attachments so an image-only prompt doesn't look empty.
-                let text = if row.attachments.is_empty() {
-                    row.text.clone()
-                } else {
-                    format!("{} [{} attachment(s)]", row.text, row.attachments.len())
+                let mut text = match &row.origin_plugin {
+                    Some(plugin) => format!("[plugin {plugin}] {}", row.text),
+                    None => row.text.clone(),
                 };
+                if !row.attachments.is_empty() {
+                    text = format!("{text} [{} attachment(s)]", row.attachments.len());
+                }
                 out.extend(user_message_lines(&text, theme));
                 out.push(Line::default());
             }
@@ -1405,6 +1415,14 @@ fn transcript_lines(
                     }
                 }
                 out.push(Line::default());
+            }
+            // Empty until the summary arrives; the row only anchors its position.
+            TranscriptRowKind::CompactionSummary => {
+                if !row.text.is_empty() {
+                    out.push(note_line(NoteKind::Info, "Compaction summary"));
+                    out.extend(agent_message_lines(&row.text, theme));
+                    out.push(Line::default());
+                }
             }
             TranscriptRowKind::EmptyOutput
             | TranscriptRowKind::ContextReset
@@ -1920,6 +1938,7 @@ mod tests {
                 severity: "warning".into(),
                 title: "Model fallback".into(),
                 description: Some("Switched to Sonnet.".into()),
+                key: None,
             }]));
 
         // One strip row per undismissed notice, each with its own close target.
@@ -1960,6 +1979,43 @@ mod tests {
         state.transcript.session_notices.clear();
         state.prune_dismissed_notices();
         assert!(state.dismissed_notices.is_empty());
+    }
+
+    #[test]
+    fn notice_policy_hides_advisories_but_never_errors() {
+        use crate::session::config::{NoticeDisplay, NoticePolicy};
+
+        let notice = |id: &str, severity: &str| SessionNotice {
+            id: id.into(),
+            severity: severity.into(),
+            title: id.into(),
+            description: None,
+        };
+        let mut state = test_state();
+        state.transcript.session_notices = vec![
+            notice("info", "info"),
+            notice("warning", "warning"),
+            notice("error", "error"),
+        ];
+        let visible = |state: &StructuredViewState| -> Vec<String> {
+            state.visible_notices().map(|n| n.id.clone()).collect()
+        };
+
+        assert_eq!(visible(&state), ["info", "warning", "error"]);
+
+        for display in [NoticeDisplay::Hidden, NoticeDisplay::Timeout] {
+            state.notice_policy = NoticePolicy {
+                display,
+                timeout_secs: 0,
+            };
+            assert_eq!(visible(&state), ["error"], "{display:?}");
+        }
+
+        state.notice_policy = NoticePolicy {
+            display: NoticeDisplay::Timeout,
+            timeout_secs: 3600,
+        };
+        assert_eq!(visible(&state), ["info", "warning", "error"]);
     }
 
     fn line_text(line: &Line) -> String {
@@ -2326,9 +2382,24 @@ mod tests {
                 outcome: ElicitationOutcome::Accepted,
                 answers: vec![answer("Proceed?", "Yes"), answer("Mode", "Fast")],
             },
+            Event::ConversationCompactionSummary {
+                compaction_id: "c-1".into(),
+                text: "kept the codeword".into(),
+            },
+            Event::ConversationCompactionSummary {
+                compaction_id: "c-2".into(),
+                text: String::new(),
+            },
         ]);
         let out = joined(&transcript_lines(&t, &Theme::default(), None));
-        for want in ["working on it", "› Proceed?: Yes", "› Mode: Fast"] {
+        assert_eq!(out.matches("Compaction summary").count(), 1, "{out:?}");
+        for want in [
+            "working on it",
+            "› Proceed?: Yes",
+            "› Mode: Fast",
+            "· Compaction summary",
+            "kept the codeword",
+        ] {
             assert!(out.contains(want), "{out:?}");
         }
         assert!(
@@ -2656,6 +2727,7 @@ mod tests {
                 text: "Hello.".into(),
                 attachments: Vec::new(),
                 synthesized: false,
+                origin_plugin: None,
             },
             Event::AgentMessageChunk {
                 text: "What should we build?".into(),
@@ -2684,6 +2756,21 @@ mod tests {
         assert!(
             !prompt.starts_with('│') && !prompt.ends_with('│'),
             "{prompt:?}"
+        );
+
+        // A plugin-sent message names its sender; a typed one does not.
+        state.transcript.server_rows = server_rows(&[Event::UserPromptSent {
+            prompt_id: None,
+            text: "PR merged".into(),
+            attachments: Vec::new(),
+            synthesized: false,
+            origin_plugin: Some("cron".into()),
+        }]);
+        let rows = render_rows(&state, 80, 20, true);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("› [plugin cron] PR merged")),
+            "{rows:?}"
         );
     }
 }

@@ -27,9 +27,9 @@ Every worker needs `runtime.worker`; other capabilities gate host RPCs and are c
 
 ## Contributions
 
-Static manifest contributions are collected from active plugins: settings join the single settings schema and keep plugin ownership, themes resolve within the plugin directory, commands and keybindings are namespaced with core names taking precedence, status definitions provide host-rendered labels, and the `pane`, `home-pane`, and `composer-action` slots render typed worker state.
+Static manifest contributions are collected from active plugins: settings join the single settings schema and keep plugin ownership, themes resolve within the plugin directory, commands and keybindings are namespaced with core names taking precedence, status definitions provide host-rendered labels, the `pane`, `home-pane`, and `composer-action` slots render typed worker state, and a `page` slot serves its declared HTML entry.
 
-No plugin code runs in a frontend. Workers publish typed state, the host stores the latest generation, and the web or daemon-connected TUI renders it; generation ids stop a stopped worker's late cleanup from deleting a newer worker's state. Pane actions return to the worker as JSON-RPC notifications.
+Host-rendered slots run no plugin code in a frontend: workers publish typed state, the host stores the latest generation, and the web or daemon-connected TUI renders it; generation ids stop a stopped worker's late cleanup from deleting a newer worker's state. Pane actions return to the worker as JSON-RPC notifications. A `page` is the exception: its own HTML and inline script run in a sandboxed frame with an opaque origin, never on the dashboard origin.
 
 ## Worker host
 
@@ -48,8 +48,9 @@ Workers may create structured-view sessions and send turns, but the host keeps t
 - `session.create` and `session.prompt` grant the basic operations, while `session.unattended` is separately required for a host-classified bypass or auto-write mode, and unknown approval modes classify as unattended;
 - repository hooks still require repository trust, which a plugin cannot grant;
 - turns may target only sessions the calling plugin created;
+- `session.message` is the one exception: `sessions.message.send` reaches any session, so the capability grant is its only gate. It wakes stopped sessions but never archived or trashed ones, runs the same prompt path as the web composer for structured sessions, and refuses terminal targets in CityHall mode;
 - idempotency keys are scoped to the plugin and session lifetime;
-- per-plugin create, active-session, and turn limits survive daemon restarts in a private audit ledger;
+- per-plugin create, active-session, turn, and message limits survive daemon restarts in a private audit ledger;
 - disabling the plugin stops its worker and its automation.
 
 The create RPC accepts structured fields only: no raw agent arguments, no arbitrary environment variables, no trust bypass.

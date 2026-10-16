@@ -1532,6 +1532,46 @@ fn empty_trash_escalates_a_row_that_keeps_failing() {
     }
 }
 
+/// A peer restore/re-trash invalidates cached force escalation even at the same timestamp.
+#[test]
+#[serial]
+fn failed_delete_retry_identity_survives_storage_and_rejects_peer_retrash() {
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instance_at(0).id.clone();
+    let storage = Storage::new_unwatched("test").unwrap();
+    storage
+        .update(|instances, _| {
+            instances.iter_mut().find(|i| i.id == id).unwrap().trash();
+            Ok(())
+        })
+        .unwrap();
+    env.view.reload().unwrap();
+    let requested = env.view.get_instance(&id).unwrap().clone();
+    env.view.failed_deletes.insert(
+        id.clone(),
+        super::super::DeleteAttempt {
+            forced: true,
+            trashed_at: requested.trashed_at,
+            trash_lifecycle_id: requested.trash_lifecycle_id.clone(),
+        },
+    );
+    assert_eq!(env.view.failed_delete_forced(&requested), Some(true));
+    storage
+        .update(|instances, _| {
+            let peer = instances.iter_mut().find(|i| i.id == id).unwrap();
+            peer.untrash();
+            peer.trash();
+            peer.trashed_at = requested.trashed_at;
+            Ok(())
+        })
+        .unwrap();
+    env.view.reload().unwrap();
+    let current = env.view.get_instance(&id).unwrap();
+    assert_eq!(current.trashed_at, requested.trashed_at);
+    assert_ne!(current.trash_lifecycle_id, requested.trash_lifecycle_id);
+    assert_eq!(env.view.failed_delete_forced(current), None);
+}
+
 /// Shelf bulk actions: "Empty Trash" routes through a destructive confirm and marks every trashed
 /// row Deleting (an empty trash shows an info dialog instead), and "Restore All" un-trashes or
 /// unarchives every row of its section.
@@ -2173,4 +2213,25 @@ fn ledger_refresh_is_idle_while_both_ledger_lines_are_off() {
     env.view.pending_ledger_refresh = false;
     env.view.request_ledger_refresh();
     assert!(!env.view.pending_ledger_refresh);
+}
+
+#[test]
+#[serial]
+fn serve_badge_renders_from_the_probe_worker() {
+    let mut env = create_test_env_with_sessions(1);
+    assert!(!render_home_to_string(&mut env.view, 160, 40).contains("Serving"));
+
+    env.view.serve_probe =
+        crate::tui::worker::Worker::seeded_for_test("serve-probe-test", Some(Some("tailscale")));
+    env.view.request_serve_probe();
+    assert!(
+        env.view.apply_serve_probe(),
+        "a new badge requests a redraw"
+    );
+    assert!(!env.view.serve_probe_in_flight);
+    let screen = render_home_to_string(&mut env.view, 160, 40);
+    assert!(
+        screen.contains("Serving") && screen.contains("(tailscale)"),
+        "{screen}"
+    );
 }

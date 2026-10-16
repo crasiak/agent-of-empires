@@ -664,6 +664,7 @@ export type PluginUiTone = "neutral" | "info" | "success" | "warn" | "danger";
 
 export type PluginUiSlot =
   | "status-bar"
+  | "header-start"
   | "row-badge"
   | "row-column"
   | "sort-key"
@@ -673,6 +674,7 @@ export type PluginUiSlot =
   | "composer-action"
   | "detail-badge"
   | "home-pane"
+  | "page"
   | "notification";
 
 /** `payload` shape is determined by `slot`. */
@@ -696,15 +698,39 @@ export interface PluginUiNotification {
   href?: string;
 }
 
+/** A page an active plugin declares; `url` serves its HTML to a sandboxed frame. */
+export interface PluginPage {
+  plugin_id: string;
+  id: string;
+  title: string;
+  icon: string | null;
+  url: string;
+  /** The plugin's granted capabilities; the page bridge gates on them. */
+  capabilities: string[];
+}
+
 export interface PluginUiState {
   entries: PluginUiEntry[];
   notifications: PluginUiNotification[];
+  /** Absent on older daemons. */
+  pages?: PluginPage[];
   /** Mutation counter per plugin, then per scope (session id, or `""` for global). Absent on older daemons. */
   revisions?: Record<string, Record<string, number>>;
 }
 
+/** A plugin's sessions in its worker's `sessions.list` row shape; null unless it declares `session.read`. */
+export function fetchPluginSessions(pluginId: string): Promise<{ sessions: Record<string, unknown>[] } | null> {
+  return fetchJson(`/api/plugins/${encodeURIComponent(pluginId)}/sessions`);
+}
+
 export function fetchPluginUiState(): Promise<PluginUiState | null> {
   return fetchJson<PluginUiState>("/api/plugins/ui-state");
+}
+
+/** Lets the next frame load of a page's `url` authenticate when device binding is on; the ticket rides an HttpOnly cookie. */
+export async function mintPluginPageTicket(url: string): Promise<boolean> {
+  const reply = await send(`${url}/ticket`, { method: "POST" }).catch(() => null);
+  return reply?.ok ?? false;
 }
 
 export function setPluginEnabled(id: string, enabled: boolean): Promise<PluginToggleResult> {
@@ -933,6 +959,8 @@ export interface ServerAbout {
   acp_replay_events: number;
   acp_compaction_reminder: boolean;
   acp_compaction_reminder_percent: number;
+  acp_notice_display: "persistent" | "timeout" | "hidden";
+  acp_notice_timeout_secs: number;
   build_flavor: "debug" | "release";
   /** Entry bundle name, compared against this page's own to detect a stale client. */
   web_build_id?: string | null;
@@ -1330,9 +1358,21 @@ export async function resolvePluginOptions(
   return body?.options ?? [];
 }
 
-export async function fetchProjects(scope?: "global" | "profile"): Promise<ProjectInfo[]> {
-  const url = scope ? `/api/projects?scope=${scope}` : "/api/projects";
-  return (await fetchJson<ProjectInfo[]>(url)) ?? [];
+/** `profile` resolves that profile's registry and per-project overrides; omitted means the served profile.
+ *  `null` means the request failed, which an empty registry is not. */
+export async function fetchProjectRegistry(
+  scope?: "global" | "profile",
+  profile?: string,
+): Promise<ProjectInfo[] | null> {
+  const params = new URLSearchParams();
+  if (scope) params.set("scope", scope);
+  if (profile) params.set("profile", profile);
+  const query = params.toString();
+  return fetchJson<ProjectInfo[]>(query ? `/api/projects?${query}` : "/api/projects");
+}
+
+export async function fetchProjects(scope?: "global" | "profile", profile?: string): Promise<ProjectInfo[]> {
+  return (await fetchProjectRegistry(scope, profile)) ?? [];
 }
 
 export type ImportableSessionsResult =

@@ -230,6 +230,11 @@ impl Instance {
         expected: ConversationState,
         prior_native_id: Option<&str>,
     ) -> Result<PreparedLaunch> {
+        let publication = if restart {
+            self.prime_root_publication(true)
+        } else {
+            None
+        };
         // The Ledger restart record seals the outgoing run, so it is made before teardown. A plain
         // restart builds the command first and records whether it resumes; nothing between the
         // build and the kill moves the conversation.
@@ -237,7 +242,7 @@ impl Instance {
             let mut prepared = self.prepare_launch_command(expected)?;
             self.record_restart_before_teardown(&mut prepared, prior_native_id);
             self.kill_clean_locked()?;
-            return self.refresh_prepared_prime_launch_after_pane_stop(prepared);
+            return self.refresh_prepared_prime_launch_after_pane_stop(prepared, publication);
         }
         // An account swap builds after the carry, so it records the resume the carry sets up.
         // The new account usually launches under another Ledger profile; Ledger then rejects
@@ -255,6 +260,7 @@ impl Instance {
             self.kill_clean_locked()?;
         }
         if let Some(carry) = conversation_carry {
+            self.absorb_published_prime_session(publication);
             // Only the default conversation may be refreshed from a final
             // observation: under Use/Fork/Cleared the launch names a specific
             // conversation, and an outgoing sidecar must not rebind it
@@ -278,7 +284,7 @@ impl Instance {
             if let Some(binding) = excluded {
                 self.retroactive_capture_excludes.remove(&binding);
             }
-            prepared.carry_relocated = relocated;
+            prepared.require_conversation_publication |= relocated;
             if let Some(intent) = restart_intent {
                 launch_command::attach_restart_intent(&mut prepared, intent);
             }
@@ -286,7 +292,7 @@ impl Instance {
         }
         let prepared = self.prepare_launch_command(expected)?;
         if restart {
-            return self.refresh_prepared_prime_launch_after_pane_stop(prepared);
+            return self.refresh_prepared_prime_launch_after_pane_stop(prepared, publication);
         }
         Ok(prepared)
     }
@@ -452,8 +458,11 @@ impl Instance {
             );
         }
         crate::session::ledger_restart::seal_before_failed_resume_cleanup(self);
-        self.kill_clean_locked()
-            .with_context(|| format!("kill_clean before resume fallback for {}", self.id))?;
+        let killed = self.kill_clean_locked();
+        // Only the sid is kept for the retry; the reservation still fences
+        // a replacement from the sweep.
+        self.release_scope();
+        killed.with_context(|| format!("kill_clean before resume fallback for {}", self.id))?;
         self.status = Status::Error;
         self.last_error = Some(format!(
             "resume failed for sid {}; preserved for explicit retry",
@@ -976,8 +985,19 @@ mod tests {
                 .unwrap()
                 .launch_base_command();
             let base_command = command.clone();
-            let resumed =
-                inst.apply_session_flags(&mut command, "test", inst.resolved_agent(), None);
+            let resumed = inst.apply_session_flags(
+                &mut command,
+                "test",
+                inst.resolved_agent(),
+                None,
+                &super::execution::AgentLaunchContext::host(
+                    inst.resolved_agent(),
+                    inst.default_selector_agent()
+                        .and_then(|agent| inst.host_agent_command(agent, None))
+                        .as_ref(),
+                ),
+                &mut inst.conversation_state(),
+            );
             if resume_supported {
                 assert!(resumed.unwrap(), "{tool}: launch resume decision");
                 assert_ne!(command, base_command, "{tool}: resume selector missing");
@@ -1291,10 +1311,29 @@ mod tests {
             .unwrap();
         let name = crate::tmux::Session::generate_name(&inst.id, &inst.title);
         let _pane = crate::tmux::test_helpers::TmuxTestSession::from_name(name);
+        // The pane the failed resume discards has its scope released while
+        // the launch reservation still fences a replacement.
+        let held_at_release = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = std::rc::Rc::clone(&held_at_release);
+        let _probe = crate::process::systemd::release_probe::install(move |id| {
+            let held = crate::session::storage::Storage::new_unwatched(profile)
+                .unwrap()
+                .load()
+                .unwrap()
+                .into_iter()
+                .find(|row| row.id == id)
+                .and_then(|row| row.lifecycle_reservation)
+                .map(|reservation| reservation.op);
+            seen.borrow_mut().push((id.to_string(), held));
+        });
         let outcome = inst
             .start_with_resume_fallback(None, true, ResumeAttemptPolicy::Allow)
             .unwrap();
         assert_eq!(outcome, StartOutcome::ResumeFailed { sid: sid.into() });
+        assert_eq!(
+            *held_at_release.borrow(),
+            [(inst.id.clone(), Some(LifecycleOperation::Launch))]
+        );
         assert_eq!(inst.agent_session_binding, known);
         assert_eq!(inst.resume_probe_failed_sid.as_deref(), Some(sid));
         let saved = storage.load().unwrap();

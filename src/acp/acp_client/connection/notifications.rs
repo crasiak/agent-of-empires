@@ -19,10 +19,13 @@ use crate::acp::acp_client::rate_limit::rate_limit_rejection_from_meta;
 use crate::acp::acp_client::session_identity::SessionIngress;
 use crate::acp::acp_client::session_sandbox::SessionSandbox;
 use crate::acp::acp_client::tool_context::{
-    update_tool_context_cache, ToolCallContextCache, ToolContextCache,
+    restore_wake_tool_title, update_tool_context_cache, ToolCallContextCache, ToolContextCache,
 };
 use crate::acp::acp_client::transcript_filter::{is_transcript_event, transcript_event_kind};
-use crate::acp::acp_client::update_events::{map_update_to_events, AgentMessageDedup};
+use crate::acp::acp_client::update_events::{
+    map_update_to_events, qualify_compaction_id, restored_wake_tool_event, AgentMessageDedup,
+    CompactionFold, CompactionTracker,
+};
 use crate::acp::acp_client::watchdog::classify_watchdog_notification_signals;
 
 pub(super) fn now_ms() -> i64 {
@@ -65,6 +68,7 @@ pub(super) struct Shared {
     pub(super) context_reset_emitted: AtomicBool,
     /// Scoped to one turn; see `AgentMessageDedup` (#2281).
     pub(super) agent_msg_dedup: std::sync::Mutex<AgentMessageDedup>,
+    compaction: std::sync::Mutex<CompactionTracker>,
     pub(super) tool_context_cache: ToolContextCache,
     bg_transcript_source: TranscriptSource,
 }
@@ -107,6 +111,7 @@ impl Shared {
             rate_limit_rejections: Default::default(),
             context_reset_emitted: AtomicBool::new(false),
             agent_msg_dedup: Default::default(),
+            compaction: Default::default(),
             tool_context_cache: Arc::new(std::sync::Mutex::new(ToolCallContextCache::default())),
             bg_transcript_source,
         }
@@ -165,7 +170,7 @@ impl Shared {
     /// per-prompt watchdog.
     pub(super) async fn handle_notification(
         &self,
-        notification: SessionNotification,
+        mut notification: SessionNotification,
         local_prompt_signals: bool,
     ) {
         self.last_event_at.store(now_ms(), Ordering::Relaxed);
@@ -188,11 +193,34 @@ impl Shared {
                 return;
             }
         }
+        // Replayed compactions carry fresh ids and are dropped as transcript.
+        if !suppressing {
+            qualify_compaction_id(&notification.session_id, &mut notification.update);
+            let fold = self
+                .compaction
+                .lock()
+                .expect("compaction tracker mutex poisoned")
+                .observe(&mut notification.update);
+            match fold {
+                CompactionFold::Pass => {}
+                CompactionFold::Skip => return,
+                CompactionFold::Patch(event) => return self.emit(*event).await,
+            }
+        }
+        let restored_title =
+            restore_wake_tool_title(&self.tool_context_cache, &notification.update);
+        let restored_wake_event = restored_title
+            .as_deref()
+            .and_then(|title| restored_wake_tool_event(self.profile, &notification.update, title));
         // One epoch per notification, so its signals belong to the prompt
         // that was current when it arrived.
         let epoch = self.prompt_epoch.load(Ordering::Relaxed);
-        let (lifecycle, wakeup) =
-            classify_watchdog_notification_signals(&notification.update, self.profile, suppressing);
+        let (lifecycle, wakeup) = classify_watchdog_notification_signals(
+            &notification.update,
+            restored_title.as_deref(),
+            self.profile,
+            suppressing,
+        );
         if lifecycle.is_some() || wakeup.is_some() {
             self.first_event_after_attach.store(true, Ordering::Relaxed);
         }
@@ -214,7 +242,8 @@ impl Shared {
         }
         self.capture_rate_limit(&notification.update);
         let update_for_tool_context = notification.update.clone();
-        let events = map_update_to_events(notification.update, self.profile);
+        let mut events = map_update_to_events(notification.update, self.profile);
+        events.extend(restored_wake_event);
         // Signals go first: if the event send backpressures, the watchdog must
         // not evaluate without a suppression-bearing signal.
         forward_lifecycle_signals(

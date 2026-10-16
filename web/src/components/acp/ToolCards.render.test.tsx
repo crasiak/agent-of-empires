@@ -600,21 +600,29 @@ describe("ToolGroupCard", () => {
     kind,
   });
 
+  const mixed = (failing: boolean) => [
+    item("g1", "execute", { command: "ls" }),
+    item("g2", "read", { path: "a.ts" }),
+    item("g3", "read", { path: "b.ts" }, failing ? makeError() : makeCompletion({ toolCallId: "g3" })),
+    item("d1", "delete", { path: "z.ts" }),
+    item("f1", "fetch", { url: "https://y" }),
+    item("t1", "think", {}),
+    item("o1", "switch_mode", {}),
+  ];
+
   it("tallies kinds and errors, and renders children when expanded", () => {
-    const items = [
-      item("g1", "execute", { command: "ls" }),
-      item("g2", "read", { path: "a.ts" }),
-      item("g3", "read", { path: "b.ts" }, makeError()),
-      item("d1", "delete", { path: "z.ts" }),
-      item("f1", "fetch", { url: "https://y" }),
-      item("t1", "think", {}),
-      item("o1", "switch_mode", {}),
-    ];
-    const { container, getAllByRole } = render(<ToolGroupCard items={items} />);
-    for (const s of ["7 actions", "Read 2", "Bash 1", "Delete 1", "Fetch 1", "Think 1", "Switch_mode 1", "1 error"]) {
+    const { container, getAllByRole } = render(<ToolGroupCard items={mixed(false)} />);
+    for (const s of ["7 actions", "Read 2", "Bash 1", "Delete 1", "Fetch 1", "Think 1", "Switch_mode 1"]) {
       expect(container.textContent).toContain(s);
     }
+    expect(container.textContent).not.toContain("z.ts");
     fireEvent.click(getAllByRole("button")[0]!);
+    expect(container.textContent).toContain("z.ts");
+  });
+
+  it("counts failed children in the header and opens by default, as a failed card does", () => {
+    const { container } = render(<ToolGroupCard items={mixed(true)} />);
+    expect(container.textContent).toContain("1 error");
     expect(container.textContent).toContain("z.ts");
   });
 
@@ -800,18 +808,18 @@ describe("HighlightedBlock stale-content transitions (#3974)", () => {
   });
 
   it("ignores a late resolution from a superseded request (pending A \u2192 committed B \u2192 late A)", async () => {
-    let resolveA!: (v: string | null) => void;
-    vi.mocked(highlightSnippet).mockReturnValueOnce(
-      new Promise<string | null>((res) => {
-        resolveA = res;
-      }),
-    );
+    const pending = Promise.withResolvers<string | null>();
+    const started = Promise.withResolvers<void>();
+    vi.mocked(highlightSnippet).mockImplementationOnce(() => {
+      started.resolve();
+      return pending.promise;
+    });
 
     const { html, text } = await renderWithLateResolution({
       a: readCard("/tmp/a.rs", "fn a() {}"),
       b: readCard("/tmp/README", "plain readme text"),
-      bText: "plain readme text",
-      resolveStale: () => resolveA('<pre class="shiki">OLD_A</pre>'),
+      requestStarted: started.promise,
+      resolveStale: () => pending.resolve('<pre class="shiki">OLD_A</pre>'),
       // Expand the card so the highlighted body renders.
       afterMount: (host) => host.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true })),
     });

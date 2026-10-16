@@ -782,12 +782,7 @@ pub struct TipsResponse {
 pub async fn get_tips(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
     let result = tokio::task::spawn_blocking(|| {
         let config = crate::session::Config::load()?;
-        let signals = crate::tips::TipSignals {
-            new_session_with_selection_count: config.app_state.new_session_with_selection_count,
-            used_new_from_selection: config.app_state.used_new_from_selection,
-            system_health_tip_earned: config.app_state.system_health_tip_earned,
-            used_system_health: config.app_state.used_system_health,
-        };
+        let signals = crate::tips::TipSignals::from(&config);
         let seen = &config.app_state.tips_seen;
         let tips = crate::tips::eligible(crate::tips::TipSurface::Web, &signals)
             .into_iter()
@@ -1672,6 +1667,10 @@ pub struct ServerAbout {
     /// Resolved `acp.compaction_reminder_percent`: the context-window
     /// percentage at which the reminder appears.
     pub acp_compaction_reminder_percent: u8,
+    /// Resolved `acp.notice_display`: how the structured view shows agent notices.
+    pub acp_notice_display: crate::session::config::NoticeDisplay,
+    /// Resolved `acp.notice_timeout_secs`, used when `acp_notice_display` is `timeout`.
+    pub acp_notice_timeout_secs: u32,
     /// `"debug"` when built with `debug_assertions`, else `"release"`. The web
     /// UI renders a DEV badge from it so concurrent debug (8081) and release
     /// (8080) instances are distinguishable, PWA installs included.
@@ -1699,6 +1698,8 @@ pub async fn get_about(State(state): State<Arc<AppState>>) -> Json<ServerAbout> 
     let acp_replay_events = acp_cfg.replay_events;
     let acp_compaction_reminder = acp_cfg.compaction_reminder;
     let acp_compaction_reminder_percent = acp_cfg.compaction_reminder_percent;
+    let acp_notice_display = acp_cfg.notice_display;
+    let acp_notice_timeout_secs = acp_cfg.notice_timeout_secs;
     let snapshot = state
         .sleep_inhibit_snapshot
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -1721,6 +1722,8 @@ pub async fn get_about(State(state): State<Arc<AppState>>) -> Json<ServerAbout> 
         acp_replay_events,
         acp_compaction_reminder,
         acp_compaction_reminder_percent,
+        acp_notice_display,
+        acp_notice_timeout_secs,
         build_flavor: if cfg!(debug_assertions) {
             "debug"
         } else {
@@ -2286,6 +2289,75 @@ mod tests {
 
         state.login_manager.elevate_session(&session).await;
         assert_eq!(save(machine).await, StatusCode::OK);
+    }
+
+    /// The global-only systemd section saves machine-wide through the
+    /// handler, and a leaf its validator rejects writes nothing.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn systemd_settings_save_machine_wide_and_reject_invalid_leaves() {
+        use serde_json::json;
+        let home = tempfile::TempDir::new().unwrap();
+        let _home = crate::session::test_support::isolate_home(home.path());
+        let state = crate::server::test_support::build_test_app_state(Vec::new());
+        let save = |body: serde_json::Value| {
+            let state = state.clone();
+            async move {
+                let response = update_settings(
+                    State(state),
+                    axum::extract::Query(SettingsQuery {
+                        profile: None,
+                        layer: None,
+                    }),
+                    None,
+                    Some(axum::Extension(LoopbackTrusted)),
+                    Ok(Json(body)),
+                )
+                .await
+                .into_response();
+                let status = response.status();
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
+        };
+
+        let (status, _) = save(json!({"systemd": {
+            "enabled": false,
+            "slice": "aoe-{profile}.slice",
+            "memory_max": "4G",
+            "tasks_max": 512,
+        }}))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let saved = crate::session::Config::load().unwrap().systemd;
+        assert!(!saved.enabled);
+        assert_eq!(saved.slice, "aoe-{profile}.slice");
+        assert_eq!(saved.memory_max.as_deref(), Some("4G"));
+        assert_eq!(saved.tasks_max, 512);
+        assert!(
+            saved.survive_daemon_restart,
+            "untouched leaves keep their value"
+        );
+        let profile = crate::session::load_profile_config("test").unwrap();
+        assert!(serde_json::to_value(profile)
+            .unwrap()
+            .get("systemd")
+            .is_none());
+
+        for (field, value) in [
+            ("slice", json!("aoe.service")),
+            ("memory_max", json!("4GB")),
+        ] {
+            let (status, body) = save(json!({"systemd": {field: value}})).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{field}");
+            assert!(
+                body.contains(&format!("systemd.{field}")),
+                "{field}: {body}"
+            );
+        }
+        let after = crate::session::Config::load().unwrap().systemd;
+        assert_eq!(after.slice, "aoe-{profile}.slice");
+        assert_eq!(after.memory_max.as_deref(), Some("4G"));
     }
 
     #[test]

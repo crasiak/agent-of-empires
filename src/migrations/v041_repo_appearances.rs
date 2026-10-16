@@ -40,7 +40,7 @@ fn run_in(dir: &Path) -> Result<()> {
                 for (id, raw) in entries {
                     if !valid_repo_id(id) || !raw.is_object() {
                         tracing::warn!(
-                            "v036: skipping invalid repository appearance key/entry {id:?}"
+                            "v041: skipping invalid repository appearance key/entry {id:?}"
                         );
                         continue;
                     }
@@ -65,9 +65,9 @@ fn run_in(dir: &Path) -> Result<()> {
                     }
                 }
             } else {
-                tracing::warn!("v036: invalid legacy repository appearance JSON; original retained in migration backup");
+                tracing::warn!("v041: invalid legacy repository appearance JSON; original retained in migration backup");
             }
-            tracing::info!("v036: moved repository appearances to shared typed state");
+            tracing::info!("v041: moved repository appearances to shared typed state");
             Ok(())
         },
     )??;

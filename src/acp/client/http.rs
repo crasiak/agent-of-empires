@@ -315,6 +315,7 @@ impl HttpClient {
             attachments: Vec::new(),
             prompt_id: None,
             no_revive,
+            queued_prompt_id: None,
         };
         let path = format!("/api/sessions/{session_id}/acp/prompt");
         let res = self
@@ -422,10 +423,17 @@ impl HttpClient {
             .await
     }
 
-    /// "Auto-name now": 2xx means started; the title arrives over the WS.
+    /// "Auto-name now": the daemon answers once the title one-shot finishes, with
+    /// its failure reason on error.
     pub async fn smart_rename(&self, session_id: &str) -> Result<(), HttpError> {
-        self.session_call(Method::POST, session_id, "/smart-rename", None)
-            .await
+        let path = format!("/api/sessions/{session_id}/smart-rename");
+        let timeout = crate::session::smart_rename::RENAME_DEADLINE + DEFAULT_TIMEOUT;
+        self.send(
+            || self.request(Method::POST, &path).timeout(timeout),
+            Scope::Session(session_id),
+        )
+        .await?;
+        Ok(())
     }
 
     /// The result echoes over the WS as `CurrentModeChanged` or
@@ -575,6 +583,23 @@ impl HttpClient {
             .acp_compaction_reminder
             .then_some(about.acp_compaction_reminder_percent)
             .filter(|pct| (1..=99).contains(pct)))
+    }
+
+    /// The daemon's notice display policy, for the same reason as
+    /// [`Self::compaction_reminder`].
+    pub async fn notice_policy(&self) -> Result<crate::session::config::NoticePolicy, HttpError> {
+        #[derive(serde::Deserialize)]
+        struct NoticeAbout {
+            acp_notice_display: crate::session::config::NoticeDisplay,
+            acp_notice_timeout_secs: u32,
+        }
+        let about: NoticeAbout = self
+            .get_json("/api/about", Scope::Session("<about>"))
+            .await?;
+        Ok(crate::session::config::NoticePolicy {
+            display: about.acp_notice_display,
+            timeout_secs: about.acp_notice_timeout_secs,
+        })
     }
 
     /// Cheapest authenticated probe: separates a down host (transport error)

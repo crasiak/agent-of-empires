@@ -384,6 +384,7 @@ pub(crate) async fn spawn_structured_session(
             return Err(e);
         }
 
+        crate::tips::record_session_creations(1);
         Ok::<(Instance, Vec<String>, Option<String>), anyhow::Error>((
             instance,
             build_warnings,
@@ -494,30 +495,33 @@ pub(crate) async fn spawn_structured_session(
                     };
                     let source_profile_for_spawn = Some(source_profile.clone());
                     match supervisor
-                        .spawn(crate::acp::supervisor::SpawnRequest {
-                            session_id: id.clone(),
-                            agent: agent.clone(),
-                            tool,
-                            cwd,
-                            additional_dirs: vec![],
-                            provider_env: vec![],
-                            // A pick is made on a live session, never at create.
-                            provider: None,
-                            model,
-                            effort,
-                            effort_explicit,
-                            stored_acp_session_id,
-                            fork_from,
-                            sandbox_continuation:
-                                crate::acp::supervisor::SandboxContinuation::Persisted,
-                            sandbox_info,
-                            source_profile: source_profile_for_spawn,
-                            yolo_mode,
-                            acp_mode_id,
-                            agent_command_override: command_override,
-                            seed_history_replay,
-                            claude_store_pin: None,
-                        })
+                        .spawn(
+                            crate::acp::supervisor::SpawnRequest {
+                                session_id: id.clone(),
+                                agent: agent.clone(),
+                                tool,
+                                cwd,
+                                additional_dirs: vec![],
+                                provider_env: vec![],
+                                // A pick is made on a live session, never at create.
+                                provider: None,
+                                model,
+                                effort,
+                                effort_explicit,
+                                stored_acp_session_id,
+                                fork_from,
+                                sandbox_continuation:
+                                    crate::acp::supervisor::SandboxContinuation::Persisted,
+                                sandbox_info,
+                                source_profile: source_profile_for_spawn,
+                                yolo_mode,
+                                acp_mode_id,
+                                agent_command_override: command_override,
+                                seed_history_replay,
+                                claude_store_pin: None,
+                            },
+                            crate::process::worker_registry::ResumeAuthority::Explicit,
+                        )
                         .await
                     {
                         Ok(()) => {
@@ -654,6 +658,12 @@ mod tests {
         );
         let response = response.expect("creation finishes").expect("creation task");
         assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+        assert_eq!(
+            crate::session::config::AppStateConfig::load()
+                .unwrap()
+                .sessions_created,
+            1
+        );
         let response: serde_json::Value = serde_json::from_slice(
             &axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await

@@ -18,6 +18,7 @@ import { SessionColorsContext } from "../../lib/sessionColors";
 const pluginEntries = vi.hoisted(() => ({ current: [] as PluginUiEntry[] }));
 vi.mock("../../lib/pluginUiContext", () => ({
   usePluginUiEntries: () => pluginEntries.current,
+  usePluginAttention: () => new Set<string>(),
 }));
 
 const noop = () => {};

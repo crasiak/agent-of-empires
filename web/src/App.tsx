@@ -25,12 +25,14 @@ import { useWorkspaces } from "./hooks/useWorkspaces";
 import { useLastSessionRestore } from "./hooks/useLastSessionRestore";
 import { SCRATCH_GROUP_ID, useRepoGroups } from "./hooks/useRepoGroups";
 import { useSessionGroups } from "./hooks/useSessionGroups";
+import { useAttentionJump } from "./hooks/useAttentionJump";
 import { useNestedSidebarGroups } from "./hooks/useNestedSidebarGroups";
 import { useOrgGroups } from "./hooks/useOrgGroups";
-import { PluginUiProvider, usePluginUiEntries } from "./lib/pluginUiContext";
+import { PluginUiProvider, usePluginAttention, usePluginPages, usePluginUiEntries } from "./lib/pluginUiContext";
+import { buildPluginPageActions } from "./lib/pluginPages";
 import { buildSortValueMap, pluginSortSpecs } from "./lib/pluginUi";
 import type { PluginSortContext, SidebarSortMode } from "./lib/sidebarSort";
-import { nextAttentionSessionId, sessionNeedsAttention, workspaceIsTrashed } from "./lib/sidebarSort";
+import { nextAttentionSessionId, workspaceIsTrashed } from "./lib/sidebarSort";
 import { useSidebarAxis, useSidebarSortMode } from "./hooks/useSidebarPrefs";
 import { repoGroupToSidebarGroup, type SidebarGroup } from "./lib/sidebarGroups";
 import { useProjects } from "./hooks/useProjects";
@@ -54,6 +56,7 @@ import type { RightPanelView } from "./lib/rightPanelView";
 import { usePaneLayout, dockTabs, dockGroups, dockOf, isActiveTab, isDockCollapsed } from "./lib/paneLayout";
 import { isPluginPaneId, resolvePaneIcon, usePluginPanes, type PluginPane } from "./lib/pluginPanes";
 import { PluginPaneBody } from "./components/plugin/PluginPane";
+import { PluginPageView } from "./components/plugin/PluginPageView";
 import { TOUR_ANCHORS, tourAnchor } from "./lib/tourSteps";
 import {
   deleteWorkspaceSessions,
@@ -342,6 +345,7 @@ function isInsideEditable(target: EventTarget | null): boolean {
   return false;
 }
 
+/** Composes the authenticated dashboard and synchronizes its user-scoped UI state. */
 function AppContent({
   loginRequired,
   onLogout,
@@ -374,6 +378,9 @@ function AppContent({
   const profilesMatch = useMatch("/profiles");
   const activeSessionId = sessionMatch?.params.sessionId ?? null;
   const showSettings = settingsRootMatch !== null || settingsTabMatch !== null;
+  const pluginPageMatch = useMatch("/plugins/:pluginId/:pageId");
+  // Settings and plugin pages take the full width, sidebar and session panels hidden.
+  const fullPageView = showSettings || pluginPageMatch !== null;
   const settingsTab = settingsTabMatch?.params.tab ?? null;
 
   const {
@@ -455,6 +462,9 @@ function AppContent({
   // built-in sort; if the entry reappears on a later poll the selection
   // resumes. Selecting a built-in mode clears it via `selectSidebarSortMode`.
   const pluginUiEntries = usePluginUiEntries();
+  const pluginPages = usePluginPages();
+  const pluginPageActions = useMemo(() => buildPluginPageActions(pluginPages ?? []), [pluginPages]);
+  const pluginAttention = usePluginAttention();
   const [pluginSortRef, setPluginSortRef] = useState<{ pluginId: string; entryId: string } | null>(null);
   const activePluginSort = useMemo(() => {
     if (!pluginSortRef) return null;
@@ -489,8 +499,13 @@ function AppContent({
     toggleRepoCollapsed,
     updateRepoAppearance,
     reorderRepoGroups,
-  } = useRepoGroups(workspaces, workspaceOrdering, sidebarSortMode, projects, pluginSort);
-  const { groups: sessionGroups, toggleGroupCollapsed } = useSessionGroups(workspaces, sidebarSortMode, pluginSort);
+  } = useRepoGroups(workspaces, workspaceOrdering, sidebarSortMode, projects, pluginSort, pluginAttention);
+  const { groups: sessionGroups, toggleGroupCollapsed } = useSessionGroups(
+    workspaces,
+    sidebarSortMode,
+    pluginSort,
+    pluginAttention,
+  );
   // The nested `repo+group` axis reuses the already-built repo groups for
   // its top level (so repo collapse, appearance, and ordering are shared
   // with the repo axis) and splits each repo by `group_path` underneath.
@@ -499,6 +514,7 @@ function AppContent({
     repoGroups,
     sidebarSortMode,
     pluginSort,
+    pluginAttention,
   );
   // The org axis (#3283) partitions the same repo groups by remote owner;
   // it needs no sort/plugin-sort input of its own since it reuses each
@@ -841,23 +857,24 @@ function AppContent({
     refresh: refreshDiffFiles,
   } = useDiffFiles(activeSessionId, diffPanelActive);
 
-  // Diff-viewer comments (#928). Acp-only and session-scoped. The
+  // Diff-viewer comments (#928). Session-scoped. The
   // banner lives in the diff pane while the inline UI lives inside
   // DiffFileViewer, so the store is lifted here and threaded to both.
   const diffComments = useDiffComments(activeSessionId);
-  const commentsEnabled = activeSession?.view === "structured";
-  // Sending does not require a live worker: the diff-comments handler runs the
-  // same auto-wake as a plain composer prompt, so a snoozed or idle-dormant
-  // session respawns its worker on send. Archived and trashed sessions never
-  // start on a prompt (#4116); they must be unarchived or restored first.
-  const commentSendEnabled = commentsEnabled && !activeSession?.trashed_at && !activeSession?.archived_at;
-  // Every disabled state names its cause and what the user can do about it: a
-  // tooltip that only says "unavailable" leaves them staring at a dead button.
-  const commentSendDisabledReason = !commentsEnabled
-    ? "Diff comments can only be sent from the agent view. Switch this session to the agent view first."
+  const commentsEnabled = !!activeSession;
+  // A dormant structured worker wakes on send; archived and trashed sessions cannot start.
+  const commentSendEnabled =
+    commentsEnabled &&
+    !activeSession?.trashed_at &&
+    !activeSession?.archived_at &&
+    (activeSession?.view === "structured" || !serverAbout?.read_only);
+  const commentSendDisabledReason = !activeSession
+    ? "Select a session to send comments to the agent."
     : activeSession?.trashed_at
       ? "This session is in the trash. Restore it to send comments to the agent."
-      : "This session is archived. Unarchive it to send comments to the agent.";
+      : activeSession?.archived_at
+        ? "This session is archived. Unarchive it to send comments to the agent."
+        : "Terminal input is blocked in read-only mode.";
   const commentsIsMultiRepo = (activeSession?.workspace_repos.length ?? 0) > 0;
   const [sendDialogOpen, setSendDialogOpen] = useState(false);
 
@@ -1583,6 +1600,12 @@ function AppContent({
     }
   }, [navigate, activeSessionId]);
 
+  const handleClosePluginPage = useCallback(() => {
+    // A deep link has no in-app history to pop.
+    if (location.key !== "default") navigate(-1);
+    else navigate("/");
+  }, [navigate, location.key]);
+
   const handleOpenHelp = useCallback(() => {
     setShowHelp(true);
   }, []);
@@ -1703,30 +1726,29 @@ function AppContent({
   // Flattened, display-ordered session ids plus the subset needing attention,
   // sourced from the same sidebar model the user sees so jump-to-next follows
   // the visible order under any sort or axis.
-  const attentionJump = useMemo(() => {
-    const orderedIds: string[] = [];
-    const attention = new Set<string>();
-    for (const g of sidebarGroups) {
-      for (const v of g.workspaces) {
-        for (const s of v.workspace.sessions) {
-          orderedIds.push(s.id);
-          if (sessionNeedsAttention(s)) attention.add(s.id);
-        }
-      }
-    }
-    return { orderedIds, attention };
-  }, [sidebarGroups]);
+  const attentionJump = useAttentionJump(sidebarGroups);
 
   const handleJumpToAttention = useCallback(() => {
     const next = nextAttentionSessionId(attentionJump.orderedIds, attentionJump.attention, activeSessionId);
     if (next) handleSelectSession(next);
   }, [attentionJump, activeSessionId, handleSelectSession]);
 
+  const handleFocusSidebar = useCallback(() => {
+    setSidebarOpen(true);
+    requestAnimationFrame(() => {
+      const sidebar = document.querySelector<HTMLElement>('[role="navigation"][aria-label="Sessions sidebar"]');
+      const activeRow = sidebar?.querySelector<HTMLElement>("[data-active-session-row]");
+      const target = activeRow && activeRow.getClientRects().length > 0 ? activeRow : sidebar;
+      target?.focus();
+    });
+  }, []);
+
   useKeyboardShortcuts(
     useCallback(
       () => ({
         onNew: handleNewSession,
         onJumpToAttention: handleJumpToAttention,
+        onFocusSidebar: handleFocusSidebar,
         onNewScratch: handleNewScratch,
         onDiff: () => toggleDiff(),
         // Escape closes local UI surfaces only (dialogs, palette,
@@ -1778,6 +1800,7 @@ function AppContent({
         handleNewSession,
         handleNewScratch,
         handleJumpToAttention,
+        handleFocusSidebar,
       ],
     ),
   );
@@ -1855,6 +1878,19 @@ function AppContent({
   );
 
   const renderContent = () => {
+    if (pluginPageMatch) {
+      return (
+        <PluginPageView
+          key={pluginPageMatch.pathname}
+          pluginId={pluginPageMatch.params.pluginId ?? ""}
+          pageId={pluginPageMatch.params.pageId ?? ""}
+          onBack={handleClosePluginPage}
+          readOnly={serverAbout?.read_only ?? false}
+          cityhall={caps.cityhall}
+          theme={resolvedTheme}
+        />
+      );
+    }
     if (showSettings) {
       return (
         <SettingsView
@@ -2102,6 +2138,7 @@ function AppContent({
         {sendDialogOpen && commentsEnabled && activeSessionId && (
           <SendCommentsDialog
             sessionId={activeSessionId}
+            delivery={activeSession?.view === "structured" ? "structured" : "terminal"}
             comments={diffComments.comments}
             isMultiRepo={commentsIsMultiRepo}
             sendEnabled={commentSendEnabled}
@@ -2120,10 +2157,8 @@ function AppContent({
                 diffComments.setOutroDraft("");
               }
               setSendDialogOpen(false);
-              // Close the diff viewer so the acp transcript is in
-              // view: the user just dispatched feedback and wants to
-              // see the agent's response. They can re-open any file
-              // from the right-panel list afterwards.
+              // Close the diff viewer to show the agent transcript or terminal
+              // after dispatching feedback. The file remains in the diff list.
               setSelectedFile(null);
               toastBus.handler?.info("Comments sent to agent");
             }}
@@ -2146,6 +2181,8 @@ function AppContent({
       replayEvents: serverAbout?.acp_replay_events ?? 0,
       compactionReminder: serverAbout?.acp_compaction_reminder ?? false,
       compactionReminderPercent: serverAbout?.acp_compaction_reminder_percent ?? 75,
+      noticeDisplay: serverAbout?.acp_notice_display ?? "persistent",
+      noticeTimeoutSecs: serverAbout?.acp_notice_timeout_secs ?? 10,
     }),
     [
       serverAbout?.acp_show_tool_durations,
@@ -2153,6 +2190,8 @@ function AppContent({
       serverAbout?.acp_replay_events,
       serverAbout?.acp_compaction_reminder,
       serverAbout?.acp_compaction_reminder_percent,
+      serverAbout?.acp_notice_display,
+      serverAbout?.acp_notice_timeout_secs,
     ],
   );
 
@@ -2209,7 +2248,7 @@ function AppContent({
     serverAboutLoaded &&
     sessionsLoaded &&
     !activeSessionId &&
-    !showSettings &&
+    !fullPageView &&
     !showSessionWizard &&
     !showHelp &&
     !showAbout &&
@@ -2304,7 +2343,7 @@ function AppContent({
   // dashboard / settings / diff panes the bar is the only navigation there is.
   const headerCollapsible =
     singlePane &&
-    !showSettings &&
+    !fullPageView &&
     !!activeWorkspace &&
     activeSession?.view === "structured" &&
     rightPanelView === "agent";
@@ -2341,8 +2380,8 @@ function AppContent({
             isDevBuild={isDebugBuild(serverAbout)}
             onOpenTips={tips.open}
             onGoDashboard={handleGoDashboard}
-            sidebarColumnVisible={!showSettings && sidebarOpen}
-            rightColumnVisible={isMdUp && !showSettings && !!activeWorkspace && !!activeSession && !rightDockCollapsed}
+            sidebarColumnVisible={!fullPageView && sidebarOpen}
+            rightColumnVisible={isMdUp && !fullPageView && !!activeWorkspace && !!activeSession && !rightDockCollapsed}
           />
         </CollapsibleRegion>
 
@@ -2368,7 +2407,7 @@ function AppContent({
         )}
 
         <div className="flex flex-1 min-h-0">
-          {!showSettings && (
+          {!fullPageView && (
             <WorkspaceSidebar
               groups={sidebarGroups}
               repoGroups={repoGroups}
@@ -2530,7 +2569,13 @@ function AppContent({
             setShowPalette(false);
             setPaletteQuery("");
           }}
-          actions={[...commandActions, ...conversationActions, ...settingsCommands, ...pluginCommandActions]}
+          actions={[
+            ...commandActions,
+            ...conversationActions,
+            ...pluginPageActions,
+            ...settingsCommands,
+            ...pluginCommandActions,
+          ]}
           onSearchChange={setPaletteQuery}
           searching={conversationSearching}
         />
@@ -2567,6 +2612,11 @@ function AppContent({
         <textarea
           ref={setKeyboardProxyRef}
           data-keyboard-proxy
+          data-session-input={
+            activeSession && !fullPageView && (!singlePane || rightPanelView === "agent" || rightPanelView === "paired")
+              ? ""
+              : undefined
+          }
           aria-hidden="true"
           tabIndex={-1}
           // Keep the element in the visual viewport. Focusing a zero-size

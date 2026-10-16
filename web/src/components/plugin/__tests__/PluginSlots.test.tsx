@@ -7,6 +7,7 @@ import { PluginPaneBody } from "../PluginPane";
 import {
   PluginComposerActions,
   PluginDetailBadges,
+  PluginHeaderStartSegments,
   PluginHomePanes,
   PluginRowBadges,
   PluginStatusBarSegments,
@@ -243,6 +244,19 @@ describe("plugin slots", () => {
       expect(container.querySelector("button, span")).toBeNull();
     });
 
+    it("detail-badge orders by payload order, then snapshot order", () => {
+      const badge = (id: string, order?: number): PluginUiEntry => ({
+        plugin_id: "acme.kit",
+        slot: "detail-badge",
+        id,
+        session_id: "s1",
+        payload: { text: id, ...(order === undefined ? {} : { order }) },
+      });
+      entriesRef.current = [badge("a"), badge("b", -1), badge("c", 5)];
+      const { container } = render(<PluginDetailBadges sessionId="s1" />);
+      expect([...container.querySelectorAll("[data-plugin-slot]")].map((n) => n.textContent)).toEqual(["b", "a", "c"]);
+    });
+
     it("detail-badge accepts grouped items too", () => {
       entriesRef.current = [
         {
@@ -257,6 +271,32 @@ describe("plugin slots", () => {
       fireEvent.click(screen.getByRole("button"));
       expect(screen.getByRole("button").textContent).toContain("y");
     });
+  });
+
+  it("header-start and status-bar chips order by payload order, then snapshot order", () => {
+    const chip = (slot: "header-start" | "status-bar", id: string, order?: number): PluginUiEntry => ({
+      plugin_id: "acme.kit",
+      slot,
+      id,
+      payload: { text: id, ...(order === undefined ? {} : { order }) },
+    });
+    entriesRef.current = [
+      chip("header-start", "a"),
+      chip("header-start", "b", -1),
+      chip("header-start", "c", 5),
+      chip("status-bar", "d", -9),
+      chip("status-bar", "e", 5),
+      chip("status-bar", "f"),
+    ];
+    const { container } = render(<PluginHeaderStartSegments />);
+    const texts = [...container.querySelectorAll("[data-plugin-slot]")].map((n) => n.textContent);
+    expect(texts).toEqual(["b", "a", "c"]);
+    const statusBar = render(<PluginStatusBarSegments />);
+    expect([...statusBar.container.querySelectorAll("[data-plugin-slot]")].map((n) => n.textContent)).toEqual([
+      "d",
+      "f",
+      "e",
+    ]);
   });
 
   it("home-pane renders blocks, and the simple form's title only once", () => {
@@ -456,6 +496,19 @@ describe("pane blocks", () => {
     expect(screen.queryByTestId("plugin-pane-refreshing")).toBeNull();
   });
 
+  it("overlays the refresh indicator outside the scroll flow so content does not shift", () => {
+    refreshingRef.current = true;
+    renderBlocks({ kind: "heading", text: "GitHub" });
+    const indicator = screen.getByTestId("plugin-pane-refreshing");
+    expect(screen.getByRole("status", { name: "Refreshing" })).toBe(indicator);
+    expect(indicator.textContent).toBe("");
+    const scroller = screen.getByText("GitHub").closest(".overflow-auto");
+    expect(scroller).toBeTruthy();
+    expect(scroller?.contains(indicator)).toBe(false);
+    expect(indicator.parentElement?.className).toContain("relative");
+    expect(indicator.parentElement?.contains(scroller)).toBe(true);
+  });
+
   it("renders heading, linked row, note, divider and skips unknown kinds", () => {
     const { container } = renderBlocks(
       { kind: "heading", text: "GitHub" },
@@ -503,6 +556,104 @@ describe("pane blocks", () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]!.getAttribute("class")).toContain("text-status-waiting");
     expect(lines[1]!.getAttribute("class")).toContain("text-status-error");
+  });
+
+  describe("markdown block", () => {
+    const md = (text: string, extra: Record<string, unknown> = {}) =>
+      renderBlocks({ kind: "markdown", text, ...extra });
+
+    it("renders GitHub-flavoured syntax", () => {
+      const { container } = md(
+        [
+          "# Title",
+          "",
+          "some *em* and **strong** and `inline`",
+          "",
+          "- [x] done",
+          "- [ ] todo",
+          "",
+          "1. one",
+          "",
+          "> quoted",
+          "",
+          "```rs",
+          "let x = 1;",
+          "```",
+          "",
+          "| a | b |",
+          "|---|---|",
+          "| 1 | 2 |",
+        ].join("\n"),
+      );
+      expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Title");
+      expect(container.querySelector("em")?.textContent).toBe("em");
+      expect(container.querySelector("strong")?.textContent).toBe("strong");
+      expect(container.querySelector("p code")?.textContent).toBe("inline");
+      expect(container.querySelectorAll("ul li")).toHaveLength(2);
+      expect(container.querySelectorAll("input[type=checkbox]")).toHaveLength(2);
+      expect(container.querySelector("ol li")?.textContent).toBe("one");
+      expect(container.querySelector("blockquote")?.textContent).toContain("quoted");
+      expect(container.querySelector("pre code")?.textContent).toContain("let x = 1;");
+      expect(container.querySelectorAll("table td")).toHaveLength(2);
+    });
+
+    it("links follow the row href policy", () => {
+      const { container } = md(
+        "[ext](https://example.com/x) [int](/session/abc) [js](javascript:alert(1)) [proto](//evil.com) [data](data:text/html,x)",
+      );
+      const ext = screen.getByText("ext").closest("a")!;
+      expect(ext.getAttribute("href")).toBe("https://example.com/x");
+      expect(ext.getAttribute("target")).toBe("_blank");
+      expect(ext.getAttribute("rel")).toBe("noopener noreferrer");
+      const int = screen.getByText("int").closest("a")!;
+      expect(int.getAttribute("href")).toBe("/session/abc");
+      expect(int.getAttribute("target")).toBeNull();
+      // The rejected links survive as plain text, not anchors.
+      expect(container.textContent).toContain("js proto data");
+      expect(container.querySelectorAll("a")).toHaveLength(2);
+    });
+
+    it("strips raw HTML, comments and details, keeping inner markdown", () => {
+      const { container } = md(
+        '<script>alert(1)</script>\n\n<!-- hidden note -->\n\n<details><summary>sum</summary>\n\n**inner**\n\n</details>\n\nx <b onclick="y()">bold</b> <img src="https://evil.test/p.png">',
+      );
+      expect(container.querySelector("script, details, summary, b, img")).toBeNull();
+      expect(container.innerHTML).not.toContain("hidden note");
+      expect(container.innerHTML).not.toContain("alert(1)");
+      expect(container.innerHTML).not.toContain("onclick");
+      expect(container.querySelector("strong")?.textContent).toBe("inner");
+    });
+
+    it("drops details content that has no blank line after the tag, as one HTML block", () => {
+      const { container } = md("<details>\n**inner**\n</details>\n\nafter");
+      expect(container.querySelector("details, strong")).toBeNull();
+      expect(container.textContent?.trim()).toBe("after");
+    });
+
+    it("renders a markdown image as its alt text, never loading the URL", () => {
+      const { container } = md("![the logo](https://evil.test/p.png)");
+      expect(container.querySelector("img")).toBeNull();
+      expect(screen.getByText("the logo")).toBeTruthy();
+    });
+
+    it("renders a markdown image without alt text as nothing", () => {
+      const { container } = md("before ![](https://evil.test/p.png) after");
+      expect(container.querySelector("img")).toBeNull();
+      expect(container.textContent).toBe("before  after");
+    });
+
+    it("tints with tone and drops a block without text", () => {
+      const { container } = md("warned", { tone: "warn" });
+      expect(container.querySelector("[data-testid='plugin-pane-markdown']")?.className).toContain(
+        "text-status-waiting",
+      );
+      // The conversation-sized `acp-markdown-body` would override the pane's compact `text-xs`.
+      expect(container.querySelector("[data-testid='plugin-pane-markdown']")?.className).not.toContain(
+        "acp-markdown-body",
+      );
+      const empty = renderBlocks({ kind: "markdown" }, { kind: "markdown", text: 7 });
+      expect(empty.container.querySelector("[data-testid='plugin-pane-markdown']")).toBeNull();
+    });
   });
 
   it("a bar sizes segments proportionally and drops non-positive values", () => {
