@@ -1,3 +1,5 @@
+> **Personal fork — not intended for public consumption.** This is a personal working copy of [agent-of-empires/agent-of-empires](https://github.com/agent-of-empires/agent-of-empires), kept for experiments. It is unmaintained and unsupported, may diverge from upstream or be rewritten at any time, and nothing here is released for others to use. Use the upstream project instead.
+
 <p align="center">
   <img src="assets/logo.png" alt="Agent of Empires" width="128">
   <h1 align="center">Agent of Empires (AoE)</h1>
