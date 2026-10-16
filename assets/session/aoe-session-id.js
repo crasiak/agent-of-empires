@@ -2,15 +2,14 @@
 // and report context resets, prompts, and turns to AoE's usage log.
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 
 export default function (pi) {
   const idTarget = process.env.AOE_SESSION_ID_FILE;
   const usageBin = process.env.AOE_USAGE_BIN;
-  const rootOnly = process.env.AOE_SESSION_ROOT_ONLY === "1";
   const source = process.env.AOE_SESSION_SOURCE;
-  if (!rootOnly && source !== undefined && !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(source)) return;
-  const suffix = !rootOnly && source ? "." + source : "";
+  if (source !== undefined && !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(source)) return;
+  const suffix = source ? "." + source : "";
   const sessionId = (ctx) => {
     try {
       return ctx?.sessionManager?.getSessionId?.() || undefined;
@@ -56,20 +55,12 @@ export default function (pi) {
     report({ hook_event_name: "session_start", reason: event?.reason, session_id: sessionId(ctx) });
     if (!idTarget) return;
     try {
-      const header = rootOnly ? ctx?.sessionManager?.getHeader?.() : undefined;
-      if (rootOnly && header?.rlmDepth !== 0) return;
+
       const id = ctx?.sessionManager?.getSessionId?.();
       if (!id) return;
       const file = ctx?.sessionManager?.getSessionFile?.();
-      if (rootOnly) {
-        if (!file) return;
-        writeAtomic(join(dirname(idTarget), "root_session"), JSON.stringify({
-          id, path: resolve(file), cwd: header.cwd, rlmDepth: header.rlmDepth,
-        }));
-      } else {
-        writeAtomic(idTarget + suffix, id);
-        if (file) writeAtomic(join(dirname(idTarget), "session_path" + suffix), file);
-      }
+      writeAtomic(idTarget + suffix, id);
+      if (file) writeAtomic(join(dirname(idTarget), "session_path" + suffix), file);
     } catch {
       // never block the agent
     }

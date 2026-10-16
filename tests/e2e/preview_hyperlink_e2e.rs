@@ -97,8 +97,10 @@ has_acknowledged_agent_hooks = true
 
 [session]
 default_attach_mode = "live_send"
-"#,
+
+{systemd_off}"#,
         version = env!("CARGO_PKG_VERSION"),
+        systemd_off = crate::harness::SYSTEMD_OFF,
     );
     std::fs::write(config_dir.join("config.toml"), config_content).expect("write live-send config");
 }
@@ -136,7 +138,7 @@ fn test_preview_click_opens_osc8_hyperlink() {
 
     // Redirect the browser open to a file so the resolved URL is assertable.
     let opened = h.home_path().join("opened-urls.txt");
-    h.set_env("AOE_OPEN_URL_TO", &opened.display().to_string());
+    h.set_env("AOE_OPEN_URL_TO", opened.as_os_str());
 
     let project = h.project_path();
     let add = h.run_cli(&["add", project.to_str().unwrap(), "-t", "Linky"]);
@@ -175,7 +177,7 @@ fn test_preview_click_opens_a_bare_url_with_no_osc8() {
     write_live_send_config(&h);
 
     let opened = h.home_path().join("opened-urls.txt");
-    h.set_env("AOE_OPEN_URL_TO", &opened.display().to_string());
+    h.set_env("AOE_OPEN_URL_TO", opened.as_os_str());
 
     let project = h.project_path();
     let add = h.run_cli(&["add", project.to_str().unwrap(), "-t", "Linky"]);
@@ -281,14 +283,16 @@ has_acknowledged_agent_hooks = true
 [session]
 default_attach_mode = "live_send"
 custom_agents = {{ "{LINK_AGENT}" = "{LINK_AGENT}" }}
-"#,
+
+{systemd_off}"#,
             version = env!("CARGO_PKG_VERSION"),
+            systemd_off = crate::harness::SYSTEMD_OFF,
         ),
     )
     .expect("write config");
 
     let opened = h.home_path().join("opened-urls.txt");
-    h.set_env("AOE_OPEN_URL_TO", &opened.display().to_string());
+    h.set_env("AOE_OPEN_URL_TO", opened.as_os_str());
     // The transport assertion below reads the debug trace.
     h.set_env("AGENT_OF_EMPIRES_DEBUG", "1");
 

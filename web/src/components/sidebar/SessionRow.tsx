@@ -16,6 +16,7 @@ import {
 import { isSessionActive } from "../../lib/session";
 import { useIdleDecayWindowMs } from "../../lib/idleDecay";
 import { useUnreadIndicatorEnabled } from "../../lib/unreadIndicator";
+import { usePluginAttention } from "../../lib/pluginUiContext";
 import { sessionRowChromeClass } from "../../lib/sessionRowChrome";
 import { useSessionColorsEnabled } from "../../lib/sessionColors";
 import { useSidebarCompact } from "../../lib/sidebarCompact";
@@ -67,9 +68,15 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
   const { workspace, isActive, isSelected, hasInputFocus, onActivate, readOnly, indented, bulkApi } = props;
   const idleDecayWindowMs = useIdleDecayWindowMs();
   const unreadIndicatorEnabled = useUnreadIndicatorEnabled();
+  const pluginAttention = usePluginAttention();
   const sessionColorsEnabled = useSessionColorsEnabled();
   const compact = useSidebarCompact();
-  const derived = deriveRowModel(workspace, props.optimistic, { idleDecayWindowMs, isActive, unreadIndicatorEnabled });
+  const derived = deriveRowModel(workspace, props.optimistic, {
+    idleDecayWindowMs,
+    isActive,
+    unreadIndicatorEnabled,
+    pluginAttention,
+  });
   const { label, sessionId, isDeleting, navigationSession } = derived;
   const [notifyPreset, setNotify] = usePendingSetting(
     derived.notifyPreset,
@@ -164,14 +171,17 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
         ? "text-text-primary"
         : "text-text-secondary";
   const navigationSessionId = navigationSession?.id ?? null;
+  const sessionPath = navigationSessionId ? `/session/${encodeURIComponent(navigationSessionId)}` : "/";
 
   return (
     <>
       <a
         ref={rowRef}
-        href={navigationSessionId ? `/session/${encodeURIComponent(navigationSessionId)}` : "/"}
+        href={sessionPath}
         tabIndex={isDeleting ? -1 : undefined}
         aria-disabled={isDeleting || undefined}
+        aria-current={isActive && sessionPath === window.location.pathname ? "page" : undefined}
+        data-active-session-row={isActive || undefined}
         data-testid="sidebar-session-row"
         data-highlight-color={sessionColorsEnabled && model.sessionColorDot ? model.sessionColor : undefined}
         title={model.needsAttention ? `${label} · ${model.attentionHint}` : label}
@@ -193,7 +203,7 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
         data-selected={isSelected || undefined}
         className={`block w-full text-left py-2 cursor-pointer select-none [-webkit-touch-callout:none] transition-colors duration-75 ${
           compact ? (indented ? "pl-3 pr-1" : "px-2") : indented ? "pl-6 pr-3" : "px-3"
-        } ${sessionRowChromeClass(isActive, isSelected, hasInputFocus)} ${isDeleting ? "opacity-50 pointer-events-none" : ""}`}
+        } ${sessionRowChromeClass(isActive, isSelected, hasInputFocus)} ${isDeleting ? "opacity-50 pointer-events-none" : ""} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500`}
       >
         {isSelected && <span className="sr-only">Selected</span>}
         <div className="flex items-center gap-2">
@@ -235,7 +245,7 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
                   <Pin className="h-3 w-3 -rotate-45" />
                 </span>
               )}
-              {!compact && model.isFavorited && (
+              {model.isFavorited && (
                 <span title="Favorited" aria-label="Favorited" className="shrink-0 text-favorite">
                   ✦
                 </span>

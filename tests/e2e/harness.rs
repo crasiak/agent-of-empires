@@ -12,6 +12,13 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tempfile::TempDir;
 
+/// The profile every harness session lives in.
+pub const PROFILE: &str = "default";
+
+/// Keeps tests off the developer's user manager; `systemd_scope.rs` opts back
+/// in with its own slice.
+pub const SYSTEMD_OFF: &str = "[systemd]\nenabled = false\n";
+
 pub fn app_dir_in(home: &Path) -> PathBuf {
     if cfg!(any(target_os = "linux", target_os = "macos")) {
         home.join(".config")
@@ -110,6 +117,22 @@ macro_rules! require_node {
     };
 }
 pub(crate) use require_node;
+
+/// The fake OpenCode store server is a small Python program, so the tests that
+/// need one skip where Python is absent rather than failing.
+pub fn python_available() -> bool {
+    which::which("python3").is_ok()
+}
+
+macro_rules! require_python3 {
+    () => {
+        if !$crate::harness::python_available() {
+            eprintln!("Skipping test: python3 not available");
+            return;
+        }
+    };
+}
+pub(crate) use require_python3;
 
 /// Ephemeral port not yet issued to another test in this process. The
 /// bind-then-drop TOCTOU window remains for unrelated processes.
@@ -275,7 +298,8 @@ pub struct TuiTestHarness {
     recording: bool,
     cast_path: Option<PathBuf>,
     /// Exported on every spawned process (tmux session and `run_cli`).
-    extra_env: Vec<(String, String)>,
+    extra_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    extra_env_remove: Vec<String>,
     /// Prepended to PATH ahead of the `claude` stub.
     extra_path_dirs: Vec<PathBuf>,
     stop_daemon_on_drop: bool,
@@ -324,12 +348,14 @@ impl TuiTestHarness {
 
         // Skip the welcome, telemetry consent, and hooks dialogs plus update checks.
         let config_dir = app_dir_in(home_dir.path());
-        std::fs::create_dir_all(config_dir.join("profiles").join("default"))
+        std::fs::create_dir_all(config_dir.join("profiles").join(PROFILE))
             .expect("create default profile dir");
+        // Keep `[app_state]` last: tests append bare keys that belong to it.
         let config_content = format!(
             r#"[updates]
 update_check_mode = "off"
 
+{SYSTEMD_OFF}
 [app_state]
 has_seen_welcome = true
 has_responded_to_telemetry = true
@@ -360,7 +386,8 @@ last_seen_version = "{}"
             recording,
             cast_path: None,
             // aoe addresses tmux via `-S <socket>`, so pin it to the harness socket.
-            extra_env: vec![("AOE_TMUX_SOCKET".to_string(), tmux_socket_env)],
+            extra_env: vec![("AOE_TMUX_SOCKET".into(), tmux_socket_env.into())],
+            extra_env_remove: Vec::new(),
             extra_path_dirs: Vec::new(),
             stop_daemon_on_drop: false,
             acp_fork_fail: false,
@@ -395,7 +422,10 @@ last_seen_version = "{}"
         for key in remove {
             cmd.env_remove(key);
         }
-        cmd.envs(self.extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        cmd.envs(self.extra_env.iter().map(|(key, value)| (key, value)));
+        for key in &self.extra_env_remove {
+            cmd.env_remove(key);
+        }
         cmd
     }
 
@@ -426,6 +456,9 @@ last_seen_version = "{}"
     /// Tear the TUI's own tmux session down so a test can `spawn_tui` again and assert on
     /// what a fresh start reads from disk.
     pub fn kill_tui(&mut self) {
+        // Killing the last session makes tmux exit asynchronously, and a
+        // `new-session` that connects to the exiting server fails.
+        self.tmux_ok(&["set-option", "-s", "exit-empty", "off"], "keep server");
         let name = self.session_name.clone();
         self.tmux_kill_session(&name);
         self.spawned = false;
@@ -435,8 +468,24 @@ last_seen_version = "{}"
         let _ = self.tmux().args(["kill-session", "-t", name]).output();
     }
 
-    pub fn set_env(&mut self, key: &str, value: &str) {
-        self.extra_env.push((key.to_string(), value.to_string()));
+    pub fn set_env(
+        &mut self,
+        key: impl AsRef<std::ffi::OsStr>,
+        value: impl AsRef<std::ffi::OsStr>,
+    ) {
+        let key = key.as_ref();
+        self.extra_env_remove
+            .retain(|removed| std::ffi::OsStr::new(removed) != key);
+        self.extra_env
+            .push((key.to_owned(), value.as_ref().to_owned()));
+    }
+
+    pub fn remove_env(&mut self, key: &str) {
+        self.extra_env
+            .retain(|(existing, _)| existing.as_os_str() != std::ffi::OsStr::new(key));
+        if !self.extra_env_remove.iter().any(|removed| removed == key) {
+            self.extra_env_remove.push(key.to_string());
+        }
     }
 
     pub fn add_path_dir(&mut self, dir: &Path) {
@@ -499,7 +548,7 @@ last_seen_version = "{}"
             write_executable(&bin.join(name), &script);
         }
         self.extra_path_dirs.push(bin);
-        self.set_env("FAKE_ACP_DEBUG_LOG", &debug_log.display().to_string());
+        self.set_env("FAKE_ACP_DEBUG_LOG", debug_log.as_os_str());
         self.set_env("AOE_ACP_RUNNER_SOCKET_TIMEOUT_MS", "60000");
     }
 
@@ -606,7 +655,10 @@ last_seen_version = "{}"
     }
 
     pub fn sessions_path(&self) -> PathBuf {
-        app_dir_in(self.home_path()).join("profiles/default/sessions.json")
+        app_dir_in(self.home_path())
+            .join("profiles")
+            .join(PROFILE)
+            .join("sessions.json")
     }
 
     pub fn read_sessions(&self) -> Value {

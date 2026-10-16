@@ -211,7 +211,7 @@ impl Instance {
         // An archived or trashed session must not bring its container back (#4116).
         drop(self.lock_for_input()?);
 
-        let container = self.get_container_for_instance()?;
+        let container = self.get_container_admitted()?;
         let sandbox = self
             .sandbox_info
             .as_ref()
@@ -245,6 +245,7 @@ impl Instance {
                 &env_part,
             )),
             &resolver_command,
+            true,
         );
 
         // Values ride the protected env-file, never the host shell or runtime
@@ -263,6 +264,7 @@ impl Instance {
                 &self.effective_profile(),
                 &[],
                 &env_info.env,
+                None,
             )?;
             self.apply_container_terminal_tmux_options(index);
         }
@@ -522,7 +524,8 @@ exec /usr/bin/env -i PATH="$TARGET_PATH" SHELL="$FALLBACK_SHELL" "$@"
             ),
         ] {
             let args_file = temp.path().join(format!("args-{binary}"));
-            let command = runtime.exec_command("test-container", Some(&options), &resolver_command);
+            let command =
+                runtime.exec_command("test-container", Some(&options), &resolver_command, true);
             let output = Command::new("/bin/sh")
                 .args(["-c", &command])
                 .env_clear()

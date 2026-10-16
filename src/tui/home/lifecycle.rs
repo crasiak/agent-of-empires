@@ -216,15 +216,16 @@ impl HomeView {
             selected_group: None,
             selected_group_profile: None,
             view_mode,
+            show_last_prompt: false,
+            last_prompt_cache: None,
+            last_prompt_slot: last_prompt::new_slot(),
+            last_prompt_in_flight: false,
             sort_order,
             group_by,
             row_tag_mode: resolved.session.row_tag,
             show_session_colors: resolved.session.show_session_colors,
             show_activity_age: resolved.session.show_activity_age,
-            sidebar_position: user_config
-                .as_ref()
-                .map(|c| c.session.sidebar_position)
-                .unwrap_or_default(),
+            sidebar_position: resolved.session.sidebar_position,
             agent_clipboard_forward: resolved.tmux.clipboard
                 != crate::session::config::TmuxSettingMode::Disabled,
             hyperlink_cells: crate::tui::hyperlink::SharedHyperlinks::default(),
@@ -351,6 +352,7 @@ impl HomeView {
             status_poller: StatusPoller::new(),
             pending_status_refresh: false,
             show_diagnostics: resolved.session.show_diagnostics_pane,
+            show_shortcut_bar: resolved.session.show_shortcut_bar,
             metrics_poller: crate::tui::metrics_poller::MetricsPoller::new(),
             pending_metrics_refresh: false,
             metrics: crate::process::metrics::MetricsSnapshot::default(),
@@ -439,6 +441,11 @@ impl HomeView {
             confirm_before_quit,
             host_tab_title,
             active_tui_count: 1,
+            serve_badge: None,
+            serve_probe: crate::tui::worker::Worker::spawn("aoe-serve-probe", |()| {
+                crate::cli::serve::serve_badge()
+            }),
+            serve_probe_in_flight: false,
             idle_decay_window,
             settings_view: None,
             settings_close_confirm: false,
@@ -616,6 +623,7 @@ impl HomeView {
             }
         };
         view.rewire_config_subscriptions(&initial_config_profiles);
+        view.refresh_shortcut_bar_tip();
         Ok(view)
     }
 
@@ -626,6 +634,7 @@ impl HomeView {
     /// `refresh_from_config`.
     pub fn reload(&mut self) -> anyhow::Result<()> {
         self.refresh_status_hook_config_cache();
+        self.refresh_shortcut_bar_tip();
         self.reload_storage_only()
     }
 

@@ -70,6 +70,7 @@ mod search;
 mod session_feed_tests;
 mod session_info;
 mod settings_scroll_wiring;
+mod shortcut_bar;
 mod sidebar_position;
 mod stacked_single_seam;
 mod status_rows_menu;

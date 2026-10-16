@@ -67,6 +67,9 @@ struct TextPayload {
     /// `Some([])` is an explicit clear and stays distinct from an absent list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     items: Option<Vec<BadgeItem>>,
+    /// Position among a chip slot's entries (`status-bar`, `header-start`, `detail-badge`), lowest first; default 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    order: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -571,7 +574,7 @@ impl UiStore {
 
 fn max_payload_bytes(slot: UiSlot) -> usize {
     match slot {
-        UiSlot::Pane | UiSlot::HomePane => MAX_PANE_PAYLOAD_BYTES,
+        UiSlot::Pane | UiSlot::HomePane | UiSlot::Page => MAX_PANE_PAYLOAD_BYTES,
         UiSlot::ComposerAction => MAX_COMPOSER_ACTION_PAYLOAD_BYTES,
         _ => MAX_PAYLOAD_BYTES,
     }
@@ -616,6 +619,22 @@ fn check_block_depth(blocks: Option<&[Value]>) -> Result<(), String> {
     }
 }
 
+/// Blocks are otherwise opaque; `markdown` is the one kind rejected up front
+/// when malformed. Run after `check_block_depth`, which bounds the recursion.
+fn check_markdown_blocks(blocks: &[Value]) -> Result<(), String> {
+    for block in blocks {
+        if block.get("kind").and_then(Value::as_str) == Some("markdown")
+            && !block.get("text").is_some_and(Value::is_string)
+        {
+            return Err("markdown block requires a string text".into());
+        }
+        if let Some(children) = block.get("children").and_then(Value::as_array) {
+            check_markdown_blocks(children)?;
+        }
+    }
+    Ok(())
+}
+
 fn check_badge_groups(items: &[BadgeItem]) -> Result<(), String> {
     if items.iter().any(|i| i.group.as_deref() == Some("")) {
         return Err("badge item group must not be empty".into());
@@ -629,7 +648,7 @@ fn validate_payload(slot: UiSlot, raw: &Value) -> Result<Value, String> {
         serde_json::to_value(parsed).map_err(|e| e.to_string())
     }
     match slot {
-        UiSlot::StatusBar | UiSlot::DetailBadge => {
+        UiSlot::StatusBar | UiSlot::HeaderStart | UiSlot::DetailBadge => {
             let parsed: TextPayload =
                 serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
             if parsed.text.is_none() && parsed.items.is_none() {
@@ -652,6 +671,7 @@ fn validate_payload(slot: UiSlot, raw: &Value) -> Result<Value, String> {
             let parsed: PanePayload =
                 serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
             check_block_depth(parsed.blocks.as_deref())?;
+            check_markdown_blocks(parsed.blocks.as_deref().unwrap_or_default())?;
             serde_json::to_value(parsed).map_err(|e| e.to_string())
         }
         UiSlot::ComposerAction => {
@@ -673,6 +693,9 @@ fn validate_payload(slot: UiSlot, raw: &Value) -> Result<Value, String> {
             serde_json::to_value(parsed).map_err(|e| e.to_string())
         }
         UiSlot::Notification => Err("notification is pushed via ui.notify".into()),
+        // Opaque to the host; only the page's own script reads it.
+        UiSlot::Page if raw.is_object() => Ok(raw.clone()),
+        UiSlot::Page => Err("page state must be a JSON object".into()),
     }
 }
 
@@ -934,6 +957,27 @@ mod tests {
                 true,
             ),
             (
+                "header start accepts text with an order",
+                UiSlot::HeaderStart,
+                None,
+                json!({"text": "Codex 49%", "order": -2}),
+                true,
+            ),
+            (
+                "header start with neither text nor items rejected",
+                UiSlot::HeaderStart,
+                None,
+                json!({"order": 1}),
+                false,
+            ),
+            (
+                "header start is not per-session",
+                UiSlot::HeaderStart,
+                Some("s1"),
+                json!({"text": "x"}),
+                false,
+            ),
+            (
                 "status bar accepts an explicitly empty items list",
                 UiSlot::StatusBar,
                 None,
@@ -1022,6 +1066,34 @@ mod tests {
                 true,
             ),
             (
+                "markdown block accepts string text",
+                UiSlot::Pane,
+                Some("s1"),
+                json!({"blocks": [{"kind": "markdown", "text": "# hi\n- [x] done", "tone": "info"}]}),
+                true,
+            ),
+            (
+                "markdown block without text rejected",
+                UiSlot::Pane,
+                Some("s1"),
+                json!({"blocks": [{"kind": "markdown"}]}),
+                false,
+            ),
+            (
+                "markdown block with non-string text rejected",
+                UiSlot::HomePane,
+                None,
+                json!({"blocks": [{"kind": "markdown", "text": 5}]}),
+                false,
+            ),
+            (
+                "markdown block nested in a section is checked too",
+                UiSlot::Pane,
+                Some("s1"),
+                json!({"blocks": [{"kind": "section", "children": [{"kind": "markdown"}]}]}),
+                false,
+            ),
+            (
                 "pane payload cap is larger than other slots",
                 UiSlot::Pane,
                 Some("s1"),
@@ -1040,6 +1112,34 @@ mod tests {
                 UiSlot::RowBadge,
                 Some("s1"),
                 json!({"text": "x".repeat(9 * 1024)}),
+                false,
+            ),
+            (
+                "page takes an opaque global object",
+                UiSlot::Page,
+                None,
+                json!({"stages": {"s1": "todo"}, "config": {"any": [1, 2]}}),
+                true,
+            ),
+            (
+                "page state must be an object",
+                UiSlot::Page,
+                None,
+                json!([1, 2]),
+                false,
+            ),
+            (
+                "page state is global only",
+                UiSlot::Page,
+                Some("s1"),
+                json!({}),
+                false,
+            ),
+            (
+                "page state past the 64 KiB cap rejected",
+                UiSlot::Page,
+                None,
+                json!({"blob": "x".repeat(64 * 1024)}),
                 false,
             ),
         ];
