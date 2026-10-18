@@ -13,6 +13,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use super::attached_status_hooks::AttachedStatusHookWatcher;
+use super::focus_requests::{self, FocusResult};
 use super::home::{HomeView, TerminalMode};
 use super::status_poller::StatusUpdate;
 use super::styles::Theme;
@@ -129,6 +130,9 @@ pub struct App {
     pending_view_switch: Option<String>,
     pending_daemon_start_open: Option<String>,
     pending_smart_rename: Option<String>,
+    /// External focus requests (Switchboard Jump); absent inside tmux.
+    focus_control: Option<std::sync::Arc<focus_requests::Control>>,
+    focus_rx: Option<tokio::sync::mpsc::UnboundedReceiver<focus_requests::Incoming>>,
     /// Outcome line of an in-flight "Auto-name now", which waits for the agent's one-shot.
     smart_rename_rx: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
     /// Debounce for structured preview-on-select, so fast navigation doesn't
@@ -361,6 +365,8 @@ impl App {
             preview_mount_pending: None,
             pending_view_switch: None,
             pending_smart_rename: None,
+            focus_control: None,
+            focus_rx: None,
             smart_rename_rx: None,
             pending_install_version: None,
             last_installed_version_in_session: None,
@@ -625,6 +631,8 @@ impl App {
         crate::session::write_tui_heartbeat();
         crate::session::write_tui_activity();
         self.home.active_tui_count = crate::session::count_active_tuis(PRESENCE_FRESH_WINDOW);
+        self.start_focus_control();
+        let mut focus_rx = self.focus_rx.take();
         self.home.request_serve_probe();
 
         // Telemetry is opt-in; sends are detached and swallow errors.
@@ -1133,6 +1141,9 @@ impl App {
                             view.apply_event(ev).await;
                         }
                         self.draw(terminal)?;
+                }
+                Some(incoming) = recv_focus(&mut focus_rx) => {
+                    self.handle_focus_request(incoming, terminal)?;
                 }
                 _ = refresh_interval.tick() => {}
                 _ = preview_wake.notified() => {
@@ -2670,24 +2681,10 @@ impl App {
         }
 
         let tmux_session = instance.tmux_session()?;
-
-        // Hook status or a custom command (wrapper scripts look like shells)
-        // beats shell detection.
-        let exists = tmux_session.exists();
-        let pane_dead = exists && tmux_session.is_pane_dead();
-        let needs_restart = if !exists || pane_dead {
-            true
-        } else if crate::hooks::read_hook_status(&instance.id).is_some()
-            || instance.has_command_override()
-        {
-            false
-        } else {
-            !instance.expects_shell() && tmux_session.is_pane_running_shell()
-        };
+        let (exists, needs_restart) = focus_requests::needs_restart(&instance, &tmux_session);
         tracing::debug!(target: "tui.input",
             session_id,
             exists,
-            pane_dead,
             needs_restart,
             "attach_session: restart decision"
         );
@@ -2696,44 +2693,28 @@ impl App {
         }
         if needs_restart {
             // Warn once when the agent can't take the sandbox's custom instruction.
-            if instance.is_sandboxed() {
-                let has_instruction = instance
-                    .sandbox_info
-                    .as_ref()
-                    .and_then(|s| s.custom_instruction.as_ref())
-                    .is_some_and(|i| !i.is_empty());
+            if custom_instruction_warning_pending(&instance) {
+                self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
+                    "Custom Instruction Not Supported",
+                    &format!(
+                        "'{}' does not support custom instruction injection. The session will launch without the custom instruction.",
+                        instance.tool
+                    ),
+                ));
+                self.home.pending_attach_after_warning = Some(session_id.to_string());
 
-                if has_instruction
-                    && crate::agents::get_agent(&instance.tool)
-                        .is_none_or(|a| a.instruction_flag.is_none())
-                {
-                    let config = Config::load_or_warn();
-                    if !config.app_state.has_seen_custom_instruction_warning {
-                        self.home.info_dialog = Some(
-                            crate::tui::dialogs::InfoDialog::new(
-                                "Custom Instruction Not Supported",
-                                &format!(
-                                    "'{}' does not support custom instruction injection. The session will launch without the custom instruction.",
-                                    instance.tool
-                                ),
-                            ),
-                        );
-                        self.home.pending_attach_after_warning = Some(session_id.to_string());
-
-                        // A failed write only means the warning may show again.
-                        if let Err(e) = update_app_state(|state| {
-                            state.has_seen_custom_instruction_warning = true;
-                        }) {
-                            tracing::warn!(
-                                target: "tui.input",
-                                error = %e,
-                                "failed to persist has_seen_custom_instruction_warning"
-                            );
-                        }
-
-                        return Ok(());
-                    }
+                // A failed write only means the warning may show again.
+                if let Err(e) = update_app_state(|state| {
+                    state.has_seen_custom_instruction_warning = true;
+                }) {
+                    tracing::warn!(
+                        target: "tui.input",
+                        error = %e,
+                        "failed to persist has_seen_custom_instruction_warning"
+                    );
                 }
+
+                return Ok(());
             }
 
             if instance.is_sandboxed()
@@ -2753,6 +2734,119 @@ impl App {
         self.attach_live_session(session_id, terminal)
     }
 
+    /// Register this TUI and serve focus requests. Skipped inside tmux, where
+    /// attach is a `switch-client` of the outer client the TUI does not own.
+    fn start_focus_control(&mut self) {
+        if crate::tmux::utils::inside_tmux() {
+            return;
+        }
+        let (Ok(dir), Ok(start_id), Some(tty)) = (
+            crate::session::tui_control::control_dir(),
+            crate::session::tui_control::own_start_id(),
+            crate::session::tui_control::own_tty(),
+        ) else {
+            tracing::warn!(target: "tui.focus", "TUI focus control unavailable");
+            return;
+        };
+        let record = crate::session::tui_control::TuiRecord {
+            protocol: crate::session::tui_control::PROTOCOL,
+            pid: std::process::id(),
+            start_id,
+            tty,
+            profile: self
+                .home
+                .active_profile
+                .clone()
+                .unwrap_or_else(|| crate::session::tui_control::ALL_PROFILES.to_string()),
+            attached_session_id: None,
+        };
+        let control = focus_requests::Control::new(dir, record);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        if let Err(e) = control.listen(tx) {
+            tracing::warn!(target: "tui.focus", "TUI focus listener failed: {e}");
+            control.remove();
+            return;
+        }
+        control.publish(None);
+        self.focus_control = Some(control);
+        self.focus_rx = Some(rx);
+    }
+
+    pub fn remove_focus_control(&mut self) {
+        if let Some(control) = self.focus_control.take() {
+            control.remove();
+        }
+    }
+
+    /// Answer a dashboard focus request, then attach exactly as Enter would.
+    fn handle_focus_request(
+        &mut self,
+        incoming: focus_requests::Incoming,
+        terminal: &mut Terminal<TuiBackend>,
+    ) -> Result<()> {
+        let id = incoming.session_id;
+        let result = if self.home.has_non_live_send_overlay() {
+            FocusResult::Busy
+        } else {
+            match self.home.get_instance(&id).cloned() {
+                None => FocusResult::UnknownSession,
+                Some(instance) => {
+                    let mut state = focus_requests::target_state(&instance);
+                    if state.exists && state.needs_restart && !state.shelved {
+                        state.needs_input = custom_instruction_warning_pending(&instance)
+                            || (instance.is_sandboxed()
+                                && self.home.needs_store_move_before_launch(&id));
+                    }
+                    focus_requests::decide(Some(state))
+                }
+            }
+        };
+        tracing::info!(target: "tui.focus", session_id = %id, ?result, "focus request");
+        let _ = incoming.reply.send(result);
+        if matches!(result, FocusResult::Accepted | FocusResult::Starting) {
+            self.execute_action(Action::AttachSession(id), terminal)?;
+        }
+        Ok(())
+    }
+
+    fn enter_focus_attached(&mut self, session_id: &str) {
+        let Some(control) = &self.focus_control else {
+            return;
+        };
+        let tty = control.tty();
+        let instances = self
+            .home
+            .instances()
+            .map(|i| (i.id.clone(), i.clone()))
+            .collect();
+        *control.mode.lock().expect("focus mode") =
+            focus_requests::Mode::Attached(focus_requests::Attached {
+                client_tty: tty,
+                showing: session_id.to_string(),
+                shown: vec![session_id.to_string()],
+                instances,
+                switch: focus_requests::tmux_switcher(),
+                state_of: focus_requests::target_state,
+            });
+        control.publish(Some(session_id));
+    }
+
+    /// Sessions shown during the attach, in order, starting with `session_id`.
+    fn leave_focus_attached(&mut self, session_id: &str) -> Vec<String> {
+        let Some(control) = &self.focus_control else {
+            return vec![session_id.to_string()];
+        };
+        let previous = std::mem::replace(
+            &mut *control.mode.lock().expect("focus mode"),
+            focus_requests::Mode::Dashboard,
+        );
+        control.publish(None);
+        match previous {
+            focus_requests::Mode::Attached(state) => state.shown,
+            focus_requests::Mode::Dashboard => vec![session_id.to_string()],
+        }
+    }
+
     /// Attach to `session_id`'s running tmux pane and settle the row on return.
     fn attach_live_session(
         &mut self,
@@ -2767,18 +2861,23 @@ impl App {
         // terminal, and re-assert preview geometry afterwards.
         tmux_session.reset_size_to_latest_client();
         self.home.clear_preview_pane_sync(session_id);
+        self.enter_focus_attached(session_id);
         let (attach_result, attached_status_updates) =
             self.with_attached_status_hooks(terminal, || tmux_session.attach())?;
+        let shown = self.leave_focus_attached(session_id);
 
         self.settle_after_attach(attached_status_updates)?;
         // Turns that finished during the attach were applied without the
-        // live-send exemption; the user just viewed them.
-        self.home.clear_unread_on_view(session_id);
-        self.home.stamp_last_accessed(session_id);
+        // live-send exemption; the user just viewed them, including any
+        // session a focus request switched to.
+        for id in &shown {
+            self.home.clear_unread_on_view(id);
+            self.home.stamp_last_accessed(id);
+        }
         if let Err(e) = self.home.save() {
             tracing::error!("Failed to save after attach-return: {}", e);
         }
-        self.select_after_attach(session_id);
+        self.select_after_attach(shown.last().map_or(session_id, String::as_str));
 
         if let Err(e) = attach_result {
             tracing::warn!(target: "tui.input", "tmux attach returned error: {}", e);
@@ -3163,6 +3262,30 @@ fn smart_rename_failure(e: &crate::acp::client::HttpError) -> String {
         "auto-name failed: {}",
         message.unwrap_or_else(|| e.to_string())
     )
+}
+
+async fn recv_focus(
+    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<focus_requests::Incoming>>,
+) -> Option<focus_requests::Incoming> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Restarting this sandboxed agent would first show the one-time
+/// custom-instruction warning.
+fn custom_instruction_warning_pending(instance: &crate::session::Instance) -> bool {
+    instance.is_sandboxed()
+        && instance
+            .sandbox_info
+            .as_ref()
+            .and_then(|s| s.custom_instruction.as_ref())
+            .is_some_and(|i| !i.is_empty())
+        && crate::agents::get_agent(&instance.tool).is_none_or(|a| a.instruction_flag.is_none())
+        && !Config::load_or_warn()
+            .app_state
+            .has_seen_custom_instruction_warning
 }
 
 #[cfg(test)]

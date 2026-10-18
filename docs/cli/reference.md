@@ -26,6 +26,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe session stop`↴](#aoe-session-stop)
 * [`aoe session restart`↴](#aoe-session-restart)
 * [`aoe session attach`↴](#aoe-session-attach)
+* [`aoe session focus`↴](#aoe-session-focus)
 * [`aoe session show`↴](#aoe-session-show)
 * [`aoe session rename`↴](#aoe-session-rename)
 * [`aoe session set-worktree-name`↴](#aoe-session-set-worktree-name)
@@ -460,6 +461,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `stop` — Stop session process
 * `restart` — Restart session (or all sessions with `--all`)
 * `attach` — Attach to session interactively
+* `focus` — Ask one running TUI to show a session (dashboard: attach; attached elsewhere: switch its own client). Never starts a stopped session
 * `show` — Show session details
 * `rename` — Rename a session
 * `set-worktree-name` — Edit a managed worktree session's workdir directory name (and, optionally, its git branch). Moves the worktree directory in place; the session must not be running. See #1723
@@ -573,6 +575,22 @@ Attach to session interactively
 ###### **Arguments:**
 
 * `<IDENTIFIER>` — Session ID or title
+
+
+
+## `aoe session focus`
+
+Ask one running TUI to show a session (dashboard: attach; attached elsewhere: switch its own client). Never starts a stopped session
+
+**Usage:** `aoe session focus [OPTIONS] <IDENTIFIER>`
+
+###### **Arguments:**
+
+* `<IDENTIFIER>` — Exact session ID (or unique prefix) in any profile
+
+###### **Options:**
+
+* `--json` — Output as JSON
 
 
 
