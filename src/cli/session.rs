@@ -425,7 +425,7 @@ pub struct SetWorktreeNameArgs {
 
 #[derive(Args)]
 pub struct FocusArgs {
-    /// Exact session ID (or unique prefix) in any profile
+    /// Session ID, unique ID prefix, or title, in any profile
     identifier: String,
 
     /// Output as JSON
@@ -1696,6 +1696,7 @@ const FOCUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn focus_session(args: FocusArgs) -> Result<()> {
     let mut found: Vec<(Instance, String)> = Vec::new();
+    let mut ambiguous = false;
     for profile in crate::session::list_profiles()? {
         let Ok(storage) = Storage::open_unwatched(&profile) else {
             continue;
@@ -1703,19 +1704,27 @@ fn focus_session(args: FocusArgs) -> Result<()> {
         let Ok((instances, _)) = storage.load_with_groups() else {
             continue;
         };
-        if let Ok(inst) = super::resolve_session(&args.identifier, &instances) {
-            found.push((inst.clone(), profile));
+        match super::resolve_session(&args.identifier, &instances) {
+            Ok(inst) => found.push((inst.clone(), profile)),
+            Err(e) if e.to_string().starts_with("Ambiguous") => ambiguous = true,
+            Err(_) => {}
         }
     }
-    let (inst, profile) = match found.len() {
-        1 => found.remove(0),
-        0 => bail!("No session matches {:?}", args.identifier),
-        _ => bail!(
-            "{:?} matches sessions in several profiles; use the full ID",
-            args.identifier
-        ),
+    // A miss or an ambiguous identifier still answers in the closed vocabulary.
+    let output = match (found.len(), ambiguous) {
+        (1, false) => {
+            let (inst, profile) = found.remove(0);
+            focus_output(&inst.id, &profile)
+        }
+        (0, false) => FocusOutput {
+            result: "unknown_session".into(),
+            tui: None,
+        },
+        _ => FocusOutput {
+            result: "error".into(),
+            tui: None,
+        },
     };
-    let output = focus_output(&inst.id, &profile);
     if args.json {
         super::output::print_json(&output)?;
     } else {

@@ -16,7 +16,6 @@ pub const PROTOCOL: u32 = 1;
 /// `profile` of a TUI showing every profile.
 pub const ALL_PROFILES: &str = "*";
 const CONTROL_DIR: &str = "tui-control";
-const ACTIVITY_DIR: &str = "tui-activity";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,12 +95,13 @@ fn read_record(path: &Path) -> Option<TuiRecord> {
     (named && record.protocol == PROTOCOL).then_some(record)
 }
 
-/// Live records in `dir`. `alive` decides whether a record's process still
-/// exists with the same start identity; dead entries are swept.
+/// Live records in `dir`. `alive` answers whether a record's process still
+/// exists with the same start identity: `Some(false)` is swept, `None`
+/// (unobservable) is skipped but never deleted.
 pub fn live_records_in(
     dir: &Path,
     activity_dir: &Path,
-    alive: impl Fn(&TuiRecord) -> bool,
+    alive: impl Fn(&TuiRecord) -> Option<bool>,
 ) -> Vec<LiveTui> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
@@ -115,9 +115,13 @@ pub fn live_records_in(
         let Some(record) = read_record(&path) else {
             continue;
         };
-        if !alive(&record) {
-            remove_own(dir, record.pid);
-            continue;
+        match alive(&record) {
+            Some(true) => {}
+            Some(false) => {
+                remove_own(dir, record.pid);
+                continue;
+            }
+            None => continue,
         }
         let last_input = fs::metadata(activity_dir.join(record.pid.to_string()))
             .or_else(|_| fs::metadata(&path))
@@ -133,16 +137,18 @@ pub fn live_records() -> Vec<LiveTui> {
     let (Ok(dir), Ok(app)) = (control_dir(), super::get_app_dir()) else {
         return Vec::new();
     };
-    live_records_in(
-        &dir,
-        &app.join(ACTIVITY_DIR),
-        |r| matches!(crate::process::process_birth_identity(r.pid), Ok(Some(b)) if b.start_id == r.start_id),
-    )
+    live_records_in(&dir, &app.join(super::TUI_ACTIVITY_DIR), |r| {
+        match crate::process::process_birth_identity(r.pid) {
+            Ok(Some(birth)) => Some(birth.start_id == r.start_id),
+            Ok(None) => Some(false),
+            Err(_) => None,
+        }
+    })
 }
 
 /// Pick exactly one TUI for `target_id`: one already showing it, else the most
-/// recently used TUI on the target's profile (or showing all profiles), else
-/// the most recently used TUI.
+/// recently used TUI whose profile filter includes the target's profile. A TUI
+/// filtered to another profile cannot show the session and is never chosen.
 pub fn select<'a>(
     tuis: &'a [LiveTui],
     target_id: &str,
@@ -164,7 +170,6 @@ pub fn select<'a>(
                 .collect(),
         )
     })
-    .or_else(|| newest(tuis.iter().collect()))
 }
 
 /// This process's start identity, or an error when it cannot be proven.
@@ -264,10 +269,20 @@ mod tests {
             fs::write(socket_path(&dir, pid), b"").unwrap();
         }
         fs::write(activity.join("1"), b"").unwrap();
-        let live = live_records_in(&dir, &activity, |r| r.pid == 1);
+        write_record(&dir, &record(3, "p", None)).unwrap();
+        fs::write(socket_path(&dir, 3), b"").unwrap();
+        let live = live_records_in(&dir, &activity, |r| match r.pid {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        });
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].record.pid, 1);
         assert!(!record_path(&dir, 2).exists() && !socket_path(&dir, 2).exists());
+        assert!(
+            record_path(&dir, 3).exists() && socket_path(&dir, 3).exists(),
+            "an unobservable TUI is skipped, never deleted"
+        );
         assert_eq!(
             live[0].last_input,
             fs::metadata(activity.join("1"))
@@ -299,7 +314,11 @@ mod tests {
             "profile, newest first"
         );
         assert_eq!(pick("other", "work", &tuis), Some(1));
-        assert_eq!(pick("other", "nobody", &tuis), Some(1), "global newest");
+        assert_eq!(
+            pick("other", "nobody", &tuis),
+            None,
+            "no TUI can show that profile"
+        );
         assert_eq!(pick("x", "work", &[]), None);
         let all = vec![tui(1, "work", None, 30), tui(6, ALL_PROFILES, None, 10)];
         assert_eq!(

@@ -586,7 +586,7 @@ Ask one running TUI to show a session (dashboard: attach; attached elsewhere: sw
 
 ###### **Arguments:**
 
-* `<IDENTIFIER>` — Exact session ID (or unique prefix) in any profile
+* `<IDENTIFIER>` — Session ID, unique ID prefix, or title, in any profile
 
 ###### **Options:**
 

@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -69,10 +68,11 @@ pub fn decide(target: Option<TargetState>) -> FocusResult {
     };
     if t.structured {
         FocusResult::Error
-    } else if t.shelved {
-        FocusResult::Shelved
     } else if !t.exists {
         FocusResult::NotRunning
+    } else if t.needs_restart && t.shelved {
+        // Enter refuses a shelved session only when it would start it.
+        FocusResult::Shelved
     } else if t.needs_restart && t.needs_input {
         FocusResult::NeedsInput
     } else if t.needs_restart {
@@ -130,6 +130,16 @@ pub struct Incoming {
     pub reply: mpsc::Sender<FocusResult>,
 }
 
+impl Incoming {
+    /// Answer, and report whether the caller should act: only an accepted or
+    /// starting answer that reached the requester. A requester that already
+    /// timed out was told `busy`, so a late request must not attach.
+    pub fn answer(self, result: FocusResult) -> bool {
+        let delivered = self.reply.send(result).is_ok();
+        delivered && matches!(result, FocusResult::Accepted | FocusResult::Starting)
+    }
+}
+
 /// Switches the TUI's own tmux client; injectable for tests.
 pub type Switcher = Box<dyn Fn(&str, &str) -> bool + Send>;
 
@@ -153,21 +163,36 @@ pub enum Mode {
 /// Real switcher: `switch-client -c <tty> -t <session>` on AoE's own client.
 pub fn tmux_switcher() -> Switcher {
     Box::new(|tty, session| {
-        crate::tmux::tmux_command()
-            .args(["switch-client", "-c", tty, "-t", session])
-            .status()
-            .is_ok_and(|s| s.success())
+        crate::tmux::Session::from_name(session).reset_size_to_latest_client();
+        crate::tmux::run_tmux_command_with_timeout(crate::tmux::tmux_command().args([
+            "switch-client",
+            "-c",
+            tty,
+            "-t",
+            session,
+        ]))
+        .is_ok_and(|o| o.status.success())
     })
 }
 
-fn answer_attached(state: &mut Attached, target_id: &str) -> FocusResult {
-    if state.showing == target_id {
-        return FocusResult::AlreadyShowing;
-    }
-    let Some(instance) = state.instances.get(target_id) else {
-        return FocusResult::UnknownSession;
+/// Answer while attached. tmux probes run without the mode lock, so a slow
+/// tmux cannot block the main loop's return; the bounded switch holds it so
+/// the main loop never takes back a half-updated view.
+fn answer_attached(mode: &Mutex<Mode>, target_id: &str) -> FocusResult {
+    let (instance, state_of) = {
+        let mode = mode.lock().expect("focus mode");
+        let Mode::Attached(state) = &*mode else {
+            return FocusResult::Busy;
+        };
+        if state.showing == target_id {
+            return FocusResult::AlreadyShowing;
+        }
+        let Some(instance) = state.instances.get(target_id) else {
+            return FocusResult::UnknownSession;
+        };
+        (instance.clone(), state.state_of)
     };
-    match decide(Some((state.state_of)(instance))) {
+    match decide(Some(state_of(&instance))) {
         FocusResult::Accepted => {}
         // The restart flow and its dialogs need the main loop.
         FocusResult::Starting | FocusResult::NeedsInput => return FocusResult::Busy,
@@ -175,6 +200,11 @@ fn answer_attached(state: &mut Attached, target_id: &str) -> FocusResult {
     }
     let Ok(session) = instance.tmux_session() else {
         return FocusResult::Error;
+    };
+    let mut mode = mode.lock().expect("focus mode");
+    let Mode::Attached(state) = &mut *mode else {
+        // The attach ended meanwhile; there is no client of ours to switch.
+        return FocusResult::Busy;
     };
     if !(state.switch)(&state.client_tty, session.name()) {
         return FocusResult::Error;
@@ -205,6 +235,19 @@ impl Control {
         if let Err(e) = tui_control::write_record(&self.dir, &record) {
             tracing::warn!(target: "tui.focus", "failed to publish TUI control record: {e}");
         }
+    }
+
+    /// Republish when the TUI switched profile filters.
+    pub fn set_profile(&self, profile: &str) {
+        let attached = {
+            let mut record = self.record.lock().expect("tui control record");
+            if record.profile == profile {
+                return;
+            }
+            record.profile = profile.to_string();
+            record.attached_session_id.clone()
+        };
+        self.publish(attached.as_deref());
     }
 
     pub fn remove(&self) {
@@ -276,11 +319,8 @@ impl Control {
         target_id: &str,
         forward: &tokio::sync::mpsc::UnboundedSender<Incoming>,
     ) -> FocusResult {
-        {
-            let mut mode = self.mode.lock().expect("focus mode");
-            if let Mode::Attached(state) = &mut *mode {
-                return answer_attached(state, target_id);
-            }
+        if matches!(*self.mode.lock().expect("focus mode"), Mode::Attached(_)) {
+            return answer_attached(&self.mode, target_id);
         }
         let (tx, rx) = mpsc::channel();
         if forward
@@ -297,10 +337,7 @@ impl Control {
 }
 
 fn peer_is_owner(stream: &UnixStream) -> bool {
-    let (mut uid, mut gid) = (0, 0);
-    // SAFETY: valid socket fd and out-pointers for the duration of the call.
-    let ok = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0;
-    ok && uid == nix::unistd::getuid().as_raw()
+    crate::process::peer_uid(stream) == Some(nix::unistd::getuid().as_raw())
 }
 
 fn read_request(stream: &UnixStream) -> Option<FocusRequest> {
@@ -375,7 +412,8 @@ mod tests {
         for (target, want) in [
             (None, UnknownSession),
             (Some(state(true, false, true, false, false)), Error),
-            (Some(state(false, true, true, false, false)), Shelved),
+            (Some(state(false, true, true, true, false)), Shelved),
+            (Some(state(false, true, true, false, false)), Accepted),
             (Some(state(false, false, false, true, false)), NotRunning),
             (Some(state(false, false, true, true, true)), NeedsInput),
             (Some(state(false, false, true, true, false)), Starting),
@@ -451,6 +489,54 @@ mod tests {
     }
 
     #[test]
+    fn a_request_answered_busy_is_not_carried_out_later() {
+        let incoming = |tx| Incoming {
+            session_id: "abc".into(),
+            reply: tx,
+        };
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        assert!(
+            !incoming(tx).answer(FocusResult::Accepted),
+            "requester already got busy"
+        );
+        let (tx, rx) = mpsc::channel();
+        assert!(incoming(tx).answer(FocusResult::Starting));
+        assert_eq!(rx.recv().unwrap(), FocusResult::Starting);
+        let (tx, _rx) = mpsc::channel();
+        assert!(!incoming(tx).answer(FocusResult::Busy));
+    }
+
+    #[test]
+    fn profile_switches_are_republished() {
+        let tmp = short_tmp();
+        let control = control(tmp.path());
+        control.publish(Some("abc"));
+        control.set_profile("other");
+        let path = control.dir.join(format!("{}.json", std::process::id()));
+        let record: TuiRecord = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            (
+                record.profile.as_str(),
+                record.attached_session_id.as_deref()
+            ),
+            ("other", Some("abc"))
+        );
+    }
+
+    #[test]
+    fn a_wedged_tui_is_reported_as_an_error_by_the_cli_send() {
+        let tmp = short_tmp();
+        let path = tmp.path().join("wedged.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let hold = thread::spawn(move || listener.accept().map(|(s, _)| s));
+        let start = std::time::Instant::now();
+        let err = send(&path, "abc", "0123456789abcdef", Duration::from_millis(200));
+        assert!(err.is_err() && start.elapsed() < Duration::from_secs(2));
+        drop(hold);
+    }
+
+    #[test]
     fn malformed_requests_get_no_reply() {
         let tmp = short_tmp();
         let control = control(tmp.path());
@@ -480,7 +566,7 @@ mod tests {
         switch_ok: bool,
         calls: Calls,
         state_of: fn(&Instance) -> TargetState,
-    ) -> (Attached, Vec<Instance>) {
+    ) -> (Mutex<Mode>, Vec<Instance>) {
         let live = Instance::new("live", "/tmp/live");
         let restart = Instance::new("restart", "/tmp/restart");
         let instances = [&live, &restart]
@@ -498,7 +584,14 @@ mod tests {
             }),
             state_of,
         };
-        (state, vec![live, restart])
+        (Mutex::new(Mode::Attached(state)), vec![live, restart])
+    }
+
+    fn snapshot(mode: &Mutex<Mode>) -> (String, Vec<String>) {
+        match &*mode.lock().unwrap() {
+            Mode::Attached(s) => (s.showing.clone(), s.shown.clone()),
+            Mode::Dashboard => panic!("not attached"),
+        }
     }
 
     fn by_title(i: &Instance) -> TargetState {
@@ -508,33 +601,38 @@ mod tests {
     #[test]
     fn attached_requests_switch_only_aoes_own_client() {
         let calls: Calls = Arc::new(Mutex::new(Vec::new()));
-        let (mut state, insts) = attached(true, calls.clone(), by_title);
+        let (state, insts) = attached(true, calls.clone(), by_title);
         let (live, restart) = (&insts[0], &insts[1]);
         assert_eq!(
-            answer_attached(&mut state, "current"),
+            answer_attached(&state, "current"),
             FocusResult::AlreadyShowing
         );
         assert_eq!(
-            answer_attached(&mut state, "missing"),
+            answer_attached(&state, "missing"),
             FocusResult::UnknownSession
         );
         assert_eq!(
-            answer_attached(&mut state, &restart.id),
+            answer_attached(&state, &restart.id),
             FocusResult::Busy,
             "restart needs the main loop"
         );
         assert!(calls.lock().unwrap().is_empty(), "no switch for refusals");
 
-        assert_eq!(answer_attached(&mut state, &live.id), FocusResult::Accepted);
+        assert_eq!(answer_attached(&state, &live.id), FocusResult::Accepted);
         let expected = (
             "/dev/ttys001".to_string(),
             live.tmux_session().unwrap().name().to_string(),
         );
         assert_eq!(*calls.lock().unwrap(), vec![expected]);
-        assert_eq!(state.showing, live.id);
-        assert_eq!(state.shown, vec!["current".to_string(), live.id.clone()]);
         assert_eq!(
-            answer_attached(&mut state, &live.id),
+            snapshot(&state),
+            (
+                live.id.clone(),
+                vec!["current".to_string(), live.id.clone()]
+            )
+        );
+        assert_eq!(
+            answer_attached(&state, &live.id),
             FocusResult::AlreadyShowing
         );
     }
@@ -542,12 +640,11 @@ mod tests {
     #[test]
     fn a_failed_switch_reports_error_and_keeps_state() {
         let calls: Calls = Arc::new(Mutex::new(Vec::new()));
-        let (mut state, insts) = attached(false, calls, by_title);
+        let (state, insts) = attached(false, calls, by_title);
+        assert_eq!(answer_attached(&state, &insts[0].id), FocusResult::Error);
         assert_eq!(
-            answer_attached(&mut state, &insts[0].id),
-            FocusResult::Error
+            snapshot(&state),
+            ("current".to_string(), vec!["current".to_string()])
         );
-        assert_eq!(state.showing, "current");
-        assert_eq!(state.shown, vec!["current".to_string()]);
     }
 }

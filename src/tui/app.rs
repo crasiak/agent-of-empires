@@ -1199,6 +1199,9 @@ impl App {
                 }
             }
 
+            if let Some(control) = &self.focus_control {
+                control.set_profile(&self.focus_profile());
+            }
             let mut refresh_needed = false;
             // Deterministic signals that bypass the live-send cool-down.
             let mut full = false;
@@ -2753,11 +2756,7 @@ impl App {
             pid: std::process::id(),
             start_id,
             tty,
-            profile: self
-                .home
-                .active_profile
-                .clone()
-                .unwrap_or_else(|| crate::session::tui_control::ALL_PROFILES.to_string()),
+            profile: self.focus_profile(),
             attached_session_id: None,
         };
         let control = focus_requests::Control::new(dir, record);
@@ -2772,6 +2771,13 @@ impl App {
         self.focus_rx = Some(rx);
     }
 
+    fn focus_profile(&self) -> String {
+        self.home
+            .active_profile
+            .clone()
+            .unwrap_or_else(|| crate::session::tui_control::ALL_PROFILES.to_string())
+    }
+
     pub fn remove_focus_control(&mut self) {
         if let Some(control) = self.focus_control.take() {
             control.remove();
@@ -2784,29 +2790,29 @@ impl App {
         incoming: focus_requests::Incoming,
         terminal: &mut Terminal<TuiBackend>,
     ) -> Result<()> {
-        let id = incoming.session_id;
-        let result = if self.home.has_non_live_send_overlay() {
-            FocusResult::Busy
-        } else {
-            match self.home.get_instance(&id).cloned() {
-                None => FocusResult::UnknownSession,
-                Some(instance) => {
-                    let mut state = focus_requests::target_state(&instance);
-                    if state.exists && state.needs_restart && !state.shelved {
-                        state.needs_input = custom_instruction_warning_pending(&instance)
-                            || (instance.is_sandboxed()
-                                && self.home.needs_store_move_before_launch(&id));
-                    }
-                    focus_requests::decide(Some(state))
-                }
-            }
-        };
+        let id = incoming.session_id.clone();
+        let result = self.focus_decision(&id);
         tracing::info!(target: "tui.focus", session_id = %id, ?result, "focus request");
-        let _ = incoming.reply.send(result);
-        if matches!(result, FocusResult::Accepted | FocusResult::Starting) {
+        if incoming.answer(result) {
             self.execute_action(Action::AttachSession(id), terminal)?;
         }
         Ok(())
+    }
+
+    /// The dashboard answer for a focus request; never opens a dialog.
+    fn focus_decision(&mut self, id: &str) -> FocusResult {
+        if self.home.has_non_live_send_overlay() {
+            return FocusResult::Busy;
+        }
+        let Some(instance) = self.home.get_instance(id).cloned() else {
+            return FocusResult::UnknownSession;
+        };
+        let mut state = focus_requests::target_state(&instance);
+        if state.exists && state.needs_restart && !state.shelved {
+            state.needs_input = custom_instruction_warning_pending(&instance)
+                || (instance.is_sandboxed() && self.home.needs_store_move_before_launch(id));
+        }
+        focus_requests::decide(Some(state))
     }
 
     fn enter_focus_attached(&mut self, session_id: &str) {
@@ -2870,7 +2876,11 @@ impl App {
         // Turns that finished during the attach were applied without the
         // live-send exemption; the user just viewed them, including any
         // session a focus request switched to.
-        for id in &shown {
+        for (i, id) in shown.iter().enumerate() {
+            if i > 0 {
+                // The first session's preview sync was cleared before attach.
+                self.home.clear_preview_pane_sync(id);
+            }
             self.home.clear_unread_on_view(id);
             self.home.stamp_last_accessed(id);
         }
@@ -3339,6 +3349,108 @@ mod tests {
             (SigHandler::Handler(f1), SigHandler::Handler(f2)) => f1 as usize == f2 as usize,
             _ => false,
         }
+    }
+
+    fn focus_test_app() -> App {
+        App::new(
+            "test",
+            crate::tmux::AvailableTools::with_tools(&["claude"]),
+            true,
+            false,
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .expect("app")
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn focus_decisions_refuse_without_dialogs() {
+        let temp = tempfile::TempDir::with_prefix_in("aoe-focus-app-", "/tmp").unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let mut app = focus_test_app();
+        assert_eq!(app.focus_decision("missing"), FocusResult::UnknownSession);
+        app.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new("t", "m"));
+        assert_eq!(
+            app.focus_decision("missing"),
+            FocusResult::Busy,
+            "an open dialog wins"
+        );
+        assert!(app.home.info_dialog.is_some());
+        app.home.info_dialog = None;
+        assert!(
+            !app.home.has_non_live_send_overlay(),
+            "decisions open no dialog"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn focus_control_is_skipped_inside_tmux() {
+        let temp = tempfile::TempDir::with_prefix_in("aoe-focus-app-", "/tmp").unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let previous = std::env::var_os("TMUX");
+        // SAFETY: serial test; restored below.
+        unsafe { std::env::set_var("TMUX", "/tmp/fake,1,0") };
+        let mut app = focus_test_app();
+        app.start_focus_control();
+        let skipped = app.focus_control.is_none() && app.focus_rx.is_none();
+        match previous {
+            // SAFETY: serial test restoring the prior value.
+            Some(v) => unsafe { std::env::set_var("TMUX", v) },
+            None => unsafe { std::env::remove_var("TMUX") },
+        }
+        assert!(skipped);
+        assert!(crate::session::tui_control::live_records().is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn attached_focus_bookkeeping_returns_every_shown_session() {
+        let temp = tempfile::TempDir::with_prefix_in("aoe-focus-app-", "/tmp").unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let mut app = focus_test_app();
+        assert_eq!(
+            app.leave_focus_attached("a"),
+            vec!["a".to_string()],
+            "no control: just the attached session"
+        );
+        let dir = crate::session::tui_control::control_dir().unwrap();
+        let control = focus_requests::Control::new(
+            dir,
+            crate::session::tui_control::TuiRecord {
+                protocol: crate::session::tui_control::PROTOCOL,
+                pid: std::process::id(),
+                start_id: crate::session::tui_control::own_start_id().unwrap(),
+                tty: "/dev/ttys042".into(),
+                profile: "test".into(),
+                attached_session_id: None,
+            },
+        );
+        app.focus_control = Some(control.clone());
+        app.enter_focus_attached("a");
+        let published = |want: Option<&str>| {
+            let live = crate::session::tui_control::live_records();
+            assert_eq!(live.len(), 1);
+            assert_eq!(live[0].record.attached_session_id.as_deref(), want);
+        };
+        published(Some("a"));
+        if let focus_requests::Mode::Attached(state) = &mut *control.mode.lock().unwrap() {
+            state.showing = "b".into();
+            state.shown.push("b".into());
+        } else {
+            panic!("not attached");
+        }
+        assert_eq!(
+            app.leave_focus_attached("a"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert!(matches!(
+            *control.mode.lock().unwrap(),
+            focus_requests::Mode::Dashboard
+        ));
+        published(None);
+        app.remove_focus_control();
+        assert!(crate::session::tui_control::live_records().is_empty());
     }
 
     /// A failed replacement must not consume the previous view's draft.
