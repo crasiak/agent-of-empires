@@ -43,6 +43,7 @@ pub(crate) mod sync;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod trash;
+pub mod tui_control;
 pub mod worktree_edit;
 pub mod worktree_reconcile;
 
@@ -781,7 +782,7 @@ pub fn collect_startup_ignored_key_warnings(profile: &str) -> Option<String> {
 // ── TUI presence ────────────────────────────────────────────────────────────
 
 const TUI_PRESENCE_DIR: &str = "tui-presence";
-const TUI_ACTIVITY_DIR: &str = "tui-activity";
+pub(crate) const TUI_ACTIVITY_DIR: &str = "tui-activity";
 
 fn tui_dir(name: &str) -> Option<std::path::PathBuf> {
     get_app_dir().ok().map(|d| d.join(name))

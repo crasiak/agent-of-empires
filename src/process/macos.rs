@@ -1170,3 +1170,10 @@ mod tests {
         assert!(child.0.wait().unwrap().success());
     }
 }
+
+pub(super) fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
+    use std::os::fd::AsRawFd;
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: valid connected socket fd and out-pointers for the call.
+    (unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } == 0).then_some(uid)
+}

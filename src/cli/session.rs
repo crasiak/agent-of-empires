@@ -212,6 +212,10 @@ pub enum SessionCommands {
     /// Attach to session interactively
     Attach(SessionIdArgs),
 
+    /// Ask one running TUI to show a session (dashboard: attach; attached
+    /// elsewhere: switch its own client). Never starts a stopped session
+    Focus(FocusArgs),
+
     /// Show session details
     Show(ShowArgs),
 
@@ -420,6 +424,16 @@ pub struct SetWorktreeNameArgs {
 }
 
 #[derive(Args)]
+pub struct FocusArgs {
+    /// Session ID, unique ID prefix, or title, in any profile
+    identifier: String,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
 pub struct ShowArgs {
     /// Session ID or title (optional, auto-detects in tmux)
     identifier: Option<String>,
@@ -583,6 +597,7 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Stop(args) => stop_session(profile, args).await,
         SessionCommands::Restart(args) => restart_session_dispatch(profile, args).await,
         SessionCommands::Attach(args) => attach_session(profile, args).await,
+        SessionCommands::Focus(args) => focus_session(args),
         SessionCommands::Show(args) => show_session(profile, args).await,
         SessionCommands::Capture(args) => capture_session(profile, args).await,
         SessionCommands::Rename(args) => rename_session(profile, args).await,
@@ -1662,6 +1677,105 @@ async fn attach_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let mut working = inst.clone();
     working.source_profile = profile.to_string();
     supervise_attach_capture(&mut working, |_| tmux_session.attach())
+}
+
+#[derive(serde::Serialize)]
+struct FocusOutput {
+    /// A TUI result, or `no_tui` / `error` decided here.
+    result: String,
+    tui: Option<FocusTui>,
+}
+
+#[derive(serde::Serialize)]
+struct FocusTui {
+    pid: u32,
+    tty: String,
+}
+
+const FOCUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn focus_session(args: FocusArgs) -> Result<()> {
+    let mut found: Vec<(Instance, String)> = Vec::new();
+    let mut ambiguous = false;
+    for profile in crate::session::list_profiles()? {
+        let Ok(storage) = Storage::open_unwatched(&profile) else {
+            continue;
+        };
+        let Ok((instances, _)) = storage.load_with_groups() else {
+            continue;
+        };
+        match super::resolve_session(&args.identifier, &instances) {
+            Ok(inst) => found.push((inst.clone(), profile)),
+            Err(e) if e.to_string().starts_with("Ambiguous") => ambiguous = true,
+            Err(_) => {}
+        }
+    }
+    // A miss or an ambiguous identifier still answers in the closed vocabulary.
+    let output = match (found.len(), ambiguous) {
+        (1, false) => {
+            let (inst, profile) = found.remove(0);
+            focus_output(&inst.id, &profile)
+        }
+        (0, false) => FocusOutput {
+            result: "unknown_session".into(),
+            tui: None,
+        },
+        _ => FocusOutput {
+            result: "error".into(),
+            tui: None,
+        },
+    };
+    if args.json {
+        super::output::print_json(&output)?;
+    } else {
+        println!("{}", output.result);
+    }
+    if !matches!(
+        output.result.as_str(),
+        "accepted" | "already_showing" | "starting"
+    ) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn focus_output(session_id: &str, profile: &str) -> FocusOutput {
+    use crate::session::tui_control;
+    let tuis = tui_control::live_records();
+    let Some(tui) = tui_control::select(&tuis, session_id, profile) else {
+        return FocusOutput {
+            result: "no_tui".into(),
+            tui: None,
+        };
+    };
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let result = tui_control::control_dir()
+        .map_err(|e| std::io::Error::other(e.to_string()))
+        .and_then(|dir| {
+            crate::tui::focus_requests::send(
+                &tui_control::socket_path(&dir, tui.record.pid),
+                session_id,
+                &nonce,
+                FOCUS_TIMEOUT,
+            )
+        });
+    let result = match result {
+        Ok(reply) => serde_json::to_value(reply.result)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "error".into()),
+        Err(e) => {
+            tracing::warn!(target: "cli.session", "focus request failed: {e}");
+            "error".into()
+        }
+    };
+    FocusOutput {
+        result,
+        tui: Some(FocusTui {
+            pid: tui.record.pid,
+            tty: tui.record.tty.clone(),
+        }),
+    }
 }
 
 async fn show_session(profile: &str, args: ShowArgs) -> Result<()> {
@@ -3964,5 +4078,59 @@ mod ledger_run_event_tests {
         assert_eq!(events[0].profile.as_deref(), Some("work"));
         assert_eq!(events[0].agent.as_deref(), Some("claude"));
         assert_eq!(crate::usage::ledger_runs(&events), vec![id.to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+    use crate::session::tui_control::{self, TuiRecord};
+    use crate::tui::focus_requests::{Control, FocusResult};
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn focus_reports_no_tui_when_none_is_registered() {
+        let tmp = tempfile::TempDir::with_prefix_in("aoe-focus-cli-", "/tmp").unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(tmp.path());
+        let out = focus_output("abc123", "p");
+        assert_eq!(out.result, "no_tui");
+        assert!(out.tui.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn focus_selects_the_live_tui_and_relays_its_reply() {
+        let tmp = tempfile::TempDir::with_prefix_in("aoe-focus-cli-", "/tmp").unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(tmp.path());
+        let dir = tui_control::control_dir().unwrap();
+        let control = Control::new(
+            dir,
+            TuiRecord {
+                protocol: tui_control::PROTOCOL,
+                pid: std::process::id(),
+                start_id: tui_control::own_start_id().unwrap(),
+                tty: "/dev/ttys042".into(),
+                profile: "p".into(),
+                attached_session_id: None,
+            },
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        control.listen(tx).unwrap();
+        control.publish(None);
+        let main = std::thread::spawn(move || {
+            let incoming = rx.blocking_recv().unwrap();
+            assert_eq!(incoming.session_id, "abc123");
+            incoming.reply.send(FocusResult::Accepted).unwrap();
+        });
+        let out = focus_output("abc123", "p");
+        main.join().unwrap();
+        assert_eq!(out.result, "accepted");
+        let tui = out.tui.unwrap();
+        assert_eq!(
+            (tui.pid, tui.tty.as_str()),
+            (std::process::id(), "/dev/ttys042")
+        );
+        control.remove();
     }
 }

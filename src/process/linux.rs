@@ -784,6 +784,11 @@ impl super::SleepInhibit for SystemdInhibitor {
     }
 }
 
+pub(super) fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
+    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+    getsockopt(stream, PeerCredentials).ok().map(|c| c.uid())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

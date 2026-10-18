@@ -11,6 +11,7 @@ mod creation_poller;
 mod deletion_poller;
 pub mod dialogs;
 pub mod diff;
+pub(crate) mod focus_requests;
 pub(crate) mod highlight;
 pub(crate) mod home;
 mod host_title;
@@ -342,6 +343,7 @@ pub async fn run(profile: &str, startup_warning: Option<String>) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     let result = app.run(&mut terminal).await;
 
+    app.remove_focus_control();
     crate::session::clear_tui_heartbeat();
 
     // `_terminal_guard` restores the terminal on drop.
