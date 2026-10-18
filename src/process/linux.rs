@@ -784,6 +784,11 @@ impl super::SleepInhibit for SystemdInhibitor {
     }
 }
 
+pub(super) fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
+    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+    getsockopt(stream, PeerCredentials).ok().map(|c| c.uid())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1022,9 +1027,4 @@ full avg10=0.10 avg60=0.20 avg300=0.30 total=42
         assert_eq!(parse_psi_some_avg10(""), None);
         assert_eq!(parse_psi_some_avg10("full avg10=5.0 total=9"), None);
     }
-}
-
-pub(super) fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
-    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
-    getsockopt(stream, PeerCredentials).ok().map(|c| c.uid())
 }
