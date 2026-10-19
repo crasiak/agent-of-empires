@@ -1,6 +1,8 @@
 //! Restartable frozen-v2 import; usage starts uncollected, never as active authority.
 use super::*;
-use crate::session::{afk::schema as cursor, backup_before_migration, AnchoredDir};
+use crate::session::{
+    afk::schema as cursor, anchored_fs::device_number, backup_before_migration, AnchoredDir,
+};
 use delegation::hash;
 use migration_v2 as previous;
 use previous::frozen;
@@ -139,7 +141,7 @@ fn verify_seal(app: &Path, m: &Manifest) -> Result<()> {
     ensure!(
         stat.st_uid == unsafe { libc::geteuid() }
             && stat.st_mode & 0o777 == 0o500
-            && (stat.st_dev as u64, stat.st_ino) == m.root_identity,
+            && (device_number(stat.st_dev), stat.st_ino) == m.root_identity,
         "v2 profile ingress seal changed"
     );
     Ok(())
@@ -424,7 +426,7 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
                 let mut m = Manifest {
                     version: 42,
                     phase: Phase::Started,
-                    root_identity: (dev as u64, ino),
+                    root_identity: (device_number(dev), ino),
                     entries: vec![],
                 };
                 save(&state, &mut m, Phase::Started)?;
@@ -439,7 +441,7 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
     let stat = root.metadata()?;
     ensure!(
         stat.st_uid == unsafe { libc::geteuid() }
-            && (stat.st_dev as u64, stat.st_ino) == m.root_identity
+            && (device_number(stat.st_dev), stat.st_ino) == m.root_identity
             && [0o700, 0o500].contains(&(stat.st_mode & 0o777)),
         "v2 ingress provenance changed"
     );

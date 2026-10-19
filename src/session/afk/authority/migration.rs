@@ -2,7 +2,9 @@
 use super::super::delegation::Book;
 use super::*;
 pub(in crate::session::afk) mod frozen;
-use crate::session::{afk::schema as cursor, backup_before_migration, AnchoredDir};
+use crate::session::{
+    afk::schema as cursor, anchored_fs::device_number, backup_before_migration, AnchoredDir,
+};
 use frozen::{profile_store, Session, Snapshot, NAMESPACE, PROFILE_BYTES};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -180,7 +182,7 @@ fn verify_roots(app: &Path, m: &Manifest) -> Result<()> {
         ensure!(
             stat.st_uid == unsafe { libc::geteuid() }
                 && stat.st_mode & 0o777 == 0o500
-                && stat.st_dev as u64 == recorded.device
+                && device_number(stat.st_dev) == recorded.device
                 && stat.st_ino == recorded.inode,
             "legacy root seal identity/mode changed"
         );
@@ -506,7 +508,7 @@ fn run_locked(app: &Path, store: &Store) -> Result<()> {
                 let stat = root.metadata()?;
                 roots.push(RootSeal {
                     namespace: namespace.into(),
-                    device: stat.st_dev as u64,
+                    device: device_number(stat.st_dev),
                     inode: stat.st_ino,
                     original_mode: 0o700,
                 });
@@ -530,7 +532,7 @@ fn run_locked(app: &Path, store: &Store) -> Result<()> {
         ensure!(
             stat.st_uid == unsafe { libc::geteuid() }
                 && [0o700, 0o500].contains(&(stat.st_mode & 0o777))
-                && stat.st_dev as u64 == recorded.device
+                && device_number(stat.st_dev) == recorded.device
                 && stat.st_ino == recorded.inode,
             "legacy root provenance changed"
         );

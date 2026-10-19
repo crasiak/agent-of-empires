@@ -13,6 +13,11 @@ use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf};
 
+// Preserve the unsigned encoding of native device IDs on signed and unsigned platforms.
+pub(crate) fn device_number(device: libc::dev_t) -> u64 {
+    i128::from(device) as u64
+}
+
 pub(crate) struct AnchoredDir {
     root: PathBuf,
     fd: OwnedFd,

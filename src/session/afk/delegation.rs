@@ -1,6 +1,6 @@
 //! Private, bounded one-cycle delegation ledger. Model claims are not host authority.
 use super::*;
-use crate::session::AnchoredDir;
+use crate::session::{anchored_fs::device_number, AnchoredDir};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
@@ -636,7 +636,7 @@ impl Workspace {
         let workspace = Self {
             root,
             control_root: std::fs::canonicalize(app_dir)?,
-            root_identity: (dev as u64, ino),
+            root_identity: (device_number(dev), ino),
         };
         for target in &grant.files {
             workspace.file(grant, &target.path)?;
@@ -647,7 +647,7 @@ impl Workspace {
         let root = AnchoredDir::open(&self.root)?;
         let (dev, ino) = root.identity()?;
         ensure!(
-            (dev as u64, ino) == self.root_identity,
+            (device_number(dev), ino) == self.root_identity,
             "workspace replaced"
         );
         Ok(root)
