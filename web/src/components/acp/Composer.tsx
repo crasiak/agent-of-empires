@@ -9,7 +9,7 @@ import { AtSign, Paperclip, Pencil, Slash } from "lucide-react";
 import { useFocusTerminalTarget } from "../../hooks/useFocusTerminalTarget";
 import { useMobileKeyboard } from "../../hooks/useMobileKeyboard";
 import { useSkillIndex } from "../../hooks/useSkillIndex";
-import { clearDraft, clearDraftAttachments } from "../../lib/acpDrafts";
+import { clearDraft } from "../../lib/acpDrafts";
 import type { AcpState, PromptAttachmentInput, PromptCapabilities, QueuedPrompt } from "../../lib/acpTypes";
 import { isIOS, isStandalone } from "../../lib/platform";
 import { sessionEntries } from "../../lib/pluginUi";
@@ -59,10 +59,13 @@ import {
   type ComposerClient,
 } from "./useComposerHooks";
 import { useDictationBurstGuard } from "./useDictationBurstGuard";
+import { useProviderSwitch } from "./useProviderSwitch";
 
 interface Props {
   sessionId: string;
   currentAgent: AcpState["agent"];
+  /** Pinned LLM backend, or null when the host environment decides. */
+  currentProvider: string | null;
   availableModes: AcpState["availableModes"];
   currentModeId: AcpState["currentModeId"];
   /** Fallback when the agent advertises no modes. */
@@ -108,6 +111,7 @@ export function Composer(props: Props) {
   const iosPwa = useMemo(() => isIOS() && isStandalone(), []);
   const recall = useQueueRecall(queuedPrompts, client, loadText);
   const canSend = composerText.trim().length > 0 || attachments.supported.length > 0;
+  const provider = useProviderSwitch(sessionId, props.currentAgent, props.currentProvider);
 
   const submitComposer = useCallback(() => {
     const cur = recall.recallRef.current;
@@ -180,6 +184,7 @@ export function Composer(props: Props) {
   return (
     <div className={wrapperLayout.className} style={wrapperLayout.style}>
       <div
+        data-session-composer
         {...tourAnchor(TOUR_ANCHORS.composer)}
         className="mx-auto max-w-3xl xl:max-w-4xl 2xl:max-w-5xl"
         onDragOver={(e) => {
@@ -341,6 +346,10 @@ export function Composer(props: Props) {
                   configOptions={props.configOptions}
                   pendingConfigOption={props.pendingConfigOption}
                   onSetConfigOption={props.setConfigOption}
+                  provider={provider.current}
+                  providerPending={provider.pending}
+                  onSetProvider={provider.set}
+                  providerLockedReason={turnActive ? "Switch providers once the turn finishes" : null}
                 />
                 <AuthStatusHint authStatus={props.authStatus} />
                 <UsageHint usage={props.sessionUsage} />
@@ -482,7 +491,6 @@ function sendFromTextarea(
   void enqueuePrompt(text, attachments.length > 0 ? attachments : undefined);
   client.setText("");
   clearDraft(sessionId);
-  clearDraftAttachments(sessionId);
   clearAttachments();
   if (taRef.current) taRef.current.style.height = "auto";
 }

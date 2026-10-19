@@ -1,12 +1,11 @@
 //! Restartable transition from frozen v1 profiles to current authority.
 use super::*;
-use crate::session::{backup_before_migration, AnchoredDir};
+use crate::session::{afk::schema as cursor, backup_before_migration, AnchoredDir};
 use delegation::hash;
 use migration::frozen as v040;
 pub(in crate::session::afk) mod frozen;
 use self::frozen::{profile_store, Session, Snapshot, NAMESPACE};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
 
 const MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const TOTAL_ORIGINAL_BYTES: usize = 256 * 1024 * 1024;
@@ -146,18 +145,11 @@ fn verify_seal(app: &Path, m: &Manifest) -> Result<()> {
     );
     Ok(())
 }
-fn schema(app: &Path) -> Result<String> {
-    let file = AnchoredDir::open(app)?
-        .open_regular(Path::new(".schema_version"), 16)?
-        .context("missing schema version")?;
-    let mut version = String::new();
-    file.take(17).read_to_string(&mut version)?;
-    Ok(version.trim().to_owned())
-}
 fn ready_manifest(app: &Path, m: &Manifest) -> Result<()> {
     ensure!(
-        schema(app)? == "41" && m.phase == Phase::Complete,
-        "completed migration 41 and schema41 required"
+        cursor::read_cursor(app)? == cursor::BATCHES && m.phase == Phase::Complete,
+        "completed AFK batch import and global schema {} required",
+        cursor::BATCHES
     );
     verify_seal(app, m)
 }
@@ -338,8 +330,13 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
         "migration42 has begun; v041 reconstruction is forbidden"
     );
     ensure!(
-        matches!(schema(app)?.as_str(), "40" | "41"),
-        "migration 41 requires schema40 prerequisite or schema41 replay"
+        matches!(
+            cursor::read_cursor(app)?,
+            cursor::AUTHORITY | cursor::BATCHES
+        ),
+        "AFK batch import requires global schema {} or {}",
+        cursor::AUTHORITY,
+        cursor::BATCHES
     );
     let state = store(app, true)?;
     let _upgrade_lock = state.lock(Duration::from_secs(30))?;
@@ -642,10 +639,10 @@ fn run_locked(app: &Path, state: Store) -> Result<()> {
 pub(crate) fn initialize_test(app: &Path) {
     if !started(app).unwrap() {
         migration::run_at(app).unwrap();
-        std::fs::write(app.join(".schema_version"), "40").unwrap();
+        std::fs::write(app.join(".schema_version"), cursor::AUTHORITY.to_string()).unwrap();
     }
     run_at(app).unwrap();
-    std::fs::write(app.join(".schema_version"), "41").unwrap();
+    std::fs::write(app.join(".schema_version"), cursor::BATCHES.to_string()).unwrap();
 }
 #[cfg(test)]
 pub(super) mod golden;

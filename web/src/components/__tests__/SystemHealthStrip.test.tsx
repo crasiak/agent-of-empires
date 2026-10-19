@@ -261,6 +261,9 @@ describe("SidebarSystemHealth", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(mockFetch.mock.calls.length).toBe(callsWithOneInFlight + 1);
+    await act(async () => {
+      settle(health());
+    });
   });
 
   it("stops polling while the tab is hidden and refreshes on return", async () => {
@@ -295,5 +298,6 @@ describe("SidebarSystemHealth", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(mockFetch.mock.calls.length).toBeGreaterThan(callsWhileHidden);
+    hidden.mockRestore();
   });
 });

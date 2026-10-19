@@ -7,6 +7,8 @@ import { useRef, useState } from "react";
 import { invokePluginAction, type PluginUiEntry } from "../../lib/api";
 import { usePluginUiEntries, usePluginUiPoke } from "../../lib/pluginUiContext";
 import {
+  byOrder,
+  chipEntries,
   entryText,
   entryTone,
   globalEntries,
@@ -17,7 +19,7 @@ import {
   toneTextClass,
 } from "../../lib/pluginUi";
 import { PluginPaneBody } from "./PluginPane";
-import { BadgeChip, Spinner } from "./SlotChrome";
+import { BadgeChip, BadgeItems, Spinner } from "./SlotChrome";
 import { objectList, renderIcon } from "./slotPayload";
 
 export interface ComposerActionSnapshot {
@@ -28,24 +30,28 @@ export interface ComposerActionSnapshot {
 
 const entryKey = (e: PluginUiEntry) => `${e.plugin_id}:${e.id}`;
 
+/** An entry is a single badge or an `items` list; `items: []` clears it. */
 function EntryBadge({ entry }: { entry: PluginUiEntry }) {
-  return <BadgeChip item={entry.payload} slot={entry.slot} pluginId={entry.plugin_id} />;
+  const items = objectList(entry.payload, "items");
+  return items ? (
+    <BadgeItems items={items} slot={entry.slot} pluginId={entry.plugin_id} />
+  ) : (
+    <BadgeChip item={entry.payload} slot={entry.slot} pluginId={entry.plugin_id} />
+  );
 }
 
 export function PluginStatusBarSegments() {
-  return globalEntries(usePluginUiEntries(), "status-bar").map((e) => <EntryBadge key={entryKey(e)} entry={e} />);
+  return chipEntries(usePluginUiEntries(), "status-bar").map((e) => <EntryBadge key={entryKey(e)} entry={e} />);
 }
 
-/** An entry is a single badge or an `items` list; `items: []` clears the row. */
+export function PluginHeaderStartSegments() {
+  return chipEntries(usePluginUiEntries(), "header-start").map((e) => <EntryBadge key={entryKey(e)} entry={e} />);
+}
+
 export function PluginRowBadges({ sessionId }: { sessionId: string }) {
-  return sessionEntries(usePluginUiEntries(), "row-badge", sessionId).map((e) => {
-    const items = objectList(e.payload, "items");
-    return items ? (
-      items.map((it, i) => <BadgeChip key={`${entryKey(e)}:${i}`} item={it} slot="row-badge" pluginId={e.plugin_id} />)
-    ) : (
-      <EntryBadge key={entryKey(e)} entry={e} />
-    );
-  });
+  return sessionEntries(usePluginUiEntries(), "row-badge", sessionId).map((e) => (
+    <EntryBadge key={entryKey(e)} entry={e} />
+  ));
 }
 
 export function PluginRowColumn({ sessionId }: { sessionId: string }) {
@@ -137,7 +143,7 @@ export function PluginHomePanes() {
 }
 
 export function PluginDetailBadges({ sessionId }: { sessionId: string }) {
-  const entries = sessionEntries(usePluginUiEntries(), "detail-badge", sessionId);
+  const entries = byOrder(sessionEntries(usePluginUiEntries(), "detail-badge", sessionId));
   if (entries.length === 0) return null;
   return (
     <div className="flex flex-wrap items-center gap-1.5" data-testid="plugin-detail-badges">

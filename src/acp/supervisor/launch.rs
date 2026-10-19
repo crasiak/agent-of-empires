@@ -10,7 +10,7 @@ use super::agents::{
     apply_agent_command_override, log_wrapper_substitution, wrapper_substitution_for,
 };
 use super::publish::collect_resumable_background_agent_launches;
-use super::teardown::tear_down_runner;
+use super::teardown::{release_scope, tear_down_runner};
 use super::{
     lock_recover, BroadcastSink, PendingContextReset, ResumeKind, ResumeReservation,
     ResumeReservationOutcome, SpawnRequest, Supervisor, SupervisorError, WorkerHandle, WorkerKind,
@@ -25,9 +25,13 @@ use crate::session::SandboxInfo;
 
 impl<S: BroadcastSink> Supervisor<S> {
     /// Spawn a structured view worker for the given session.
-    pub async fn spawn(&self, req: SpawnRequest) -> Result<(), SupervisorError> {
+    pub async fn spawn(
+        &self,
+        req: SpawnRequest,
+        authority: crate::process::worker_registry::ResumeAuthority,
+    ) -> Result<(), SupervisorError> {
         match self
-            .begin_resume(&req.session_id, ResumeKind::Spawn)
+            .begin_resume(&req.session_id, ResumeKind::Spawn, authority)
             .await?
         {
             ResumeReservationOutcome::Reserved(r) => self.spawn_inner(req, r).await,
@@ -43,10 +47,18 @@ impl<S: BroadcastSink> Supervisor<S> {
         &self,
         session_id: &str,
         kind: ResumeKind,
+        authority: crate::process::worker_registry::ResumeAuthority,
     ) -> Result<ResumeReservationOutcome, SupervisorError> {
-        // Held so a concurrent shutdown observes the lease or its absence, never a torn state.
+        let observed_stop = worker_registry::stop_intent(session_id)
+            .map_err(|error| SupervisorError::Acp(AcpError::Spawn(error.to_string())))?;
+        // Hold the worker gate while claiming the matching durable stop token.
         let _workers = self.workers.lock().await;
+        worker_registry::admit_resume(session_id, authority, &observed_stop)
+            .map_err(|error| SupervisorError::Acp(AcpError::Spawn(error.to_string())))?;
         let mut table = lock_recover(&self.lifecycle);
+        if authority == crate::process::worker_registry::ResumeAuthority::Explicit {
+            table.forget_stale_cancel(session_id);
+        }
         let lease = match table.admit(session_id, kind) {
             Ok(lease) => lease,
             Err(AdmitError::AlreadyPresent) => return Ok(ResumeReservationOutcome::AlreadyPresent),
@@ -150,9 +162,17 @@ impl<S: BroadcastSink> Supervisor<S> {
         let inbound = client
             .take_inbound()
             .expect("freshly spawned AcpClient always has inbound receiver");
-        let identity = client.runner_pid().map(|pid| RunnerIdentity {
-            pid,
-            generation: lease.epoch(),
+        let identity = client.runner_pid().map(|pid| {
+            worker_registry::load(session_id)
+                .ok()
+                .flatten()
+                .filter(|record| record.pid == pid && record.generation == lease.epoch())
+                .map(|record| RunnerIdentity::from_record(&record))
+                .unwrap_or(RunnerIdentity {
+                    pid,
+                    generation: lease.epoch(),
+                    birth_fingerprint: None,
+                })
         });
         let kind = WorkerKind::Runner {
             spawn_config: Box::new(config),
@@ -238,33 +258,18 @@ impl<S: BroadcastSink> Supervisor<S> {
             req.effort.clone(),
         );
 
-        let mut base_host_environment = Vec::new();
-        let mut host_environment = Vec::new();
-        if req.sandbox_info.is_none() {
-            // Trusted global/profile configuration; repo overrides cannot contribute it.
-            base_host_environment = crate::session::environment::resolve_host_environment_pairs(
-                &resolved_cfg.environment,
-            );
-            host_environment = base_host_environment.clone();
-            if !resolved_cfg.host_hooks.before_session.is_empty() {
-                let minted = before_session_env(
-                    &req.session_id,
-                    &req.tool,
-                    req.source_profile.clone().unwrap_or_default(),
-                    req.cwd.clone(),
-                )
-                .await
-                .map_err(|e| {
-                    SupervisorError::InvalidAgentCommand(format!(
-                        "before_session hook task failed: {e}"
-                    ))
-                })?
-                .map_err(|e| {
-                    SupervisorError::Acp(AcpError::Spawn(format!("before_session hook: {e}")))
-                })?;
-                overlay_env(&mut host_environment, minted);
-            }
-        }
+        let (base_host_environment, mut host_environment) = if req.sandbox_info.is_none() {
+            host_spawn_environment(
+                &resolved_cfg,
+                &req.session_id,
+                &req.tool,
+                req.source_profile.clone().unwrap_or_default(),
+                req.cwd.clone(),
+            )
+            .await?
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
         let claude_store_pin = req.claude_store_pin.clone().filter(|_| {
             req.sandbox_info.is_none() && matches!(req.agent.as_str(), "claude" | "claude-code")
@@ -373,6 +378,11 @@ impl<S: BroadcastSink> Supervisor<S> {
                 wrapper_substitution,
                 generation,
                 claude_store_pin,
+                provider_routing: req
+                    .provider
+                    .as_deref()
+                    .and_then(crate::session::environment::provider_override_env)
+                    .unwrap_or_default(),
             },
             context_reset,
         ))
@@ -393,7 +403,16 @@ impl<S: BroadcastSink> Supervisor<S> {
         let lease = reservation.lease().clone();
         let client = Arc::new(client);
         let mut workers = self.workers.lock().await;
-        let install = lock_recover(&self.lifecycle).install(&lease, identity);
+        if worker_registry::stop_requested(session_id) {
+            lock_recover(&self.lifecycle).begin_stop(session_id, "user_stopped");
+        }
+        let mut install = lock_recover(&self.lifecycle).install(&lease, identity);
+        if install.is_ok() && worker_registry::stop_requested(session_id) {
+            lock_recover(&self.lifecycle).begin_stop(session_id, "user_stopped");
+            install = Err(InstallError::Cancelled {
+                reason: "user_stopped".into(),
+            });
+        }
         if let Err(refusal) = install {
             drop(workers);
             let _ = client.shutdown().await;
@@ -457,24 +476,34 @@ impl<S: BroadcastSink> Supervisor<S> {
         Ok(client)
     }
 
-    /// Retire a runner a failed spawn left behind under this lease's generation.
+    /// Retire a runner a failed spawn left behind under this lease's generation
+    /// and release the scope it created, while the lease still holds the
+    /// session. A first launch has no previous runner to keep. Under a pending
+    /// stop the scope is released even when no runner of this generation exists.
     async fn reap_failed_launch(&self, lease: &Lease) {
         let session_id = lease.session_id();
-        let Ok(Some(record)) = worker_registry::load(session_id) else {
-            return;
+        let identity = worker_registry::load(session_id)
+            .ok()
+            .flatten()
+            .filter(|record| record.generation == lease.epoch())
+            .map(|record| RunnerIdentity::from_record(&record));
+        // One lock: a stop landing after the conversion sees `AlreadyStopping`,
+        // so the pending-stop check must be read in the same critical section.
+        let (stop_pending, converted) = {
+            let mut table = lock_recover(&self.lifecycle);
+            let stop_pending = table.cancel_requested(lease).is_some();
+            let converted = identity.is_some() && table.convert_to_stopping(lease);
+            if converted {
+                table.owe_sweep(lease);
+            }
+            (stop_pending, converted)
         };
-        if record.generation != lease.epoch() {
-            return;
+        if converted {
+            let settlement = tear_down_runner(&*self.process_control, session_id, identity).await;
+            self.settle_sweeping_if_owed(lease, settlement).await;
+        } else if stop_pending {
+            release_scope(&self.process_control, session_id).await;
         }
-        let identity = RunnerIdentity {
-            pid: record.pid,
-            generation: record.generation,
-        };
-        if !lock_recover(&self.lifecycle).convert_to_stopping(lease) {
-            return;
-        }
-        let settlement = tear_down_runner(&*self.process_control, session_id, Some(identity)).await;
-        self.settle(lease, settlement);
     }
 
     /// Tear down a built worker whose install the lifecycle table refused.
@@ -494,7 +523,9 @@ impl<S: BroadcastSink> Supervisor<S> {
                     %reason,
                     "resume cancelled by a concurrent shutdown; runner torn down"
                 );
-                self.settle(lease, settlement);
+                // The refused install left this lease stopping and owing the
+                // sweep, which holds off a replacement start until the settle.
+                self.settle_sweeping_if_owed(lease, settlement).await;
                 self.publish_next(session_id, &Event::Stopped { reason });
             }
             InstallError::Stale => {
@@ -518,7 +549,14 @@ impl<S: BroadcastSink> Supervisor<S> {
         in_flight_turn: bool,
         sandbox: Option<SandboxInfo>,
     ) -> Result<(), SupervisorError> {
-        match self.begin_resume(&session_id, ResumeKind::Attach).await? {
+        match self
+            .begin_resume(
+                &session_id,
+                ResumeKind::Attach,
+                crate::process::worker_registry::ResumeAuthority::Automatic,
+            )
+            .await?
+        {
             ResumeReservationOutcome::Reserved(r) => {
                 self.attach_inner(session_id, cwd, additional_dirs, in_flight_turn, sandbox, r)
                     .await
@@ -545,10 +583,7 @@ impl<S: BroadcastSink> Supervisor<S> {
             Some(r) if worker_registry::is_record_live(&r) => r,
             _ => return Err(SupervisorError::UnknownSession(session_id)),
         };
-        let identity = RunnerIdentity {
-            pid: record.pid,
-            generation: record.generation,
-        };
+        let identity = RunnerIdentity::from_record(&record);
         lock_recover(&self.lifecycle).note_generation(&session_id, record.generation);
 
         let agent_key = if record.agent_key.is_empty() {
@@ -571,14 +606,14 @@ impl<S: BroadcastSink> Supervisor<S> {
                  permits; terminating it instead of reattaching"
             );
             let id = session_id.clone();
-            if let Err(e) =
-                tokio::task::spawn_blocking(move || worker_registry::terminate(&id)).await
-            {
+            if !matches!(
+                tokio::task::spawn_blocking(move || worker_registry::terminate(&id)).await,
+                Ok(Ok(()))
+            ) {
                 warn!(
                     target: "acp.supervisor",
                     session = %session_id,
-                    "terminate task for a disallowed worker failed: {e}; the next \
-                     reconciler tick retries"
+                    "disallowed worker termination remains unproven; the next reconciler tick retries"
                 );
             }
             return Err(SupervisorError::AgentNotAllowed(agent_key));
@@ -613,7 +648,11 @@ impl<S: BroadcastSink> Supervisor<S> {
         let context_reset = if sandbox.as_ref().is_some_and(|info| info.enabled) {
             let profile = record.source_profile.clone().unwrap_or_default();
             let id = session_id.clone();
-            let native_agent = crate::acp::agent_profiles::resolve(&agent_key).native_config_agent;
+            let native_agent = if record.prime_runtime.is_some() {
+                Some("prime-agent")
+            } else {
+                crate::acp::agent_profiles::resolve(&agent_key).native_config_agent
+            };
             let generation = reservation.lease().epoch();
             let context = tokio::task::spawn_blocking(move || {
                 crate::migrations::v033_isolate_sandbox_content::prepare_acp_context(
@@ -752,6 +791,33 @@ async fn admit_durable_launch(req: &SpawnRequest) -> Result<(), SupervisorError>
     })
     .await
     .map_err(|e| SupervisorError::Acp(AcpError::Spawn(format!("launch admission task: {e}"))))?
+}
+
+/// Unsandboxed host environment as `(base, host)`: trusted global/profile `[environment]` pairs
+/// (repo overrides cannot contribute them), then `host` overlays the before_session hook output.
+pub(crate) async fn host_spawn_environment(
+    cfg: &crate::session::Config,
+    session_id: &str,
+    tool: &str,
+    profile: String,
+    cwd: PathBuf,
+) -> Result<(Vec<(String, String)>, Vec<(String, String)>), SupervisorError> {
+    let base = crate::session::environment::resolve_host_environment_pairs(&cfg.environment);
+    let mut host = base.clone();
+    if !cfg.host_hooks.before_session.is_empty() {
+        let minted = before_session_env(session_id, tool, profile, cwd)
+            .await
+            .map_err(|e| {
+                SupervisorError::InvalidAgentCommand(format!(
+                    "before_session hook task failed: {e}"
+                ))
+            })?
+            .map_err(|e| {
+                SupervisorError::Acp(AcpError::Spawn(format!("before_session hook: {e}")))
+            })?;
+        overlay_env(&mut host, minted);
+    }
+    Ok((base, host))
 }
 
 /// Run the profile's `before_session` host hooks and return the env they mint.
@@ -925,6 +991,27 @@ mod tests {
                 _ => "unknown",
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn host_spawn_environment_forwards_configured_pairs() {
+        let cfg = crate::session::Config {
+            environment: vec![
+                "PI_CODING_AGENT_DIR=/stores/pi".into(),
+                "PI_ACP_PI_COMMAND=pi-wrapper".into(),
+            ],
+            ..Default::default()
+        };
+        let (base, host) =
+            host_spawn_environment(&cfg, "s", "pi", String::new(), PathBuf::from("/"))
+                .await
+                .unwrap();
+        let expected = vec![
+            ("PI_CODING_AGENT_DIR".to_string(), "/stores/pi".to_string()),
+            ("PI_ACP_PI_COMMAND".to_string(), "pi-wrapper".to_string()),
+        ];
+        assert_eq!(base, expected);
+        assert_eq!(host, expected);
     }
 
     #[tokio::test]
@@ -1159,7 +1246,13 @@ mod tests {
 
         let spawner = {
             let sup = Arc::clone(&sup);
-            tokio::spawn(async move { sup.spawn(req).await })
+            tokio::spawn(async move {
+                sup.spawn(
+                    req,
+                    crate::process::worker_registry::ResumeAuthority::Explicit,
+                )
+                .await
+            })
         };
         gate.entered.notified().await;
         gate.open.notify_one();
@@ -1208,7 +1301,13 @@ mod tests {
         req.source_profile = Some(inst.source_profile.clone());
         let spawner = {
             let sup = Arc::clone(&sup);
-            tokio::spawn(async move { sup.spawn(req).await })
+            tokio::spawn(async move {
+                sup.spawn(
+                    req,
+                    crate::process::worker_registry::ResumeAuthority::Explicit,
+                )
+                .await
+            })
         };
         gate.entered.notified().await;
 
@@ -1250,13 +1349,21 @@ mod tests {
         let mut req = spawn_request("s-1");
         req.agent = "no-such-agent".into();
         assert!(matches!(
-            sup.spawn(req).await,
+            sup.spawn(
+                req,
+                crate::process::worker_registry::ResumeAuthority::Explicit
+            )
+            .await,
             Err(SupervisorError::UnknownAgent(_))
         ));
 
         sup.test_insert_worker("s-1").await;
         assert!(matches!(
-            sup.spawn(spawn_request("s-1")).await,
+            sup.spawn(
+                spawn_request("s-1"),
+                crate::process::worker_registry::ResumeAuthority::Explicit
+            )
+            .await,
             Err(SupervisorError::AlreadyRunning(_))
         ));
     }
@@ -1268,7 +1375,13 @@ mod tests {
 
         let sup = Supervisor::with_capacity(VecSink::new(), 1);
         sup.test_insert_worker("s-1").await;
-        match sup.spawn(spawn_request("s-2")).await {
+        match sup
+            .spawn(
+                spawn_request("s-2"),
+                crate::process::worker_registry::ResumeAuthority::Explicit,
+            )
+            .await
+        {
             Err(SupervisorError::CapacityFull { current, limit }) => {
                 assert_eq!((current, limit), (1, 1));
             }
@@ -1283,7 +1396,13 @@ mod tests {
         let record = worker_record("detached-1", std::process::id(), socket);
         worker_registry::save(&record).unwrap();
         assert!(worker_registry::is_record_live(&record));
-        match sup.spawn(spawn_request("fresh")).await {
+        match sup
+            .spawn(
+                spawn_request("fresh"),
+                crate::process::worker_registry::ResumeAuthority::Explicit,
+            )
+            .await
+        {
             Err(SupervisorError::CapacityFull { current, limit }) => {
                 assert_eq!(
                     (current, limit),
@@ -1296,10 +1415,38 @@ mod tests {
         worker_registry::delete("detached-1").unwrap();
 
         let sup = Supervisor::with_capacity(VecSink::new(), 2);
-        let _a = reserve(sup.begin_resume("s-a", ResumeKind::Spawn).await);
-        let _attach = reserve(sup.begin_resume("s-attach", ResumeKind::Attach).await);
-        let _b = reserve(sup.begin_resume("s-b", ResumeKind::Spawn).await);
-        match sup.begin_resume("s-c", ResumeKind::Spawn).await {
+        let _a = reserve(
+            sup.begin_resume(
+                "s-a",
+                ResumeKind::Spawn,
+                crate::process::worker_registry::ResumeAuthority::Automatic,
+            )
+            .await,
+        );
+        let _attach = reserve(
+            sup.begin_resume(
+                "s-attach",
+                ResumeKind::Attach,
+                crate::process::worker_registry::ResumeAuthority::Automatic,
+            )
+            .await,
+        );
+        let _b = reserve(
+            sup.begin_resume(
+                "s-b",
+                ResumeKind::Spawn,
+                crate::process::worker_registry::ResumeAuthority::Automatic,
+            )
+            .await,
+        );
+        match sup
+            .begin_resume(
+                "s-c",
+                ResumeKind::Spawn,
+                crate::process::worker_registry::ResumeAuthority::Automatic,
+            )
+            .await
+        {
             Err(SupervisorError::CapacityFull { current, limit }) => {
                 assert_eq!(
                     (current, limit),
@@ -1457,7 +1604,12 @@ mod tests {
             .with_process_control(control)
             .with_launcher(launcher);
         sup.hydrate_seqs(store.all_session_seqs());
-        sup.spawn(spawn_request("s-startup")).await.unwrap();
+        sup.spawn(
+            spawn_request("s-startup"),
+            crate::process::worker_registry::ResumeAuthority::Explicit,
+        )
+        .await
+        .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while !store
                 .unresolved_approval_nonces("s-startup")
@@ -1540,7 +1692,12 @@ mod tests {
             .with_process_control(control)
             .with_launcher(launcher);
         sup.hydrate_seqs(store.all_session_seqs());
-        sup.spawn(spawn_request("s-startup")).await.unwrap();
+        sup.spawn(
+            spawn_request("s-startup"),
+            crate::process::worker_registry::ResumeAuthority::Explicit,
+        )
+        .await
+        .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while !store
                 .unresolved_background_agent_ids("s-startup")

@@ -14,7 +14,7 @@ mod tests {
     #[serial_test::serial]
     fn preserves_legacy_evidence_without_enrollment() {
         let _home = crate::session::test_support::isolate_app_dir();
-        super::super::v036_afk_control::run().unwrap();
+        super::super::v042_afk_control::run().unwrap();
         let app = crate::session::get_app_dir().unwrap();
         std::fs::write(app.join("afk/evidence"), b"legacy").unwrap();
         super::run().unwrap();

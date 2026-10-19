@@ -33,3 +33,4 @@ pub mod tui;
 pub mod update;
 pub mod usage;
 mod util;
+mod yaml;

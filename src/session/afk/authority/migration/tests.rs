@@ -115,11 +115,23 @@ fn every_phase_resumes_with_exact_originals_stable_legacy_handles_and_question_r
             ],
             lock_inodes
         );
-        std::fs::write(app.path().join(".schema_version"), "40").unwrap();
+        std::fs::write(
+            app.path().join(".schema_version"),
+            cursor::AUTHORITY.to_string(),
+        )
+        .unwrap();
         super::super::migration_v2::run_at(app.path()).unwrap();
-        std::fs::write(app.path().join(".schema_version"), "41").unwrap();
+        std::fs::write(
+            app.path().join(".schema_version"),
+            cursor::BATCHES.to_string(),
+        )
+        .unwrap();
         super::super::migration_v3::run_at(app.path()).unwrap();
-        std::fs::write(app.path().join(".schema_version"), "42").unwrap();
+        std::fs::write(
+            app.path().join(".schema_version"),
+            cursor::USAGE.to_string(),
+        )
+        .unwrap();
         let authority = Store::authority(app.path(), "alpha", "test", false).unwrap();
         let mut expected = book.clone();
         expected["windows"][0]["state"] = json!("ended");
@@ -210,11 +222,23 @@ fn legacy_evidence_has_exact_ownership_without_protocol_promotion_or_empty_defau
         .unwrap();
     assert_eq!(associated.profiles, ["alpha"]);
     assert_eq!(unassigned(app.path()).unwrap()[0].instance, "unassigned");
-    std::fs::write(app.path().join(".schema_version"), "40").unwrap();
+    std::fs::write(
+        app.path().join(".schema_version"),
+        cursor::AUTHORITY.to_string(),
+    )
+    .unwrap();
     super::super::migration_v2::run_at(app.path()).unwrap();
-    std::fs::write(app.path().join(".schema_version"), "41").unwrap();
+    std::fs::write(
+        app.path().join(".schema_version"),
+        cursor::BATCHES.to_string(),
+    )
+    .unwrap();
     super::super::migration_v3::run_at(app.path()).unwrap();
-    std::fs::write(app.path().join(".schema_version"), "42").unwrap();
+    std::fs::write(
+        app.path().join(".schema_version"),
+        cursor::USAGE.to_string(),
+    )
+    .unwrap();
     let beta = Store::authority(app.path(), "beta", "test", false)
         .unwrap()
         .session()
@@ -315,11 +339,23 @@ fn concurrent_migration_attempts_serialize_and_missing_imports_cannot_be_recreat
     for peer in peers {
         peer.join().unwrap();
     }
-    std::fs::write(app.path().join(".schema_version"), "40").unwrap();
+    std::fs::write(
+        app.path().join(".schema_version"),
+        cursor::AUTHORITY.to_string(),
+    )
+    .unwrap();
     super::super::migration_v2::run_at(app.path()).unwrap();
-    std::fs::write(app.path().join(".schema_version"), "41").unwrap();
+    std::fs::write(
+        app.path().join(".schema_version"),
+        cursor::BATCHES.to_string(),
+    )
+    .unwrap();
     super::super::migration_v3::run_at(app.path()).unwrap();
-    std::fs::write(app.path().join(".schema_version"), "42").unwrap();
+    std::fs::write(
+        app.path().join(".schema_version"),
+        cursor::USAGE.to_string(),
+    )
+    .unwrap();
     let store = super::super::profile_store(app.path(), "alpha", false).unwrap();
     let original = store.bytes("snapshot.json").unwrap().unwrap();
     for missing in ["session", "evidence"] {

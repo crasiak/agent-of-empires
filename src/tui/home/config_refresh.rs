@@ -23,11 +23,7 @@ impl HomeView {
     pub(in crate::tui) fn refresh_from_config(&mut self, origin: ConfigRefreshOrigin) {
         let profile = self.config_profile();
         let config = resolve_config_or_warn(&profile);
-        // The lenient resolver returns defaults when only the profile is malformed.
-        let sidebar_position = crate::session::Config::load_or_warn()
-            .session
-            .sidebar_position;
-        self.apply_config_to_state(config, sidebar_position, origin);
+        self.apply_config_to_state(config, origin);
     }
 
     /// Strict counterpart of `refresh_from_config`: a parse error keeps the previous state
@@ -40,8 +36,7 @@ impl HomeView {
         self.maybe_export_watcher_refresh_count(new_count);
         let profile = self.config_profile();
         let config = crate::session::resolve_config(&profile)?;
-        let sidebar_position = config.session.sidebar_position;
-        self.apply_config_to_state(config, sidebar_position, ConfigRefreshOrigin::Watcher);
+        self.apply_config_to_state(config, ConfigRefreshOrigin::Watcher);
         Ok(())
     }
 
@@ -49,7 +44,6 @@ impl HomeView {
     fn apply_config_to_state(
         &mut self,
         config: crate::session::Config,
-        sidebar_position: crate::session::config::SidebarPosition,
         origin: ConfigRefreshOrigin,
     ) {
         self.default_terminal_mode = match config.sandbox.default_terminal_mode {
@@ -64,12 +58,17 @@ impl HomeView {
         self.host_tab_title = config.session.host_tab_title;
         self.row_tag_mode = config.session.row_tag;
         self.show_session_colors = config.session.show_session_colors;
+        if self.repo_appearances != config.app_state.repo_appearances {
+            self.repo_appearances = config.app_state.repo_appearances.clone();
+            self.rebuild_flat_items_keeping_cursor();
+        }
         self.show_activity_age = config.session.show_activity_age;
-        self.set_sidebar_position(sidebar_position);
+        self.set_sidebar_position(config.session.sidebar_position);
         self.show_diagnostics = config.session.show_diagnostics_pane;
         self.show_usage_overlay = config.session.show_usage_overlay;
         self.show_ledger_overlay = config.session.show_ledger_overlay;
         self.show_headroom_overlay = config.session.show_headroom_overlay;
+        self.show_shortcut_bar = config.session.show_shortcut_bar;
         self.daemon_sidebar = config.session.daemon_sidebar;
         if !self.daemon_sidebar {
             self.set_sidebar_source(
@@ -92,6 +91,7 @@ impl HomeView {
         crate::session::set_unread_enabled(config.session.unread_indicator);
         crate::session::set_favorites_first(config.session.favorites_first);
         self.tips_unseen = tips_unseen_count(&config);
+        self.queue_shortcut_bar_tip(&config);
         self.tool_configs = config.tools;
         self.tool_hotkey_cache = input::build_tool_hotkey_cache(&self.tool_configs);
         let hotkey_warnings = input::validate_tool_hotkeys(&self.tool_configs);

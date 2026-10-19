@@ -1,5 +1,6 @@
 //! Operator claims only. This namespace never publishes execution authority.
 use super::*;
+use crate::session::afk::schema as cursor;
 use std::collections::BTreeSet;
 
 const NAMESPACE: &str = "afk-review-v1";
@@ -134,14 +135,16 @@ fn index_at(store: &Store, budget: &mut usize) -> Result<Index> {
 }
 
 pub(crate) fn initialize(app: &Path) -> Result<()> {
-    let schema = authority::migration_v3::schema(app)?;
+    let schema = cursor::read_cursor(app)?;
     ensure!(
-        matches!(schema.as_str(), "42" | "43"),
-        "review migration requires schema42 or schema43"
+        matches!(schema, cursor::USAGE | cursor::REVIEW),
+        "review migration requires global schema {} or {}",
+        cursor::USAGE,
+        cursor::REVIEW
     );
     authority::ready(app)?;
-    let store = namespace(app, schema == "42")?;
-    let _lock = if schema == "42" {
+    let store = namespace(app, schema == cursor::USAGE)?;
+    let _lock = if schema == cursor::USAGE {
         store.lock(TIMEOUT)?
     } else {
         store.lock_existing(TIMEOUT)?
@@ -150,7 +153,7 @@ pub(crate) fn initialize(app: &Path) -> Result<()> {
         index_at(&store, &mut { INDEX_BYTES })?;
     } else {
         ensure!(
-            schema == "42",
+            schema == cursor::USAGE,
             "missing review index; explicit repair required"
         );
         store.write_exclusive(
@@ -162,14 +165,15 @@ pub(crate) fn initialize(app: &Path) -> Result<()> {
         )?;
     }
     store.dir.sync()?;
-    tracing::info!("Migration 43 initialized separate private AFK operator annotations");
+    tracing::info!("Initialized separate private AFK operator annotations");
     Ok(())
 }
 
 pub(super) fn read_index(app: &Path, budget: &mut usize) -> Result<(Store, Index)> {
     ensure!(
-        authority::migration_v3::schema(app)? == "43",
-        "review annotations require migration43; run aoe migrate explicitly"
+        cursor::read_cursor(app)? == cursor::REVIEW,
+        "review annotations require global schema {}; run aoe migrate explicitly",
+        cursor::REVIEW
     );
     let store = namespace(app, false)?;
     let index = index_at(&store, budget)?;
@@ -312,8 +316,9 @@ pub(in crate::session::afk) fn append_at(
     let store = namespace(app, false)?;
     let _lock = store.lock_existing(TIMEOUT)?;
     ensure!(
-        authority::migration_v3::schema(app)? == "43",
-        "annotation writes require migration43"
+        cursor::read_cursor(app)? == cursor::REVIEW,
+        "annotation writes require global schema {}",
+        cursor::REVIEW
     );
     let mut index = index_at(&store, &mut budget)?;
     let selection = &request.target.selection;

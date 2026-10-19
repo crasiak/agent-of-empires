@@ -117,7 +117,7 @@ Reads allow32 MiB per profile authority and64 MiB total input; formatted exports
 allow8 MiB. Capacity failures are explicit, not truncation. Review/export do not
 run startup migration. Missing/unmigrated storage stays unavailable; export also
 requires the app directory to exist to verify its exclusion boundary. Intentionally
-migrate the selected isolated namespace separately when needed. Schema43 adds only
+migrate the selected isolated namespace separately when needed. Schema49 adds only
 the separate review store, not new execution authority.
 
 TUI `n`, `c` and `v` open note, correction and reviewed-claim editors. Enter appends
@@ -738,13 +738,26 @@ durability returns a publication warning, not a failed activation; restart may
 restore only a veto. Preserve these diagnostics and never delete a journal to
 force activation.
 
+This line supports fresh app namespaces and ordinary main-line upgrades. Main's
+published migrations 1 through 41 retain their meanings; AFK uses global steps
+42 through 49. Old AFK development stores from the divergent 36 through 43 line
+are not automatically converted. Intact incompatible layouts are refused before
+migration bodies or schema publication; acquiring the runner lock may create its
+lock file. Ordinary data is assumed to have main-line provenance, not to be a
+development store whose identifying files were removed.
+
+Use fresh private state for integrated-build testing. Keep old development data
+with its frozen reader and stop old writers before inspection. Do not relabel,
+remove or lower `.schema_version` to bypass refusal. A development-store conversion
+requires a separately qualified procedure.
+
 Run `aoe migrate` normally in the selected app namespace before launching the new
 integration. The early bridge refuses older, incomplete or corrupt authority
 rather than running migrations or creating an empty replacement. The overview
 remains read-only before migration and shows missing/unavailable authority beside
 session rows. It never repairs storage or makes stored acknowledgements fresh.
 
-Migration 40 preserves verified original bytes under
+Global migration 46 preserves verified original bytes in manifest format 40 under
 `<app_dir>/afk-authority-v1/migration/`, with hashes and ownership in its durable
 `manifest.json`. Before inventory, it records legacy root identities and seals child creation at
 mode `0500`, qualifying denial through held root descriptors. Unsupported
@@ -762,16 +775,16 @@ Assigned history without a current registry profile/session appears separately
 as historical authority, with redacted references and guard summaries, never as
 an eligible live session.
 
-Migration 41 preserves verified v1 originals, seals v1 profile creation and
-fences actual present or prepared-absent snapshots before importing nonauthorizing
-v2 history. It preserves guards and counters, not live windows or invented bulk
-preferences. Migration 40 must finish before the first durable v41 start; after
-that, retries verify its frozen historical evidence without reopening or
-reconstructing the old active namespace. A completed newer snapshot is never
+Global migration 47 preserves verified v1 originals in manifest format 41, seals
+v1 profile creation and fences actual present or prepared-absent snapshots before
+importing nonauthorizing v2 history. It preserves guards and counters, not live
+windows or invented bulk preferences. The v1 import must finish before the first
+durable v2 start; afterward retries verify frozen historical evidence without
+reopening or reconstructing the old active namespace. A completed newer snapshot is never
 overwritten by replay.
 
-Migration42 first freezes migration41's v2 serialization, then preserves its
-verified originals, permanently seals v2 profile creation and fences populated
+Global migration 48 keeps the frozen v2 serialization and manifest format 42,
+preserves its verified originals, permanently seals v2 profile creation and fences populated
 and prepared-absent leaves under stable locks. The new v3 snapshot preserves
 preferences, batches, charged/held tickets and human guards, with no active import
 or invented usage. Pending publication journals remain vetoes, not repair input.

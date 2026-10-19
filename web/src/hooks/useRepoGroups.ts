@@ -1,12 +1,8 @@
 import { useCallback, useMemo, useState } from "react";
 import type { ProjectInfo, Workspace, RepoGroup } from "../lib/types";
 import { mergeRegisteredProjects, unpinnedSavedProjects } from "../lib/registeredProjects";
-import {
-  applyRepoAppearanceUpdate,
-  loadRepoAppearances,
-  persistRepoAppearances,
-  type RepoAppearanceUpdate,
-} from "../lib/repoAppearance";
+import type { RepoAppearanceUpdate } from "../lib/repoAppearance";
+import { useRepoAppearances, updateRepoAppearance } from "../lib/repoAppearanceStore";
 import { loadRepoGroupOrder, persistRepoGroupOrder } from "../lib/repoGroupOrder";
 import { useCollapsedKeys } from "./useCollapsedKeys";
 import { compareSortValues } from "../lib/pluginUi";
@@ -41,6 +37,7 @@ export function useRepoGroups(
   sortMode: SidebarSortMode = "manual",
   projects: readonly ProjectInfo[] = [],
   pluginSort?: PluginSortContext,
+  pluginAttention?: ReadonlySet<string>,
 ): {
   groups: RepoGroup[];
   savedProjects: RepoGroup[];
@@ -49,7 +46,7 @@ export function useRepoGroups(
   reorderRepoGroups: (orderedGroupIds: string[]) => void;
 } {
   const { isCollapsed, toggle: toggleRepoCollapsed } = useCollapsedKeys("aoe-repo-collapsed-");
-  const [appearanceMap, setAppearanceMap] = useState(loadRepoAppearances);
+  const appearanceMap = useRepoAppearances();
   const [groupOrder, setGroupOrder] = useState<string[]>(loadRepoGroupOrder);
 
   const { groups, savedProjects } = useMemo(() => {
@@ -74,7 +71,7 @@ export function useRepoGroups(
         return [...list].sort(pluginCompare);
       }
       if (sortMode === "attention") {
-        return [...list].sort(compareWorkspacesByAttention);
+        return [...list].sort((a, b) => compareWorkspacesByAttention(a, b, pluginAttention));
       }
       if (sortMode === "lastActivity") {
         return [...list].sort(compareWorkspacesByLastActivityDesc);
@@ -148,8 +145,8 @@ export function useRepoGroups(
             const au = repoGroupIsUrgent(a.workspaces);
             const bu = repoGroupIsUrgent(b.workspaces);
             if (au !== bu) return au ? -1 : 1;
-            const ar = repoGroupAttentionRank(a.workspaces);
-            const br = repoGroupAttentionRank(b.workspaces);
+            const ar = repoGroupAttentionRank(a.workspaces, pluginAttention);
+            const br = repoGroupAttentionRank(b.workspaces, pluginAttention);
             if (ar !== br) return ar - br;
             const af = repoGroupIsFavorited(a.workspaces);
             const bf = repoGroupIsFavorited(b.workspaces);
@@ -200,15 +197,17 @@ export function useRepoGroups(
     });
 
     return { groups: merged, savedProjects };
-  }, [workspaces, workspaceOrdering, sortMode, pluginSort, projects, isCollapsed, appearanceMap, groupOrder]);
-
-  const updateRepoAppearance = useCallback((repoId: string, update: RepoAppearanceUpdate) => {
-    setAppearanceMap((prev) => {
-      const next = applyRepoAppearanceUpdate(prev, repoId, update);
-      persistRepoAppearances(next);
-      return next;
-    });
-  }, []);
+  }, [
+    workspaces,
+    workspaceOrdering,
+    sortMode,
+    pluginSort,
+    pluginAttention,
+    projects,
+    isCollapsed,
+    appearanceMap,
+    groupOrder,
+  ]);
 
   const reorderRepoGroups = useCallback((orderedGroupIds: string[]) => {
     setGroupOrder(orderedGroupIds);

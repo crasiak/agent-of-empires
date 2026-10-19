@@ -42,6 +42,9 @@ pub struct Config {
     pub tmux: TmuxConfig,
 
     #[serde(default)]
+    pub systemd: SystemdSettings,
+
+    #[serde(default)]
     pub session: SessionConfig,
 
     #[serde(default)]
@@ -535,6 +538,30 @@ pub struct AcpConfig {
         validate = "range:1:99"
     )]
     pub compaction_reminder_percent: u8,
+    /// How the structured view shows agent notices (rate-limit warnings, model
+    /// fallbacks). Persistent keeps each until dismissed, timeout dismisses
+    /// info and warning notices after the timeout below, hidden never shows
+    /// them. Error notices always stay until dismissed.
+    #[serde(default)]
+    #[setting(
+        label = "Agent notices",
+        widget = "select",
+        options = "persistent:Until dismissed,timeout:Auto-dismiss,hidden:Hidden"
+    )]
+    pub notice_display: NoticeDisplay,
+    /// Seconds before an info or warning notice auto-dismisses when agent
+    /// notices are set to auto-dismiss. Capped at 2147483 so the web
+    /// dashboard's `setTimeout` delay (a signed 32-bit millisecond count)
+    /// cannot overflow and fire immediately.
+    #[serde(default = "default_notice_timeout_secs")]
+    #[setting(
+        label = "Notice auto-dismiss (s)",
+        widget = "number",
+        min = 1,
+        max = 2147483,
+        validate = "range:1:2147483"
+    )]
+    pub notice_timeout_secs: u32,
     /// Silent-orphan watchdog: vendor-agnostic correctness grace. When
     /// a prompt is in flight, `tool_calls_in_flight` is empty, at least
     /// one progress notification has arrived, and no further progress
@@ -644,6 +671,10 @@ fn default_compaction_reminder_percent() -> u8 {
     75
 }
 
+fn default_notice_timeout_secs() -> u32 {
+    10
+}
+
 fn default_silent_orphan_grace_secs() -> u32 {
     120
 }
@@ -663,6 +694,8 @@ impl Default for AcpConfig {
             wrap_tool_output: false,
             compaction_reminder: false,
             compaction_reminder_percent: default_compaction_reminder_percent(),
+            notice_display: NoticeDisplay::default(),
+            notice_timeout_secs: default_notice_timeout_secs(),
             silent_orphan_grace_secs: default_silent_orphan_grace_secs(),
             auto_stop_idle_secs: default_acp_auto_stop_idle_secs(),
             rate_limit_auto_resume: false,
@@ -913,6 +946,14 @@ pub struct AppStateConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tips_seen: Vec<String>,
 
+    /// Successful session creations across all profiles, independent of telemetry.
+    #[serde(default)]
+    pub sessions_created: u64,
+
+    /// Stops concurrent upgrade migrations from seeding the counter twice.
+    #[serde(default)]
+    pub sessions_created_seeded: bool,
+
     /// How many times the new-session dialog has been opened while a project or
     /// session was selected. Once this passes
     /// [`crate::tips::NEW_FROM_SELECTION_TIP_THRESHOLD`], the "new from
@@ -936,14 +977,11 @@ pub struct AppStateConfig {
     #[serde(default)]
     pub used_system_health: bool,
 
-    /// Server-side mirror of the web dashboard's syncable UI state, keyed by
-    /// the frontend's localStorage key (the value is the opaque string the
-    /// browser stored). Single-tenant: there is one user, so these prefs
-    /// (sidebar sort/axis, tool density, repo appearance/order, group collapse,
-    /// last-used tool, welcome-seen, etc.) live here so they follow the user
-    /// across browsers and devices instead of being trapped in per-browser
-    /// localStorage. The server never interprets the values; the web owns the
-    /// shape. See `GET`/`PATCH /api/app-state/web-ui-state`.
+    /// Shared repository appearance keyed by path, including synthetic bucket IDs.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub repo_appearances: crate::session::repo_appearance::RepoAppearances,
+
+    /// Opaque web-owned preferences, excluding shared repository appearances.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub web_ui_state: std::collections::BTreeMap<String, String>,
 }
@@ -1037,22 +1075,19 @@ pub struct SessionConfig {
     #[setting(label = "Record session usage", widget = "toggle")]
     pub usage_tracking: bool,
 
-    /// Show the session's context-reset count and usage breakdown in a corner
-    /// of the preview pane and the web session view.
+    /// Show context resets and usage in the TUI info panel and web info strip.
     #[serde(default = "default_true")]
-    #[setting(label = "Show usage overlay", widget = "toggle")]
+    #[setting(label = "Show usage in session info", widget = "toggle")]
     pub show_usage_overlay: bool,
 
-    /// Under the usage overlay, show which Ledger generation a Ledger-launched
-    /// session runs on and how it differs from what a new launch would get.
+    /// In session info, show the launched Ledger generation and its drift.
     #[serde(default = "default_true")]
-    #[setting(label = "Show Ledger drift overlay", widget = "toggle")]
+    #[setting(label = "Show Ledger drift in session info", widget = "toggle")]
     pub show_ledger_overlay: bool,
 
-    /// Under the usage overlay, show the input tokens Headroom compression
-    /// saved for a Ledger-launched Headroom session, with a dollar estimate.
+    /// In session info, show Headroom token savings and a dollar estimate.
     #[serde(default = "default_true")]
-    #[setting(label = "Show Headroom savings overlay", widget = "toggle")]
+    #[setting(label = "Show Headroom savings in session info", widget = "toggle")]
     pub show_headroom_overlay: bool,
 
     /// Side of the TUI session list. Narrow terminals keep the list above the preview.
@@ -1155,6 +1190,13 @@ pub struct SessionConfig {
     #[serde(default = "default_true")]
     #[setting(label = "Smart Session Rename", widget = "toggle", category = "Agents")]
     pub smart_rename: bool,
+
+    /// Give a title typed in the TUI's New Session dialog to the agent as its own session name on
+    /// the first launch (Claude's `--name`), so it shows in the agent's own apps. Later
+    /// launches leave the agent's name alone, so a rename inside the agent survives restarts.
+    #[serde(default)]
+    #[setting(label = "Name Agent Session", widget = "toggle", category = "Agents")]
+    pub name_agent_session: bool,
 
     /// Override Smart Session Rename for scratch sessions specifically, since they have no repo
     /// path to key a per-project override on the way a registered project does.
@@ -1670,6 +1712,18 @@ pub struct SessionConfig {
     )]
     pub show_tips: bool,
 
+    /// Show the bottom shortcut bar, including the LIVE banner. Hiding it frees
+    /// one row; shortcuts, help, and temporary notifications remain available.
+    #[serde(default = "default_true")]
+    #[setting(
+        label = "Show shortcut bar",
+        widget = "toggle",
+        category = "Interaction",
+        global_only,
+        tui_only
+    )]
+    pub show_shortcut_bar: bool,
+
     /// Keep an aoe-managed worktree session's directory leaf in sync with its
     /// title. When enabled (default), renaming the session also moves its
     /// worktree directory, and new sessions derive the directory leaf from the
@@ -1862,6 +1916,38 @@ pub enum NewSessionView {
     Terminal,
 }
 
+/// See `AcpConfig::notice_display`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeDisplay {
+    #[default]
+    Persistent,
+    Timeout,
+    Hidden,
+}
+
+/// Resolved notice display policy, shared by every structured view surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoticePolicy {
+    pub display: NoticeDisplay,
+    pub timeout_secs: u32,
+}
+
+impl NoticePolicy {
+    /// Whether a notice of `severity` that has been visible for `age` is
+    /// hidden. Errors are never hidden: they are failures, not advisories.
+    pub fn hides(&self, severity: &str, age: std::time::Duration) -> bool {
+        if severity == "error" {
+            return false;
+        }
+        match self.display {
+            NoticeDisplay::Persistent => false,
+            NoticeDisplay::Hidden => true,
+            NoticeDisplay::Timeout => age.as_secs() >= u64::from(self.timeout_secs),
+        }
+    }
+}
+
 /// How the TUI activates an existing terminal-mode session. See
 /// `SessionConfig::default_attach_mode`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1931,6 +2017,7 @@ impl Default for SessionConfig {
             merge_hooks_into_selected_agent: true,
             conversation_summary: false,
             smart_rename: true,
+            name_agent_session: false,
             scratch_smart_rename: ScratchSmartRenameMode::default(),
             smart_rename_agent: String::new(),
             smart_rename_model: HashMap::new(),
@@ -1966,6 +2053,7 @@ impl Default for SessionConfig {
             show_session_colors: true,
             favorites_first: true,
             show_tips: true,
+            show_shortcut_bar: true,
             tie_workdir_to_name: true,
         }
     }
@@ -3012,6 +3100,76 @@ pub struct TmuxConfig {
     pub vt_live: bool,
 }
 
+pub fn default_systemd_slice() -> String {
+    crate::process::systemd::DEFAULT_SLICE_TEMPLATE.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, SettingsSection)]
+#[setting_section(name = "systemd", category = "Systemd")]
+pub struct SystemdSettings {
+    /// Place every new session in its own transient systemd scope. No-op when
+    /// the systemd user manager is unreachable. Existing scopes are still
+    /// stopped with their sessions when off. Applies after an aoe restart.
+    #[serde(default = "default_true")]
+    #[setting(label = "Use systemd scopes", widget = "toggle", global_only)]
+    pub enabled: bool,
+
+    /// Slice for the session scopes; must end in `.slice`. `{profile}` expands to the escaped profile name. Applies after an aoe restart.
+    #[serde(default = "default_systemd_slice")]
+    #[setting(
+        label = "Systemd slice",
+        widget = "text",
+        validate = "systemd_slice",
+        global_only
+    )]
+    pub slice: String,
+
+    /// Keep sessions running when the aoe daemon service stops. Applies after an aoe restart.
+    #[serde(default = "default_true")]
+    #[setting(
+        label = "Sessions survive daemon restart",
+        widget = "toggle",
+        global_only
+    )]
+    pub survive_daemon_restart: bool,
+
+    /// Per-session memory cap (e.g. `4G`, `512M`). Empty means unlimited. Applies after an aoe restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[setting(
+        label = "Session memory limit",
+        widget = "optional_text",
+        validate = "memory_limit",
+        global_only,
+        advanced
+    )]
+    pub memory_max: Option<String>,
+
+    /// Per-session task cap. 0 means unlimited. Applies after an aoe restart.
+    #[serde(default)]
+    #[setting(
+        label = "Session task limit",
+        widget = "number",
+        min = 0,
+        max = 4194304,
+        validate = "range:0:4194304",
+        global_only,
+        advanced
+    )]
+    pub tasks_max: u32,
+}
+
+impl Default for SystemdSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            slice: default_systemd_slice(),
+            survive_daemon_restart: true,
+            memory_max: None,
+            tasks_max: 0,
+        }
+    }
+}
+
 impl Default for TmuxConfig {
     fn default() -> Self {
         Self {
@@ -3791,6 +3949,33 @@ mod model_value_quoting_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notice_policy_hides_by_display_severity_and_age() {
+        use std::time::Duration;
+
+        let policy = |display| NoticePolicy {
+            display,
+            timeout_secs: 10,
+        };
+        let secs = Duration::from_secs;
+        // (display, severity, age secs, hidden)
+        let cases = [
+            (NoticeDisplay::Persistent, "warning", 999, false),
+            (NoticeDisplay::Hidden, "info", 0, true),
+            (NoticeDisplay::Hidden, "error", 0, false),
+            (NoticeDisplay::Timeout, "warning", 9, false),
+            (NoticeDisplay::Timeout, "warning", 10, true),
+            (NoticeDisplay::Timeout, "error", 999, false),
+        ];
+        for (display, severity, age, hidden) in cases {
+            assert_eq!(
+                policy(display).hides(severity, secs(age)),
+                hidden,
+                "{display:?} {severity} {age}s"
+            );
+        }
+    }
 
     /// Drives the `auto` branch of [`resolve_tmux_setting`]: a config that does
     /// not set the option must read as "silent" so aoe still applies its own
@@ -4615,5 +4800,15 @@ mod tests {
                 "{name} missing from schema"
             );
         }
+    }
+
+    #[test]
+    fn systemd_settings_defaults() {
+        let cfg = Config::default();
+        assert!(cfg.systemd.enabled);
+        assert_eq!(cfg.systemd.slice, "background-aoe-{profile}.slice");
+        assert!(cfg.systemd.survive_daemon_restart);
+        assert_eq!(cfg.systemd.memory_max, None);
+        assert_eq!(cfg.systemd.tasks_max, 0);
     }
 }

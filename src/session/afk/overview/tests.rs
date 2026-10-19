@@ -287,7 +287,11 @@ fn older_partial_and_missing_authority_keep_rows_and_leave_files_unchanged() {
         let manifest = app.path().join("afk-authority-v2/migration/manifest.json");
         let original = fs::read(&manifest).unwrap();
         if condition == "older" {
-            fs::write(app.path().join(".schema_version"), "39").unwrap();
+            fs::write(
+                app.path().join(".schema_version"),
+                crate::session::afk::schema::QUESTIONS.to_string(),
+            )
+            .unwrap();
         } else if condition == "partial" {
             let mut value: Value = serde_json::from_slice(&original).unwrap();
             value["phase"] = serde_json::json!("imports");
@@ -304,7 +308,11 @@ fn older_partial_and_missing_authority_keep_rows_and_leave_files_unchanged() {
         assert!(!overview.profiles[0].errors.is_empty());
         assert_eq!(tree(app.path()), before, "{condition}");
         fs::write(&manifest, original).unwrap();
-        fs::write(app.path().join(".schema_version"), "41").unwrap();
+        fs::write(
+            app.path().join(".schema_version"),
+            crate::session::afk::schema::BATCHES.to_string(),
+        )
+        .unwrap();
     }
 }
 

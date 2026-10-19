@@ -1,6 +1,6 @@
 # Installation
 
-**Prerequisites:** [tmux](https://github.com/tmux/tmux/wiki). Docker (or another container runtime) is optional, for [sandboxing](guides/sandbox.md), and [Node.js](https://nodejs.org/) is needed only to build the web dashboard from source. Building also needs a C toolchain for the bundled native dependencies (SQLite, libgit2, OpenSSL, liblzma, AWS-LC); a stock `cc` covers most platforms, and targets without pre-generated AWS-LC bindings also need CMake.
+**Prerequisites:** [tmux](https://github.com/tmux/tmux/wiki). Docker (or another container runtime) is optional, for [sandboxing](guides/sandbox.md), and [Node.js](https://nodejs.org/) is needed only to build the web dashboard from source. Building also needs a C toolchain for native dependencies; a stock `cc` covers most platforms, and targets without pre-generated AWS-LC bindings also need CMake.
 
 ## Install
 
@@ -12,11 +12,24 @@ curl -fsSL \
 
 # Homebrew
 brew install aoe
+```
 
-# From source; add --features web for the dashboard (needs Node and npm)
+## Build from Source
+
+```bash
 git clone https://github.com/agent-of-empires/agent-of-empires
 cd agent-of-empires && cargo build --release
 ```
+
+Add `--features web` for the dashboard, which requires Node and npm. The default-enabled `vendored` feature selects OpenSSL and SQLite vendoring.
+
+For system libraries, install `pkg-config` and compatible libgit2, OpenSSL and SQLite development packages. SQLite must provide JSON functions. Then build with vendoring disabled and system libgit2 required:
+
+```bash
+LIBGIT2_NO_VENDOR=1 cargo build --release --no-default-features --features default-plugins
+```
+
+`--no-default-features` disables all defaults; explicitly selecting `default-plugins` retains that default feature selection independently of `vendored`. Add `web` to the feature list for the dashboard. `LIBGIT2_NO_VENDOR=1` fails the build if compatible system libgit2 is unavailable, instead of falling back to a source build. Other native dependencies are unaffected, and system libgit2 may still link OpenSSL transitively.
 
 A source build leaves the binary at `target/release/aoe`. Verify any install with `aoe --version`.
 
@@ -34,15 +47,15 @@ If you installed shell completions as a static file, regenerate it afterwards so
 
 Downgrades are not supported: the older build refuses to start when `.schema_version` records a newer data schema, and that refusal is the safe outcome, because a migration that retypes a persisted field writes a shape the previous release cannot read.
 
-AFK migration 40 also retypes executable policy and ledger leaves. Its verified
+The AFK authority import also retypes executable policy and ledger leaves. Its verified
 originals are evidence, not downgrade inputs. Keep the fences, migration manifest
 and profile authority intact; reverting code does not authorize restoring active
 legacy ledgers or lowering the schema version. A qualified recovery procedure is
 required. See [AFK profile authority and upgrades](guides/afk.md#profile-authority-and-upgrades).
 
-### Inspecting session-registry compatibility before AFK migration 40
+### Inspecting session-registry compatibility before AFK authority import
 
-1. Copy every `profiles/<name>/sessions.json` and the `groups.json` beside it out of the [app directory](guides/configuration.md#file-locations), plus the top-level `sessions.json` if the pre-profiles layout left one. This procedure checks only session registries, not AFK authority or other persisted state; `groups.json` comes along so a return trip restores a matching pair. Do not use these steps on a namespace that has begun AFK migration 40.
+1. Copy every `profiles/<name>/sessions.json` and the `groups.json` beside it out of the [app directory](guides/configuration.md#file-locations), plus the top-level `sessions.json` if the pre-profiles layout left one. This procedure checks only ordinary main-line session registries, not old AFK development stores, AFK authority or other persisted state; `groups.json` comes along so a return trip restores a matching pair. Do not use these steps on an old AFK development namespace or one that has begun AFK authority import. Follow the [AFK upgrade policy](guides/afk.md#profile-authority-and-upgrades); changing a cursor does not convert a development lineage.
 2. With that same older build, run `aoe ps` and read the number it prints when it refuses, its own schema version. A command that returns before the migration gate prints nothing, so `aoe update` and `aoe uninstall` are no use here. Then copy `.schema_version` as a record and edit it in place down to that number. Deleting it is not the safer variant: a missing file reads as version 0, so the older build re-runs every migration it has.
 3. Move any `sessions.corrupt.jsonl` or `groups.corrupt.jsonl` aside rather than deleting it, so step 4 can tell a new one from an old one.
 4. With that same older build, run `aoe ps`. It lists the running sessions, not every row in the registry, so read it for nothing: what matters is what it leaves on disk. The only file it adds beside a `sessions.json` is a quarantine file, and a pending sandbox-store transition, which the migrations reconcile on start, can also leave a `.storage.lock` beside it; neither file is created by reading, and only the quarantine one says anything about readability. Look for `sessions.corrupt.jsonl` or `groups.corrupt.jsonl` beside each `sessions.json`: one appears as soon as that build reads a row it cannot decode, and a `sessions.json` it cannot parse at all leaves nothing behind either. A profile whose directory is a symlink is skipped by a bare `aoe ps`, so run `aoe ps -p <name>`, or set `AGENT_OF_EMPIRES_PROFILE`, once more for each of those. The top-level `sessions.json` from step 1 gets no verdict: the session list only ever reads `profiles/<name>/sessions.json`, so nothing quarantines it, but the sandbox migrations do read and rewrite it, so treat it as unchecked by this procedure. The TUI is not a probe: it reconciles duplicates and rewrites the registry on start.

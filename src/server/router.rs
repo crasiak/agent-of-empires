@@ -182,6 +182,14 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         // Plugin management.
         .route("/api/plugins", get(api::list_plugins))
         .route("/api/plugins/{id}/icon", get(api::serve_plugin_icon))
+        .route(
+            "/api/plugins/{id}/pages/{page_id}",
+            get(api::serve_plugin_page),
+        )
+        .route(
+            "/api/plugins/{id}/pages/{page_id}/ticket",
+            post(api::mint_plugin_page_ticket),
+        )
         .route("/api/plugins/commands", get(api::plugin_commands))
         .route(
             "/api/plugins/commands/{fqid}/invoke",
@@ -197,6 +205,7 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
             post(api::restart_plugin_worker),
         )
         .route("/api/plugins/{id}/action", post(api::invoke_plugin_action))
+        .route("/api/plugins/{id}/sessions", get(api::plugin_sessions))
         .route(
             "/api/plugins/{id}/settings/options/resolve",
             post(api::resolve_options),
@@ -228,6 +237,14 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
             post(api::mark_web_tour_seen),
         )
         .route("/api/app-state/dismiss-update", post(api::dismiss_update))
+        .route(
+            "/api/app-state/repo-appearances/import",
+            post(api::import_repo_appearances),
+        )
+        .route(
+            "/api/app-state/repo-appearances",
+            get(api::get_repo_appearances).patch(api::patch_repo_appearance),
+        )
         .route(
             "/api/app-state/web-ui-state",
             get(api::get_web_ui_state).patch(api::patch_web_ui_state),
@@ -313,6 +330,10 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
             post(api::switch_acp_agent),
         )
         .route(
+            "/api/sessions/{id}/acp/switch-provider",
+            post(api::switch_acp_provider),
+        )
+        .route(
             "/api/sessions/{id}/acp/prompt",
             // Prompt bodies carry inline base64 attachments, which blow past the global 1
             // MiB cap.
@@ -368,7 +389,10 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/acp/agents", get(api::list_acp_agents))
         .route("/api/acp/option-catalog", get(api::get_option_catalog))
-        .route("/api/claude-sessions", get(api::list_claude_sessions));
+        .route(
+            "/api/importable-sessions",
+            get(api::list_importable_sessions),
+        );
 
     // Dashboard bundle (Vite build output) plus the SPA fallback.
     #[cfg(feature = "web")]

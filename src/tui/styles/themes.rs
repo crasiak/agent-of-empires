@@ -261,6 +261,27 @@ impl Theme {
         blend(self.fresh_idle, self.dimmed, 0.5)
     }
 
+    /// Faint label tint, preserving palette-mode output after RGB blending.
+    pub fn highlight_background(&self, color: Color) -> Color {
+        let rgb = |color| match color {
+            Color::Indexed(index @ 16..=231) => {
+                let levels = [0, 95, 135, 175, 215, 255];
+                let n = (index - 16) as usize;
+                Color::Rgb(levels[n / 36], levels[(n / 6) % 6], levels[n % 6])
+            }
+            Color::Indexed(index @ 232..=255) => {
+                let level = 8 + 10 * (index - 232);
+                Color::Rgb(level, level, level)
+            }
+            other => other,
+        };
+        let tint = blend(rgb(self.background), rgb(color), 0.14);
+        match self.background {
+            Color::Rgb(..) => tint,
+            _ => color_to_palette(tint),
+        }
+    }
+
     /// A fixed hue no theme slot carries (the purple and teal session labels), mapped
     /// to the xterm-256 palette when this theme was downsampled for palette mode.
     pub fn fixed_hue(&self, r: u8, g: u8, b: u8) -> Color {

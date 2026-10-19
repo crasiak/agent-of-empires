@@ -92,6 +92,8 @@ export interface SessionResponse {
   acp_session_id?: string;
   /** Resolved ACP registry key, used as the current agent before any `AgentSwitched`. */
   acp_agent?: string;
+  /** Pinned LLM backend ("api" | "bedrock" | "vertex"); absent means the host decides. */
+  acp_provider?: string;
   /** Switching views preserves the conversation (server-computed). */
   keeps_context?: boolean;
   /** Slash commands that reset the conversation for this agent. */
@@ -351,6 +353,7 @@ export interface GroupInfo {
 export interface ProjectOverrides {
   worktree_enabled?: boolean;
   smart_rename?: boolean;
+  sandbox_enabled?: boolean;
 }
 
 export interface ProjectInfo {
@@ -417,11 +420,11 @@ export interface CreateProgress {
   output: string[];
 }
 
-export interface ClaudeSessionSummary {
+export interface ImportableSession {
   session_id: string;
   cwd: string;
   title: string | null;
-  last_modified_ms: number;
+  updated_at: string | null;
   cwd_exists: boolean;
 }
 
@@ -500,6 +503,7 @@ export type SettingsValidation =
   | { rule: "capability_list" }
   | { rule: "security_opt_list" }
   | { rule: "network" }
+  | { rule: "systemd_slice" }
   | { rule: "cron" }
   | {
       rule: "object_list";

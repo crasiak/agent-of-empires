@@ -5,7 +5,11 @@ use std::fs;
 
 fn initialize(app: &Path) {
     annotations::initialize(app).unwrap();
-    fs::write(app.join(".schema_version"), "43").unwrap();
+    fs::write(
+        app.join(".schema_version"),
+        crate::session::afk::schema::REVIEW.to_string(),
+    )
+    .unwrap();
 }
 fn selected(w: &Window) -> Selection {
     Selection {
@@ -374,7 +378,11 @@ fn review_errors_and_exports_are_bounded_private_and_non_mutating() {
     assert!(!vetoed.complete);
     assert!(vetoed.selections[0].window.is_none());
     assert_eq!(before, tree(app.path()));
-    fs::write(app.path().join(".schema_version"), "44").unwrap();
+    fs::write(
+        app.path().join(".schema_version"),
+        (crate::session::afk::schema::REVIEW + 1).to_string(),
+    )
+    .unwrap();
     let before = tree(app.path());
     assert!(
         !service::collect_at(app.path(), &[selection], 2000)

@@ -1,7 +1,4 @@
 import type { CSSProperties } from "react";
-import { safeGetItem, safeRemoveItem, safeSetItem } from "./safeStorage";
-
-const STORAGE_KEY = "aoe-repo-appearance-v1";
 
 export type RepoColor = "amber" | "teal" | "sky" | "violet" | "rose" | "slate";
 
@@ -51,42 +48,6 @@ export function repoSwatchStyle(color: RepoColor): CSSProperties {
 }
 
 const validColors = new Set(REPO_COLOR_OPTIONS.map((option) => option.id));
-
-function normalizeAppearance(value: unknown): RepoAppearance | null {
-  if (!value || typeof value !== "object") return null;
-  const raw = value as { alias?: unknown; color?: unknown };
-  const alias = typeof raw.alias === "string" ? raw.alias.trim() : "";
-  const color =
-    typeof raw.color === "string" && validColors.has(raw.color as RepoColor) ? (raw.color as RepoColor) : undefined;
-  if (!alias && !color) return null;
-  return {
-    ...(alias ? { alias } : {}),
-    ...(color ? { color } : {}),
-  };
-}
-
-export function loadRepoAppearances(): Record<string, RepoAppearance> {
-  const raw = safeGetItem(STORAGE_KEY);
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    const entries = Object.entries(parsed)
-      .map(([repoId, value]) => [repoId, normalizeAppearance(value)] as const)
-      .filter((entry): entry is readonly [string, RepoAppearance] => entry[1] !== null);
-    return Object.fromEntries(entries);
-  } catch {
-    return {};
-  }
-}
-
-export function persistRepoAppearances(map: Record<string, RepoAppearance>): void {
-  if (Object.keys(map).length === 0) {
-    safeRemoveItem(STORAGE_KEY);
-    return;
-  }
-  safeSetItem(STORAGE_KEY, JSON.stringify(map));
-}
 
 export function applyRepoAppearanceUpdate(
   current: Record<string, RepoAppearance>,

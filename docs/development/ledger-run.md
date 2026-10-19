@@ -1,7 +1,7 @@
-# Ledger run overlay
+# Ledger run info
 
 For a session Ledger launched (the agent pane carries `@aoe_ledger_launch`),
-the preview overlay and the web terminal overlay show two lines under the
+the TUI info panel and the web session-info strip show two lines under the
 reset counter:
 
 ```
@@ -49,7 +49,15 @@ error`), and the Headroom line is hidden.
   before, rounded down. The dollar figure is `~$` plus whole cents from
   `src/usage/prices.rs`; unknown models (currently all GPT models) get none.
 - `session.show_ledger_overlay` and `session.show_headroom_overlay` gate the
-  two lines.
+  two lines. These configuration keys retain their names; the content no
+  longer covers the terminal output.
+
+CPU and memory sparklines beside the badges track the selected agent's process
+tree, including children, not host totals. CPU is a percentage of host capacity
+on a fixed 0–100% scale. RSS uses an automatic scale over the retained history;
+sandboxed sessions show container memory instead. Missing readings are unknown,
+not zero. History is in memory only, bounded to 60 samples per session, and
+expires after sampling stops. The TUI's `i` info toggle also hides these readouts.
 
 `src/tui/components/ledger_overlay.rs` and `web/src/lib/ledgerRun.ts` render
 the same text, pinned by `tests/fixtures/ledger-run/cases.json`.

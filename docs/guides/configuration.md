@@ -12,7 +12,7 @@ Global-only settings use the global config. On upgrade, the default profile's va
 
 Over the web API, `GET /api/settings` returns the settings as they apply to the profile the server serves (or `?profile=<name>`): the profile's overrides over the global config. `PATCH /api/settings` saves each field to the layer it belongs in, that profile for fields it can override and the global config for the rest, so a save always lands where the read looks. Add `?layer=machine` to either to read or write the global config alone.
 
-A project registry entry can also override `worktree.enabled` and `session.smart_rename` for that project, from the web Projects view or the TUI add-project form. This override wins over all three layers. It lives in your own registry (`projects.json`), not the repo, so it does not weaken the `repo = "deny"` policy on either field.
+A project registry entry can also override `worktree.enabled`, `session.smart_rename` and `sandbox.enabled_by_default` for that project, from the web Projects view or the TUI add-project form. This override wins over all three layers. It lives in your own registry (`projects.json`), not the repo, so it does not weaken the `repo = "deny"` policy on any of them.
 
 ## File locations
 
@@ -75,10 +75,15 @@ default_tool = "claude"
 yolo_mode_default = false
 agent_status_hooks = true
 smart_rename = true
+name_agent_session = false
 auto_stop_idle_secs = 0   # 0 disables; e.g. 7200 = stop after 2h idle
 row_tag = "branch"        # none | auto | profile | sandbox | agent | branch
 sidebar_position = "left" # left | right; TUI session list
 ```
+
+After your 31st session creation, a one-time tip explains how to hide the shortcut bar.
+It waits until the home screen is free, respects **Show tips**, and never changes the setting.
+You can browse tips from **Ctrl+K > Show tips** even with the bar hidden.
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -91,6 +96,7 @@ sidebar_position = "left" # left | right; TUI session list
 | `row_tag` | `"branch"` | Metadata next to a session title in the TUI and web sidebar: `none`, `auto` (profile code in all-profiles view), `profile`, `sandbox`, `agent` ([launch identity](#launch-identity-badges) for Claude/Codex/Pi, agent codes for other tools), or `branch`. |
 | `show_activity_age` | `true` | Show the age column at the right edge of each TUI session row: time since the agent stopped on `Idle` rows, time since last access on `Unknown` rows, and remaining snooze time under the Attention sort. |
 | `sidebar_position` | `"left"` | TUI session sidebar position: `left` or `right`. Global only. Narrow terminals keep the stacked layout. |
+| `show_shortcut_bar` | `true` | Show the TUI's bottom shortcut row, including the LIVE banner. Global only, under Settings > Global > Interaction. Hiding it gives that row to the main view; shortcuts, `?` help, dialog controls, and temporary notifications still work. |
 | `tie_workdir_to_name` | `true` | Keep a managed worktree session's directory named after its title. See [Worktrees](worktrees.md#naming). |
 | `pre_trust_agent_folders` | `false` | Pre-trust each host session's worktree in the agent's own config (Claude Code, Codex, Gemini) so it does not open on a folder-trust prompt. Config-dir overrides are honored, and an `agent_config_dir` entry wins over them. Trust also activates the repo's `.claude/settings.json`, hooks included, so enable it only for directories you would have trusted by hand. Sandboxed sessions always pre-trust their own staged config. |
 | `agent_status_hooks` | `true` | Install status-detection hooks into the agent's config; see [Agent hook approval](#agent-hook-approval) for the approval that gates it and [Adding a New Agent](../development/adding-agents.md#hook-format-reference) for the formats. Disabling it leaves status to pane reading but keeps identity hooks used for native resume. |
@@ -98,6 +104,7 @@ sidebar_position = "left" # left | right; TUI session list
 | `smart_rename` | `true` | Auto-rename a still-default-named structured session from its first turn, using the session's agent in one-shot mode. Title only; a session you named is never touched. Skipped for agents with no one-shot mode and command-overridden agents. Overridable per project. |
 | `smart_rename_agent` | `""` | Agent used for one-shot utility calls (the rename title and the conversation summary). Empty means the session's own agent. A sandboxed session only mounts its own agent's credentials, so a different value makes it ineligible instead of falling back. |
 | `smart_rename_model` | `{}` | Per-agent model for the rename one-shot, e.g. `{ claude = "haiku" }`. An absent key uses the agent's built-in default, an empty value forces the CLI default, and any other value is passed to the agent's model flag. |
+| `name_agent_session` | `false` | For a session whose title was typed in the TUI's New Session dialog, give its title at the first launch (including a rename in AoE before then) to the agent as its own session name, so it shows in the agent's own apps (Claude's `--name`). For a structured session that is its first terminal launch. Skipped for a generated or suggested title, a title starting with `-`, a launch that resumes a conversation, sandboxed sessions, a launch whose command, arguments or `PATH` AoE cannot attest (including your own `-n`/`--name`), and when the agent's `--help` does not list the flag. |
 | `inherit_host_environment` | `false` | Forward AoE's whole environment to host sessions. See [Host environment](#host-environment). |
 | `agent_extra_args` | `{}` | Per-agent arguments appended after the binary, e.g. `{ opencode = "--port 8080" }`. Ignored for structured view sessions. |
 | `agent_command_override` | `{}` | Per-agent command replacing the binary. Managed resume and fork validate the actual native command and store; opaque wrappers require an explicit execution contract. See [execution identity and wrappers](session-resume.md#execution-identity-and-wrappers). |
@@ -340,6 +347,8 @@ inherit_host_environment = true
 
 Every variable AoE holds then reaches host sessions, except `AOE_*` and `AGENT_OF_EMPIRES_*` (its own wiring) and `TERM` (owned by tmux). Off by default, since it widens what every agent can read, including tokens exported in your shell. In the terminal view the pairs ride `tmux new-session -e`, so a secret is briefly visible in `ps` while that command runs.
 
+Managed OpenCode selects this policy before probing or launching the native agent. It also retains process essentials and OpenCode database, configuration and workspace selector inputs for validation when wholesale inheritance is off. Unsupported selectors remain unsupported. Explicit profile `environment` entries and before-session overrides take precedence; login-only exports are not imported. See [managed OpenCode contexts](session-resume.md#supported-managed-contexts).
+
 ### When AoE has no environment to forward
 
 Forwarding is a passthrough, not a store: AoE can only hand a session what its own process holds. A daemon started by systemd, launchd, cron, or an SSH command inherits that launcher's environment, not your shell's.
@@ -399,6 +408,46 @@ vt_live = true
 | `vt_live` | `true` | Render agent previews and the dashboard's agent terminal from a persistent VT channel instead of `capture-pane` polling. See [the VT live transport](live-mode.md#the-vt-live-transport). |
 
 Per-option detection reads `~/.tmux.conf`, `$XDG_CONFIG_HOME/tmux/tmux.conf`, and `~/.config/tmux/tmux.conf` for a `set` / `setw` of the option. It is deliberately conservative: an option reached through `source-file`, `if-shell`, a false `%if`, or a key binding is not detected, so set the mode to `"disabled"` if you keep yours in one of those places. `/etc/tmux.conf` is not consulted.
+
+## systemd
+
+```toml
+[systemd]
+enabled = true
+slice = "background-aoe-{profile}.slice"
+survive_daemon_restart = true
+# memory_max = "4G"
+tasks_max = 0
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `true` | Start every session through `systemd-run --user --scope`, so it runs in its own transient systemd scope. Sessions start unscoped when `systemd-run` is missing or the user manager is unreachable. `false` only prevents new scopes and skips the check below; stopping, deleting and trashing sessions still stop their existing scopes. Global only. |
+| `slice` | `"background-aoe-{profile}.slice"` | Template for the slice the session scopes live in; must end in `.slice`. `{profile}` expands to the session's profile name, escaped for systemd: every byte other than ASCII alphanumerics, `:` and `.` becomes `_<hex>` (so `-` and `_` are escaped too, as are spaces, `/` and non-ASCII characters). A value without `{profile}` is used as is. An invalid value falls back to the default with a warning. Global only. |
+| `survive_daemon_restart` | `true` | Keep sessions running when the aoe daemon service stops: agents live in their own scopes, outside the daemon's cgroup. `false` binds the scopes the daemon creates to its service with `PartOf=`, so stopping or restarting the daemon service stops them, and systemd does not start them again; this only takes effect when the daemon itself runs as a `.service`, otherwise it is ignored with a warning. Scopes created from the CLI or TUI are never bound. Global only. |
+| `memory_max` | unset | Memory cap for each session scope, a number followed by `b`, `k`, `m`, or `g` (e.g. `4G`, `512M`, `512b`). Unset or empty means unlimited; any other value is ignored with a warning. Global only. |
+| `tasks_max` | `0` | Task cap for each session scope (0 to 4194304). `0` means unlimited. Global only. |
+
+Each session start runs the agent as `systemd-run --user --scope`, in a fresh scope `aoe-session-<id>-<n>.scope`, where `<n>` is the start time in unix milliseconds. Only the session id reaches systemd: the scope description is `aoe session <first 8 chars of the id>`, and `aoe list` maps the id to the title. With the default `slice` template the scopes sit in `background.slice/background-aoe.slice/background-aoe-<profile>.slice`; a custom `slice` has its own hierarchy. Inspect them with:
+
+```sh
+systemctl --user status 'aoe-session-*'
+systemd-cgls --user
+```
+
+A session that changes profile keeps its old slice until its next start. To cap a whole profile or all of aoe, put limits on the slice itself with `systemctl --user set-property background-aoe-<profile>.slice MemoryMax=8G` or a drop-in. There `<profile>` is the escaped profile name, for example `my_2dprofile` for `my-profile`. The `memory_max` and `tasks_max` settings apply to each session scope on its own. Set `slice` to group sessions elsewhere, for example `aoe.slice`.
+
+aoe checks once per process that `systemd-run` works with the configured limits, with `--expand-environment=no` so `$` in session commands stays literal. The check is one attempt of at most 5 seconds. Sessions start unscoped, with one line in the log, when `systemd-run` or `env` is not on `PATH`, when `systemd-run` cannot reach the user manager or times out, when it rejects the configured `memory_max`/`tasks_max` (a warning naming them), or when `enabled` is `false` (`systemd.enabled=false`). If `systemd-run` fails after that check passed, the session start fails visibly: the tmux pane dies, and an ACP session reports an attach error after the dial deadline, with the `systemd-run` error in the runner log.
+
+Sessions that are already running are not moved into a scope. They stay unscoped until you restart or recreate them; restarting aoe or the daemon does not change that. Stopping, deleting or trashing a session releases its scopes with `systemctl --user stop --no-block`, also when `enabled` is `false`, so scopes started before you turned it off are still stopped. One known limitation: `aoe rm` from the CLI does not shut down the ACP runner of a structured session, so that runner and its scope keep running. Trashing or archiving a tmux session releases them when its pane is killed (the default). ACP sessions release whenever their worker is shut down, for example on archive, snooze, idle auto-stop, rename or a provider switch, and when their first launch fails after the runner registered itself (a runner that exits on its own before that leaves no record, so its scope is not swept). Restarting a tmux session does not release the old scope: it ends when its processes exit. A tmux start or restart whose launch fails once its pane may exist, and a resume whose pane dies right away, release all of the session's scopes, including the old one. aoe creates the scopes; systemd never starts sessions at boot or restarts them after a crash. The `[systemd]` settings are read once per aoe process, so changes take effect after aoe (including the daemon) restarts.
+
+For a sandboxed session only the container CLI or runner process is in the scope, so `memory_max` and `tasks_max` do not constrain the container itself; use the sandbox settings for that.
+
+The tmux server is not scoped. A tmux server started by the daemon lives in the daemon's cgroup, and restarting the daemon service can kill it and every pane with it, although the agent processes are still in their session scopes. Either set `KillMode=process` on the daemon unit (this leaves the daemon's other processes running after a stop), or select a dedicated tmux socket with `tmux.socket_name` whose server is started outside the daemon.
+
+The daemon reports `STATUS=<n> running, <n> waiting, <n> idle` to systemd, visible in `systemctl --user status <daemon unit>`.
+
+`aoe list --json` adds a `systemd_unit` field to live sessions that have a running process, when `enabled` is true and the user manager's socket exists (`$XDG_RUNTIME_DIR/systemd/private`, `$XDG_RUNTIME_DIR/bus` or the socket in `DBUS_SESSION_BUS_ADDRESS`). Its value is the unit glob `aoe-session-<id>-*.scope`. It is the expected pattern, not proof that a unit exists, since the check does not call systemd.
 
 ## Diff
 

@@ -32,6 +32,7 @@ use crate::daemon::AcpWorkerState;
 use crate::session::SandboxInfo;
 
 pub(crate) use agents::apply_agent_command_override;
+pub(crate) use launch::host_spawn_environment;
 pub use sink::{BroadcastSink, ChannelSink};
 
 /// Post-startup respawns allowed within `RESTART_WINDOW` before the session is parked.
@@ -40,7 +41,7 @@ const RESTART_WINDOW: Duration = Duration::from_secs(60);
 /// Backoff before respawning so an agent that crashes on startup cannot hot-loop.
 const RESPAWN_BACKOFF: Duration = Duration::from_millis(500);
 /// How long a runner request path waits for a mid-resume worker to land.
-const WORKER_READY_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const WORKER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Builds the client for a spawn; swapped in tests to drive lifecycles without a runner.
 pub(crate) type Launcher = Arc<
@@ -223,6 +224,9 @@ pub struct SpawnRequest {
     pub cwd: PathBuf,
     pub additional_dirs: Vec<PathBuf>,
     pub provider_env: Vec<(String, String)>,
+    /// LLM backend pinned on the session row, one of
+    /// `session::environment::AGENT_PROVIDERS`; `None` defers to the host.
+    pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     /// True for persisted user effort, not a resolved default.
@@ -261,7 +265,7 @@ impl<S: BroadcastSink> Supervisor<S> {
             lifecycle: Arc::new(std::sync::Mutex::new(LifecycleTable::new(
                 chrono::Utc::now().timestamp_millis().max(1) as u64,
             ))),
-            process_control: Arc::new(SystemProcessControl),
+            process_control: Arc::new(SystemProcessControl::default()),
             launcher: Arc::new(|config, session_id| Box::pin(AcpClient::spawn(config, session_id))),
             warmed_up_agents: Arc::default(),
             agent_warmup_locks: Arc::default(),
@@ -303,11 +307,6 @@ impl<S: BroadcastSink> Supervisor<S> {
     fn mark_incompatible_binary(&self, session_id: &str, binary: &str) {
         lock_recover(&self.incompatible_binaries)
             .insert(session_id.to_string(), binary.to_string());
-    }
-
-    /// A user-initiated resume overrides a stop kept from a resume that failed before install.
-    pub fn forget_stale_cancel(&self, session_id: &str) {
-        lock_recover(&self.lifecycle).forget_stale_cancel(session_id);
     }
 
     pub fn request_respawn(&self, session_id: &str) {

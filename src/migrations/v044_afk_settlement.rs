@@ -14,7 +14,7 @@ mod tests {
     #[serial_test::serial]
     fn preserves_v2_evidence_without_new_authority() {
         let _home = crate::session::test_support::isolate_app_dir();
-        super::super::v037_afk_runtime::run().unwrap();
+        super::super::v043_afk_runtime::run().unwrap();
         let app = crate::session::get_app_dir().unwrap();
         std::fs::write(app.join("afk-runtime-v2/evidence"), b"old grant").unwrap();
         super::run().unwrap();

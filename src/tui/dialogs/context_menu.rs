@@ -10,6 +10,7 @@ use crate::tui::styles::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextMenuAction {
+    ProjectColor(Option<crate::session::repo_appearance::RepoColor>),
     Rename,
     Delete,
     /// Archive or unarchive the session (the `'z'` hotkey).
@@ -97,6 +98,7 @@ pub struct ContextMenuDialog {
     anchor: (u16, u16),
     /// Last rendered rect, so click-outside needs no layout math.
     last_area: Rect,
+    scroll_offset: usize,
 }
 
 /// The menu item at `(col, row)`, or `None` on any border, past the last item,
@@ -113,7 +115,7 @@ fn row_to_item_idx(area: Rect, items_len: usize, col: u16, row: u16) -> Option<u
     }
     let inner_y = area.y.saturating_add(1);
     let last_item_y = inner_y.saturating_add(items_len as u16);
-    if row < inner_y || row >= last_item_y {
+    if row < inner_y || row >= last_item_y || row >= area.bottom().saturating_sub(1) {
         return None;
     }
     Some((row - inner_y) as usize)
@@ -252,8 +254,62 @@ impl ContextMenuDialog {
             vec![
                 (ContextMenuAction::NewFromSelection, "New Session"),
                 (ContextMenuAction::TogglePin, pin_label),
+                (
+                    ContextMenuAction::ProjectColor(Some(
+                        crate::session::repo_appearance::RepoColor::Amber,
+                    )),
+                    "Highlight Amber",
+                ),
+                (
+                    ContextMenuAction::ProjectColor(Some(
+                        crate::session::repo_appearance::RepoColor::Teal,
+                    )),
+                    "Highlight Teal",
+                ),
+                (
+                    ContextMenuAction::ProjectColor(Some(
+                        crate::session::repo_appearance::RepoColor::Sky,
+                    )),
+                    "Highlight Sky",
+                ),
+                (
+                    ContextMenuAction::ProjectColor(Some(
+                        crate::session::repo_appearance::RepoColor::Violet,
+                    )),
+                    "Highlight Violet",
+                ),
+                (
+                    ContextMenuAction::ProjectColor(Some(
+                        crate::session::repo_appearance::RepoColor::Rose,
+                    )),
+                    "Highlight Rose",
+                ),
+                (
+                    ContextMenuAction::ProjectColor(Some(
+                        crate::session::repo_appearance::RepoColor::Slate,
+                    )),
+                    "Highlight Slate",
+                ),
+                (
+                    ContextMenuAction::ProjectColor(None),
+                    "Clear project highlight",
+                ),
             ],
         )
+    }
+
+    pub fn for_synthetic_project(anchor: (u16, u16)) -> Self {
+        let mut menu = Self::for_project_group(anchor, false);
+        menu.items
+            .retain(|(action, _)| *action != ContextMenuAction::TogglePin);
+        menu
+    }
+
+    pub fn for_project_highlights(anchor: (u16, u16)) -> Self {
+        let mut menu = Self::for_project_group(anchor, false);
+        menu.items
+            .retain(|(action, _)| matches!(action, ContextMenuAction::ProjectColor(_)));
+        menu
     }
 
     /// Menu for the Trash section header: empty it, restore everything, or
@@ -302,6 +358,7 @@ impl ContextMenuDialog {
             highlight: Some(0),
             anchor,
             last_area: Rect::default(),
+            scroll_offset: 0,
         }
     }
 
@@ -341,7 +398,14 @@ impl ContextMenuDialog {
         if !self.last_area.contains(Position::from((col, row))) {
             return None;
         }
-        match row_to_item_idx(self.last_area, self.items.len(), col, row) {
+        match row_to_item_idx(
+            self.last_area,
+            self.items.len().saturating_sub(self.scroll_offset),
+            col,
+            row,
+        )
+        .map(|i| i + self.scroll_offset)
+        {
             None => {
                 // A border or a gap: keep the menu open to try again.
                 Some(DialogResult::Continue)
@@ -368,7 +432,13 @@ impl ContextMenuDialog {
     /// and nothing is armed, so an accidental near-miss can't leave a
     /// misleading row lit for `Enter`.
     pub fn handle_hover(&mut self, col: u16, row: u16) -> bool {
-        let next = row_to_item_idx(self.last_area, self.items.len(), col, row);
+        let next = row_to_item_idx(
+            self.last_area,
+            self.items.len().saturating_sub(self.scroll_offset),
+            col,
+            row,
+        )
+        .map(|i| i + self.scroll_offset);
         if self.highlight == next {
             return false;
         }
@@ -488,12 +558,25 @@ impl ContextMenuDialog {
             .border_style(Style::default().fg(theme.accent));
 
         let inner = block.inner(dialog_area);
+        let visible = inner.height as usize;
+        if let Some(focused) = self.highlight {
+            if focused < self.scroll_offset {
+                self.scroll_offset = focused;
+            } else if focused >= self.scroll_offset + visible {
+                self.scroll_offset = (focused + 1).saturating_sub(visible);
+            }
+        }
+        self.scroll_offset = self
+            .scroll_offset
+            .min(self.items.len().saturating_sub(visible));
         frame.render_widget(block, dialog_area);
 
         let rows: Vec<Line> = self
             .items
             .iter()
             .enumerate()
+            .skip(self.scroll_offset)
+            .take(visible)
             .map(|(idx, (_, label))| {
                 let style = if Some(idx) == self.highlight {
                     Style::default()
@@ -516,6 +599,48 @@ mod tests {
     use super::*;
     use crate::tui::dialogs::test_keys::key;
     use ContextMenuAction as A;
+
+    #[test]
+    fn project_highlight_menu_scrolls_focus_and_never_hits_clipped_border() {
+        let mut menu = ContextMenuDialog::for_project_group((1, 1), false);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(48, 8)).unwrap();
+        let theme = crate::tui::styles::load_theme("empire");
+        menu.handle_key(key(KeyCode::Up));
+        terminal.draw(|f| menu.render(f, f.area(), &theme)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            text.contains("Highlight Rose") && text.contains("Clear project highlight"),
+            "{text}"
+        );
+        assert!(menu.scroll_offset > 0);
+        let x = menu.last_area.x + 2;
+        let border_y = menu.last_area.bottom() - 1;
+        assert!(matches!(
+            menu.handle_click(x, border_y),
+            Some(DialogResult::Continue)
+        ));
+        assert!(menu.handle_hover(x, border_y));
+        assert_eq!(menu.highlight_for_test(), None);
+        assert!(matches!(
+            menu.handle_click(x, border_y - 1),
+            Some(DialogResult::Submit(A::ProjectColor(None)))
+        ));
+        assert_eq!(menu.selected_action(), A::ProjectColor(None));
+        menu.handle_key(key(KeyCode::Down));
+        terminal.draw(|f| menu.render(f, f.area(), &theme)).unwrap();
+        assert_eq!(menu.scroll_offset, 0);
+        assert!(matches!(
+            menu.handle_click(x, menu.last_area.y + 1),
+            Some(DialogResult::Submit(A::NewFromSelection))
+        ));
+    }
 
     /// A session menu at `(0, 0)` with snooze shown, unread hidden, fork on.
     fn session() -> ContextMenuDialog {
@@ -633,12 +758,32 @@ mod tests {
             (
                 "unpinned project",
                 labels(&ContextMenuDialog::for_project_group((0, 0), false)),
-                vec!["New Session", "Pin project"],
+                vec![
+                    "New Session",
+                    "Pin project",
+                    "Highlight Amber",
+                    "Highlight Teal",
+                    "Highlight Sky",
+                    "Highlight Violet",
+                    "Highlight Rose",
+                    "Highlight Slate",
+                    "Clear project highlight",
+                ],
             ),
             (
                 "pinned project",
                 labels(&ContextMenuDialog::for_project_group((0, 0), true)),
-                vec!["New Session", "Unpin project"],
+                vec![
+                    "New Session",
+                    "Unpin project",
+                    "Highlight Amber",
+                    "Highlight Teal",
+                    "Highlight Sky",
+                    "Highlight Violet",
+                    "Highlight Rose",
+                    "Highlight Slate",
+                    "Clear project highlight",
+                ],
             ),
         ];
         for (name, got, want) in cases {

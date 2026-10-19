@@ -43,6 +43,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe session stop`↴](#aoe-session-stop)
 * [`aoe session restart`↴](#aoe-session-restart)
 * [`aoe session attach`↴](#aoe-session-attach)
+* [`aoe session focus`↴](#aoe-session-focus)
 * [`aoe session show`↴](#aoe-session-show)
 * [`aoe session rename`↴](#aoe-session-rename)
 * [`aoe session set-worktree-name`↴](#aoe-session-set-worktree-name)
@@ -134,6 +135,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe acp doctor`↴](#aoe-acp-doctor)
 * [`aoe acp agents`↴](#aoe-acp-agents)
 * [`aoe acp stop`↴](#aoe-acp-stop)
+* [`aoe acp recover`↴](#aoe-acp-recover)
 * [`aoe acp kill`↴](#aoe-acp-kill)
 * [`aoe acp logs`↴](#aoe-acp-logs)
 * [`aoe acp restart`↴](#aoe-acp-restart)
@@ -145,6 +147,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe acp tail`↴](#aoe-acp-tail)
 * [`aoe acp attach`↴](#aoe-acp-attach)
 * [`aoe acp switch-agent`↴](#aoe-acp-switch-agent)
+* [`aoe acp switch-provider`↴](#aoe-acp-switch-provider)
 * [`aoe uninstall`↴](#aoe-uninstall)
 * [`aoe update`↴](#aoe-update)
 * [`aoe migrate`↴](#aoe-migrate)
@@ -220,11 +223,12 @@ Add a new session
 * `-g`, `--group <GROUP>` — Group path (defaults to parent folder)
 * `-c`, `--cmd <COMMAND>` — Command to run (e.g., 'claude' or any other supported agent)
 * `--tool <TOOL>` — Named built-in or configured custom agent to run
-* `-P`, `--parent <PARENT>` — Parent session (creates sub-session, inherits group). The sub-session does not inherit the parent's worktree or path: without `--worktree` it opens at `<path>` (default: the current directory) on whatever branch is checked out there
-* `--fork-from <FORK_FROM>` — Fork an existing session: resume its conversation context in a new, independent session that then diverges. Give the source session's id or title. Terminal fork; available for agents that support forking (claude, codex, opencode)
+* `-P`, `--parent <PARENT>` — Parent session (creates sub-session, inherits group, not worktree or path). Without `--worktree` or `--scratch`, opens at `<path>` (default: current directory) on its checked-out branch. `--scratch` uses a fresh directory
+* `--fork-from <FORK_FROM>` — Fork an existing session: resume its conversation context in a new, independent session that then diverges. Give the source session's id or title. Terminal fork; available for agents that support forking (claude, codex, opencode, pi)
 * `-l`, `--launch` — Launch the session immediately after creating
 * `-w`, `--worktree <WORKTREE_BRANCH>` — Create session in a git worktree for the specified branch
 * `-b`, `--new-branch` — Create a new branch (use with --worktree)
+* `--generated-name` — Use a generated civilization name as the session title and as the `{branch}` value of the worktree path template, instead of the branch name (use with --worktree). The git branch stays as given. Attaching to an existing worktree keeps its directory and only generates the title. Cannot be combined with --title, --repo or --project
 * `--base-branch <BASE_BRANCH>` — Branch to base the new worktree branch on (use with --new-branch). Defaults to the repository's default branch. Useful for stacking work on top of an in-flight PR branch, hot-fixing a release branch, or branching off a teammate's branch
 * `--repo-base <REPO_BASES>` — Base branch for one repo of a multi-repo workspace, as `<repo>=<branch>` (repeatable). `<repo>` is the repo's directory name or the path you passed to `--repo`. Outranks `--base-branch`, which stays the base for every repo this does not name. Example: `--base-branch develop --repo-base api=epic/checkout`
 * `-r`, `--repo <EXTRA_REPOS>` — Additional repositories for multi-repo workspace (use with --worktree)
@@ -475,6 +479,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `stop` — Stop session process
 * `restart` — Restart session (or all sessions with `--all`)
 * `attach` — Attach to session interactively
+* `focus` — Ask one running TUI to show a session (dashboard: attach; attached elsewhere: switch its own client). Never starts a stopped session
 * `show` — Show session details
 * `rename` — Rename a session
 * `set-worktree-name` — Edit a managed worktree session's workdir directory name (and, optionally, its git branch). Moves the worktree directory in place; the session must not be running. See #1723
@@ -807,7 +812,7 @@ Restart session (or all sessions with `--all`)
 
 ###### **Options:**
 
-* `--all` — Restart every session in the active profile. Useful after `aoe update`, after editing `sandbox.environment`, after a Docker hiccup, or after changing a hook. Mutually exclusive with `identifier`
+* `--all` — Restart every session in the active profile. Useful after `aoe update`, after editing `sandbox.environment`, after a Docker hiccup, or after changing a hook. Mutually exclusive with `identifier`. When run from an agent session, the caller is skipped so the command can finish
 * `--parallel <PARALLEL>` — Concurrency cap for `--all`. Restarting many sandboxed sessions in parallel pressures dockerd, so the default is intentionally modest. Ignored when `--all` is not set
 
   Default value: `3`
@@ -823,6 +828,22 @@ Attach to session interactively
 ###### **Arguments:**
 
 * `<IDENTIFIER>` — Session ID or title
+
+
+
+## `aoe session focus`
+
+Ask one running TUI to show a session (dashboard: attach; attached elsewhere: switch its own client). Never starts a stopped session
+
+**Usage:** `aoe session focus [OPTIONS] <IDENTIFIER>`
+
+###### **Arguments:**
+
+* `<IDENTIFIER>` — Session ID, unique ID prefix, or title, in any profile
+
+###### **Options:**
+
+* `--json` — Output as JSON
 
 
 
@@ -1262,11 +1283,15 @@ Install an external plugin from a `gh:owner/repo[@ref]` slug or a local director
 
 Update an installed external plugin from its recorded source and restart its worker in a running daemon. Prompts to re-approve capabilities if the update changes the capability set
 
-**Usage:** `aoe plugin update <ID>`
+**Usage:** `aoe plugin update [OPTIONS] <ID>`
 
 ###### **Arguments:**
 
 * `<ID>` — Plugin id
+
+###### **Options:**
+
+* `--yes` — Re-approve a changed capability set without prompting
 
 
 
@@ -2007,10 +2032,11 @@ Manage the ACP structured-view workers (doctor, ps, logs, prompt, approve, ...)
 
 * `doctor` — Verify the structured view can start: Node runtime, configured agents, provider auth (claude login)
 * `agents` — List configured agents (claude-code, aoe-agent, etc.)
-* `stop` — Gracefully stop an agent worker (SIGTERM the runner, agent receives stdin EOF). Sessions can be reattached on the next `aoe serve` only if they are still alive afterward; `stop` destroys the worker
-* `kill` — SIGKILL a worker immediately (use when `stop` doesn't take)
+* `stop` — Stop an agent worker and settle its owned native processes. Unlike `aoe serve --stop`, this ends the worker rather than detaching
+* `recover` — Retire unprovable worker ownership after external shutdown confirmation
+* `kill` — SIGKILL the runner, then settle its native workers
 * `logs` — Tail the runner's log file for an agent session
-* `restart` — Restart a wedged agent worker: stop the existing runner, then let the daemon's reconciler spawn a fresh one on the next tick
+* `restart` — Restart a wedged worker after its runner and native workers have stopped
 * `history` — Print the persisted transcript for an agent session
 * `status` — Print live status for an agent session: highest/lowest seq, and whether the on-disk retention window has truncated history
 * `prompt` — Send a prompt to an agent session's agent
@@ -2019,6 +2045,7 @@ Manage the ACP structured-view workers (doctor, ps, logs, prompt, approve, ...)
 * `tail` — Stream the agent broadcast for a session to stdout as JSON lines (one frame per line). Press Ctrl-C to stop
 * `attach` — Open the TUI structured view directly for a known session id. Combine with `AOE_DAEMON_URL` (+ `AOE_DAEMON_TOKEN`, or `AOE_DAEMON_PASSPHRASE` against a `--auth=passphrase` daemon) to attach across machines without going through the home session list
 * `switch-agent` — Switch an agent session to a different ACP agent, keeping the transcript. Valid targets are built-in registry agents and any custom agent configured in `[session.agent_acp_cmd]`. The new agent starts fresh; use `aoe acp agents` to list built-in targets. Handy for returning to claude after a rate-limit handoff to codex
+* `switch-provider` — Re-route a Claude session to a different LLM provider, keeping the transcript. Refused mid-turn; once idle the worker restarts and resumes the same conversation. Credentials are not provisioned by this: the target provider's own variables must already be set on the host (for example `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` for vertex). The model resets to the new provider's default, because model ids differ between providers
 
 
 
@@ -2050,7 +2077,7 @@ List configured agents (claude-code, aoe-agent, etc.)
 
 ## `aoe acp stop`
 
-Gracefully stop an agent worker (SIGTERM the runner, agent receives stdin EOF). Sessions can be reattached on the next `aoe serve` only if they are still alive afterward; `stop` destroys the worker
+Stop an agent worker and settle its owned native processes. Unlike `aoe serve --stop`, this ends the worker rather than detaching
 
 **Usage:** `aoe acp stop [OPTIONS] [SESSION]`
 
@@ -2067,9 +2094,26 @@ Gracefully stop an agent worker (SIGTERM the runner, agent receives stdin EOF). 
 
 
 
+## `aoe acp recover`
+
+Retire unprovable worker ownership after external shutdown confirmation
+
+**Usage:** `aoe acp recover [OPTIONS] <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>` — Session whose ownership evidence to retire
+
+###### **Options:**
+
+* `--confirm-prime-stopped` — Confirm native processes are stopped for an identifiable missing-route Prime record
+* `--confirm-worker-stopped` — Confirm the original runner and all host/container native processes are stopped. Accepts malformed, unattested legacy, or externally settled orphan records
+
+
+
 ## `aoe acp kill`
 
-SIGKILL a worker immediately (use when `stop` doesn't take)
+SIGKILL the runner, then settle its native workers
 
 **Usage:** `aoe acp kill <SESSION>`
 
@@ -2094,7 +2138,7 @@ Tail the runner's log file for an agent session
 
 ## `aoe acp restart`
 
-Restart a wedged agent worker: stop the existing runner, then let the daemon's reconciler spawn a fresh one on the next tick
+Restart a wedged worker after its runner and native workers have stopped
 
 **Usage:** `aoe acp restart <SESSION>`
 
@@ -2227,6 +2271,22 @@ Switch an agent session to a different ACP agent, keeping the transcript. Valid 
 ###### **Options:**
 
 * `--model <MODEL>` — Optional model override forwarded to the new agent
+
+
+
+## `aoe acp switch-provider`
+
+Re-route a Claude session to a different LLM provider, keeping the transcript. Refused mid-turn; once idle the worker restarts and resumes the same conversation. Credentials are not provisioned by this: the target provider's own variables must already be set on the host (for example `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` for vertex). The model resets to the new provider's default, because model ids differ between providers
+
+**Usage:** `aoe acp switch-provider <SESSION> <PROVIDER>`
+
+###### **Arguments:**
+
+* `<SESSION>` — Acp session id
+* `<PROVIDER>` — Provider to route through
+
+  Possible values: `api`, `bedrock`, `vertex`
+
 
 
 

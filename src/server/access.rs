@@ -283,6 +283,8 @@ pub(super) const CITYHALL_MUTATION_ALLOW: &[(&str, &str)] = &[
     ("PATCH", "/api/profiles/{name}/settings"),
     ("PATCH", "/api/theme"),
     ("POST", "/api/plugins/{id}/settings/options/resolve"),
+    // Lets a page frame load authenticate; grants nothing beyond rendering it.
+    ("POST", "/api/plugins/{id}/pages/{page_id}/ticket"),
     // Telemetry consent (its own surface, still prompted).
     ("POST", "/api/telemetry/consent"),
     ("POST", "/api/telemetry/seen"),
@@ -291,6 +293,8 @@ pub(super) const CITYHALL_MUTATION_ALLOW: &[(&str, &str)] = &[
     ("POST", "/api/presence"),
     // Per-device UI preferences / client log.
     ("PATCH", "/api/app-state/web-ui-state"),
+    ("PATCH", "/api/app-state/repo-appearances"),
+    ("POST", "/api/app-state/repo-appearances/import"),
     ("POST", "/api/app-state/dismiss-update"),
     ("POST", "/api/app-state/tip-seen"),
     ("POST", "/api/app-state/volume-ignores-globs-acknowledged"),
@@ -358,6 +362,7 @@ pub(super) const CITYHALL_MUTATION_DENY: &[(&str, &str)] = &[
     ("POST", "/api/sessions/{id}/acp/mode"),
     ("POST", "/api/sessions/{id}/acp/spawn"),
     ("POST", "/api/sessions/{id}/acp/switch-agent"),
+    ("POST", "/api/sessions/{id}/acp/switch-provider"),
     // Global settings / ops / shared workspace ordering.
     ("PATCH", "/api/settings"),
     ("PATCH", "/api/log-level"),
@@ -420,10 +425,15 @@ pub(super) async fn security_headers(
 ) -> axum::response::Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    headers.insert("x-frame-options", "DENY".parse().unwrap());
+    // The plugin page route sets its own frame and content policy.
+    headers
+        .entry("x-frame-options")
+        .or_insert("DENY".parse().unwrap());
     headers.insert("x-content-type-options", "nosniff".parse().unwrap());
     headers.insert("referrer-policy", "no-referrer".parse().unwrap());
-    headers.insert("content-security-policy", CSP.parse().unwrap());
+    headers
+        .entry("content-security-policy")
+        .or_insert(CSP.parse().unwrap());
     response
 }
 

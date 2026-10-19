@@ -1,6 +1,8 @@
 //! Session management module
 
 pub mod afk;
+pub mod repo_appearance;
+
 pub(crate) mod anchored_fs;
 pub mod artifacts;
 pub mod attach_project;
@@ -20,6 +22,7 @@ pub(crate) mod environment;
 pub mod fork;
 mod groups;
 pub mod idle_reap;
+pub mod import;
 mod instance;
 pub mod launch_identity;
 pub mod ledger_restart;
@@ -41,6 +44,7 @@ pub(crate) mod sync;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod trash;
+pub mod tui_control;
 pub mod worktree_edit;
 pub mod worktree_reconcile;
 
@@ -136,7 +140,7 @@ pub use config::profile_config::{
     load_profile_config, merge_configs, resolve_config, resolve_config_or_warn,
     save_profile_config, validate_capability_format, validate_check_interval, validate_env_format,
     validate_memory_limit, validate_network_format, validate_port_mapping_format,
-    validate_security_opt_format, validate_volume_format, ProfileConfig,
+    validate_security_opt_format, validate_systemd_slice, validate_volume_format, ProfileConfig,
 };
 pub use config::repo_config::{
     check_repo_trust, execute_hooks, execute_hooks_in_container, load_repo_config,
@@ -151,8 +155,9 @@ pub use scope::SessionScope;
 pub(crate) use storage::migration_backups;
 pub(crate) use storage::{
     acquire_session_title_lock, acquire_storage_flock, acquire_storage_shared_flock, atomic_write,
-    backup_before_migration, read_file_no_follow, replace_file_no_follow, resolve_symlink_chain,
-    try_acquire_storage_flock, GroupMovePlan, StorageFlock, STORAGE_LOCK_FILENAME,
+    backup_before_migration, locked_update, read_file_no_follow, replace_file_no_follow,
+    resolve_symlink_chain, try_acquire_storage_flock, GroupMovePlan, StorageFlock,
+    STORAGE_LOCK_FILENAME,
 };
 pub use storage::{
     load_recent_projects, load_workspace_ordering, recent_project_entry_for, record_recent_project,
@@ -778,7 +783,7 @@ pub fn collect_startup_ignored_key_warnings(profile: &str) -> Option<String> {
 // ── TUI presence ────────────────────────────────────────────────────────────
 
 const TUI_PRESENCE_DIR: &str = "tui-presence";
-const TUI_ACTIVITY_DIR: &str = "tui-activity";
+pub(crate) const TUI_ACTIVITY_DIR: &str = "tui-activity";
 
 fn tui_dir(name: &str) -> Option<std::path::PathBuf> {
     get_app_dir().ok().map(|d| d.join(name))

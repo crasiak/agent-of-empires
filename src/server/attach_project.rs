@@ -276,6 +276,7 @@ async fn spawn_worker(state: &Arc<AppState>, id: &str) -> WorkerOutcome {
             cwd: PathBuf::from(&inst.project_path),
             additional_dirs: vec![],
             provider_env: vec![],
+            provider: inst.agent_provider.clone(),
             model: inst.agent_model.clone(),
             effort: None,
             effort_explicit: false,
@@ -297,7 +298,14 @@ async fn spawn_worker(state: &Arc<AppState>, id: &str) -> WorkerOutcome {
         }
     };
 
-    match state.acp_supervisor.spawn(request).await {
+    match state
+        .acp_supervisor
+        .spawn(
+            request,
+            crate::process::worker_registry::ResumeAuthority::Explicit,
+        )
+        .await
+    {
         Ok(()) => WorkerOutcome::Restarted,
         Err(e) => WorkerOutcome::RestartFailed(format!("worker respawn failed: {e}")),
     }

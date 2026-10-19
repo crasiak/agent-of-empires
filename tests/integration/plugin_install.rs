@@ -1064,6 +1064,18 @@ command = ["cp", "aoe-plugin.toml", "marker-v2"]
             .version,
         "0.1.0"
     );
+
+    // `--yes` approves the changed recipe without a prompt.
+    install::update("acme.recipe", true).await.unwrap();
+    assert!(installed.join("marker-v2").exists());
+    assert_eq!(
+        Lockfile::load()
+            .unwrap()
+            .get("acme.recipe")
+            .unwrap()
+            .version,
+        "0.2.0"
+    );
 }
 
 const PLAIN_MANIFEST: &str = r#"

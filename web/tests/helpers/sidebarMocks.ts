@@ -2,6 +2,7 @@
 
 import type { Page, Route } from "@playwright/test";
 import { sessionResponse } from "./sessions";
+import { mockRepoAppearances } from "./apiMocks";
 
 export interface MockSessionInput {
   id: string;
@@ -64,6 +65,7 @@ export interface SidebarMockOptions {
 }
 
 export async function installSidebarMocks(page: Page, opts: SidebarMockOptions): Promise<SidebarMockHandle> {
+  await mockRepoAppearances(page);
   const filled = opts.sessions.map((s, i) => fillCreatedAt(s, i));
   const handle: SidebarMockHandle = {
     puts: [],

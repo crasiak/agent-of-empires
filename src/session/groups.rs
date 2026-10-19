@@ -62,7 +62,10 @@ pub fn archived_project_sub_path(project_name: &str) -> String {
 /// Archived/Trash shelves (and anything nested under them) and the scratch bucket.
 #[inline]
 pub fn is_synthetic_project_header(path: &str) -> bool {
-    is_within_archived_section(path) || is_within_trash_section(path) || is_scratch_group_path(path)
+    is_within_archived_section(path)
+        || is_within_trash_section(path)
+        || is_scratch_group_path(path)
+        || path == super::repo_appearance::MULTI_REPO_ID
 }
 
 /// Map a project-mode group identity key to its human display label, for the sites that render a
@@ -71,6 +74,8 @@ pub fn is_synthetic_project_header(path: &str) -> bool {
 pub fn project_group_display_name(key: &str) -> &str {
     if is_scratch_group_path(key) {
         SCRATCH_GROUP_NAME
+    } else if key == super::repo_appearance::MULTI_REPO_ID {
+        "Multi-repo"
     } else {
         key
     }

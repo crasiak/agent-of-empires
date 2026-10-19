@@ -35,7 +35,11 @@ fn fixture() -> App {
             .unwrap();
     }
     migration::run_at(app.path()).unwrap();
-    fs::write(app.path().join(".schema_version"), "40").unwrap();
+    fs::write(
+        app.path().join(".schema_version"),
+        cursor::AUTHORITY.to_string(),
+    )
+    .unwrap();
     assert_eq!(
         frozen::profile_store(app.path(), "alpha", false)
             .unwrap()
@@ -99,9 +103,17 @@ fn every_upgrade_boundary_preserves_frozen_history_and_fences_held_handles() {
             ),
             "644787c82e846a27579003d47c37add375bdcebf9edf08d4a9d0457a25084c53"
         );
-        fs::write(app.path().join(".schema_version"), "41").unwrap();
+        fs::write(
+            app.path().join(".schema_version"),
+            cursor::BATCHES.to_string(),
+        )
+        .unwrap();
         super::super::migration_v3::run_at(app.path()).unwrap();
-        fs::write(app.path().join(".schema_version"), "42").unwrap();
+        fs::write(
+            app.path().join(".schema_version"),
+            cursor::USAGE.to_string(),
+        )
+        .unwrap();
         let current = Store::authority(app.path(), "alpha", "fixture", false).unwrap();
         let session = current.session().unwrap();
         assert_eq!(session.epoch, 3);
@@ -147,11 +159,19 @@ fn prepared_absence_and_runtime_created_profiles_are_included() {
         .insert("new-session".into(), frozen::Session::empty());
     runtime.write_raw("snapshot.json", &old).unwrap();
     run_at(app.path()).unwrap();
-    fs::write(app.path().join(".schema_version"), "41").unwrap();
+    fs::write(
+        app.path().join(".schema_version"),
+        cursor::BATCHES.to_string(),
+    )
+    .unwrap();
     assert!(prepared.read::<frozen::Snapshot>("snapshot.json").is_err());
     assert!(!expected_profile(app.path(), "prepared").unwrap());
     super::super::migration_v3::run_at(app.path()).unwrap();
-    fs::write(app.path().join(".schema_version"), "42").unwrap();
+    fs::write(
+        app.path().join(".schema_version"),
+        cursor::USAGE.to_string(),
+    )
+    .unwrap();
     let current = Store::authority(app.path(), "runtime", "new-session", false).unwrap();
     assert_eq!(current.session().unwrap().epoch, 2);
     assert_eq!(manifest(app.path()).unwrap().entries.len(), 3);

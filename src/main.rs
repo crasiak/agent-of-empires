@@ -69,33 +69,35 @@ fn take_afk_inspection(command: &mut Option<Commands>) -> Option<cli::afk::AfkAr
     None
 }
 
+fn main() -> Result<()> {
+    let mut args = std::env::args();
+    let _ = args.next();
+    let helper = args.next();
+    if helper.as_deref() == Some("__afk-bridge") {
+        return agent_of_empires::session::afk::run_bridge(
+            &args.next().unwrap_or_default(),
+            &args.next().unwrap_or_default(),
+        );
+    }
+    if helper.as_deref() == Some("__frozen-env") {
+        return agent_of_empires::process::exec_frozen_environment();
+    }
+    if helper.as_deref() == Some("__opencode-yolo") {
+        return agent_of_empires::process::exec_post_login_opencode_yolo();
+    }
+    async_main(helper, args)
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
-    {
-        let mut args = std::env::args().skip(1);
-        if args.next().as_deref() == Some("__afk-bridge") {
-            return agent_of_empires::session::afk::run_bridge(
-                &args.next().unwrap_or_default(),
-                &args.next().unwrap_or_default(),
-            );
-        }
+async fn async_main(helper: Option<String>, mut a: std::env::Args) -> Result<()> {
+    if helper.as_deref() == Some("__vt-pipe") {
+        let sock = a.next().unwrap_or_default();
+        return agent_of_empires::tui::run_vt_pipe(&sock).map_err(Into::into);
     }
 
-    // Hidden helper for the VT live preview, handled before clap so it stays off the CLI surface.
+    // Hidden smart-rename helper bypasses clap.
     {
-        let mut a = std::env::args();
-        let _ = a.next();
-        if a.next().as_deref() == Some("__vt-pipe") {
-            let sock = a.next().unwrap_or_default();
-            return agent_of_empires::tui::run_vt_pipe(&sock).map_err(Into::into);
-        }
-    }
-
-    // Hidden smart-rename helper, handled before clap so it stays off the CLI surface.
-    {
-        let mut a = std::env::args();
-        let _ = a.next();
-        if a.next().as_deref() == Some("__smart-rename") {
+        if helper.as_deref() == Some("__smart-rename") {
             let mut next = a.next();
             let force = next.as_deref() == Some("--force");
             if force {
@@ -124,6 +126,9 @@ async fn main() -> Result<()> {
             }
         }
     };
+    if let Some(Commands::PrimeRunner(args)) = cli.command {
+        return agent_of_empires::process::prime::run(args).await;
+    }
 
     // Pane reports use only validated argv and the caller's exact tmux socket.
     // They must not migrate stores, flush telemetry, or initialize app state.
@@ -345,6 +350,7 @@ async fn run(
         Some(Commands::Uninstall(args)) => return cli::uninstall::run(args).await,
         Some(Commands::Update(args)) => return cli::update::run(args).await,
         Some(Commands::Migrate) => return cli::migrate::run(),
+
         Some(Commands::Stop { .. }) => return cli::killall::stop_trap(),
         _ => {}
     }

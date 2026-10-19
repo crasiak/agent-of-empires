@@ -15,7 +15,7 @@ import type {
   DockerStatusResponse,
   CreateProgress,
   CreateSessionRequest,
-  ClaudeSessionSummary,
+  ImportableSession,
   SettingsFieldDescriptor,
 } from "./types";
 import type { ConfigOptionDescriptor } from "./acpTypes";
@@ -664,6 +664,7 @@ export type PluginUiTone = "neutral" | "info" | "success" | "warn" | "danger";
 
 export type PluginUiSlot =
   | "status-bar"
+  | "header-start"
   | "row-badge"
   | "row-column"
   | "sort-key"
@@ -673,6 +674,7 @@ export type PluginUiSlot =
   | "composer-action"
   | "detail-badge"
   | "home-pane"
+  | "page"
   | "notification";
 
 /** `payload` shape is determined by `slot`. */
@@ -696,15 +698,39 @@ export interface PluginUiNotification {
   href?: string;
 }
 
+/** A page an active plugin declares; `url` serves its HTML to a sandboxed frame. */
+export interface PluginPage {
+  plugin_id: string;
+  id: string;
+  title: string;
+  icon: string | null;
+  url: string;
+  /** The plugin's granted capabilities; the page bridge gates on them. */
+  capabilities: string[];
+}
+
 export interface PluginUiState {
   entries: PluginUiEntry[];
   notifications: PluginUiNotification[];
+  /** Absent on older daemons. */
+  pages?: PluginPage[];
   /** Mutation counter per plugin, then per scope (session id, or `""` for global). Absent on older daemons. */
   revisions?: Record<string, Record<string, number>>;
 }
 
+/** A plugin's sessions in its worker's `sessions.list` row shape; null unless it declares `session.read`. */
+export function fetchPluginSessions(pluginId: string): Promise<{ sessions: Record<string, unknown>[] } | null> {
+  return fetchJson(`/api/plugins/${encodeURIComponent(pluginId)}/sessions`);
+}
+
 export function fetchPluginUiState(): Promise<PluginUiState | null> {
   return fetchJson<PluginUiState>("/api/plugins/ui-state");
+}
+
+/** Lets the next frame load of a page's `url` authenticate when device binding is on; the ticket rides an HttpOnly cookie. */
+export async function mintPluginPageTicket(url: string): Promise<boolean> {
+  const reply = await send(`${url}/ticket`, { method: "POST" }).catch(() => null);
+  return reply?.ok ?? false;
 }
 
 export function setPluginEnabled(id: string, enabled: boolean): Promise<PluginToggleResult> {
@@ -933,6 +959,8 @@ export interface ServerAbout {
   acp_replay_events: number;
   acp_compaction_reminder: boolean;
   acp_compaction_reminder_percent: number;
+  acp_notice_display: "persistent" | "timeout" | "hidden";
+  acp_notice_timeout_secs: number;
   build_flavor: "debug" | "release";
   /** Entry bundle name, compared against this page's own to detect a stale client. */
   web_build_id?: string | null;
@@ -1090,6 +1118,39 @@ export function switchAcpAgent(
     `/api/sessions/${encodeURIComponent(sessionId)}/acp/switch-agent`,
     jsonInit("POST", body),
   );
+}
+
+export interface SwitchProviderResponse {
+  session_id: string;
+  provider: string;
+  /** Whether a model pick was replaced by the new provider's default. */
+  model_cleared: boolean;
+  status: string;
+}
+
+/** Re-route a Claude session to `provider`, keeping the transcript. Throws with
+ *  the server's reason rather than collapsing to null: the refusals worth
+ *  reading (an agent that does not route through a provider, a respawn that
+ *  failed after the worker stopped) exist only in the body, and the second kind
+ *  leaves the session changed, so the caller must not read a failure as a
+ *  no-op. */
+export async function switchAcpProvider(sessionId: string, provider: string): Promise<SwitchProviderResponse> {
+  const res = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/acp/switch-provider`,
+    jsonInit("POST", { provider }),
+  );
+  const body = await res.text();
+  if (!res.ok) {
+    // Structured refusals carry `message`; the respawn failures are plain text.
+    let message: string | undefined;
+    try {
+      message = stringField(JSON.parse(body) as Payload, "message");
+    } catch {
+      message = undefined;
+    }
+    throw new Error(message || body.slice(0, 200) || `request failed (${res.status})`);
+  }
+  return JSON.parse(body) as SwitchProviderResponse;
 }
 
 export interface ViewSwitchResponse {
@@ -1297,14 +1358,46 @@ export async function resolvePluginOptions(
   return body?.options ?? [];
 }
 
-export async function fetchProjects(scope?: "global" | "profile"): Promise<ProjectInfo[]> {
-  const url = scope ? `/api/projects?scope=${scope}` : "/api/projects";
-  return (await fetchJson<ProjectInfo[]>(url)) ?? [];
+/** `profile` resolves that profile's registry and per-project overrides; omitted means the served profile.
+ *  `null` means the request failed, which an empty registry is not. */
+export async function fetchProjectRegistry(
+  scope?: "global" | "profile",
+  profile?: string,
+): Promise<ProjectInfo[] | null> {
+  const params = new URLSearchParams();
+  if (scope) params.set("scope", scope);
+  if (profile) params.set("profile", profile);
+  const query = params.toString();
+  return fetchJson<ProjectInfo[]>(query ? `/api/projects?${query}` : "/api/projects");
 }
 
-/** Claude Code sessions on disk, newest first, for the import picker. */
-export async function listClaudeSessions(): Promise<ClaudeSessionSummary[]> {
-  return (await fetchJson<ClaudeSessionSummary[]>("/api/claude-sessions")) ?? [];
+export async function fetchProjects(scope?: "global" | "profile", profile?: string): Promise<ProjectInfo[]> {
+  return (await fetchProjectRegistry(scope, profile)) ?? [];
+}
+
+export type ImportableSessionsResult =
+  | { ok: true; sessions: ImportableSession[]; truncated: boolean }
+  | { ok: false; error: string; message: string };
+
+/** Native sessions `agent` can import under `profile`, newest first, for the import picker. */
+export async function listImportableSessions(agent: string, profile?: string): Promise<ImportableSessionsResult> {
+  const params = new URLSearchParams({ agent });
+  if (profile) params.set("profile", profile);
+  const reply = await send(`/api/importable-sessions?${params}`).catch(() => null);
+  if (!reply) return { ok: false, error: "network", message: "Network error" };
+  const payload = reply.payload ?? {};
+  if (!reply.ok) {
+    return {
+      ok: false,
+      error: typeof payload.error === "string" ? payload.error : "server_error",
+      message: typeof payload.message === "string" ? payload.message : `Server error (${reply.status})`,
+    };
+  }
+  return {
+    ok: true,
+    sessions: (payload.sessions as ImportableSession[] | undefined) ?? [],
+    truncated: payload.truncated === true,
+  };
 }
 
 /** Error bodies may be JSON `{message}` or plain text. */
@@ -1937,4 +2030,20 @@ export function syncSkills(options?: {
     (p) => ({ outcomes: (p?.outcomes as SkillSyncOutcome[] | undefined) ?? [] }),
     { outcomes: [] },
   );
+}
+
+export function fetchRepoAppearances(): Promise<Record<string, import("./repoAppearance").RepoAppearance> | null> {
+  return fetchJson("/api/app-state/repo-appearances");
+}
+export function patchRepoAppearance(
+  repo_path: string,
+  update: import("./repoAppearance").RepoAppearanceUpdate,
+): Promise<Record<string, import("./repoAppearance").RepoAppearance> | null> {
+  return fetchJson("/api/app-state/repo-appearances", jsonInit("PATCH", { repo_path, ...update }));
+}
+
+export function importRepoAppearances(
+  appearances: Record<string, import("./repoAppearance").RepoAppearance>,
+): Promise<Record<string, import("./repoAppearance").RepoAppearance> | null> {
+  return fetchJson("/api/app-state/repo-appearances/import", jsonInit("POST", { appearances }));
 }

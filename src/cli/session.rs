@@ -214,6 +214,10 @@ pub enum SessionCommands {
     /// Attach to session interactively
     Attach(SessionIdArgs),
 
+    /// Ask one running TUI to show a session (dashboard: attach; attached
+    /// elsewhere: switch its own client). Never starts a stopped session
+    Focus(FocusArgs),
+
     /// Show session details
     Show(ShowArgs),
 
@@ -371,7 +375,8 @@ pub struct RestartArgs {
     /// Restart every session in the active profile. Useful after
     /// `aoe update`, after editing `sandbox.environment`, after a
     /// Docker hiccup, or after changing a hook. Mutually exclusive
-    /// with `identifier`.
+    /// with `identifier`. When run from an agent session, the caller is
+    /// skipped so the command can finish.
     #[arg(long, conflicts_with = "identifier")]
     pub all: bool,
 
@@ -418,6 +423,16 @@ pub struct SetWorktreeNameArgs {
     /// Also rename the underlying git branch to match the new name
     #[arg(long)]
     rename_branch: bool,
+}
+
+#[derive(Args)]
+pub struct FocusArgs {
+    /// Session ID, unique ID prefix, or title, in any profile
+    identifier: String,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -585,6 +600,7 @@ pub async fn run(profile: &str, command: SessionCommands) -> Result<()> {
         SessionCommands::Stop(args) => stop_session(profile, args).await,
         SessionCommands::Restart(args) => restart_session_dispatch(profile, args).await,
         SessionCommands::Attach(args) => attach_session(profile, args).await,
+        SessionCommands::Focus(args) => focus_session(args),
         SessionCommands::Show(args) => show_session(profile, args).await,
         SessionCommands::Capture(args) => capture_session(profile, args).await,
         SessionCommands::Rename(args) => rename_session(profile, args).await,
@@ -671,6 +687,7 @@ async fn archive_session(profile: &str, args: ArchiveArgs) -> Result<()> {
             eprintln!("Warning: failed to kill agent tmux session: {}", e);
         }
         inst.kill_ancillary_tmux_sessions_locked();
+        inst.release_scope();
     }
 
     let landed = storage.update(|instances, _groups| {
@@ -1102,11 +1119,14 @@ fn apply_import_mode(
 }
 
 async fn import_sessions(profile: &str, args: ImportArgs) -> Result<()> {
-    use crate::session::claude_import::{scan_sessions, sessions_under_paths, MAX_SESSIONS};
+    use crate::session::claude_import::{scan_sessions, sessions_under_paths};
+    use crate::session::import::{worktree_dir_markers, Owned, MAX_SESSIONS};
 
     let structured = args.structured;
 
+    let provisioned = Owned::new(&[], worktree_dir_markers());
     let mut discovered = scan_sessions();
+    discovered.retain(|s| !provisioned.excludes(&s.session_id, &s.cwd));
     if !args.all {
         let roots = resolve_import_roots(&args.paths)?;
         discovered = sessions_under_paths(discovered, &roots);
@@ -1212,6 +1232,7 @@ async fn import_sessions(profile: &str, args: ImportArgs) -> Result<()> {
     }
     let created_ids: Vec<String> = created.into_iter().map(|inst| inst.id).collect();
 
+    crate::tips::record_session_creations(created_ids.len());
     println!("✓ Imported {} session(s).", created_ids.len());
 
     if structured {
@@ -1321,9 +1342,31 @@ async fn restart_all_sessions(profile: &str, parallel: usize) -> Result<()> {
     let storage = Storage::open_unwatched(profile)?;
 
     let (instances, _groups) = storage.load_with_groups()?;
-    let target_ids = pick_targets_for_restart_all(&instances);
+    let current_tmux_session = current_tmux_session_for_restart_all()?;
+    let current_instance = current_tmux_session.as_ref().and_then(|tmux_session| {
+        instances.iter().find(|instance| {
+            crate::tmux::agent_session_belongs_to_marked(
+                &tmux_session.name,
+                tmux_session.kind,
+                &instance.id,
+            )
+        })
+    });
+    let skipped_current_instance =
+        current_instance.filter(|instance| is_restart_all_target(instance));
+    let target_ids = pick_targets_for_restart_all(&instances, current_tmux_session.as_ref());
+    if let Some(instance) = skipped_current_instance {
+        println!(
+            "Skipping current session '{}' so `restart --all` can finish.",
+            instance.title
+        );
+    }
     if target_ids.is_empty() {
-        println!("No sessions to restart in profile '{}'.", profile);
+        if skipped_current_instance.is_some() {
+            println!("No other sessions to restart in profile '{}'.", profile);
+        } else {
+            println!("No sessions to restart in profile '{}'.", profile);
+        }
         return Ok(());
     }
 
@@ -1471,12 +1514,37 @@ async fn restart_all_sessions(profile: &str, parallel: usize) -> Result<()> {
     Ok(())
 }
 
-fn pick_targets_for_restart_all(instances: &[crate::session::Instance]) -> Vec<String> {
+fn current_tmux_session_for_restart_all() -> Result<Option<crate::tmux::CurrentTmuxSession>> {
+    crate::tmux::current_session_for_current_pane().map_err(|error| {
+        anyhow::anyhow!(
+            "Could not determine the current tmux session; refusing `session restart --all`: {error}"
+        )
+    })
+}
+
+fn is_restart_all_target(instance: &crate::session::Instance) -> bool {
     use crate::session::Status;
+    !matches!(instance.status, Status::Deleting | Status::Creating)
+        && !instance.is_structured()
+        && instance.ensure_startable().is_ok()
+}
+
+fn pick_targets_for_restart_all(
+    instances: &[crate::session::Instance],
+    current_tmux_session: Option<&crate::tmux::CurrentTmuxSession>,
+) -> Vec<String> {
     instances
         .iter()
-        .filter(|i| !matches!(i.status, Status::Deleting | Status::Creating))
-        .filter(|i| !i.is_structured() && i.ensure_startable().is_ok())
+        .filter(|instance| is_restart_all_target(instance))
+        .filter(|instance| {
+            !current_tmux_session.is_some_and(|tmux_session| {
+                crate::tmux::agent_session_belongs_to_marked(
+                    &tmux_session.name,
+                    tmux_session.kind,
+                    &instance.id,
+                )
+            })
+        })
         .map(|i| i.id.clone())
         .collect()
 }
@@ -1613,6 +1681,105 @@ async fn attach_session(profile: &str, args: SessionIdArgs) -> Result<()> {
     let mut working = inst.clone();
     working.source_profile = profile.to_string();
     supervise_attach_capture(&mut working, |_| tmux_session.attach())
+}
+
+#[derive(serde::Serialize)]
+struct FocusOutput {
+    /// A TUI result, or `no_tui` / `error` decided here.
+    result: String,
+    tui: Option<FocusTui>,
+}
+
+#[derive(serde::Serialize)]
+struct FocusTui {
+    pid: u32,
+    tty: String,
+}
+
+const FOCUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn focus_session(args: FocusArgs) -> Result<()> {
+    let mut found: Vec<(Instance, String)> = Vec::new();
+    let mut ambiguous = false;
+    for profile in crate::session::list_profiles()? {
+        let Ok(storage) = Storage::open_unwatched(&profile) else {
+            continue;
+        };
+        let Ok((instances, _)) = storage.load_with_groups() else {
+            continue;
+        };
+        match super::resolve_session(&args.identifier, &instances) {
+            Ok(inst) => found.push((inst.clone(), profile)),
+            Err(e) if e.to_string().starts_with("Ambiguous") => ambiguous = true,
+            Err(_) => {}
+        }
+    }
+    // A miss or an ambiguous identifier still answers in the closed vocabulary.
+    let output = match (found.len(), ambiguous) {
+        (1, false) => {
+            let (inst, profile) = found.remove(0);
+            focus_output(&inst.id, &profile)
+        }
+        (0, false) => FocusOutput {
+            result: "unknown_session".into(),
+            tui: None,
+        },
+        _ => FocusOutput {
+            result: "error".into(),
+            tui: None,
+        },
+    };
+    if args.json {
+        super::output::print_json(&output)?;
+    } else {
+        println!("{}", output.result);
+    }
+    if !matches!(
+        output.result.as_str(),
+        "accepted" | "already_showing" | "starting"
+    ) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn focus_output(session_id: &str, profile: &str) -> FocusOutput {
+    use crate::session::tui_control;
+    let tuis = tui_control::live_records();
+    let Some(tui) = tui_control::select(&tuis, session_id, profile) else {
+        return FocusOutput {
+            result: "no_tui".into(),
+            tui: None,
+        };
+    };
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let result = tui_control::control_dir()
+        .map_err(|e| std::io::Error::other(e.to_string()))
+        .and_then(|dir| {
+            crate::tui::focus_requests::send(
+                &tui_control::socket_path(&dir, tui.record.pid),
+                session_id,
+                &nonce,
+                FOCUS_TIMEOUT,
+            )
+        });
+    let result = match result {
+        Ok(reply) => serde_json::to_value(reply.result)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "error".into()),
+        Err(e) => {
+            tracing::warn!(target: "cli.session", "focus request failed: {e}");
+            "error".into()
+        }
+    };
+    FocusOutput {
+        result,
+        tui: Some(FocusTui {
+            pid: tui.record.pid,
+            tty: tui.record.tty.clone(),
+        }),
+    }
 }
 
 async fn show_session(profile: &str, args: ShowArgs) -> Result<()> {
@@ -3267,13 +3434,45 @@ mod target_filter_tests {
                 inst
             },
         ];
-        let mut picked = pick_targets_for_restart_all(&instances);
+        let mut picked = pick_targets_for_restart_all(&instances, None);
         picked.sort();
         assert_eq!(
             picked,
             ["error", "idle", "running", "starting", "stopped", "unknown", "waiting"]
         );
-        assert!(pick_targets_for_restart_all(&[]).is_empty());
+        assert!(pick_targets_for_restart_all(&[], None).is_empty());
+    }
+
+    #[test]
+    fn restart_all_skips_only_the_current_agent_session() {
+        use crate::tmux::{CurrentTmuxSession, SessionKind};
+
+        let mut caller = Instance::new("caller", "/tmp");
+        caller.id = "caller-session-01".to_string();
+        let mut other = Instance::new("other", "/tmp");
+        other.id = "other-session-02".to_string();
+        let instances = vec![caller.clone(), other.clone()];
+        let caller_tmux_session = CurrentTmuxSession {
+            name: crate::tmux::Session::generate_name(&caller.id, &caller.title),
+            kind: Some(SessionKind::Agent),
+        };
+
+        assert_eq!(
+            pick_targets_for_restart_all(&instances, Some(&caller_tmux_session)),
+            [other.id.clone()]
+        );
+        assert_eq!(
+            pick_targets_for_restart_all(&instances[..1], Some(&caller_tmux_session)),
+            Vec::<String>::new()
+        );
+        let ordinary_context = CurrentTmuxSession {
+            name: "ordinary-tmux-session".to_string(),
+            kind: None,
+        };
+        assert_eq!(
+            pick_targets_for_restart_all(&instances, Some(&ordinary_context)),
+            [caller.id, other.id]
+        );
     }
 }
 
@@ -3535,6 +3734,61 @@ mod session_mutation_tests {
 mod import_tests {
     use super::*;
     use crate::session::claude_import::ClaudeSessionSummary;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn import_counts_only_new_committed_sessions_across_profiles() {
+        let home = crate::session::test_support::isolate_app_dir();
+        let store = home.path().join(".claude/projects/import-count");
+        std::fs::create_dir_all(&store).unwrap();
+        let _env = crate::session::test_support::EnvGuard::unset(&["CLAUDE_CONFIG_DIR"]);
+        for id in ["import-one", "import-two"] {
+            let row = serde_json::json!({
+                "cwd": home.path(), "type": "user", "message": {"content": id}
+            });
+            std::fs::write(store.join(format!("{id}.jsonl")), row.to_string()).unwrap();
+        }
+        let count = || {
+            crate::session::config::AppStateConfig::load()
+                .unwrap()
+                .sessions_created
+        };
+        for (profile, dry_run, expected) in [
+            ("test", true, 0),
+            ("test", false, 2),
+            ("test", false, 2),
+            ("other", false, 4),
+        ] {
+            Storage::new_unwatched(profile).unwrap();
+            import_sessions(
+                profile,
+                ImportArgs {
+                    paths: vec![],
+                    all: true,
+                    structured: false,
+                    group: None,
+                    launch: false,
+                    dry_run,
+                    yes: true,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(count(), expected);
+        }
+        Storage::open_unwatched("test")
+            .unwrap()
+            .update(|rows, _| {
+                rows.clear();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            count(),
+            4,
+            "deleting sessions does not lower the lifetime count"
+        );
+    }
 
     fn summary(id: &str, cwd: &str, title: Option<&str>) -> ClaudeSessionSummary {
         ClaudeSessionSummary {
@@ -3827,5 +4081,59 @@ mod ledger_run_event_tests {
         assert_eq!(events[0].profile.as_deref(), Some("work"));
         assert_eq!(events[0].agent.as_deref(), Some("claude"));
         assert_eq!(crate::usage::ledger_runs(&events), vec![id.to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+    use crate::session::tui_control::{self, TuiRecord};
+    use crate::tui::focus_requests::{Control, FocusResult};
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn focus_reports_no_tui_when_none_is_registered() {
+        let tmp = tempfile::TempDir::with_prefix_in("aoe-focus-cli-", "/tmp").unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(tmp.path());
+        let out = focus_output("abc123", "p");
+        assert_eq!(out.result, "no_tui");
+        assert!(out.tui.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn focus_selects_the_live_tui_and_relays_its_reply() {
+        let tmp = tempfile::TempDir::with_prefix_in("aoe-focus-cli-", "/tmp").unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(tmp.path());
+        let dir = tui_control::control_dir().unwrap();
+        let control = Control::new(
+            dir,
+            TuiRecord {
+                protocol: tui_control::PROTOCOL,
+                pid: std::process::id(),
+                start_id: tui_control::own_start_id().unwrap(),
+                tty: "/dev/ttys042".into(),
+                profile: "p".into(),
+                attached_session_id: None,
+            },
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        control.listen(tx).unwrap();
+        control.publish(None);
+        let main = std::thread::spawn(move || {
+            let incoming = rx.blocking_recv().unwrap();
+            assert_eq!(incoming.session_id, "abc123");
+            incoming.reply.send(FocusResult::Accepted).unwrap();
+        });
+        let out = focus_output("abc123", "p");
+        main.join().unwrap();
+        assert_eq!(out.result, "accepted");
+        let tui = out.tui.unwrap();
+        assert_eq!(
+            (tui.pid, tui.tty.as_str()),
+            (std::process::id(), "/dev/ttys042")
+        );
+        control.remove();
     }
 }

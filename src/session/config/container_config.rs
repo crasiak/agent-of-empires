@@ -1658,10 +1658,6 @@ pub(crate) fn install_pi_sandbox_extension_at(root: &Path) -> Result<()> {
     install_session_extension_at(root, &rel)
 }
 
-/// Stage the root-only identity extension inside Prime's private sandbox store.
-pub(crate) fn install_prime_sandbox_extension_at(root: &Path) -> Result<()> {
-    install_session_extension_at(root, Path::new("extensions/aoe-session-id.js"))
-}
 /// Which branch [`compute_volume_paths_with_resolve`] resolved the mounts through.
 ///
 /// Reported rather than re-derived, so a caller acting on the difference between the
@@ -2491,13 +2487,19 @@ fn validate_managed_container_environment(
     Ok(())
 }
 
+/// Whether the session requests the agent's approval bypass.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct SandboxYolo {
+    pub(crate) enabled: bool,
+}
+
 /// Build a sandboxed container config with the selected profile's overrides.
 /// An empty profile uses the configured default.
 pub(crate) fn build_container_config(
     project_path_str: &str,
     sandbox_info: &SandboxInfo,
     agent_selection: ContainerAgentSelection<'_>,
-    is_yolo_mode: bool,
+    yolo: SandboxYolo,
     instance_id: &str,
     workspace_info: Option<&crate::session::WorkspaceInfo>,
     profile: &str,
@@ -2630,7 +2632,9 @@ pub(crate) fn build_container_config(
     // `CLAUDE_CODE_USE_VERTEX` is Claude-specific, so a globally exported flag
     // must not hand GCP creds to other agents. `GOOGLE_APPLICATION_CREDENTIALS`
     // is not forwarded: client libraries find the well-known path themselves.
-    if agent_selection.tool == "claude" && crate::session::environment::host_vertex_enabled() {
+    if agent_selection.tool == "claude"
+        && crate::session::environment::vertex_enabled(sandbox_info.provider.as_deref())
+    {
         let container_cred_path = format!(
             "{}/.config/gcloud/application_default_credentials.json",
             CONTAINER_HOME
@@ -2951,8 +2955,9 @@ pub(crate) fn build_container_config(
                 value: value.to_string(),
             });
         }
-        if is_yolo_mode {
-            if let Some(crate::agents::YoloMode::EnvVar(key, value)) = &agent.yolo {
+        if yolo.enabled {
+            // Multi-generation approval is resolved only after the container starts.
+            if let Some(crate::agents::YoloMode::EnvVar(key, value)) = agent.yolo.as_ref() {
                 environment.push(EnvEntry::Literal {
                     key: key.to_string(),
                     value: value.to_string(),
@@ -2971,7 +2976,7 @@ pub(crate) fn build_container_config(
         profile,
         instance_id,
         &workspace_path,
-        is_yolo_mode,
+        yolo.enabled,
     );
 
     // Add extra_volumes from config (host:container format)
@@ -3199,6 +3204,7 @@ mod tests {
         selection: ContainerAgentSelection<'a>,
         info: crate::session::instance::SandboxInfo,
         yolo: bool,
+
         instance: &'a str,
         profile: &'a str,
     }
@@ -3209,6 +3215,7 @@ mod tests {
                 selection,
                 info: test_sandbox_info(),
                 yolo: false,
+
                 instance: "test-instance-id",
                 profile: "",
             }
@@ -3225,6 +3232,7 @@ mod tests {
 
         fn yolo(mut self, yolo: bool) -> Self {
             self.yolo = yolo;
+
             self
         }
 
@@ -3243,7 +3251,7 @@ mod tests {
                 project.to_str().unwrap(),
                 &self.info,
                 self.selection,
-                self.yolo,
+                SandboxYolo { enabled: self.yolo },
                 self.instance,
                 None,
                 self.profile,
@@ -4534,6 +4542,7 @@ mod tests {
         let project_dir = TempDir::new().unwrap();
         git2::Repository::init(project_dir.path()).unwrap();
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -4557,7 +4566,7 @@ mod tests {
                 project_dir.path().to_str().unwrap(),
                 &sandbox_info,
                 ContainerAgentSelection::new("claude", None),
-                false,
+                SandboxYolo::default(),
                 instance_id,
                 None,
                 "",
@@ -4688,6 +4697,7 @@ mount_ssh = true
         git2::Repository::init(project_dir.path()).unwrap();
 
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -4703,7 +4713,7 @@ mount_ssh = true
             project_path_str,
             &sandbox_info,
             ContainerAgentSelection::new("claude", None),
-            false,
+            SandboxYolo::default(),
             "test-instance-id",
             None,
             "",
@@ -4810,6 +4820,7 @@ extra_run_args = ["--privileged"]
         git2::Repository::init(project_dir.path()).unwrap();
 
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -4825,7 +4836,7 @@ extra_run_args = ["--privileged"]
             project_path_str,
             &sandbox_info,
             ContainerAgentSelection::new("claude", None),
-            false,
+            SandboxYolo::default(),
             "test-instance-id",
             None,
             "",
@@ -4867,6 +4878,7 @@ extra_run_args = ["--privileged"]
             git2::Repository::init(project_dir.path()).unwrap();
 
             let sandbox_info = crate::session::instance::SandboxInfo {
+                provider: None,
                 enabled: true,
                 container_id: None,
                 image: "test:latest".to_string(),
@@ -4881,7 +4893,7 @@ extra_run_args = ["--privileged"]
                 project_dir.path().to_str().unwrap(),
                 &sandbox_info,
                 ContainerAgentSelection::new("claude", None),
-                false,
+                SandboxYolo::default(),
                 "test-instance-id",
                 None,
                 "",
@@ -4929,6 +4941,7 @@ volume_ignores = ["**/bin", "**/obj", "target"]
         git2::Repository::init(project_dir.path()).unwrap();
 
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -4944,7 +4957,7 @@ volume_ignores = ["**/bin", "**/obj", "target"]
             project_path_str,
             &sandbox_info,
             ContainerAgentSelection::new("claude", None),
-            false,
+            SandboxYolo::default(),
             "test-instance-id",
             None,
             "",
@@ -5019,6 +5032,7 @@ volume_ignores_strategy = "named"
             )
             .unwrap();
             let sandbox_info = crate::session::instance::SandboxInfo {
+                provider: None,
                 enabled: true,
                 container_id: None,
                 image: "test:latest".to_string(),
@@ -5032,7 +5046,7 @@ volume_ignores_strategy = "named"
                 project.to_str().unwrap(),
                 &sandbox_info,
                 ContainerAgentSelection::new("claude", None),
-                false,
+                SandboxYolo::default(),
                 "test-instance-id",
                 None,
                 "",
@@ -5150,6 +5164,7 @@ volume_ignores = ["node_modules"]
         }
 
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -5164,7 +5179,7 @@ volume_ignores = ["node_modules"]
             worktree_path.to_str().unwrap(),
             &sandbox_info,
             ContainerAgentSelection::new("claude", None),
-            false,
+            SandboxYolo::default(),
             "test-instance-id",
             None,
             "",
@@ -5200,6 +5215,7 @@ volume_ignores = ["node_modules"]
         git2::Repository::init(project_dir.path()).unwrap();
 
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -5214,7 +5230,7 @@ volume_ignores = ["node_modules"]
             project_dir.path().to_str().unwrap(),
             &sandbox_info,
             ContainerAgentSelection::new("codex", None),
-            false,
+            SandboxYolo::default(),
             instance_id,
             None,
             "",
@@ -5285,7 +5301,7 @@ volume_ignores = ["node_modules"]
                     project_dir.path().to_str().unwrap(),
                     &sandbox_info,
                     ContainerAgentSelection::new("codex", None),
-                    false,
+                    SandboxYolo::default(),
                     instance_id,
                     None,
                     "",
@@ -5383,7 +5399,7 @@ volume_ignores = ["node_modules"]
                         projects[project].path().to_str().unwrap(),
                         &test_sandbox_info(),
                         ContainerAgentSelection::new(tool, None),
-                        false,
+                        SandboxYolo::default(),
                         &id,
                         None,
                         "",
@@ -5426,6 +5442,7 @@ volume_ignores = ["node_modules"]
         );
     }
 
+    #[serial_test::serial]
     // Issue #472: a YOLO-mode sandbox session must disable the agent's
     // folder-trust prompt so the ephemeral container does not re-prompt on
     // every launch.
@@ -5488,6 +5505,7 @@ volume_ignores = ["node_modules"]
             git2::Repository::init(project_dir.path()).unwrap();
 
             let sandbox_info = crate::session::instance::SandboxInfo {
+                provider: None,
                 enabled: true,
                 container_id: None,
                 image: "test:latest".to_string(),
@@ -5502,7 +5520,7 @@ volume_ignores = ["node_modules"]
                 project_dir.path().to_str().unwrap(),
                 &sandbox_info,
                 ContainerAgentSelection::new("claude", None),
-                is_yolo,
+                SandboxYolo { enabled: is_yolo },
                 &instance_id,
                 None,
                 "",
@@ -5567,6 +5585,7 @@ claude-personal = "~/.claude-personal"
         git2::Repository::init(project_dir.path()).unwrap();
 
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -5581,7 +5600,7 @@ claude-personal = "~/.claude-personal"
             project_dir.path().to_str().unwrap(),
             &sandbox_info,
             ContainerAgentSelection::new("claude-personal", Some("claude")),
-            false,
+            SandboxYolo::default(),
             instance_id,
             None,
             "",
@@ -5659,6 +5678,7 @@ codex-work = "{}"
         git2::Repository::init(project_dir.path()).unwrap();
 
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -5673,7 +5693,7 @@ codex-work = "{}"
             project_dir.path().to_str().unwrap(),
             &sandbox_info,
             ContainerAgentSelection::new("codex-work", Some("codex")),
-            true,
+            SandboxYolo { enabled: true },
             instance_id,
             None,
             "",
@@ -5844,6 +5864,7 @@ codex-work = "{}"
         let project_dir = TempDir::new().unwrap();
         git2::Repository::init(project_dir.path()).unwrap();
         let sandbox_info = crate::session::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -5858,7 +5879,7 @@ codex-work = "{}"
             project_dir.path().to_str().unwrap(),
             &sandbox_info,
             ContainerAgentSelection::new("cursor", None),
-            false,
+            SandboxYolo::default(),
             "cursor-shadow-test",
             None,
             "",
@@ -5881,7 +5902,7 @@ codex-work = "{}"
             project_dir.path().to_str().unwrap(),
             &sandbox_info,
             ContainerAgentSelection::new("cursor", None),
-            false,
+            SandboxYolo::default(),
             "cursor-output-shadow",
             None,
             "",
@@ -5902,7 +5923,7 @@ codex-work = "{}"
             project_dir.path().to_str().unwrap(),
             &sandbox_info,
             ContainerAgentSelection::new("cursor", None),
-            false,
+            SandboxYolo::default(),
             "cursor-readonly",
             None,
             "",
@@ -5919,7 +5940,7 @@ codex-work = "{}"
             project_dir.path().to_str().unwrap(),
             &sandbox_info,
             ContainerAgentSelection::new("cursor", None),
-            false,
+            SandboxYolo::default(),
             "cursor-home-override",
             None,
             "",
@@ -5945,6 +5966,7 @@ codex-work = "{}"
         let project = TempDir::new().unwrap();
         git2::Repository::init(project.path()).unwrap();
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".into(),
@@ -5972,7 +5994,7 @@ codex-work = "{}"
                 project.path().to_str().unwrap(),
                 &sandbox_info,
                 ContainerAgentSelection::new(agent.name, None),
-                false,
+                SandboxYolo::default(),
                 &id,
                 None,
                 "",
@@ -6034,6 +6056,7 @@ codex-work = "{}"
             );
 
             let sandbox_info = crate::session::instance::SandboxInfo {
+                provider: None,
                 enabled: true,
                 container_id: None,
                 image: "test:latest".to_string(),
@@ -6048,7 +6071,7 @@ codex-work = "{}"
                 project_dir.path().to_str().unwrap(),
                 &sandbox_info,
                 ContainerAgentSelection::new(agent.name, None),
-                false,
+                SandboxYolo::default(),
                 &instance_id,
                 None,
                 "",
@@ -6126,6 +6149,7 @@ codex-work = "{}"
         build_container_config(
             project_dir.path().to_str().unwrap(),
             &crate::session::SandboxInfo {
+                provider: None,
                 enabled: true,
                 container_id: None,
                 image: "test:latest".to_string(),
@@ -6136,7 +6160,7 @@ codex-work = "{}"
                 container_workdir: None,
             },
             ContainerAgentSelection::new("cursor", None),
-            false,
+            SandboxYolo::default(),
             instance_id,
             None,
             profile,
@@ -6194,6 +6218,7 @@ codex-work = "{}"
         build_container_config(
             project_dir.path().to_str().unwrap(),
             &crate::session::instance::SandboxInfo {
+                provider: None,
                 enabled: true,
                 container_id: None,
                 image: "test:latest".to_string(),
@@ -6204,7 +6229,7 @@ codex-work = "{}"
                 container_workdir: None,
             },
             ContainerAgentSelection::new("kiro", None).with_selected_agent(Some("custom-agent")),
-            false,
+            SandboxYolo::default(),
             instance_id,
             None,
             "",
@@ -6324,7 +6349,7 @@ codex-work = "{}"
                 project_dir.path().to_str().unwrap(),
                 &test_sandbox_info(),
                 ContainerAgentSelection::new(tool, None),
-                false,
+                SandboxYolo::default(),
                 &instance_id,
                 None,
                 profile,
@@ -6379,6 +6404,7 @@ codex-work = "{}"
         git2::Repository::init(project_dir.path()).unwrap();
 
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -6393,7 +6419,7 @@ codex-work = "{}"
             project_dir.path().to_str().unwrap(),
             &sandbox_info,
             ContainerAgentSelection::new("codex", None),
-            false,
+            SandboxYolo::default(),
             instance_id,
             None,
             "",
@@ -6481,6 +6507,7 @@ trusted_hash = "keep"
         let project_dir = TempDir::new().unwrap();
         git2::Repository::init(project_dir.path()).unwrap();
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -6495,7 +6522,7 @@ trusted_hash = "keep"
                 project_dir.path().to_str().unwrap(),
                 &sandbox_info,
                 ContainerAgentSelection::new("codex", None),
-                false,
+                SandboxYolo::default(),
                 instance_id,
                 None,
                 "",
@@ -6572,6 +6599,7 @@ trusted_hash = "keep"
         git2::Repository::init(project_dir.path()).unwrap();
 
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -6594,7 +6622,7 @@ trusted_hash = "keep"
                 project_dir.path().to_str().unwrap(),
                 &sandbox_info,
                 ContainerAgentSelection::new("codex", None),
-                false,
+                SandboxYolo::default(),
                 instance_id,
                 None,
                 profile,
@@ -6854,6 +6882,7 @@ volume_ignores = ["target", "node_modules"]
         .unwrap();
 
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -6869,7 +6898,7 @@ volume_ignores = ["target", "node_modules"]
             project_path_str,
             &sandbox_info,
             ContainerAgentSelection::new("claude", None),
-            false,
+            SandboxYolo::default(),
             "test-instance-id",
             None,
             "",
@@ -6946,6 +6975,7 @@ volume_ignores = ["target"]
         .unwrap();
 
         let sandbox_info = crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -6961,7 +6991,7 @@ volume_ignores = ["target"]
             project_path_str,
             &sandbox_info,
             ContainerAgentSelection::new("claude", None),
-            false,
+            SandboxYolo::default(),
             "test-instance-id",
             None,
             "",
@@ -7033,6 +7063,7 @@ volume_ignores = ["target"]
 
     fn test_sandbox_info() -> crate::session::instance::SandboxInfo {
         crate::session::instance::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -7052,30 +7083,46 @@ volume_ignores = ["target"]
         adc_path
     }
 
-    fn run_build_for_vertex_test(tool: &str, project_dir: &std::path::Path) -> ContainerConfig {
+    fn run_build_for_vertex_test(
+        tool: &str,
+        provider: Option<&str>,
+        project_dir: &std::path::Path,
+    ) -> ContainerConfig {
         git2::Repository::init(project_dir).unwrap();
-        Build::new(tool).run(project_dir).unwrap()
+        let info = SandboxInfo {
+            provider: provider.map(str::to_string),
+            ..test_sandbox_info()
+        };
+        Build::new(tool).info(info).run(project_dir).unwrap()
     }
 
-    /// The ADC mount is Claude-only, needs a non-empty `CLAUDE_CODE_USE_VERTEX`
-    /// and an existing credential file, and prefers an explicit
-    /// `GOOGLE_APPLICATION_CREDENTIALS` over the well-known host path.
+    /// The ADC mount is Claude-only and needs an existing credential file, and
+    /// prefers an explicit `GOOGLE_APPLICATION_CREDENTIALS` over the well-known
+    /// host path. A session's provider pick decides it outright; only an
+    /// unpinned session falls back to `CLAUDE_CODE_USE_VERTEX` on the host.
+    /// The mount is made at container-create time, which is why a pick that
+    /// disagrees with it has to rebuild the container.
     #[test]
     #[serial_test::serial]
     fn vertex_adc_is_mounted_only_for_claude_with_the_flag_and_a_file() {
         const TARGET: &str = "/root/.config/gcloud/application_default_credentials.json";
-        // (CLAUDE_CODE_USE_VERTEX, tool, default ADC on disk, custom credential, mounted)
-        let cases: &[(Option<&str>, &str, bool, bool, bool)] = &[
-            (Some("1"), "claude", true, false, true),
-            (Some("1"), "claude", false, true, true),
-            (None, "claude", true, false, false),
-            (Some("1"), "opencode", true, false, false),
-            (Some(""), "claude", true, false, false),
-            (Some("1"), "claude", false, false, false),
+        // (CLAUDE_CODE_USE_VERTEX, provider pick, tool, default ADC on disk, custom credential, mounted)
+        let cases: &[(Option<&str>, Option<&str>, &str, bool, bool, bool)] = &[
+            (Some("1"), None, "claude", true, false, true),
+            (Some("1"), None, "claude", false, true, true),
+            (None, None, "claude", true, false, false),
+            (Some("1"), None, "opencode", true, false, false),
+            (Some(""), None, "claude", true, false, false),
+            (Some("1"), None, "claude", false, false, false),
+            // The pick outranks the host flag in both directions.
+            (None, Some("vertex"), "claude", true, false, true),
+            (Some("1"), Some("api"), "claude", true, false, false),
+            (Some("1"), Some("bedrock"), "claude", true, false, false),
+            (None, Some("vertex"), "opencode", true, false, false),
         ];
 
-        for &(flag, tool, write_default, write_custom, mounted) in cases {
-            let label = format!("flag={flag:?} tool={tool}");
+        for &(flag, provider, tool, write_default, write_custom, mounted) in cases {
+            let label = format!("flag={flag:?} provider={provider:?} tool={tool}");
             let temp_home = TempDir::new().unwrap();
             let _home_guard = crate::session::test_support::isolate_home(temp_home.path());
             match flag {
@@ -7095,7 +7142,7 @@ volume_ignores = ["target"]
             }
 
             let project_dir = TempDir::new().unwrap();
-            let config = run_build_for_vertex_test(tool, project_dir.path());
+            let config = run_build_for_vertex_test(tool, provider, project_dir.path());
             let mount = config.volumes.iter().find(|v| v.container_path == TARGET);
 
             match mount {
@@ -7399,6 +7446,7 @@ volume_ignores = ["target"]
         let project_dir = TempDir::new().unwrap();
         git2::Repository::init(project_dir.path()).unwrap();
         let sandbox_info = crate::session::SandboxInfo {
+            provider: None,
             enabled: true,
             container_id: None,
             image: "test:latest".to_string(),
@@ -7412,7 +7460,7 @@ volume_ignores = ["target"]
             project_dir.path().to_str().unwrap(),
             &sandbox_info,
             ContainerAgentSelection::new("gemini", None),
-            false,
+            SandboxYolo::default(),
             instance_id,
             None,
             profile,

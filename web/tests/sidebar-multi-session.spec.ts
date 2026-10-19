@@ -233,10 +233,10 @@ test.describe("Sidebar multi-session (#956)", () => {
     await page.locator("[data-testid='sidebar-group-color-amber']").click();
     await expect(projectHeader).toHaveAttribute("style", /color-mix/);
 
-    const stored = await page.evaluate(() => window.localStorage.getItem("aoe-repo-appearance-v1"));
-    expect(JSON.parse(stored ?? "{}")).toMatchObject({
-      "/tmp/agent-of-empires": { alias: "Client Alpha", color: "amber" },
-    });
+    await expect
+      .poll(() => page.evaluate(async () => (await fetch("/api/app-state/repo-appearances")).json()))
+      .toMatchObject({ "/tmp/agent-of-empires": { alias: "Client Alpha", color: "amber" } });
+    expect(await page.evaluate(() => window.localStorage.getItem("aoe-repo-appearance-v1"))).toBeNull();
 
     await page.reload();
     const restoredHeader = page.locator('[data-testid="sidebar-group-header"][data-group-id="/tmp/agent-of-empires"]');

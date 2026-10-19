@@ -9,8 +9,13 @@ impl HomeView {
             .position(|item| matches!(item, Item::Session { id, .. } if id == session_id))
     }
 
+    /// Select `session_id`'s row, or its group header while the `y` filter hides it, so the
+    /// selection never names a session the list does not show.
     pub fn select_session_by_id(&mut self, session_id: &str) {
-        if let Some(idx) = self.session_row(session_id) {
+        if let Some(idx) = self
+            .session_row(session_id)
+            .or_else(|| self.header_row_for_hidden_session(session_id))
+        {
             self.cursor = idx;
             self.update_selected();
         }
@@ -18,14 +23,16 @@ impl HomeView {
 
     /// Rebuild `flat_items` and move the cursor back onto the selected session or group.
     pub(super) fn rebuild_flat_items_keeping_cursor(&mut self) {
+        let selected_session = self.selected_session.clone();
+        let selected_group = self.selected_group.clone();
+        let selected_profile = self.selected_group_profile.clone();
         self.rebuild_flat_items();
-        let restored = match (&self.selected_session, &self.selected_group) {
+        let restored = match (&selected_session, &selected_group) {
             (Some(sid), _) => self.session_row(sid),
             (None, Some(gpath)) => {
                 // Two profiles can hold the same group path in the all-profiles list, and
                 // landing on the wrong one leaves `selected_group_profile` pointing at the
                 // other profile, which the next action would act on.
-                let selected_profile = self.selected_group_profile.clone();
                 self.flat_items
                     .iter()
                     .position(|item| {
@@ -40,12 +47,26 @@ impl HomeView {
             }
             (None, None) => None,
         };
+        let hidden_header = restored
+            .is_none()
+            .then(|| self.selected_session.clone())
+            .flatten()
+            .and_then(|sid| self.header_row_for_hidden_session(&sid));
+        if let Some(header) = hidden_header {
+            self.cursor = header;
+            self.update_selected();
+            self.context_menu = None;
+            return;
+        }
         match restored {
             Some(idx) => self.cursor = idx,
             None if self.cursor >= self.flat_items.len() && !self.flat_items.is_empty() => {
                 self.cursor = self.flat_items.len() - 1;
             }
             None => {}
+        }
+        if self.live_send.is_none() {
+            self.update_selected();
         }
     }
 
@@ -108,5 +129,6 @@ impl HomeView {
         if let Some(pos) = self.session_row(session_id) {
             self.cursor = pos;
         }
+        self.update_selected();
     }
 }

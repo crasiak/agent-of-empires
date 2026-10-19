@@ -26,7 +26,11 @@ A plain New session opens on the project you launched last; pick another from Re
 
 ## Command palette
 
-The palette (top-bar button or keyboard shortcut) is a fuzzy launcher for global actions: jump to a session, open settings, start a session, toggle the right panel. Individual settings appear under `Settings`: a writable toggle flips inline with a toast, while read-only servers and settings needing elevation open the settings view instead. The Settings header has its own search box (the TUI settings screen uses `/`) that filters across every tab.
+The palette (top-bar button or keyboard shortcut) is a fuzzy launcher for global actions: jump to a session, open settings, start a session, toggle the right panel.
+
+When an embedded agent or paired terminal, or the structured-session composer, has keyboard focus, press `Ctrl+Q` to return focus to the active session in the sidebar. Then press `a` to move to the next session needing attention; `a` works when a terminal or text field is not focused.
+
+Individual settings appear under `Settings`: a writable toggle flips inline with a toast, while read-only servers and settings needing elevation open the settings view instead. The Settings header has its own search box (the TUI settings screen uses `/`) that filters across every tab.
 
 ## First-run onboarding
 
@@ -42,15 +46,25 @@ The sort picker offers three modes, and drag is available only in the first:
 
 - **Manual** (default).
 - **Recent activity**: by the most recent of `last_accessed_at`, `idle_entered_at`, and `created_at` across the workspace's sessions.
-- **Attention**: sessions needing a human first, mirroring the TUI. Ranks by status (Waiting, Error, Idle, Unknown, Running, Stopped, transient last), floats sessions the `attention-urgent` hook flagged above non-urgent rows in their tier, favorites first within a rank, then most recent activity.
+- **Attention**: sessions needing a human first, mirroring the TUI. Ranks by status (Waiting, Error, Idle, Unknown, Running, Stopped, transient last), floats sessions the `attention-urgent` hook flagged above non-urgent rows in their tier, favorites first within a rank, then most recent activity. A session with a plugin `row-column` entry toned `warn` or `danger` ranks at least as high as Error (Waiting stays ahead), and counts toward the attention badges and the jump-to-next shortcut like a Waiting or Error session. Archived, snoozed, and trashed sessions never count.
 
 A grouping toggle next to it cycles **By repo** (default), **By group** (the group set in the TUI by right-clicking a session and choosing **Move to group**, with `aoe group move`, or from the row's **Edit group** menu; ungrouped sessions sit in a bucket at the bottom), and **By repo and group** (repo headers with groups nested inside). Group paths use `/` for hierarchy. Collapse state is tracked per axis, and the sort and grouping choices are per-browser. The Multi-repo and Scratch groups default to the bottom.
+
+## Filtering
+
+![Session and project highlight filters used together](../../assets/web/sidebar-highlight-filter.png)
+
+Open **Filter sessions** in the sidebar to search by name, branch, agent, or path. Use **Session highlight** to match the color shown on a session row and **Project highlight** to match its repository's highlight, regardless of the grouping mode. Project highlights also filter saved and pinned projects without sessions; session highlights exclude those projects.
+
+Project aliases and highlights are shared with the local and remote TUI through the daemon. Changes from another client appear on refresh without reopening the sidebar. Appearance edits are optimistic; a failed save shows an error and reverts that edit. See [TUI highlight filters](../../quick-start.md#highlight-filters) for the keyboard workflow.
+
+Select multiple colors to match any of them within one selector. Session highlights, project highlights, text, and plugin facets narrow results together. **None** matches unhighlighted rows; **All** removes that selector's restriction. **Clear filters**, closing the filter, or pressing Escape inside it resets the text and highlight selections without changing plugin facets. Compact mode pauses text and highlight filtering until the sidebar is expanded again.
 
 ## Triage: pin, archive, snooze
 
 Right-click (long-press on touch) a session row:
 
-- **Pin** floats the workspace to the top in every sort mode. Pin is web-only and distinct from the favorite mark.
+- **Pin** floats the workspace to the top in every sort mode. Pin is web-only and distinct from the favorite mark. Favorites keep their `✦` marker in both normal and compact sidebars.
 - **Archive** tears down every tmux session the workspace owns (pass `kill_pane: false` in the API, or `--no-kill` on the CLI, to skip that) and shuts down the structured-view worker, then sinks the row into the collapsible "Snoozed & archived" footer. An archived session never starts or resumes, whether from a message, **Start**, attaching, or a daemon restart; unarchive it first.
 - **Snooze** sinks the row for a chosen duration (1h through 1w); it wakes when the timer expires, or early if you send a message.
 
@@ -64,13 +78,13 @@ A session is never pinned and sunk at once, but either transition is one step: p
 
 A **Projects** section near the bottom of the sidebar lists saved projects that are not pinned and have no live session; a project with sessions, or a pinned one, renders above as its own header. It is the same registry the wizard's "Saved projects" tab reads. See [Multi-repo workspaces](../multi-repo-workspaces.md#the-project-registry).
 
-Add one with the **+** on the section header (browse or type a path, optionally a name and default base branch, global or profile scope). Clicking a project row starts a session in that repo. **Project settings** (default base branch, worktree-by-default and smart-rename overrides) and **Remove** live in the row's context menu, opened by right-click or long-press; removing deletes every registration for that path. The add / edit / remove controls are hidden in read-only mode.
+Add one with the **+** on the section header (browse or type a path, optionally a name and default base branch, global or profile scope). Clicking a project row starts a session in that repo. **Project settings** (default base branch, worktree-by-default, smart-rename and start-in-container overrides) and **Remove** live in the row's context menu, opened by right-click or long-press; removing deletes every registration for that path. The add / edit / remove controls are hidden in read-only mode.
 
 ## Settings and profiles
 
 ![The settings view with its section groups and the profile picker on the Session tab](../../assets/web/settings.png)
 
-Settings are grouped into **Dashboard** (Theme, Notifications for [web push](../../push-notifications.md), Terminal, Panels, Diff, Devices, Security), **Sessions** (Profiles, session defaults, Structured view, MCP servers, Skills), **Environment** (Sandbox, Worktree, Tmux, Sound), and **System** (Updates, Telemetry, Logging, Plugins). On a phone, Settings opens on this grouped list. The panel is generated from the same settings schema as the TUI, so a field declared once appears on both and they cannot drift; fields only the TUI reads sit under a **Terminal UI** fold. The host environment list is the one config knob the dashboard does not surface.
+Settings are grouped into **Dashboard** (Theme, Notifications for [web push](../../push-notifications.md), Terminal, Panels, Diff, Devices, Security), **Sessions** (Profiles, session defaults, Structured view, MCP servers, Skills), **Environment** (Sandbox, Worktree, Tmux, Systemd, Sound), and **System** (Updates, Telemetry, Logging, Plugins). On a phone, Settings opens on this grouped list. The panel is generated from the same settings schema as the TUI, so a field declared once appears on both and they cannot drift; fields only the TUI reads sit under a **Terminal UI** fold. The host environment list is the one config knob the dashboard does not surface.
 
 The profile picker, shown beside the title of tabs that hold profile-overridable fields, scopes which profile you are editing; global settings apply where a profile does not override a field. The **Profiles** tab (`/settings/profiles`) creates, renames, deletes, and sets the default profile, and its **Edit configuration** buttons deep-link into a tab scoped to that profile. Lifecycle hooks are shown read-only with their source, since hooks run arbitrary shell commands; the same applies to agent-command and environment fields. Creating, deleting, or renaming a profile, and saving global settings, are [step-up](../web-dashboard.md#security) actions.
 

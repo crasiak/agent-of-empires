@@ -7,6 +7,7 @@ pub mod delegation;
 pub mod overview;
 mod registry;
 pub mod review;
+pub(crate) mod schema;
 mod store;
 #[cfg(test)]
 mod tests;

@@ -8,6 +8,7 @@ mod dialogs;
 mod file_watch_tests;
 mod icons;
 mod input;
+mod last_prompt;
 mod layout;
 mod lifecycle;
 mod live_send;
@@ -83,6 +84,14 @@ pub(super) enum DragKind {
     SettingsScrollbar,
 }
 
+/// A deletion's force level and the trash lifecycle it ran in.
+#[derive(Clone)]
+pub(super) struct DeleteAttempt {
+    pub(super) forced: bool,
+    pub(super) trashed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) trash_lifecycle_id: Option<String>,
+}
+
 pub(super) struct GroupRenameContext {
     pub(super) old_path: String,
     pub(super) old_profile: String,
@@ -145,6 +154,16 @@ pub struct HomeView {
     pub(super) selected_group: Option<String>,
     pub(super) selected_group_profile: Option<String>,
     pub(super) view_mode: ViewMode,
+    /// Whether the terminal-view last-prompt footer (toggled with `Ctrl+L`) is on.
+    pub(super) show_last_prompt: bool,
+    /// Latest last-prompt scrape adopted for rendering. Module-private: only the
+    /// `home` submodules touch it.
+    last_prompt_cache: Option<last_prompt::LastPromptCache>,
+    /// Drop-box a background scrape thread writes into, keeping `capture-pane` off
+    /// the render/input path.
+    last_prompt_slot: last_prompt::LastPromptSlot,
+    /// Whether a background last-prompt scrape is currently running.
+    last_prompt_in_flight: bool,
     pub(super) sort_order: SortOrder,
     pub(super) group_by: GroupByMode,
     pub(super) row_tag_mode: crate::session::config::RowTagMode,
@@ -171,6 +190,9 @@ pub struct HomeView {
     pub(super) worktree_name_dialog: Option<WorktreeNameDialog>,
     pub(super) restart_dialog: Option<RestartDialog>,
     pub(super) context_menu: Option<ContextMenuDialog>,
+    pub(super) highlight_filters: crate::tui::highlight::HighlightFilters,
+    pub(super) highlight_filter_dialog: Option<crate::tui::highlight::HighlightFilterDialog>,
+    pub(super) repo_appearances: crate::session::repo_appearance::RepoAppearances,
     pub(super) group_rename_context: Option<GroupRenameContext>,
     pub(super) repo_trust_dialog: Option<RepoTrustDialog>,
     pub(super) pending_repo_trust_data: Option<NewSessionData>,
@@ -239,6 +261,8 @@ pub struct HomeView {
     pub(super) pending_stop_terminal: Option<(String, TerminalMode)>,
     pub(super) pending_stop_tool: Option<(String, String)>,
     pub(super) pending_image_pull: Option<String>,
+    /// Checkbox keys the last submitted confirm dialog had checked.
+    pub(super) confirm_checked: Vec<&'static str>,
     pub(super) pending_switch_view_session: Option<String>,
     pub(super) pending_daemon_start_session: Option<String>,
     pub(in crate::tui) structured_preview:
@@ -261,9 +285,11 @@ pub struct HomeView {
     pub(super) pending_status_refresh: bool,
 
     pub(super) show_diagnostics: bool,
+    pub(super) show_shortcut_bar: bool,
     pub(super) metrics_poller: super::metrics_poller::MetricsPoller,
     pub(super) pending_metrics_refresh: bool,
     pub(super) metrics: crate::process::metrics::MetricsSnapshot,
+    pub(super) resource_history: crate::tui::components::session_resources::ResourceHistory,
     pub(super) usage_poller: super::usage_poller::UsagePoller,
     pub(super) pending_usage_refresh: bool,
     /// Summary for one instance id; drawn only while that id is selected.
@@ -291,10 +317,16 @@ pub struct HomeView {
     pub(super) structured_approval_poller: super::approval_poller::StructuredApprovalPoller,
 
     pub(super) deletion_poller: DeletionPoller,
+    pub(super) deletes_in_flight: HashMap<String, DeleteAttempt>,
+    /// Each session's last failed deletion, so Empty Trash can escalate: a failed delete
+    /// is offered a forced retry, a failed forced delete removal from aoe without cleanup.
+    pub(super) failed_deletes: HashMap<String, DeleteAttempt>,
 
     pub(super) stop_poller: StopPoller,
 
     pub(super) trash_poller: crate::tui::trash_poller::TrashPoller,
+    pub(super) drop_poller:
+        crate::tui::worker::TrackedWorker<operations::DropRequest, operations::DropResult>,
     pub(super) reconcile_poller: crate::tui::reconcile_poller::ReconcilePoller,
     pub(super) startup_recovery_gate: Option<std::time::Instant>,
     pub(super) pending_reconcile_reload: bool,
@@ -367,6 +399,9 @@ pub struct HomeView {
     pub(super) host_tab_title: bool,
 
     pub(super) active_tui_count: usize,
+    pub(super) serve_badge: Option<Option<&'static str>>,
+    pub(super) serve_probe: crate::tui::worker::Worker<(), Option<Option<&'static str>>>,
+    pub(super) serve_probe_in_flight: bool,
 
     pub(super) settings_view: Option<SettingsView>,
     pub(super) settings_close_confirm: bool,
@@ -397,6 +432,12 @@ pub struct HomeView {
     pub(super) show_preview_info: bool,
 
     pub(super) archived_section_collapsed: bool,
+
+    /// Stopped sessions inside groups are left out of the sidebar, for this run only.
+    pub(super) hide_stopped_in_groups: bool,
+    /// While stopped sessions are hidden, each group header's full count, keyed by path and
+    /// profile, so the header can show `visible/total`.
+    pub(super) group_totals: HashMap<(String, Option<String>), usize>,
 
     pub(super) trashed_section_collapsed: bool,
 

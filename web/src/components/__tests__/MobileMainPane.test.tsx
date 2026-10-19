@@ -7,6 +7,11 @@ import type { SessionResponse } from "../../lib/types";
 import { makeSession as baseSession } from "./fixtures";
 import type { useDiffComments } from "../../hooks/useDiffComments";
 
+vi.mock("../SessionInfo", () => ({
+  SessionInfo: ({ session }: { session: SessionResponse }) => (
+    <section data-testid="session-info">{session.title}</section>
+  ),
+}));
 vi.mock("../TerminalSessionStack", () => ({
   TerminalSessionStack: () => <div data-testid="agent-terminal" />,
 }));
@@ -74,7 +79,7 @@ function setup(overrides: Partial<Parameters<typeof MobileMainPane>[0]> = {}) {
     activeSession: session(),
     activeSessionId: "s1",
     sessions: [session()],
-    serverAbout: null,
+    cityhall: false,
     webSettings: { persistentTerminals: false, maxPersistentTerminals: 3 },
     selectedFilePath: null,
     selectedRepoName: undefined,
@@ -102,6 +107,25 @@ function setup(overrides: Partial<Parameters<typeof MobileMainPane>[0]> = {}) {
 }
 
 describe("MobileMainPane", () => {
+  it("places selected-session info before agent content and unmounts it in other views", () => {
+    setup({ activeSession: session({ title: "Selected session" }) });
+    const info = screen.getByTestId("session-info");
+    expect(info.textContent).toBe("Selected session");
+    expect(
+      info.compareDocumentPosition(screen.getByTestId("agent-terminal")) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    cleanup();
+    setup({ view: "paired", pairedMounted: true });
+    expect(screen.getByTestId("paired-shell")).toBeTruthy();
+    expect(screen.queryByTestId("session-info")).toBeNull();
+  });
+
+  it("does not mount local session info for CityHall sessions", async () => {
+    setup({ cityhall: true, activeSession: session({ view: "structured" }) });
+    expect(await screen.findByTestId("acp-view")).toBeDefined();
+    expect(screen.queryByTestId("session-info")).toBeNull();
+  });
+
   it("renders the structured view for structured view sessions", async () => {
     setup({ view: "agent", activeSession: session({ view: "structured" }) });
     // StructuredView is lazy-loaded behind Suspense, so await its resolution.
@@ -165,12 +189,34 @@ describe("MobileMainPane", () => {
     expect(screen.getByTestId("mobile-back-to-agent")).toBeDefined();
   });
 
-  it("on send closes the dialog, clearing comments and the open file only when clearAfterSend is on", () => {
-    for (const clearAfterSend of [true, false]) {
+  it("shows the comments banner when there are comments", () => {
+    setup({
+      view: "diff",
+      commentsEnabled: true,
+      diffComments: { ...diffComments, count: 2 } as ReturnType<typeof useDiffComments>,
+    });
+    expect(screen.getByTestId("comments-banner")).toBeDefined();
+  });
+
+  it("renders the send dialog when open", () => {
+    setup({
+      view: "diff",
+      commentsEnabled: true,
+      sendDialogOpen: true,
+    });
+    expect(screen.getByTestId("send-dialog")).toBeDefined();
+  });
+
+  it("on send clears comments + drafts, closes dialog and file, and returns only terminal sessions to agent", () => {
+    for (const [view, returnsToAgent] of [
+      ["structured", false],
+      ["terminal", true],
+    ] as const) {
       const onCloseSendDialog = vi.fn();
       const onClearSelectedFile = vi.fn();
-      const store = makeStore({ clearAfterSend });
-      setup({
+      const store = makeStore({ clearAfterSend: true });
+      const { onBackToAgent } = setup({
+        activeSession: session({ view }),
         view: "diff",
         commentsEnabled: true,
         sendDialogOpen: true,
@@ -179,15 +225,27 @@ describe("MobileMainPane", () => {
         onClearSelectedFile,
       });
       fireEvent.click(screen.getByTestId("send-dialog"));
+      expect(store.clearComments).toHaveBeenCalled();
+      expect(store.setIntroDraft).toHaveBeenCalledWith("");
       expect(onCloseSendDialog).toHaveBeenCalled();
-      if (clearAfterSend) {
-        expect(store.clearComments).toHaveBeenCalled();
-        expect(store.setIntroDraft).toHaveBeenCalledWith("");
-        expect(onClearSelectedFile).toHaveBeenCalled();
-      } else {
-        expect(store.clearComments).not.toHaveBeenCalled();
-      }
+      expect(onClearSelectedFile).toHaveBeenCalled();
+      expect(onBackToAgent).toHaveBeenCalledTimes(returnsToAgent ? 1 : 0);
       cleanup();
     }
+  });
+
+  it("keeps comments when clearAfterSend is off while closing the dialog", () => {
+    const onCloseSendDialog = vi.fn();
+    const store = makeStore({ clearAfterSend: false });
+    setup({
+      view: "diff",
+      commentsEnabled: true,
+      sendDialogOpen: true,
+      diffComments: store,
+      onCloseSendDialog,
+    });
+    fireEvent.click(screen.getByTestId("send-dialog"));
+    expect(store.clearComments).not.toHaveBeenCalled();
+    expect(onCloseSendDialog).toHaveBeenCalled();
   });
 });

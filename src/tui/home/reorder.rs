@@ -41,6 +41,10 @@ impl HomeView {
     /// its parent. Refuses where a move would be discarded or would write a membership the
     /// list is not showing.
     pub(super) fn move_row_at_cursor(&mut self, delta: isize) -> anyhow::Result<()> {
+        if self.highlight_filters.active() {
+            self.flash_status("Clear highlight filters before reordering");
+            return Ok(());
+        }
         if self.sort_order != SortOrder::Custom {
             self.flash_status("Press o for the Custom sort to arrange rows by hand");
             return Ok(());
@@ -55,6 +59,11 @@ impl HomeView {
         if let Some(group_path) = self.selected_group.clone() {
             self.move_group_row(&group_path, delta)?;
         } else if let Some(id) = self.selected_session.clone() {
+            if self.hide_stopped_in_groups {
+                // A session move renumbers every sibling in the store, the hidden ones too.
+                self.flash_status("Show stopped sessions (y) to move sessions by hand");
+                return Ok(());
+            }
             self.move_session_row(&id, delta)?;
         }
         Ok(())

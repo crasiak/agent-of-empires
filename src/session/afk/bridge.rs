@@ -232,10 +232,15 @@ mod tests {
         };
         let raw = serde_json::to_string(&bootstrap).unwrap();
         authority::migration::initialize_test(&app);
-        for state in ["schema39", "partial", "corrupt", "missing-import"] {
+        for state in ["pre-authority", "partial", "corrupt", "missing-import"] {
             std::fs::write(
                 app.join(".schema_version"),
-                if state == "schema39" { "39" } else { "42" },
+                if state == "pre-authority" {
+                    super::super::schema::QUESTIONS
+                } else {
+                    super::super::schema::USAGE
+                }
+                .to_string(),
             )
             .unwrap();
             let path = app.join("afk-authority-v3/migration/manifest.json");
@@ -256,7 +261,11 @@ mod tests {
             );
             assert!(!app.join("afk-authority-v3/profiles").exists());
             std::fs::write(&path, &original).unwrap();
-            std::fs::write(app.join(".schema_version"), "42").unwrap();
+            std::fs::write(
+                app.join(".schema_version"),
+                super::super::schema::USAGE.to_string(),
+            )
+            .unwrap();
         }
     }
     #[test]

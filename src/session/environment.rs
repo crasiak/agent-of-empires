@@ -4,6 +4,18 @@ use super::config::SandboxConfig;
 use super::instance::SandboxInfo;
 use crate::containers::container_interface::EnvEntry;
 
+/// Process essentials shared by host agent launchers.
+pub(crate) const HOST_BASE_ENV_KEYS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "USER",
+    "SSH_AUTH_SOCK",
+];
+
 /// Terminal environment variables that are always passed through for proper UI/theming
 pub(crate) const DEFAULT_TERMINAL_ENV_VARS: &[&str] =
     &["TERM", "COLORTERM", "FORCE_COLOR", "NO_COLOR"];
@@ -24,6 +36,40 @@ pub(crate) fn host_vertex_enabled() -> bool {
         .is_some_and(|v| !v.is_empty())
 }
 
+/// The LLM backends a session can be pinned to. `None` on a session means the
+/// host environment decides, which is the behavior before a pick is made.
+pub(crate) const AGENT_PROVIDERS: &[&str] = &["api", "bedrock", "vertex"];
+
+/// The Claude routing flags that pin a session to `provider`, or `None` when
+/// the name is not one of [`AGENT_PROVIDERS`].
+///
+/// Both flags are written for every pick, because the override has to beat an
+/// inherited host value rather than merely be absent. Off is the empty string,
+/// never `"0"`: the adapter reads these with a JavaScript truthiness test, for
+/// which `"0"` is on. Credentials are not touched; they stay wherever the host
+/// put them.
+pub(crate) fn provider_override_env(provider: &str) -> Option<Vec<(String, String)>> {
+    let (bedrock, vertex) = match provider {
+        "api" => ("", ""),
+        "bedrock" => ("1", ""),
+        "vertex" => ("", "1"),
+        _ => return None,
+    };
+    Some(vec![
+        ("CLAUDE_CODE_USE_BEDROCK".to_string(), bedrock.to_string()),
+        ("CLAUDE_CODE_USE_VERTEX".to_string(), vertex.to_string()),
+    ])
+}
+
+/// Whether Vertex is in effect: a session's pick wins, and without one the
+/// host flag decides.
+pub(crate) fn vertex_enabled(provider: Option<&str>) -> bool {
+    match provider {
+        Some(pick) if AGENT_PROVIDERS.contains(&pick) => pick == "vertex",
+        _ => host_vertex_enabled(),
+    }
+}
+
 /// Returns the user's preferred shell from `$SHELL`, falling back to `bash`.
 pub(crate) fn user_shell() -> String {
     std::env::var("SHELL")
@@ -40,7 +86,22 @@ const FORWARDED_DESKTOP_VARS: &[&str] = &[
     "XAUTHORITY",
     "DBUS_SESSION_BUS_ADDRESS",
     "SSH_AUTH_SOCK",
+    "COLORFGBG",
 ];
+
+pub(crate) fn host_env_key_inherited(key: &std::ffi::OsStr, passthrough: bool) -> bool {
+    let bytes = key.as_encoded_bytes();
+    if bytes.starts_with(b"AOE_")
+        || bytes.starts_with(b"AGENT_OF_EMPIRES_")
+        || key == std::ffi::OsStr::new("TERM")
+    {
+        return false;
+    }
+    passthrough
+        || key
+            .to_str()
+            .is_some_and(|key| key.starts_with("XDG_") || FORWARDED_DESKTOP_VARS.contains(&key))
+}
 
 /// Why the wholesale passthrough ([`inherited_host_env`] with `session.inherit_host_environment`
 /// on) refuses a key, or `None` when it may be forwarded.
@@ -48,25 +109,42 @@ fn passthrough_denyreason(key: &str) -> Option<&'static str> {
     if !is_valid_env_key(key) {
         return Some("not a valid environment variable name");
     }
-    if key.starts_with("AOE_") || key.starts_with("AGENT_OF_EMPIRES_") {
-        return Some("aoe-internal wiring or credential");
-    }
-    if key == "TERM" {
-        return Some("terminal type is owned by tmux and the spawn allowlists");
+    if !host_env_key_inherited(std::ffi::OsStr::new(key), true) {
+        return Some(if key == "TERM" {
+            "terminal type is owned by tmux and the spawn allowlists"
+        } else {
+            "aoe-internal wiring or credential"
+        });
     }
     None
 }
 
 /// The environment a host session inherits from aoe, as `(KEY, VALUE)` pairs.
 pub(crate) fn inherited_host_env(profile: &str) -> Vec<(String, String)> {
-    let passthrough = super::config::profile_config::resolve_config_or_warn(
+    let config = super::config::profile_config::resolve_config_or_warn(
         &super::config::effective_profile(profile),
-    )
-    .session
-    .inherit_host_environment;
+    );
     let vars = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
-    inherited_host_env_from(vars, passthrough)
+    let mut env = inherited_host_env_from(vars, config.session.inherit_host_environment);
+    // The agent starts before a client attaches, so tmux has no outer background to report
+    // via OSC 11; agents such as OMP then fall back to `COLORFGBG`.
+    if !env.iter().any(|(key, _)| key == "COLORFGBG") {
+        let appearance =
+            crate::tui::styles::resolve_theme(&super::config::resolve_theme_name()).appearance;
+        env.push((
+            "COLORFGBG".to_string(),
+            colorfgbg_for(appearance).to_string(),
+        ));
+    }
+    env
+}
+
+fn colorfgbg_for(appearance: crate::tui::styles::ThemeAppearance) -> &'static str {
+    match appearance {
+        crate::tui::styles::ThemeAppearance::Light => "0;15",
+        crate::tui::styles::ThemeAppearance::Dark => "15;0",
+    }
 }
 
 /// Pure core of [`inherited_host_env`], split out so the filtering is unit-tested without mutating
@@ -79,7 +157,7 @@ where
         if passthrough {
             passthrough_denyreason(key).is_none()
         } else {
-            key.starts_with("XDG_") || FORWARDED_DESKTOP_VARS.contains(&key)
+            host_env_key_inherited(std::ffi::OsStr::new(key), false)
         }
     };
     let mut pairs: Vec<(String, String)> = vars
@@ -425,9 +503,19 @@ pub(crate) fn collect_environment(
         .as_deref()
         .unwrap_or(&sandbox_config.environment);
 
-    // Terminal defaults, plus Vertex provider vars when Vertex is enabled on the host. A key is
-    // claimed even when unset on the host, so later entries cannot supply it.
-    let vertex: &[&str] = if host_vertex_enabled() {
+    // A session's provider pick is claimed before everything else: this list wins a shared key
+    // against both the request auth payload and the per-adapter allowlist, so the routing flags
+    // have to be set here to beat whatever the host exported.
+    let provider = sandbox_info.provider.as_deref();
+    for (key, value) in provider.and_then(provider_override_env).unwrap_or_default() {
+        if seen_keys.insert(key.clone()) {
+            result.push(EnvEntry::Literal { key, value });
+        }
+    }
+
+    // Terminal defaults, plus Vertex provider vars when Vertex is in effect. A key is claimed
+    // even when unset on the host, so later entries cannot supply it.
+    let vertex: &[&str] = if vertex_enabled(provider) {
         AUTO_FORWARD_VERTEX_ENV_VARS
     } else {
         &[]
@@ -535,6 +623,36 @@ pub(crate) struct DockerExecEnv {
 pub(crate) const CONTAINER_EXEC_ENV_FD: u8 = 9;
 pub(crate) const CONTAINER_EXEC_ENV_PATH: &str = "/dev/fd/9";
 
+pub(crate) fn container_env_file<'a>(
+    environment: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> anyhow::Result<tempfile::NamedTempFile> {
+    use std::io::Write;
+    let mut file = tempfile::Builder::new()
+        .prefix("aoe-container-env-")
+        .tempfile()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    for (key, value) in environment {
+        anyhow::ensure!(
+            is_valid_env_key(key),
+            "invalid container environment key {key:?}"
+        );
+        anyhow::ensure!(
+            !value
+                .bytes()
+                .any(|byte| matches!(byte, b'\0' | b'\n' | b'\r')),
+            "container environment value for {key} cannot be represented in an env-file"
+        );
+        writeln!(file, "{key}={value}")?;
+    }
+    file.flush()?;
+    Ok(file)
+}
+
 /// Build docker exec environment transport from config and optional
 /// per-session extra entries.
 #[cfg(test)]
@@ -628,6 +746,14 @@ mod tests {
             custom_instruction: None,
             before_start_env: Vec::new(),
             container_workdir: None,
+            provider: None,
+        }
+    }
+
+    fn sandbox_for(provider: &str) -> SandboxInfo {
+        SandboxInfo {
+            provider: Some(provider.to_string()),
+            ..sandbox(None)
         }
     }
 
@@ -651,6 +777,7 @@ mod tests {
     fn inherited_host_env_filtering() {
         let vars = owned(&[
             ("DISPLAY", ":0"),
+            ("COLORFGBG", "0;15"),
             ("XDG_RUNTIME_DIR", "/run/user/1000"),
             ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
             ("WAYLAND_DISPLAY", ""),
@@ -664,6 +791,7 @@ mod tests {
         assert_eq!(
             inherited_host_env_from(vars.clone(), false),
             owned(&[
+                ("COLORFGBG", "0;15"),
                 ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
                 ("DISPLAY", ":0"),
                 ("XDG_RUNTIME_DIR", "/run/user/1000"),
@@ -672,6 +800,7 @@ mod tests {
         assert_eq!(
             inherited_host_env_from(vars, true),
             owned(&[
+                ("COLORFGBG", "0;15"),
                 ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
                 ("DISPLAY", ":0"),
                 ("GOPATH", "/home/me/go"),
@@ -709,6 +838,32 @@ mod tests {
             custom(&inherited_host_env("")).as_deref(),
             Some("custom-value")
         );
+    }
+
+    #[test]
+    #[serial]
+    fn inherited_host_env_derives_colorfgbg_from_theme() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _app_dir = crate::session::test_support::isolate_app_dir_at(tmp.path());
+        let config_path = crate::session::config::config_path().expect("config path");
+        std::fs::create_dir_all(config_path.parent().expect("app dir")).expect("app dir");
+        let colorfgbg = || {
+            inherited_host_env("")
+                .into_iter()
+                .find(|(k, _)| k == "COLORFGBG")
+                .map(|(_, v)| v)
+        };
+
+        for (host, theme, want) in [
+            (None, "catppuccin-latte", "0;15"),
+            (None, "dracula", "15;0"),
+            (Some("7;0"), "catppuccin-latte", "7;0"),
+        ] {
+            std::fs::write(&config_path, format!("[theme]\nname = \"{theme}\"\n"))
+                .expect("write config");
+            let _env = EnvGuard::set(&[("COLORFGBG", host.unwrap_or(""))]);
+            assert_eq!(colorfgbg().as_deref(), Some(want), "{host:?} {theme}");
+        }
     }
 
     #[test]
@@ -979,6 +1134,131 @@ mod tests {
         assert_eq!(
             session_host_env_pairs("any-profile", tmp.path(), &info),
             owned(&[("TEST_VAR", "foo"), ("OTHER", "bar")])
+        );
+    }
+
+    /// Every pick writes both flags, so the override beats whatever the host
+    /// exported rather than merely failing to set it. Off is empty, never "0":
+    /// the adapter reads these with a JavaScript truthiness test.
+    #[test]
+    fn provider_override_env_sets_both_flags() {
+        let cases = [("api", "", ""), ("bedrock", "1", ""), ("vertex", "", "1")];
+        for (provider, bedrock, vertex) in cases {
+            assert_eq!(
+                provider_override_env(provider),
+                Some(owned(&[
+                    ("CLAUDE_CODE_USE_BEDROCK", bedrock),
+                    ("CLAUDE_CODE_USE_VERTEX", vertex),
+                ])),
+                "{provider}"
+            );
+        }
+        assert_eq!(provider_override_env("gateway"), None);
+        assert_eq!(provider_override_env(""), None);
+    }
+
+    /// A pick decides Vertex routing on its own; only an unpinned session
+    /// falls back to the host flag, which is the behavior before any pick.
+    #[test]
+    #[serial]
+    fn vertex_enabled_prefers_the_session_pick() {
+        for (host, cases) in [
+            (
+                "1",
+                [(None, true), (Some("api"), false), (Some("vertex"), true)],
+            ),
+            (
+                "",
+                [(None, false), (Some("api"), false), (Some("vertex"), true)],
+            ),
+        ] {
+            let _env = EnvGuard::set(&[("CLAUDE_CODE_USE_VERTEX", host)]);
+            for (pick, expected) in cases {
+                assert_eq!(
+                    vertex_enabled(pick),
+                    expected,
+                    "host={host:?} pick={pick:?}"
+                );
+            }
+            // An unrecognized stored value must not silently mean "not vertex".
+            assert_eq!(vertex_enabled(Some("gateway")), !host.is_empty());
+        }
+    }
+
+    /// The sandbox path claims the first entry for a key, so the pick has to
+    /// land here to outrank the request auth payload and the adapter
+    /// allowlist. A Vertex pick also pulls in the credential vars the host
+    /// flag would otherwise gate.
+    #[test]
+    #[serial]
+    fn collect_environment_applies_the_provider_pick() {
+        let _env = EnvGuard::set(&[
+            ("CLAUDE_CODE_USE_VERTEX", "1"),
+            ("ANTHROPIC_VERTEX_PROJECT_ID", "proj"),
+            ("CLOUD_ML_REGION", "europe-west1"),
+        ]);
+        let config = config(&[]);
+
+        let api = collect_environment(&config, &sandbox_for("api"));
+        assert_eq!(
+            lookup(&api, "CLAUDE_CODE_USE_VERTEX"),
+            vec![(String::new(), false)]
+        );
+        assert_eq!(
+            lookup(&api, "CLAUDE_CODE_USE_BEDROCK"),
+            vec![(String::new(), false)]
+        );
+        assert!(
+            lookup(&api, "ANTHROPIC_VERTEX_PROJECT_ID").is_empty(),
+            "an api pick must not carry the host's vertex credentials"
+        );
+
+        let bedrock = collect_environment(&config, &sandbox_for("bedrock"));
+        assert_eq!(
+            lookup(&bedrock, "CLAUDE_CODE_USE_BEDROCK"),
+            vec![("1".to_string(), false)]
+        );
+        assert_eq!(
+            lookup(&bedrock, "CLAUDE_CODE_USE_VERTEX"),
+            vec![(String::new(), false)]
+        );
+
+        let vertex = collect_environment(&config, &sandbox_for("vertex"));
+        assert_eq!(
+            lookup(&vertex, "CLAUDE_CODE_USE_VERTEX"),
+            vec![("1".to_string(), false)]
+        );
+        assert_eq!(
+            lookup(&vertex, "ANTHROPIC_VERTEX_PROJECT_ID"),
+            vec![("proj".to_string(), true)]
+        );
+
+        // Unpinned keeps the host-driven behavior.
+        let unpinned = collect_environment(&config, &sandbox(None));
+        assert_eq!(
+            lookup(&unpinned, "CLAUDE_CODE_USE_VERTEX"),
+            vec![("1".to_string(), true)]
+        );
+        assert!(lookup(&unpinned, "CLAUDE_CODE_USE_BEDROCK").is_empty());
+    }
+
+    /// A Vertex pick reaches a host that never exported the flag, which is the
+    /// whole point of switching: the credential vars travel with it.
+    #[test]
+    #[serial]
+    fn collect_environment_forwards_vertex_vars_without_the_host_flag() {
+        let _env = EnvGuard::set(&[
+            ("CLAUDE_CODE_USE_VERTEX", ""),
+            ("ANTHROPIC_VERTEX_PROJECT_ID", "proj"),
+        ]);
+        let entries = collect_environment(&config(&[]), &sandbox_for("vertex"));
+        assert_eq!(
+            lookup(&entries, "CLAUDE_CODE_USE_VERTEX"),
+            vec![("1".to_string(), false)]
+        );
+        assert_eq!(
+            lookup(&entries, "ANTHROPIC_VERTEX_PROJECT_ID"),
+            vec![("proj".to_string(), true)]
         );
     }
 

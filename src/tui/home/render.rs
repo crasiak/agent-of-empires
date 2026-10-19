@@ -917,21 +917,10 @@ impl ListRowLayout {
     }
 }
 
-fn session_color_background(color: Color, theme: &Theme) -> Option<Color> {
-    let rgb = |c: Color| match c {
-        Color::Rgb(r, g, b) => Some((r, g, b)),
-        _ => None,
-    };
-    let (r, g, b) = rgb(color)?;
-    let (br, bg, bb) = rgb(theme.background)?;
-    let lerp = |x: u8, y: u8| ((x as f32) * 0.14 + (y as f32) * 0.86).round() as u8;
-    Some(Color::Rgb(lerp(r, br), lerp(g, bg), lerp(b, bb)))
-}
-
 /// Where the right-aligned activity column lives on a session row.
 ///
 /// `prefix_width` is the display width of the spans already pushed, `list_width` the inner
-/// width of the list pane, `slot_width` 0 when the age is hidden, `badge_width` 0 when no
+/// width of the list pane, `slot_width` 0 when the age is empty, `badge_width` 0 when no
 /// terminal-mode badge follows. `Some(pad)` is the padding to push between prefix and
 /// column when it fits with the slot, the badge and `LAST_ACTIVITY_RIGHT_MARGIN`; `None`
 /// means the row is too wide and the title wins.
@@ -999,11 +988,13 @@ impl HomeView {
         update_status: Option<&str>,
         image_update: Option<&ImageUpdate>,
     ) {
-        // Start each frame with no footer buttons and no sidebar collapse rects; the home
-        // render paths repopulate them. The takeover views return before those run, so
-        // clearing here keeps a stale rect from swallowing a click on the diff/serve
-        // surface (the collapse handler runs ahead of `hit_diff`).
+        // Hidden bars and takeover views must not retain clickable regions.
         self.footer_buttons.clear();
+        self.tips_badge_rect = None;
+        if !self.show_shortcut_bar {
+            self.footer_hover = None;
+            self.tips_badge_hovered = false;
+        }
         self.collapse_button_area = Rect::default();
         self.expand_strip_area = Rect::default();
         // Hyperlink cells are per-frame: a takeover view or a link-free preview must
@@ -1059,24 +1050,46 @@ impl HomeView {
             return;
         }
 
-        // Layout: main area + status bar + optional update bar. The update bar carries
-        // both persistent banners and transient toasts, so it needs a row whenever either
-        // is present, or a toast fired without a pending update would never show.
+        // Scrape the last prompt for the footer (throttled; a no-op unless the
+        // Ctrl+L toggle is on and a session is selected). The owned line is shown
+        // just above the status bar.
+        self.refresh_last_prompt();
+        let last_prompt = self.last_prompt_footer_line();
+
+        // Keep temporary feedback and the leader menu available with the bar hidden.
+        let has_status_bar = self.show_shortcut_bar
+            || self.status_flash_text().is_some()
+            || (self.live_send.is_some()
+                && (self.live_send_pending_leader || self.live_send_ctrl_c_flash_active()));
         let has_update_bar =
             update_info.is_some() || update_status.is_some() || image_update.is_some();
-        let constraints = if has_update_bar {
-            vec![
-                Constraint::Min(0),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ]
-        } else {
-            vec![Constraint::Min(0), Constraint::Length(1)]
-        };
+        let mut constraints = vec![Constraint::Min(0)];
+        if last_prompt.is_some() {
+            constraints.push(Constraint::Length(1)); // last-prompt footer
+        }
+        if has_status_bar {
+            constraints.push(Constraint::Length(1));
+        }
+        if has_update_bar {
+            constraints.push(Constraint::Length(1)); // update bar
+        }
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints(constraints)
             .split(area);
+
+        let mut next_row = 1;
+        let last_prompt_idx = last_prompt.as_ref().map(|_| {
+            let i = next_row;
+            next_row += 1;
+            i
+        });
+        let status_idx = has_status_bar.then(|| {
+            let i = next_row;
+            next_row += 1;
+            i
+        });
+        let update_bar_idx = has_update_bar.then_some(next_row);
 
         // The diagnostics strip docks under the session-list column (see
         // `diagnostics_dock`) so it stays narrow and the preview keeps its height.
@@ -1098,7 +1111,7 @@ impl HomeView {
             let strip_col = self.diagnostics_dock(frame, strip_area, theme);
             self.render_collapsed_strip(frame, strip_col, theme);
             self.render_preview(frame, preview_area, theme);
-            self.render_usage_overlay(frame, theme);
+            self.render_session_info(frame, theme);
         } else if available_width < responsive::STACKED_BREAKPOINT {
             let main_height = content_area.height;
             let list_height = responsive::stacked_list_height(main_height);
@@ -1119,7 +1132,7 @@ impl HomeView {
             let list_rect = self.diagnostics_dock(frame, chunks[0], theme);
             self.render_list(frame, list_rect, theme, ListLayout::Stacked);
             self.render_preview(frame, chunks[1], theme);
-            self.render_usage_overlay(frame, theme);
+            self.render_session_info(frame, theme);
         } else {
             // Side-by-side: cap list width so the preview pane keeps its
             // usability floor (PREVIEW_MIN_WIDTH).
@@ -1144,14 +1157,29 @@ impl HomeView {
             let layout = ListLayout::Horizontal(self.sidebar_position);
             self.render_list(frame, list_rect, theme, layout);
             self.render_preview(frame, preview_area, theme);
-            self.render_usage_overlay(frame, theme);
+            self.render_session_info(frame, theme);
         }
-        self.render_status_bar(frame, main_chunks[1], theme);
+        if let (Some(idx), Some(text)) = (last_prompt_idx, last_prompt.as_deref()) {
+            self.render_last_prompt_footer(frame, main_chunks[idx], theme, text);
+        }
+        if let Some(idx) = status_idx {
+            self.render_status_bar(frame, main_chunks[idx], theme);
+        } else if !self.live_send_pending_leader && self.hovered_link().is_some() {
+            // Overlay the border so hovering cannot move the link out from under the pointer.
+            let row = Rect::new(
+                content_area.x,
+                content_area.bottom().saturating_sub(1),
+                content_area.width,
+                content_area.height.min(1),
+            );
+            frame.render_widget(Clear, row);
+            self.render_status_bar(frame, row, theme);
+        }
 
-        if has_update_bar {
+        if let Some(idx) = update_bar_idx {
             self.render_update_bar(
                 frame,
-                main_chunks[2],
+                main_chunks[idx],
                 theme,
                 update_info,
                 update_status,
@@ -1227,6 +1255,9 @@ impl HomeView {
             // context_menu renders last so its popup sits above any underlying dialog.
             context_menu,
         );
+        if let Some(dialog) = &self.highlight_filter_dialog {
+            dialog.render(frame, theme);
+        }
     }
 
     /// Dock the diagnostics strip under the session-list column: carve
@@ -1724,6 +1755,7 @@ impl HomeView {
                 collapsed,
                 session_count,
                 archived_at,
+                profile,
                 ..
             } => {
                 let icon = if *collapsed {
@@ -1746,6 +1778,20 @@ impl HomeView {
                 } else {
                     None
                 };
+                // Count hidden stopped sessions within the active highlight filters.
+                let total = (!self.group_totals.is_empty())
+                    .then(|| self.group_totals.get(&(path.clone(), profile.clone())))
+                    .flatten();
+                let session_count = match total {
+                    Some(total) if total > session_count => format!("{session_count}/{total}"),
+                    _ => session_count.to_string(),
+                };
+                let alias = (self.group_by == GroupByMode::Project)
+                    .then(|| self.project_appearance_id(path))
+                    .flatten()
+                    .and_then(|id| self.repo_appearances.get(&id))
+                    .and_then(|a| a.alias.as_deref());
+                let name = alias.unwrap_or(name);
                 let text = if let Some(glyph) = section_glyph {
                     Cow::Owned(format!("{} {} ({})", glyph, name, session_count))
                 } else if pinned {
@@ -2052,11 +2098,10 @@ impl HomeView {
         } else {
             String::new()
         };
-        // A blank age keeps its slot only to line the badge up with the rows around it.
-        let slot_width = if self.show_activity_age && (!age.is_empty() || badge_text.is_some()) {
-            LAST_ACTIVITY_SLOT
-        } else {
+        let slot_width = if age.is_empty() {
             0
+        } else {
+            LAST_ACTIVITY_SLOT
         };
 
         let (title_width, keep_tag) = title_width_for_column(
@@ -2123,11 +2168,20 @@ impl HomeView {
         if is_hovered {
             return Some(theme.selection);
         }
+        if let Item::Group { path, .. } = item {
+            if self.group_by != GroupByMode::Project {
+                return None;
+            }
+            let id = self.project_appearance_id(path)?;
+            return self.repo_appearances.get(&id)?.color.map(|color| {
+                theme.highlight_background(crate::tui::highlight::project_color(color, theme))
+            });
+        }
         let Item::Session { id, .. } = item else {
             return None;
         };
         self.session_color(id, theme)
-            .and_then(|color| session_color_background(color, theme))
+            .map(|color| theme.highlight_background(color))
     }
 
     fn session_color(&self, id: &str, theme: &Theme) -> Option<Color> {
@@ -2135,15 +2189,7 @@ impl HomeView {
             return None;
         }
         let color = self.get_instance(id)?.color.as_deref()?;
-        match color {
-            "red" => Some(theme.error),
-            "amber" => Some(theme.waiting),
-            "green" => Some(theme.running),
-            // Tailwind purple-500 and teal-500, matching the web sidebar's dots.
-            "purple" => Some(theme.fixed_hue(0xa8, 0x55, 0xf7)),
-            "teal" => Some(theme.fixed_hue(0x14, 0xb8, 0xa6)),
-            _ => None,
-        }
+        crate::tui::highlight::session_color(color, theme)
     }
 
     /// Keep the live-send tmux pane sized to the preview's visible output area.
@@ -2836,10 +2882,8 @@ impl HomeView {
         self.active_preview_cache().captured_lines
     }
 
-    /// Draws the overlay stack over the preview's top-right corner: the reset
-    /// counter, then the Ledger drift and Headroom lines, each only when it is
-    /// switched on and loaded for the selected session.
-    fn render_usage_overlay(&self, frame: &mut Frame, theme: &Theme) {
+    /// Session-attributed badges and resources, never over captured output.
+    fn render_session_info(&self, frame: &mut Frame, theme: &Theme) {
         use crate::tui::components::{ledger_overlay, usage_overlay};
         if self.system_health_open {
             return;
@@ -2850,6 +2894,24 @@ impl HomeView {
         let Some(instance) = self.get_instance(selected) else {
             return;
         };
+        let metadata_height = match self.view_mode {
+            ViewMode::Structured => preview::agent_info_height(instance),
+            _ => preview::terminal_info_height(instance),
+        };
+        let layout = preview::PreviewLayout::compute(
+            self.preview_area,
+            self.preview_outer_area.width < responsive::STACKED_BREAKPOINT,
+            self.show_preview_info,
+            metadata_height,
+        );
+        let Some(info) = layout.info else { return };
+        // Placeholder and health views do not render an info header.
+        if layout.output != self.preview_pane_area {
+            return;
+        }
+        let areas = preview::InfoAreas::compute(info, metadata_height);
+        self.resource_history
+            .render(frame, areas.resources, instance, theme);
         let now = chrono::Utc::now();
         let mut sections = Vec::new();
         if self.show_usage_overlay {
@@ -2874,7 +2936,7 @@ impl HomeView {
                 }
             }
         }
-        usage_overlay::render_overlay_sections(frame, self.preview_pane_area, &sections, theme);
+        usage_overlay::render_info_sections(frame, areas.badges, &sections);
     }
 
     /// Paint the preview and refresh geometry used by selection and live-send.
@@ -3872,28 +3934,41 @@ impl HomeView {
         );
     }
 
+    /// Show the first line of the last submitted prompt as a clipped footer.
+    fn render_last_prompt_footer(&self, frame: &mut Frame, area: Rect, theme: &Theme, text: &str) {
+        // `text` is the scrape's first prompt line, already whitespace-collapsed
+        // and length-capped; the paragraph clips whatever still overruns the row.
+        let spans = vec![
+            Span::styled(
+                " ↑ last prompt: ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(text.to_string(), Style::default().fg(theme.dimmed)),
+        ];
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
     fn render_status_bar(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        // Cleared each frame and set only when the badge is drawn, so a stale rect can't
-        // make a footer click open tips while the badge is hidden.
-        self.tips_badge_rect = None;
-        // A flash is one-shot feedback on something the user just did, so it takes the
-        // row for its few seconds and wins over a hovered link's target, which it is
-        // usually reporting anyway. The LIVE chip stays either way: which pane keystrokes
-        // land on must never be hidden. A hovered target shows only while no overlay
-        // covers the preview (the click is inert there) and is resolved per frame, and it
-        // is suppressed while the leader is armed so the which-key menu stays visible.
+        // Action feedback takes precedence over a hovered link target.
         let hovered = (!self.live_send_pending_leader)
             .then(|| self.hovered_link())
             .flatten()
             .map(|uri| format!("\u{1f517} {uri}"));
-        let transient = self.status_flash_text().map(str::to_string).or(hovered);
+        let transient = self
+            .status_flash_text()
+            .map(str::to_string)
+            .or(hovered)
+            .or_else(|| {
+                (self.live_send.is_none() && self.highlight_filters.active())
+                    .then(|| self.highlight_filters.summary())
+            });
         if let Some(text) = transient {
             let mut spans = Vec::new();
             let mut budget = area.width as usize;
-            // In live-send the chip and the way out both stay: a flash lasts three
-            // seconds but a hovered target lasts as long as the pointer rests, and that
-            // is too long to leave the user with no visible exit chord.
-            let exit = self.live_send.as_ref().map(|state| {
+            let visible_live = self.live_send.as_ref().filter(|_| self.show_shortcut_bar);
+            let exit = visible_live.map(|state| {
                 let chord = if state.exit_chords.is_empty() {
                     "?".to_string()
                 } else {
@@ -3901,7 +3976,7 @@ impl HomeView {
                 };
                 format!(" {chord} to exit ")
             });
-            if self.live_send.is_some() {
+            if visible_live.is_some() {
                 let chip = " \u{25CF} LIVE ";
                 budget = budget.saturating_sub(unicode_width::UnicodeWidthStr::width(chip));
                 spans.push(Span::styled(
@@ -3923,10 +3998,13 @@ impl HomeView {
             frame.render_widget(Paragraph::new(Line::from(spans)), area);
             return;
         }
-        // The live-send banner takes over the status bar as an always-visible reminder
-        // that keystrokes are relayed, and how to get out. Distinct color and bold so it
-        // is not read as the regular footer. The scroll indicator, present only when the
-        // user scrolled back, sits between title and exit hint.
+        if !self.show_shortcut_bar
+            && !(self.live_send.is_some()
+                && (self.live_send_pending_leader || self.live_send_ctrl_c_flash_active()))
+        {
+            return;
+        }
+        // LIVE shares the shortcut row; its temporary menu and feedback can restore it.
         if let Some(state) = &self.live_send {
             let base_title = if state.title.is_empty() {
                 "session"
@@ -4096,11 +4174,8 @@ impl HomeView {
         // status indicators, which render but aren't clickable.
         let mut groups: Vec<(u8, Option<KeyEvent>, Vec<Span<'static>>)> = Vec::new();
 
-        // Serve indicator, shown only while the `aoe serve` daemon is live. The TUI does
-        // not own the daemon, so the PID file is probed each render; mode comes from a
-        // PID-keyed cache rather than a per-frame file read.
-        let mode_label = crate::cli::serve::cached_serve_mode_label();
-        if crate::cli::serve::daemon_pid().is_some() {
+        // Serve indicator, shown only while the `aoe serve` daemon is live.
+        if let Some(mode_label) = self.serve_badge {
             // A build without the dashboard bundle answers the API only, so
             // the badge must not read as "the dashboard is up".
             let what = if cfg!(feature = "web") {

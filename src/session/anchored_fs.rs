@@ -260,6 +260,18 @@ impl AnchoredDir {
         Ok(names)
     }
 
+    pub(crate) fn is_empty(&self) -> Result<bool> {
+        let mut dir = Dir::from_fd(self.open_dir(Path::new(""))?)?;
+        for entry in dir.iter() {
+            let entry = entry.context("reading anchored directory entry")?;
+            let name = entry.file_name().to_bytes();
+            if name != b"." && name != b".." {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(crate) fn regular_modified(
         &self,
         relative: &Path,

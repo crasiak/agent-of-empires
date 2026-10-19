@@ -15,6 +15,8 @@
 //! only debug builds compile, so release test builds (the Nix checks) skip them.
 
 mod common;
+#[cfg(unix)]
+mod frozen_environment;
 mod home_isolation;
 
 mod daemon_client;
@@ -44,6 +46,9 @@ mod acp_smoke;
 mod acp_session_delete;
 
 mod acp_model_respawn;
+mod acp_session_import;
+
+mod acp_provider_respawn;
 
 #[cfg(debug_assertions)]
 mod acp_midturn_resume;
@@ -66,6 +71,8 @@ mod no_stale_doc_refs;
 mod plugin_install;
 #[cfg(debug_assertions)]
 mod project_create_dedupe;
+#[cfg(debug_assertions)]
+mod project_list_profile;
 #[cfg(debug_assertions)]
 mod serve_cityhall_lockdown;
 #[cfg(debug_assertions)]

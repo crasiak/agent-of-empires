@@ -1,11 +1,10 @@
 //! Restartable frozen-v2 import; usage starts uncollected, never as active authority.
 use super::*;
-use crate::session::{backup_before_migration, AnchoredDir};
+use crate::session::{afk::schema as cursor, backup_before_migration, AnchoredDir};
 use delegation::hash;
 use migration_v2 as previous;
 use previous::frozen;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
 
 const MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const TOTAL_ORIGINAL_BYTES: usize = 256 * 1024 * 1024;
@@ -145,18 +144,13 @@ fn verify_seal(app: &Path, m: &Manifest) -> Result<()> {
     );
     Ok(())
 }
-pub(in crate::session::afk) fn schema(app: &Path) -> Result<String> {
-    let file = AnchoredDir::open(app)?
-        .open_regular(Path::new(".schema_version"), 16)?
-        .context("missing schema version")?;
-    let mut version = String::new();
-    file.take(17).read_to_string(&mut version)?;
-    Ok(version.trim().to_owned())
-}
 fn ready_manifest(app: &Path, m: &Manifest) -> Result<()> {
     ensure!(
-        matches!(schema(app)?.as_str(), "42" | "43") && m.phase == Phase::Complete,
-        "completed migration 42 and supported schema42/43 required"
+        matches!(cursor::read_cursor(app)?, cursor::USAGE | cursor::REVIEW)
+            && m.phase == Phase::Complete,
+        "completed AFK usage import and global schema {} or {} required",
+        cursor::USAGE,
+        cursor::REVIEW
     );
     verify_seal(app, m)
 }
@@ -401,13 +395,15 @@ fn save(store: &Store, m: &mut Manifest, phase: Phase) -> Result<()> {
 thread_local! { static INTERRUPT: std::cell::Cell<Option<Phase>> = const { std::cell::Cell::new(None) }; }
 
 pub(crate) fn run_at(app: &Path) -> Result<()> {
-    if schema(app)? == "43" {
+    if cursor::read_cursor(app)? == cursor::REVIEW {
         // Additive review storage does not reopen the frozen authority import.
         return ready(app);
     }
     ensure!(
-        matches!(schema(app)?.as_str(), "41" | "42"),
-        "migration 42 requires schema41 prerequisite or schema42 replay"
+        matches!(cursor::read_cursor(app)?, cursor::BATCHES | cursor::USAGE),
+        "AFK usage import requires global schema {} or {}",
+        cursor::BATCHES,
+        cursor::USAGE
     );
     let state = store(app, true)?;
     let _upgrade_lock = state.lock(Duration::from_secs(30))?;
@@ -649,7 +645,7 @@ pub(crate) fn initialize_test(app: &Path) {
     }
     run_at(app).unwrap();
     crate::session::afk::wake::initialize(app).unwrap();
-    std::fs::write(app.join(".schema_version"), "42").unwrap();
+    std::fs::write(app.join(".schema_version"), cursor::USAGE.to_string()).unwrap();
 }
 #[cfg(test)]
 mod tests;

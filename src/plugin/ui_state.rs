@@ -54,7 +54,8 @@ pub struct FacetOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TextPayload {
-    text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tone: Option<Tone>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,6 +64,12 @@ struct TextPayload {
     icon: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     href: Option<String>,
+    /// `Some([])` is an explicit clear and stays distinct from an absent list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    items: Option<Vec<BadgeItem>>,
+    /// Position among a chip slot's entries (`status-bar`, `header-start`, `detail-badge`), lowest first; default 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    order: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +85,9 @@ struct BadgeItem {
     href: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tooltip: Option<String>,
+    /// Items sharing a group collapse into one chip that cycles on click.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,8 +103,8 @@ struct RowBadgePayload {
     icon: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     href: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    items: Vec<BadgeItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    items: Option<Vec<BadgeItem>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -564,7 +574,7 @@ impl UiStore {
 
 fn max_payload_bytes(slot: UiSlot) -> usize {
     match slot {
-        UiSlot::Pane | UiSlot::HomePane => MAX_PANE_PAYLOAD_BYTES,
+        UiSlot::Pane | UiSlot::HomePane | UiSlot::Page => MAX_PANE_PAYLOAD_BYTES,
         UiSlot::ComposerAction => MAX_COMPOSER_ACTION_PAYLOAD_BYTES,
         _ => MAX_PAYLOAD_BYTES,
     }
@@ -609,14 +619,50 @@ fn check_block_depth(blocks: Option<&[Value]>) -> Result<(), String> {
     }
 }
 
+/// Blocks are otherwise opaque; `markdown` is the one kind rejected up front
+/// when malformed. Run after `check_block_depth`, which bounds the recursion.
+fn check_markdown_blocks(blocks: &[Value]) -> Result<(), String> {
+    for block in blocks {
+        if block.get("kind").and_then(Value::as_str) == Some("markdown")
+            && !block.get("text").is_some_and(Value::is_string)
+        {
+            return Err("markdown block requires a string text".into());
+        }
+        if let Some(children) = block.get("children").and_then(Value::as_array) {
+            check_markdown_blocks(children)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_badge_groups(items: &[BadgeItem]) -> Result<(), String> {
+    if items.iter().any(|i| i.group.as_deref() == Some("")) {
+        return Err("badge item group must not be empty".into());
+    }
+    Ok(())
+}
+
 fn validate_payload(slot: UiSlot, raw: &Value) -> Result<Value, String> {
     fn normalize<T: serde::de::DeserializeOwned + Serialize>(raw: &Value) -> Result<Value, String> {
         let parsed: T = serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
         serde_json::to_value(parsed).map_err(|e| e.to_string())
     }
     match slot {
-        UiSlot::StatusBar | UiSlot::DetailBadge => normalize::<TextPayload>(raw),
-        UiSlot::RowBadge => normalize::<RowBadgePayload>(raw),
+        UiSlot::StatusBar | UiSlot::HeaderStart | UiSlot::DetailBadge => {
+            let parsed: TextPayload =
+                serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
+            if parsed.text.is_none() && parsed.items.is_none() {
+                return Err("badge requires text or items".into());
+            }
+            check_badge_groups(parsed.items.as_deref().unwrap_or_default())?;
+            serde_json::to_value(parsed).map_err(|e| e.to_string())
+        }
+        UiSlot::RowBadge => {
+            let parsed: RowBadgePayload =
+                serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
+            check_badge_groups(parsed.items.as_deref().unwrap_or_default())?;
+            serde_json::to_value(parsed).map_err(|e| e.to_string())
+        }
         UiSlot::RowColumn => normalize::<RowColumnPayload>(raw),
         UiSlot::SortKey => normalize::<SortKeyPayload>(raw),
         UiSlot::FilterFacet => normalize::<FilterFacetPayload>(raw),
@@ -625,6 +671,7 @@ fn validate_payload(slot: UiSlot, raw: &Value) -> Result<Value, String> {
             let parsed: PanePayload =
                 serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
             check_block_depth(parsed.blocks.as_deref())?;
+            check_markdown_blocks(parsed.blocks.as_deref().unwrap_or_default())?;
             serde_json::to_value(parsed).map_err(|e| e.to_string())
         }
         UiSlot::ComposerAction => {
@@ -646,6 +693,9 @@ fn validate_payload(slot: UiSlot, raw: &Value) -> Result<Value, String> {
             serde_json::to_value(parsed).map_err(|e| e.to_string())
         }
         UiSlot::Notification => Err("notification is pushed via ui.notify".into()),
+        // Opaque to the host; only the page's own script reads it.
+        UiSlot::Page if raw.is_object() => Ok(raw.clone()),
+        UiSlot::Page => Err("page state must be a JSON object".into()),
     }
 }
 
@@ -886,6 +936,76 @@ mod tests {
                 false,
             ),
             (
+                "row badge items accept a cycle group",
+                UiSlot::RowBadge,
+                Some("s1"),
+                json!({"items": [{"text": "5h 40%", "group": "usage"}, {"text": "7d 12%", "group": "usage"}]}),
+                true,
+            ),
+            (
+                "status bar accepts a grouped items list without text",
+                UiSlot::StatusBar,
+                None,
+                json!({"items": [{"text": "5h 40%", "group": "usage"}, {"text": "7d 12%", "group": "usage"}]}),
+                true,
+            ),
+            (
+                "detail badge accepts items",
+                UiSlot::DetailBadge,
+                Some("s1"),
+                json!({"items": [{"text": "a"}]}),
+                true,
+            ),
+            (
+                "header start accepts text with an order",
+                UiSlot::HeaderStart,
+                None,
+                json!({"text": "Codex 49%", "order": -2}),
+                true,
+            ),
+            (
+                "header start with neither text nor items rejected",
+                UiSlot::HeaderStart,
+                None,
+                json!({"order": 1}),
+                false,
+            ),
+            (
+                "header start is not per-session",
+                UiSlot::HeaderStart,
+                Some("s1"),
+                json!({"text": "x"}),
+                false,
+            ),
+            (
+                "status bar accepts an explicitly empty items list",
+                UiSlot::StatusBar,
+                None,
+                json!({"items": []}),
+                true,
+            ),
+            (
+                "detail badge accepts text with an explicitly empty items list",
+                UiSlot::DetailBadge,
+                Some("s1"),
+                json!({"text": "fallback", "items": []}),
+                true,
+            ),
+            (
+                "status bar with neither text nor items rejected",
+                UiSlot::StatusBar,
+                None,
+                json!({"tone": "info"}),
+                false,
+            ),
+            (
+                "empty cycle group rejected",
+                UiSlot::RowBadge,
+                Some("s1"),
+                json!({"items": [{"text": "a", "group": ""}]}),
+                false,
+            ),
+            (
                 "pane accepts unknown future block kinds",
                 UiSlot::Pane,
                 Some("s1"),
@@ -946,6 +1066,34 @@ mod tests {
                 true,
             ),
             (
+                "markdown block accepts string text",
+                UiSlot::Pane,
+                Some("s1"),
+                json!({"blocks": [{"kind": "markdown", "text": "# hi\n- [x] done", "tone": "info"}]}),
+                true,
+            ),
+            (
+                "markdown block without text rejected",
+                UiSlot::Pane,
+                Some("s1"),
+                json!({"blocks": [{"kind": "markdown"}]}),
+                false,
+            ),
+            (
+                "markdown block with non-string text rejected",
+                UiSlot::HomePane,
+                None,
+                json!({"blocks": [{"kind": "markdown", "text": 5}]}),
+                false,
+            ),
+            (
+                "markdown block nested in a section is checked too",
+                UiSlot::Pane,
+                Some("s1"),
+                json!({"blocks": [{"kind": "section", "children": [{"kind": "markdown"}]}]}),
+                false,
+            ),
+            (
                 "pane payload cap is larger than other slots",
                 UiSlot::Pane,
                 Some("s1"),
@@ -966,6 +1114,34 @@ mod tests {
                 json!({"text": "x".repeat(9 * 1024)}),
                 false,
             ),
+            (
+                "page takes an opaque global object",
+                UiSlot::Page,
+                None,
+                json!({"stages": {"s1": "todo"}, "config": {"any": [1, 2]}}),
+                true,
+            ),
+            (
+                "page state must be an object",
+                UiSlot::Page,
+                None,
+                json!([1, 2]),
+                false,
+            ),
+            (
+                "page state is global only",
+                UiSlot::Page,
+                Some("s1"),
+                json!({}),
+                false,
+            ),
+            (
+                "page state past the 64 KiB cap rejected",
+                UiSlot::Page,
+                None,
+                json!({"blob": "x".repeat(64 * 1024)}),
+                false,
+            ),
         ];
         for (name, slot, session, payload, ok) in cases {
             let result = set(&s, g, slot, "x", session, payload);
@@ -975,6 +1151,53 @@ mod tests {
             s.remove("acme.kit", g, UiSlot::RowBadge, "x", None),
             Err(UiError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn badges_keep_an_explicitly_empty_items_list() {
+        let s = store();
+        let g = s.begin_generation("acme.kit");
+        set(&s, g, UiSlot::StatusBar, "u", None, json!({"text": "old"})).unwrap();
+        set(&s, g, UiSlot::StatusBar, "u", None, json!({"items": []})).unwrap();
+        set(
+            &s,
+            g,
+            UiSlot::DetailBadge,
+            "d",
+            Some("s1"),
+            json!({"text": "t", "items": []}),
+        )
+        .unwrap();
+        set(
+            &s,
+            g,
+            UiSlot::DetailBadge,
+            "e",
+            Some("s1"),
+            json!({"text": "t"}),
+        )
+        .unwrap();
+        set(
+            &s,
+            g,
+            UiSlot::RowBadge,
+            "r",
+            Some("s1"),
+            json!({"text": "t", "items": []}),
+        )
+        .unwrap();
+        let snap = s.snapshot();
+        let payload = |id: &str| {
+            snap.entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.payload.clone())
+                .unwrap()
+        };
+        assert_eq!(payload("u"), json!({"items": []}));
+        assert_eq!(payload("d"), json!({"text": "t", "items": []}));
+        assert_eq!(payload("e"), json!({"text": "t"}));
+        assert_eq!(payload("r"), json!({"text": "t", "items": []}));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! One-time transformations of persisted data, run in order on upgrade. See
 //! `docs/development/adding-a-migration.md` to add one.
 
+#[cfg(test)]
+mod afk_tests;
 mod config_file;
 pub mod progress;
 mod runner_lock;
@@ -43,14 +45,20 @@ mod v032_bound_capture_exclusions;
 pub(crate) mod v033_isolate_sandbox_content;
 mod v034_trash_retention_minutes;
 mod v035_custom_sort_order;
-mod v036_afk_control;
-mod v037_afk_runtime;
-mod v038_afk_settlement;
-mod v039_afk_questions;
-mod v040_afk_authority;
-mod v041_afk_batches;
-mod v042_afk_usage_guards;
-mod v043_afk_return_review;
+mod v036_session_creation_count;
+mod v037_trash_lifecycle_id;
+mod v038_prime_native_runtime;
+mod v039_prime_control_path;
+mod v040_worker_ownership;
+mod v041_repo_appearances;
+mod v042_afk_control;
+mod v043_afk_runtime;
+mod v044_afk_settlement;
+mod v045_afk_questions;
+mod v046_afk_authority;
+mod v047_afk_batches;
+mod v048_afk_usage_guards;
+mod v049_afk_return_review;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -92,11 +100,12 @@ mod hook_fixtures {
     }
 }
 
+use crate::session::afk::schema as afk_schema;
 use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 43;
+const CURRENT_VERSION: u32 = afk_schema::REVIEW;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -226,14 +235,48 @@ const MIGRATIONS: &[Migration] = &[
         v034_trash_retention_minutes::run,
     ),
     (35, "custom_sort_order", v035_custom_sort_order::run),
-    (36, "afk_control", v036_afk_control::run),
-    (37, "afk_runtime", v037_afk_runtime::run),
-    (38, "afk_settlement", v038_afk_settlement::run),
-    (39, "afk_questions", v039_afk_questions::run),
-    (40, "afk_authority", v040_afk_authority::run),
-    (41, "afk_batches", v041_afk_batches::run),
-    (42, "afk_usage_guards", v042_afk_usage_guards::run),
-    (43, "afk_return_review", v043_afk_return_review::run),
+    (
+        36,
+        "session_creation_count",
+        v036_session_creation_count::run,
+    ),
+    (37, "trash_lifecycle_id", v037_trash_lifecycle_id::run),
+    (38, "prime_native_runtime", v038_prime_native_runtime::run),
+    (39, "prime_control_path", v039_prime_control_path::run),
+    (40, "worker_ownership", v040_worker_ownership::run),
+    (
+        41,
+        "Shared repository appearances",
+        v041_repo_appearances::run,
+    ),
+    (afk_schema::CONTROL, "afk_control", v042_afk_control::run),
+    (afk_schema::RUNTIME, "afk_runtime", v043_afk_runtime::run),
+    (
+        afk_schema::SETTLEMENT,
+        "afk_settlement",
+        v044_afk_settlement::run,
+    ),
+    (
+        afk_schema::QUESTIONS,
+        "afk_questions",
+        v045_afk_questions::run,
+    ),
+    (
+        afk_schema::AUTHORITY,
+        "afk_authority",
+        v046_afk_authority::run,
+    ),
+    (afk_schema::BATCHES, "afk_batches", v047_afk_batches::run),
+    (
+        afk_schema::USAGE,
+        "afk_usage_guards",
+        v048_afk_usage_guards::run,
+    ),
+    (
+        afk_schema::REVIEW,
+        "afk_return_review",
+        v049_afk_return_review::run,
+    ),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -310,7 +353,8 @@ fn run_migrations_inner(reporter: Option<progress::Reporter>, announce: bool) ->
     let _installed = progress::install(reporter);
     let _announced = progress::install_announced(announce);
     let _runner_lock = runner_lock::acquire(std::time::Duration::from_secs(30))?;
-    let current = get_current_version();
+    let app = crate::session::get_app_dir()?;
+    let current = afk_schema::read_cursor(&app)?;
     debug!("Current schema version: {}", current);
 
     if current > CURRENT_VERSION {
@@ -318,6 +362,7 @@ fn run_migrations_inner(reporter: Option<progress::Reporter>, announce: bool) ->
             "data schema version {current} is newer than this build supports ({CURRENT_VERSION}); refusing to downgrade"
         );
     }
+    afk_schema::ensure_mainline(&app, current)?;
     if current == CURRENT_VERSION {
         v027_isolate_sandbox_stores::reconcile_pending(announce)?;
         return v033_isolate_sandbox_content::reconcile_pending(announce);
@@ -444,7 +489,7 @@ mod tests {
             root.join("version.json").exists(),
             "version record rename preceded failed directory sync"
         );
-        assert_eq!(get_current_version(), 41);
+        assert_eq!(get_current_version(), afk_schema::BATCHES);
         run_migrations().unwrap();
         assert_eq!(get_current_version(), CURRENT_VERSION);
         assert_eq!(fs::read(&manifest).unwrap(), original);
@@ -454,9 +499,9 @@ mod tests {
         let snapshot = app.join("afk-authority-v3/profiles/alpha/snapshot.json");
         let advanced = fs::read(&snapshot).unwrap();
         crate::session::anchored_fs::FAIL_SYNC_ONCE.set(Some(root));
-        assert!(v042_afk_usage_guards::run().is_err());
+        assert!(v048_afk_usage_guards::run().is_err());
         crate::session::anchored_fs::FAIL_SYNC_ONCE.set(None);
-        v042_afk_usage_guards::run().unwrap();
+        v048_afk_usage_guards::run().unwrap();
         assert_eq!(fs::read(snapshot).unwrap(), advanced);
         assert_eq!(get_current_version(), CURRENT_VERSION);
     }
@@ -484,9 +529,7 @@ mod tests {
         assert!(error.contains("refusing to downgrade"));
     }
 
-    /// v035 is a schema step and nothing more: an install on the previous version with a
-    /// non-default sort order comes out on a newer version with `state.toml` byte for byte
-    /// as it was, and running the migrations again changes neither.
+    /// Upgrading preserves the sort order, and a second run leaves state untouched.
     #[test]
     #[serial_test::serial]
     fn schema_34_advances_and_keeps_its_sort_order() {
@@ -510,16 +553,18 @@ mod tests {
         assert!(advanced > 34, "the version advances past 34, to {advanced}");
         assert_eq!(advanced, CURRENT_VERSION);
         assert_eq!(
-            fs::read_to_string(app.join("state.toml")).unwrap(),
-            state,
-            "the state is not rewritten"
+            crate::session::config::AppStateConfig::load()
+                .unwrap()
+                .sort_order,
+            Some(crate::session::config::SortOrder::Oldest)
         );
+        let migrated_state = fs::read_to_string(app.join("state.toml")).unwrap();
 
         run_migrations().unwrap();
         assert_eq!(get_current_version(), advanced, "a second run stays put");
         assert_eq!(
             fs::read_to_string(app.join("state.toml")).unwrap(),
-            state,
+            migrated_state,
             "and leaves the state alone"
         );
     }

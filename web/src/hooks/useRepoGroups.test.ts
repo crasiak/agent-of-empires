@@ -1,12 +1,17 @@
 // @vitest-environment jsdom
 
 import { renderHook, act } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useRepoGroups, MULTI_REPO_GROUP_ID, SCRATCH_GROUP_ID } from "./useRepoGroups";
 import type { SessionResponse, Workspace } from "../lib/types";
 import type { SidebarSortMode } from "../lib/sidebarSort";
 import { session, workspace } from "./__tests__/fixtures";
+
+vi.mock("../lib/api", () => ({
+  fetchRepoAppearances: vi.fn(async () => ({})),
+  patchRepoAppearance: vi.fn(async () => ({ "/repo-a": { alias: "pretty-name" } })),
+}));
 
 const multiRepos = [
   { name: "repo-a", source_path: "/repo-a", branch: "main" },
@@ -115,6 +120,50 @@ describe("useRepoGroups sort modes", () => {
   });
 });
 
+describe("useRepoGroups plugin attention (#4446)", () => {
+  /** Mounts in `mode` with a plugin-toned session set that tests can swap between renders. */
+  function mountToned(workspaces: Workspace[], mode: SidebarSortMode, toned: string[]) {
+    const ordering = workspaces.map((w) => w.id);
+    return renderHook(
+      ({ attention }: { attention: ReadonlySet<string> }) =>
+        useRepoGroups(workspaces, ordering, mode, [], undefined, attention),
+      { initialProps: { attention: new Set(toned) } },
+    );
+  }
+  interface Mounted {
+    result: { current: { groups: { id: string; workspaces: { id: string }[] }[] } };
+  }
+  const groupIds = (m: Mounted) => m.result.current.groups.map((g) => g.id);
+  const wsIds = (m: Mounted) => m.result.current.groups[0]!.workspaces.map((w) => w.id);
+
+  it("sorts a toned workspace ahead of a Running one in attention mode", () => {
+    const list = [ws("running", "/repo-a", { status: "Running" }), ws("toned", "/repo-a", { status: "Stopped" })];
+    expect(wsIds(mountToned(list, "attention", []))).toEqual(["running", "toned"]);
+    expect(wsIds(mountToned(list, "attention", ["s-toned"]))).toEqual(["toned", "running"]);
+  });
+
+  it("ranks a repo group by its toned session in attention mode", () => {
+    const list = [ws("a1", "/repo-a"), ws("b1", "/repo-b", { status: "Running" })];
+    expect(groupIds(mountToned(list, "attention", []))).toEqual(["/repo-a", "/repo-b"]);
+    expect(groupIds(mountToned(list, "attention", ["s-b1"]))).toEqual(["/repo-b", "/repo-a"]);
+  });
+
+  it("re-sorts when a tone appears and again when it clears", () => {
+    const list = [ws("a1", "/repo-a"), ws("b1", "/repo-b", { status: "Running" })];
+    const mounted = mountToned(list, "attention", []);
+    expect(groupIds(mounted)).toEqual(["/repo-a", "/repo-b"]);
+    mounted.rerender({ attention: new Set(["s-b1"]) });
+    expect(groupIds(mounted)).toEqual(["/repo-b", "/repo-a"]);
+    mounted.rerender({ attention: new Set() });
+    expect(groupIds(mounted)).toEqual(["/repo-a", "/repo-b"]);
+  });
+
+  it("ignores tones outside attention mode", () => {
+    const list = [ws("a1", "/repo-a"), ws("b1", "/repo-b", { status: "Running" })];
+    expect(groupIds(mountToned(list, "lastActivity", ["s-b1"]))).toEqual(["/repo-a", "/repo-b"]);
+  });
+});
+
 describe("useRepoGroups manual group order (#1644)", () => {
   it.each<[string, string[], Workspace[], SidebarSortMode, string[]]>([
     [
@@ -159,7 +208,7 @@ describe("useRepoGroups manual group order (#1644)", () => {
 });
 
 describe("useRepoGroups stateful API", () => {
-  it("toggleRepoCollapsed, updateRepoAppearance, and reorderRepoGroups persist", () => {
+  it("toggleRepoCollapsed, updateRepoAppearance, and reorderRepoGroups persist", async () => {
     const { result } = groupsOf([ws("a1", "/repo-a"), ws("b1", "/repo-b")], "manual");
     const first = () => result.current.groups[0]!;
 
@@ -170,7 +219,9 @@ describe("useRepoGroups stateful API", () => {
     expect(first().collapsed).toBe(false);
     expect(localStorage.getItem("aoe-repo-collapsed-/repo-a")).toBeNull();
 
-    act(() => result.current.updateRepoAppearance("/repo-a", { alias: "pretty-name" }));
+    await act(async () => {
+      await result.current.updateRepoAppearance("/repo-a", { alias: "pretty-name" });
+    });
     expect(first()).toMatchObject({ displayName: "pretty-name", alias: "pretty-name" });
 
     act(() => result.current.reorderRepoGroups(["/repo-b", "/repo-a"]));

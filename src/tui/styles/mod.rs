@@ -10,7 +10,6 @@ mod themes;
 
 pub use contrast::has_min_contrast;
 pub use resolved::{resolve_theme, ResolvedTheme};
-pub(crate) use themes::blend;
 pub use themes::ThemeAppearance;
 pub use themes::{idle_decay_window, Theme};
 

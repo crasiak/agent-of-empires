@@ -3,7 +3,7 @@
 use crate::acp::agent_profiles;
 use crate::acp::state::Event;
 use agent_client_protocol::schema::v1::{
-    ContentBlock, SessionUpdate, ToolCallContent, ToolCallStatus,
+    CompactionStatus, ContentBlock, SessionUpdate, ToolCallContent, ToolCallStatus,
 };
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use tokio::sync::mpsc;
@@ -64,9 +64,18 @@ pub(super) fn classify_lifecycle_signal(update: &SessionUpdate) -> Option<Lifecy
             }
             Some(LifecycleSignal::Progress)
         }
-        SessionUpdate::AgentThoughtChunk(_) | SessionUpdate::Plan(_) => {
-            Some(LifecycleSignal::Progress)
-        }
+        SessionUpdate::CompactionUpdate(u) => Some(match u.status {
+            CompactionStatus::InProgress => LifecycleSignal::CompactionStarted,
+            CompactionStatus::Completed => LifecycleSignal::CompactionCompleted,
+            CompactionStatus::Failed | CompactionStatus::Cancelled => {
+                LifecycleSignal::CompactionFailed
+            }
+            // Custom and future statuses (`paused`) keep the compaction open.
+            _ => LifecycleSignal::Progress,
+        }),
+        SessionUpdate::AgentThoughtChunk(_)
+        | SessionUpdate::Plan(_)
+        | SessionUpdate::CompactionSummaryChunk(_) => Some(LifecycleSignal::Progress),
         SessionUpdate::ToolCall(tc) => Some(LifecycleSignal::ToolStarted {
             id: tc.tool_call_id.0.to_string(),
             is_background_task: tc
@@ -231,8 +240,10 @@ pub(super) fn detect_off_protocol_work_completed(
 /// Wake signal from a non-failed `ScheduleWakeup` tool update. The initial
 /// `ToolCall` is excluded because the tool may still fail; `InProgress` is
 /// accepted because the adapter strips `raw_input` from `Completed`.
+/// `restored_title` names an update that arrived without a title.
 pub(super) fn wakeup_lifecycle_signal_from_update(
     update: &SessionUpdate,
+    restored_title: Option<&str>,
     profile: &agent_profiles::AgentProfile,
 ) -> Option<LifecycleSignal> {
     if !profile.supports_wakeup_tools {
@@ -242,7 +253,7 @@ pub(super) fn wakeup_lifecycle_signal_from_update(
         return None;
     };
     if matches!(u.fields.status, Some(ToolCallStatus::Failed))
-        || u.fields.title.as_deref() != Some("ScheduleWakeup")
+        || u.fields.title.as_deref().or(restored_title) != Some("ScheduleWakeup")
     {
         return None;
     }
@@ -255,7 +266,7 @@ pub(super) fn wakeup_lifecycle_signal_from_update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::acp::acp_client::test_helpers::text_chunk;
+    use crate::acp::acp_client::test_helpers::{compaction_chunk, compaction_update, text_chunk};
     use agent_client_protocol::schema::v1::{
         Content, ToolCall, ToolCallUpdate, ToolCallUpdateFields,
     };
@@ -340,6 +351,32 @@ mod tests {
             assert_eq!(format!("{sig:?}"), expected, "{text:?}");
         }
 
+        let none = serde_json::json!({});
+        let typed = [
+            (
+                compaction_update("c", "in_progress", none.clone()),
+                "CompactionStarted",
+            ),
+            (
+                compaction_update("c", "completed", none.clone()),
+                "CompactionCompleted",
+            ),
+            (
+                compaction_update("c", "failed", none.clone()),
+                "CompactionFailed",
+            ),
+            (
+                compaction_update("c", "cancelled", none.clone()),
+                "CompactionFailed",
+            ),
+            (compaction_update("c", "paused", none), "Progress"),
+            (compaction_chunk("c", "summary"), "Progress"),
+        ];
+        for (update, expected) in typed {
+            let sig = classify_lifecycle_signal(&update).unwrap();
+            assert_eq!(format!("{sig:?}"), expected, "{update:?}");
+        }
+
         let tool_cases = [
             (
                 ToolCallStatus::Completed,
@@ -412,8 +449,11 @@ mod tests {
                 (ToolCallStatus::InProgress, true),
                 (ToolCallStatus::Failed, false),
             ] {
-                let sig =
-                    wakeup_lifecycle_signal_from_update(&wake(status), &agent_profiles::CLAUDE);
+                let sig = wakeup_lifecycle_signal_from_update(
+                    &wake(status),
+                    None,
+                    &agent_profiles::CLAUDE,
+                );
                 assert_eq!(
                     matches!(sig, Some(LifecycleSignal::WakeupPending { .. })),
                     expected,
@@ -424,9 +464,28 @@ mod tests {
             tc.raw_input = Some(serde_json::json!({ "delaySeconds": 60 }));
             assert!(wakeup_lifecycle_signal_from_update(
                 &SessionUpdate::ToolCall(tc),
+                None,
                 &agent_profiles::CLAUDE
             )
             .is_none());
+            let untitled = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "tc-wake-3",
+                ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::InProgress)
+                    .raw_input(serde_json::json!({ "delaySeconds": 60 })),
+            ));
+            for (restored, expected) in [(Some("ScheduleWakeup"), true), (None, false)] {
+                let sig = wakeup_lifecycle_signal_from_update(
+                    &untitled,
+                    restored,
+                    &agent_profiles::CLAUDE,
+                );
+                assert_eq!(
+                    matches!(sig, Some(LifecycleSignal::WakeupPending { .. })),
+                    expected,
+                    "{restored:?}"
+                );
+            }
         }
     }
 

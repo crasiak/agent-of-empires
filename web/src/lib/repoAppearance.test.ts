@@ -1,15 +1,8 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { expect, it } from "vitest";
 
-import {
-  applyRepoAppearanceUpdate,
-  loadRepoAppearances,
-  persistRepoAppearances,
-  type RepoAppearance,
-} from "./repoAppearance";
-
-const STORAGE_KEY = "aoe-repo-appearance-v1";
+import { applyRepoAppearanceUpdate, type RepoAppearance } from "./repoAppearance";
 
 it("applyRepoAppearanceUpdate trims, validates, clears, and prunes without mutating its input", () => {
   const cases: [string, Record<string, RepoAppearance>, Partial<Record<"alias" | "color", string | null>>, unknown][] =
@@ -41,31 +34,4 @@ it("applyRepoAppearanceUpdate trims, validates, clears, and prunes without mutat
     expect(applyRepoAppearanceUpdate(current, "/repo/a", update as never), name).toEqual(expected);
     expect(JSON.stringify(current), name).toBe(snapshot);
   }
-});
-
-describe("persistRepoAppearances / loadRepoAppearances", () => {
-  beforeEach(() => {
-    window.localStorage.clear();
-  });
-
-  it("round-trips a populated map and removes the entry when empty", () => {
-    const map: Record<string, RepoAppearance> = {
-      "/repo/a": { alias: "Alpha", color: "amber" },
-      "/repo/b": { color: "violet" },
-    };
-    persistRepoAppearances(map);
-    expect(loadRepoAppearances()).toEqual(map);
-    persistRepoAppearances({});
-    expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
-  });
-
-  it("loads an empty map from invalid JSON and drops entries with neither alias nor known color", () => {
-    window.localStorage.setItem(STORAGE_KEY, "{not json");
-    expect(loadRepoAppearances()).toEqual({});
-    window.localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({ "/repo/a": { alias: "Alpha" }, "/repo/b": { color: "rainbow" }, "/repo/c": {} }),
-    );
-    expect(loadRepoAppearances()).toEqual({ "/repo/a": { alias: "Alpha" } });
-  });
 });

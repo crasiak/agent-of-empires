@@ -23,8 +23,8 @@ pub use acp::{
     acp_attachment, acp_cancel, acp_context_primer, acp_disable, acp_enable, acp_files,
     acp_force_end_turn, acp_prompt, acp_prompt_diff_comments, acp_replay, acp_set_config_option,
     acp_set_mode, acp_worker_log, get_option_catalog, install_agent, list_acp_agents,
-    list_claude_sessions, resolve_approval, resolve_elicitation, shutdown_acp, spawn_acp,
-    switch_acp_agent,
+    list_importable_sessions, resolve_approval, resolve_elicitation, shutdown_acp, spawn_acp,
+    switch_acp_agent, switch_acp_provider,
 };
 
 pub use queue::{queue_clear, queue_edit, queue_enqueue, queue_list, queue_remove};
@@ -36,10 +36,10 @@ pub use mcp::{drop_mcp_server, get_mcp_servers, keep_mcp_server, resolve_mcp_con
 pub use plugin_settings::resolve_options;
 pub use plugins::{
     apply_plugin_update, dismiss_plugin_update, invoke_plugin_action, invoke_plugin_command,
-    list_plugins, plugin_commands, plugin_details, plugin_discover, plugin_job_status,
-    plugin_ui_state, plugin_update_preview, plugin_updates, preview_plugin_install,
-    restart_plugin_worker, serve_plugin_icon, set_plugin_enabled, start_plugin_install,
-    start_plugin_uninstall,
+    list_plugins, mint_plugin_page_ticket, plugin_commands, plugin_details, plugin_discover,
+    plugin_job_status, plugin_sessions, plugin_ui_state, plugin_update_preview, plugin_updates,
+    preview_plugin_install, restart_plugin_worker, serve_plugin_icon, serve_plugin_page,
+    set_plugin_enabled, start_plugin_install, start_plugin_uninstall,
 };
 pub use projects::{create_project, delete_project, list_projects, update_project};
 pub use sessions::{
@@ -65,10 +65,11 @@ pub(crate) use sessions::{
 pub use system::{
     browse_filesystem, create_profile, default_profile, delete_profile, dismiss_update,
     docker_status, filesystem_home, get_about, get_cityhall_bundle, get_current_theme,
-    get_profile_settings, get_resolved_theme, get_settings, get_settings_resolved,
-    get_settings_schema, get_tips, get_update_status, get_web_ui_state, list_agents, list_groups,
-    list_profiles, list_sounds, list_themes, mark_tip_seen, mark_volume_ignores_globs_acknowledged,
-    mark_web_tour_seen, patch_web_ui_state, post_dashboard_presence, rename_profile,
+    get_profile_settings, get_repo_appearances, get_resolved_theme, get_settings,
+    get_settings_resolved, get_settings_schema, get_tips, get_update_status, get_web_ui_state,
+    import_repo_appearances, list_agents, list_groups, list_profiles, list_sounds, list_themes,
+    mark_tip_seen, mark_volume_ignores_globs_acknowledged, mark_web_tour_seen,
+    patch_repo_appearance, patch_web_ui_state, post_dashboard_presence, rename_profile,
     serve_sound_file, set_show_tips, system_health, update_profile_settings, update_settings,
     update_theme,
 };
@@ -193,6 +194,32 @@ pub(crate) async fn agent_policy() -> crate::acp::agent_policy::AgentPolicy {
             tracing::error!("agent policy load task failed: {e}");
             crate::acp::agent_policy::AgentPolicy::deny_all()
         })
+}
+
+/// The error response when `name` is not an existing profile. Every profile is a real directory
+/// under profiles/; an enumeration failure is a 500, not a client 400.
+pub(crate) fn unknown_profile_response(name: &str) -> Option<Response> {
+    let known = match crate::session::list_profiles() {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::error!(
+                target: "server.sessions",
+                "failed to enumerate profiles while validating a profile: {e:#}"
+            );
+            return Some(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                format!("Failed to enumerate profiles: {e}"),
+            ));
+        }
+    };
+    (!known.iter().any(|p| p == name)).then(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "profile_not_found",
+            format!("Profile '{name}' does not exist"),
+        )
+    })
 }
 
 /// 404 when the instance vanished between persisting a write and applying it.
@@ -354,6 +381,8 @@ mod tests {
                 "update_settings",
                 "dismiss_update",
                 "patch_web_ui_state",
+                "patch_repo_appearance",
+                "import_repo_appearances",
                 "mark_web_tour_seen",
                 "mark_tip_seen",
                 "set_show_tips",

@@ -131,6 +131,9 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHomeSt
     render_header(frame, chunks[0], theme, state);
     render_list(frame, chunks[1], theme, state);
     render_footer(frame, chunks[2], theme, state);
+    if let Some(dialog) = &state.filter_dialog {
+        dialog.render(frame, theme);
+    }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHomeState) {
@@ -169,11 +172,11 @@ fn render_list(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHomeS
         return;
     }
     if state.sessions.is_empty() {
-        let para = Paragraph::new(
-            "No structured view sessions on this daemon.
-
-Press r to refresh, q to quit.",
-        )
+        let para = Paragraph::new(if state.filters.active() {
+            "No sessions match the highlight filters.\n\nPress F4 to edit, Esc to clear."
+        } else {
+            "No structured view sessions on this daemon.\n\nPress r to refresh, q to quit."
+        })
         .style(Style::default().fg(theme.hint));
         frame.render_widget(para, area);
         return;
@@ -237,8 +240,35 @@ Press r to refresh, q to quit.",
                     width = plugin_width - width
                 )));
             }
-            spans.push(Span::styled(s.project_path.clone(), readable(path_style)));
-            ListItem::new(Line::from(spans))
+            let appearance = state.appearances.get(&s.repo_id);
+            let project_style = if is_selected {
+                readable(path_style)
+            } else {
+                appearance
+                    .and_then(|a| a.color)
+                    .map(|color| {
+                        path_style.bg(theme.highlight_background(
+                            crate::tui::highlight::project_color(color, theme),
+                        ))
+                    })
+                    .unwrap_or(path_style)
+            };
+            spans.push(Span::styled(
+                appearance
+                    .and_then(|a| a.alias.clone())
+                    .unwrap_or_else(|| s.project_path.clone()),
+                project_style,
+            ));
+            let style = if is_selected {
+                Style::default()
+            } else {
+                s.color
+                    .as_deref()
+                    .and_then(|color| crate::tui::highlight::session_color(color, theme))
+                    .map(|color| Style::default().bg(theme.highlight_background(color)))
+                    .unwrap_or_default()
+            };
+            ListItem::new(Line::from(spans)).style(style)
         })
         .collect();
     let list = List::new(items)
@@ -257,6 +287,13 @@ Press r to refresh, q to quit.",
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHomeState) {
+    if state.filters.active() {
+        frame.render_widget(
+            Paragraph::new(state.filters.summary()).style(Style::default().fg(theme.hint)),
+            area,
+        );
+        return;
+    }
     let mut spans: Vec<Span> = Vec::new();
     if let Some(text) = &state.status_text {
         spans.push(Span::styled(
@@ -266,7 +303,7 @@ fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHom
     }
     let selected = state.sessions.get(state.cursor);
     spans.push(Span::styled(
-        " j/k=navigate · Enter=open · r=refresh · q=quit ",
+        " j/k=navigate · Enter=open · F4=highlights · r=refresh · q=quit ",
         Style::default().fg(theme.hint),
     ));
     if let Some(session) = selected {
@@ -305,6 +342,9 @@ mod tests {
                 id: (*id).to_string(),
                 title: format!("session {id}"),
                 project_path: format!("/tmp/{id}"),
+                repo_id: format!("/tmp/{id}"),
+                color: None,
+                trashed: false,
                 status: "idle".to_string(),
                 context_resume: Some(ContextResumeAvailability::Indeterminate {
                     reason: ContextResumeIndeterminateReason::AgentHandshakeRequired,
@@ -509,6 +549,17 @@ mod tests {
                 "{style:?}"
             );
         }
+    }
+
+    #[test]
+    fn empty_highlight_projection_explains_how_to_clear_filters() {
+        let mut state = state_with(&[], json!([]));
+        state.filters.sessions = vec![Some("red".into())];
+        let painted = rows(&state);
+        assert!(painted
+            .iter()
+            .any(|line| line.contains("No sessions match the highlight filters")));
+        assert!(painted.iter().any(|line| line.contains("Esc to clear")));
     }
 
     #[test]

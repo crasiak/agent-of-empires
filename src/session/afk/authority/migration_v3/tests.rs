@@ -75,7 +75,11 @@ fn every_v42_boundary_preserves_originals_tickets_and_guards_without_authority()
             state_original(app.path(), "main"),
             previous::golden::QUESTION.as_bytes()
         );
-        fs::write(app.path().join(".schema_version"), "42").unwrap();
+        fs::write(
+            app.path().join(".schema_version"),
+            cursor::USAGE.to_string(),
+        )
+        .unwrap();
         ready(app.path()).unwrap();
         let main = profile_store(app.path(), "main", false).unwrap();
         let next: Snapshot = main.read_raw("snapshot.json").unwrap().unwrap();
@@ -158,7 +162,11 @@ fn v42_retries_reestablish_successor_file_and_directory_durability() {
         assert!(manifest(app.path()).unwrap().phase < Phase::Imports);
     }
     run_at(app.path()).unwrap();
-    fs::write(app.path().join(".schema_version"), "42").unwrap();
+    fs::write(
+        app.path().join(".schema_version"),
+        cursor::USAGE.to_string(),
+    )
+    .unwrap();
     ready(app.path()).unwrap();
 }
 

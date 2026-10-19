@@ -278,7 +278,11 @@ fn output_is_private_exclusive_and_unready_inspection_does_not_initialize() {
     let original = fs::read(&migration).unwrap();
     for state in ["older", "partial"] {
         if state == "older" {
-            fs::write(app.path().join(".schema_version"), "39").unwrap();
+            fs::write(
+                app.path().join(".schema_version"),
+                crate::session::afk::schema::QUESTIONS.to_string(),
+            )
+            .unwrap();
         } else {
             let mut value: Value = serde_json::from_slice(&original).unwrap();
             value["phase"] = json!("imports");
@@ -292,7 +296,11 @@ fn output_is_private_exclusive_and_unready_inspection_does_not_initialize() {
             .contains("aoe migrate"));
         assert_eq!(before, super::super::overview::tests::tree(app.path()));
         assert!(!output.exists());
-        fs::write(app.path().join(".schema_version"), "42").unwrap();
+        fs::write(
+            app.path().join(".schema_version"),
+            crate::session::afk::schema::USAGE.to_string(),
+        )
+        .unwrap();
         fs::write(&migration, &original).unwrap();
     }
     let receipt = preview_at(app.path(), &input, &output).unwrap();

@@ -39,6 +39,8 @@ const NON_SUFFIX_HOST_STATE: Record<string, string> = {
   AOE_E2E_PARTIAL_FRAME_FILE: `${HOST}/partial-frame`,
   AOE_E2E_PROMPT_COMPLETED_FILE: `${HOST}/prompt-completed`,
   AOE_E2E_STORAGE_LOCK_CONTENDED: `${HOST}/lock-contended`,
+  AOE_PRIME_CENSUS_CHILD: "1",
+  AOE_RUNNER_EXPIRY_CHILD: "host-test-child",
   AOE_TUI_TEST_CHILD: "host-test-child",
   AOE_TUI_TEST_ENTERED: `${HOST}/test-entered`,
   AOE_GITHUB_CLONE_BASE: `file://${HOST}/plugins`,
@@ -69,6 +71,13 @@ const NON_SUFFIX_HOST_STATE: Record<string, string> = {
 /** Every src/ environment read must be neutralized or explicitly safe to inherit. */
 const INHERITED_BY_CONTRACT = new Set([
   ...INHERITED_PATH_VARS,
+  // The host session bus, like XDG_RUNTIME_DIR a socket rather than data.
+  // `aoe list` and the scope setup only check that a user bus exists; specs
+  // seed `[systemd] enabled = false`, so nothing calls systemd through it.
+  "DBUS_SESSION_BUS_ADDRESS",
+  // systemd's id of the unit invocation; aoe only restores the caller's value
+  // after `systemd-run` overwrites it and resolves nothing from it.
+  "INVOCATION_ID",
   // Timing, tracing, and test switches. Their values are numbers or flags, so
   // a hostile one can slow a spec down but cannot point the daemon anywhere.
   "AOE_ACP_RUNNER_SOCKET_TIMEOUT_MS",
@@ -95,8 +104,10 @@ const INHERITED_BY_CONTRACT = new Set([
   "AOE_TERMINAL_TRACE",
   "AOE_TEST_TOKEN_GRACE_SECS",
   "AOE_TEST_TOKEN_LIFETIME_SECS",
-  // Rust test-binary re-entry marker, compiled out of aoe serve.
+  // Rust test-binary re-entry markers, compiled out of aoe serve.
   "AOE_AGENT_PROBE_TEST_CHILD",
+  "AOE_FROZEN_NATIVE_TEST_CHILD",
+  "AOE_LOOPBACK_PROXY_TEST_CHILD",
   // A marker `aoe` echoes into a pane to probe a login shell, not a variable
   // the daemon resolves anything from.
   "AOE_AGENT_OK",

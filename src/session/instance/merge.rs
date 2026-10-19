@@ -179,6 +179,7 @@ impl Instance {
         self.active_execution = None;
         self.acp_effort = None;
         self.agent_model = None;
+        self.agent_provider = None;
         self.import_pending = None;
         self.fork_pending = None;
         self.agent_name = None;
@@ -311,6 +312,11 @@ impl Instance {
         );
         splice(&mut self.pinned_at, &pre.pinned_at, &post.pinned_at);
         splice(&mut self.trashed_at, &pre.trashed_at, &post.trashed_at);
+        splice(
+            &mut self.trash_lifecycle_id,
+            &pre.trash_lifecycle_id,
+            &post.trash_lifecycle_id,
+        );
         splice(
             &mut self.pre_trash_project_path,
             &pre.pre_trash_project_path,

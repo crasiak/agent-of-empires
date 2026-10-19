@@ -2,7 +2,7 @@
 use super::super::delegation::Book;
 use super::*;
 pub(in crate::session::afk) mod frozen;
-use crate::session::{backup_before_migration, AnchoredDir};
+use crate::session::{afk::schema as cursor, backup_before_migration, AnchoredDir};
 use frozen::{profile_store, Session, Snapshot, NAMESPACE, PROFILE_BYTES};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -198,14 +198,11 @@ pub(super) fn ready(app: &Path) -> Result<()> {
     ready_manifest(app, &manifest(app)?)
 }
 fn ready_manifest(app: &Path, m: &Manifest) -> Result<()> {
-    let app_dir = AnchoredDir::open(app)?;
-    let schema = app_dir
-        .open_regular(Path::new(".schema_version"), 16)?
-        .context("missing schema version")?;
-    use std::io::Read;
-    let mut bytes = String::new();
-    schema.take(17).read_to_string(&mut bytes)?;
-    ensure!(bytes.trim() == "40", "schema 40 required");
+    ensure!(
+        cursor::read_cursor(app)? == cursor::AUTHORITY,
+        "AFK authority import requires global schema {}",
+        cursor::AUTHORITY
+    );
     ensure!(m.phase == Phase::Complete, "migration 40 import incomplete");
     verify_roots(app, m)?;
     Ok(())
