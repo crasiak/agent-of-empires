@@ -38,7 +38,11 @@ export const HOST_STATE_VARS = new Set([
   // A host passphrase would let discovery log in against a host daemon's
   // session store instead of the private one the harness spawned.
   "AOE_DAEMON_PASSPHRASE",
-  // Private fixture files and subprocess controls cannot come from the host.
+  // SDK roots and subprocess controls belong to their own isolated fixtures.
+  "AOE_AFK_SHARED_CHILD",
+  "AOE_ASK_USER_SOURCE_ROOT",
+  "AOE_PI_ROOT",
+  "AOE_PI_SOURCE_ROOT",
   "AOE_E2E_INPUT_BARRIER",
   "AOE_E2E_PARTIAL_FRAME_FILE",
   "AOE_E2E_PROMPT_COMPLETED_FILE",
