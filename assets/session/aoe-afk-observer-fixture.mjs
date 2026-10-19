@@ -1,8 +1,9 @@
-// Test-only options observer. No timer source, refresh cycle, stop caller or remote-execution claims.
+// Test-only bridge and exposed-call observations, not timer origins or remote receipt.
 import { openSync, writeSync, closeSync, statSync, existsSync, writeFileSync, linkSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 import { registerAfk, spawnBridge } from "./aoe-afk.mjs";
+import { writeAudit } from "./aoe-afk-observer-audit.mjs";
 
 export const EVENTS = ["request", "resolved", "rejected", "close", "closed", "close_failed", "attach", "attached", "attach_failed", "failed", "failed_returned", "failed_threw", "opened", "question_closed", "reply", "teardown", "truncated"];
 export const OPS = ["poll", "ack", "runtime_ack", "question_recover", "runtime", "other"];
@@ -66,16 +67,11 @@ export function privateTrace(path) {
 export function health() {
   const key = Symbol.for("aoe.test.native-observer.health");
   if (globalThis[key]) return globalThis[key];
-  const state = { teardown: false, shutdown: false, fault: false, calls: 0, cancelled: false, opened: false, attributed: false, nativeDeferred: false, waitArmed: false, runCompleted: false, trace: null };
+  const state = { teardown: false, shutdown: false, fault: false, calls: 0, cancelled: false, opened: false, attributed: false, nativeDeferred: false, waitArmed: false, runCompleted: false, trace: null, probes: null, fixture: null };
   globalThis[key] = state;
   process.on("uncaughtExceptionMonitor", () => { state.fault = true; });
   process.on("exit", () => {
-    try {
-      const report = { version: 1, teardown: state.teardown, shutdown: state.shutdown, fault: state.fault,
-        calls: state.calls, cancelled: state.cancelled, opened: state.opened, attributed: state.attributed,
-        nativeDeferred: state.nativeDeferred, waitArmed: state.waitArmed, runCompleted: state.runCompleted, trace: state.trace?.snapshot() ?? null };
-      writeSync(Number(process.env.AOE_FIXTURE_AUDIT_FD), JSON.stringify(report) + "\n");
-    } catch { /* A missing independent-channel receipt is inconclusive. */ }
+    try { writeAudit(state); } catch { /* Missing or invalid audit emission is inconclusive. */ }
   });
   return state;
 }
@@ -143,9 +139,10 @@ export function observeDelegation(delegate, trace, state) {
   }
   return decorated;
 }
-export function registerObserved(pi, delegationRuntime) {
+export function registerObserved(pi, delegationRuntime, options = {}) {
   const state = health(), trace = privateTrace(process.env.AOE_FIXTURE_TRACE);
-  state.trace = trace;
+  const probe = process.env.AOE_FIXTURE_PROBES ? options.probes?.open(process.env.AOE_FIXTURE_PROBES) : null;
+  state.trace = trace; state.probes = probe;
   state.syncTeardown = () => {
     if (!state.teardown && existsSync(`${process.env.AOE_FIXTURE_ROOT}/teardown`)) {
       state.teardown = true;
@@ -153,9 +150,27 @@ export function registerObserved(pi, delegationRuntime) {
     }
   };
   pi.on("session_shutdown", () => observerCall(trace, state, state.syncTeardown));
-  let bridges = 0;
-  registerAfk(pi, { protocol: 6, delegation: observeDelegation(delegationRuntime(pi), trace, state),
-    bridge: (...args) => observeBridge(spawnBridge(...args), trace, state, ++bridges) });
+  let bridges = 0, current;
+  const delegate = delegationRuntime(pi);
+  const captured = { ...delegate, attach(...args) { current = args[0]; return Reflect.apply(delegate.attach, delegate, args); } };
+  const observed = probe ? options.probes.delegation(captured, state, probe) : captured;
+  const registration = { ...pi, on(event, handler) {
+    return pi.on(event, event === "session_start" ? async (...args) => {
+      await handler(...args);
+      if (!probe) return;
+      observerCall(trace, state, () => {
+        const installed = !!current && options.probes.refresh(current, probe, state);
+        if (state.fixture) state.fixture.observationInstalled = installed;
+        if (!installed) { probe.invalidate(); state.fault = true; }
+      });
+    } : handler);
+  } };
+  registerAfk(registration, { protocol: 6, delegation: observeDelegation(observed, trace, state), schedule: options.schedule,
+    bridge: (...args) => {
+      const ordinal = ++bridges, bridge = (options.bridge ?? spawnBridge)(...args);
+      return observeBridge(probe ? options.probes.bridge(bridge, state, ordinal, probe) : bridge, trace, state, ordinal);
+    } });
+  pi.on("session_shutdown", () => { state.shutdown = true; });
   for (const [channel, event] of [["opened", "opened"], ["closed", "question_closed"], ["reply", "reply"]]) {
     pi.events.on(`ask:defer:v1:${channel}`, () => observerCall(trace, state, () => trace.emit(event, { teardown: state.teardown })));
   }

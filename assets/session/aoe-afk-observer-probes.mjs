@@ -59,24 +59,34 @@ export function privateProbe(path) {
   return { ...probe, close() { try { if (fd !== undefined) closeSync(fd); } catch { probe.invalidate(); } fd = undefined; } };
 }
 
+function synchronize(probe, state) {
+  try { state.syncTeardown?.(); } catch { probe?.invalidate(); }
+}
+
+function record(probe, state, type, phase, data) {
+  synchronize(probe, state);
+  probe?.emit(type, phase, { ...data, teardown: !!state.teardown });
+}
+
 // These wrappers observe calls only, not lexical refreshes, writes, timer origins or Rust receipt.
 export function observeRefresh(runtime, probe, state) {
   if (!probe || typeof runtime?.refresh !== "function" || runtime.refresh.__aoeObserved) return false;
   const original = runtime.refresh;
   let active;
   runtime.refresh = function (boundary = "poll", ...args) {
+    synchronize(probe, state);
     const joined = !!runtime.refreshing;
     const call = probe.allocateCall();
     const data = { call, parent: joined && active?.promise === runtime.refreshing ? active.call : 0,
       caller: caller(boundary), teardown: !!state.teardown };
-    probe.emit("refresh", joined ? "join" : "start", data);
+    record(probe, state, "refresh", joined ? "join" : "start", data);
     let result;
     try { result = Reflect.apply(original, this, [boundary, ...args]); }
-    catch (error) { probe.emit("refresh", "threw", { ...data, teardown: !!state.teardown }); throw error; }
+    catch (error) { record(probe, state, "refresh", "threw", data); throw error; }
     if (!joined) active = { call, promise: result };
     Promise.resolve(result).then(
-      () => probe.emit("refresh", "resolved", { ...data, teardown: !!state.teardown }),
-      () => probe.emit("refresh", "rejected", { ...data, teardown: !!state.teardown }),
+      () => record(probe, state, "refresh", "resolved", data),
+      () => record(probe, state, "refresh", "rejected", data),
     );
     return result;
   };
@@ -88,6 +98,7 @@ export function observeBridge(bridge, state, ordinal = 1, probe = null) {
   let requests = 0;
   return {
     request(...args) {
+      synchronize(probe, state);
       const request = ++requests;
       let stop = false, data;
       try {
@@ -96,14 +107,14 @@ export function observeBridge(bridge, state, ordinal = 1, probe = null) {
         stop = packet?.op === "runtime" && kind === "stop";
         data = { call: stop ? probe?.allocateCall() ?? 0 : 0, parent: state.cleanupCall ?? 0,
           bridge: ordinal, request, kind, caller: caller(state.cleanupCaller), teardown: !!state.teardown };
-        if (stop) probe?.emit("cleanup_stop", "dispatch", data);
+        if (stop) record(probe, state, "cleanup_stop", "dispatch", data);
       } catch { stop = false; probe?.invalidate(); }
       let result;
       try { result = Reflect.apply(bridge.request, bridge, args); }
-      catch (error) { if (stop) probe?.emit("cleanup_stop", "threw", { ...data, teardown: !!state.teardown }); throw error; }
+      catch (error) { if (stop) record(probe, state, "cleanup_stop", "threw", data); throw error; }
       if (stop) Promise.resolve(result).then(
-        () => probe?.emit("cleanup_stop", "reply_resolved", { ...data, teardown: !!state.teardown }),
-        () => probe?.emit("cleanup_stop", "reply_rejected", { ...data, teardown: !!state.teardown }),
+        () => record(probe, state, "cleanup_stop", "reply_resolved", data),
+        () => record(probe, state, "cleanup_stop", "reply_rejected", data),
       );
       return result;
     },
@@ -116,19 +127,20 @@ export function observeDelegation(delegate, state, probe = null) {
   for (const [method, label] of [["failed", "failed_callback"], ["shutdown", "shutdown"]]) {
     if (typeof delegate[method] !== "function") continue;
     decorated[method] = function (...args) {
+      synchronize(probe, state);
       const call = probe?.allocateCall() ?? 0;
       const data = { call, caller: label, teardown: !!state.teardown };
       const previousCall = state.cleanupCall, previousCaller = state.cleanupCaller;
       state.cleanupCall = call; state.cleanupCaller = label;
-      probe?.emit("cleanup_stop", "entry", data);
+      record(probe, state, "cleanup_stop", "entry", data);
       let result;
       try { result = Reflect.apply(delegate[method], delegate, args); }
-      catch (error) { probe?.emit("cleanup_stop", "threw", { ...data, teardown: !!state.teardown }); throw error; }
+      catch (error) { record(probe, state, "cleanup_stop", "threw", data); throw error; }
       finally { state.cleanupCall = previousCall; state.cleanupCaller = previousCaller; }
       // Async dispatch after this synchronous call frame has an unknown caller, not borrowed attribution.
       Promise.resolve(result).then(
-        () => probe?.emit("cleanup_stop", "returned", { ...data, teardown: !!state.teardown }),
-        () => probe?.emit("cleanup_stop", "rejected", { ...data, teardown: !!state.teardown }),
+        () => record(probe, state, "cleanup_stop", "returned", data),
+        () => record(probe, state, "cleanup_stop", "rejected", data),
       );
       return result;
     };

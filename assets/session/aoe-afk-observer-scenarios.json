@@ -1,0 +1,9 @@
+[
+  "normal", "pre-failure", "positive-malformed", "early-exit", "endpoint-not-reached", "observation-missing",
+  "audit-missing", "audit-stdout", "audit-fd1", "audit-invalid-fd", "audit-wrong-nonce", "audit-wrong-version", "audit-extra",
+  "audit-duplicate", "audit-partial", "audit-oversized", "audit-split",
+  "trace-missing", "trace-drop", "trace-bytes", "trace-malformed", "trace-truncated", "trace-noncanonical",
+  "trace-mode", "trace-symlink", "trace-fifo", "trace-cap", "probe-cap", "writer-close-failure", "probe-missing", "probe-malformed", "probe-count",
+  "exit-nonzero", "exit-signal", "exit-ignored", "valid-audit-hang", "spawn-failure", "holder", "holder-ignored", "holder-no-fd", "holder-spawn-failure",
+  "control-partial", "unexpected-file", "root-mode", "setup-pipe-failure", "trace-oversize", "trace-too-many-rows", "trace-invalid-utf8"
+]

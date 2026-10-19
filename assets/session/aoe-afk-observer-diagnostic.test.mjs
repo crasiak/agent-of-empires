@@ -392,6 +392,34 @@ test("real registration distinguishes outer failures without claiming an unobser
   }
 });
 
+test("stacked wrappers synchronize a new teardown marker between dispatch and settlement", async () => {
+  for (const rejects of [false, true]) {
+    const rows = [], { rows: probes, probe } = captureProbe(), gate = latch();
+    const trace = createTrace(line => rows.push(JSON.parse(line)));
+    const state = { teardown: false, published: false, syncTeardown() {
+      if (this.published && !this.teardown) { this.teardown = true; trace.emit("teardown", { teardown: true }); }
+    } };
+    const original = { request: () => gate.promise, close: () => Promise.resolve() };
+    const bridge = traceBridge(observeBridge(original, state, 1, probe), trace, state);
+    trace.emit("attach"); trace.emit("attached");
+    const pending = bridge.request({ op: "runtime", command: { kind: "stop" } });
+    assert.equal(pending, gate.promise);
+    assert.equal(rows.find(row => row.event === "request").teardown, false);
+    assert.equal(probes.find(row => row.phase === "dispatch").teardown, false);
+    state.published = true;
+    const error = Error("PRIVATE controlled reply");
+    if (rejects) { gate.reject(error); await assert.rejects(pending, e => e === error); }
+    else { gate.resolve(); await pending; }
+    await bridge.close();
+    assert.equal(rows.find(row => row.event === (rejects ? "rejected" : "resolved")).teardown, true);
+    assert.equal(probes.find(row => row.phase === (rejects ? "reply_rejected" : "reply_resolved")).teardown, true);
+    assert.equal(rows.filter(row => row.event === "teardown").length, 1);
+    const result = classified(rows, { probes });
+    assert.equal(result.trace_status, "complete");
+    assert.equal(result.probe_status, "complete");
+  }
+});
+
 test("diagnostic field projection retains only bounded report fields", () => {
   const fields = diagnosticFields({ classification: "diagnostic_clean", cause_claim: "PRIVATE", private_payload: "SECRET", cleanup_stop_phase: "reply_rejected", refresh_phase: "poll_rejected" });
   assert.equal(fields.cause_claim, "unknown");
