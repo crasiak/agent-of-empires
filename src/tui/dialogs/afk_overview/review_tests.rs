@@ -54,10 +54,12 @@ fn overview(profile: &str, windows: Vec<Selection>) -> Overview {
         observation: "stored only",
     }
 }
+type ReviewRead = (Vec<Selection>, ReviewLabels, mpsc::Sender<ReviewReply>);
+
 fn harness() -> (
     AfkOverviewDialog,
     Receiver<mpsc::Sender<Reply>>,
-    Receiver<(Vec<Selection>, ReviewLabels, mpsc::Sender<ReviewReply>)>,
+    Receiver<ReviewRead>,
 ) {
     let (send, reads) = mpsc::channel();
     let mut dialog = AfkOverviewDialog::with_dispatch(Box::new(move || {
