@@ -57,7 +57,7 @@ fn overview(profile: &str, windows: Vec<Selection>) -> Overview {
 fn harness() -> (
     AfkOverviewDialog,
     Receiver<mpsc::Sender<Reply>>,
-    Receiver<(Vec<Selection>, mpsc::Sender<ReviewReply>)>,
+    Receiver<(Vec<Selection>, ReviewLabels, mpsc::Sender<ReviewReply>)>,
 ) {
     let (send, reads) = mpsc::channel();
     let mut dialog = AfkOverviewDialog::with_dispatch(Box::new(move || {
@@ -66,16 +66,20 @@ fn harness() -> (
         result
     }));
     let (send_review, reviews) = mpsc::channel();
-    dialog.review_factory = Box::new(move |selections| {
+    dialog.review_factory = Box::new(move |selections, labels| {
         let send_review = send_review.clone();
+        let captured_labels = labels.clone();
         AfkReviewDialog::with_dispatch(
             selections,
+            labels,
             Box::new(move |request| {
                 let (reply, result) = mpsc::channel();
                 let ReviewRequest::Read(selections) = request else {
                     panic!("overview navigation must never dispatch a write")
                 };
-                assert!(send_review.send((selections, reply)).is_ok());
+                assert!(send_review
+                    .send((selections, captured_labels.clone(), reply))
+                    .is_ok());
                 result
             }),
         )
@@ -108,14 +112,14 @@ fn exact_marks_survive_refresh_and_nested_escape_without_resolving_display_ident
     press(&mut dialog, KeyCode::Char(' '));
     assert_eq!(dialog.marked, BTreeSet::from([original.clone()]));
     press(&mut dialog, KeyCode::Char('r'));
-    deliver(
-        &mut dialog,
-        &reads,
-        overview(profile, vec![replacement.clone()]),
-    );
+    let mut renamed = overview(profile, vec![replacement.clone()]);
+    renamed.profiles[0].sessions[0].id = "escaped-display-id".into();
+    renamed.profiles[0].sessions[0].title = "Renamed workstream".into();
+    deliver(&mut dialog, &reads, renamed);
     assert_eq!(dialog.marked, BTreeSet::from([original.clone()]));
     press(&mut dialog, KeyCode::Char('v'));
-    let (selected, reply) = reviews.try_recv().unwrap();
+    let (selected, labels, reply) = reviews.try_recv().unwrap();
+    assert_eq!(labels.name(&original), "Renamed workstream");
     assert_eq!(selected, vec![original]);
     assert!(reply
         .send(ReviewReply::Read(Ok(review::Report {
@@ -136,7 +140,7 @@ fn exact_marks_survive_refresh_and_nested_escape_without_resolving_display_ident
         })))
         .is_ok());
     assert!(dialog.tick());
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(130, 44)).unwrap();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(132, 44)).unwrap();
     terminal
         .draw(|frame| dialog.render(frame, frame.area(), &Theme::default()))
         .unwrap();
@@ -149,7 +153,22 @@ fn exact_marks_survive_refresh_and_nested_escape_without_resolving_display_ident
         .collect();
     assert!(text.contains("AFK return review"));
     assert!(text.contains("INCOMPLETE COLLECTION"));
-    assert!(text.contains("Original window unavailable"));
+    assert!(text.contains("Selected window unavailable"));
+    assert!(text.contains("Renamed workstream"));
+    press(&mut dialog, KeyCode::Char('d'));
+    terminal
+        .draw(|frame| dialog.render(frame, frame.area(), &Theme::default()))
+        .unwrap();
+    let diagnostic: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(diagnostic.contains("Original window unavailable"));
+    assert_eq!(press(&mut dialog, KeyCode::Esc), DialogResult::Continue);
+    assert!(dialog.review.is_some());
     assert!(!text.contains(['\u{202e}', '\u{7f}']));
     assert_eq!(press(&mut dialog, KeyCode::Esc), DialogResult::Continue);
     assert!(dialog.review.is_none());
@@ -208,7 +227,12 @@ fn original_batch_and_orphan_windows_are_exact_and_overflow_never_partially_mark
     press(&mut dialog, KeyCode::Char(' '));
     assert_eq!(dialog.marked.len(), 16);
     press(&mut dialog, KeyCode::Char('v'));
-    let (selections, _) = reviews.try_recv().unwrap();
+    let (selections, labels, _) = reviews.try_recv().unwrap();
+    for selection in &selections {
+        assert_eq!(labels.name(selection), "Workstream");
+    }
+    assert_eq!(labels.name(&old), "Historical session (name unavailable)");
+    assert_eq!(labels.name(&newer), "Historical session (name unavailable)");
     assert_eq!(
         selections.into_iter().collect::<BTreeSet<_>>(),
         batch.into_iter().collect::<BTreeSet<_>>()
@@ -224,9 +248,82 @@ fn original_batch_and_orphan_windows_are_exact_and_overflow_never_partially_mark
     dialog.selection.select(Some(3));
     press(&mut dialog, KeyCode::Char(' '));
     press(&mut dialog, KeyCode::Char('v'));
-    let (selections, _) = reviews.try_recv().unwrap();
+    let (selections, labels, _) = reviews.try_recv().unwrap();
+    assert_eq!(labels.name(&a), "Workstream");
+    assert_eq!(labels.name(&old), "Historical session (name unavailable)");
     assert_eq!(
         selections.into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([a, old])
     );
+}
+
+#[test]
+fn review_label_handoff_uses_hidden_cross_profile_keys_and_refuses_conflicting_names() {
+    let first = select("raw\u{202e}profile", "raw\nidentity", 1);
+    let older = select(&first.profile, &first.session_id, 2);
+    let second = select("other-profile", &first.session_id, 3);
+    let conflict = select("raw\u{202e}profile", "conflict", 4);
+    let blank = select("raw\u{202e}profile", "blank", 5);
+    let absent = select("missing-profile", "missing", 6);
+    let orphan = select("history-profile", "orphan", 7);
+    let mut snapshot = overview("display-only profile", vec![first.clone()]);
+    snapshot.profiles[0].sessions[0].id = "display-only identity".into();
+    snapshot.profiles[0].sessions[0].title = "Duplicate name\n\u{202e}".into();
+    let mut other = overview("another display profile", vec![second.clone()])
+        .profiles
+        .remove(0);
+    other.sessions[0].title = "Duplicate name\n\u{202e}".into();
+    snapshot.profiles.push(other);
+    let mut conflict_a = session(vec![conflict.clone()]);
+    conflict_a.title = "First name".into();
+    let mut conflict_b = session(vec![conflict.clone()]);
+    conflict_b.title = "Second name".into();
+    let mut empty = session(vec![blank.clone()]);
+    empty.title = "   ".into();
+    snapshot.profiles[0]
+        .sessions
+        .extend([conflict_a, conflict_b, empty]);
+    snapshot.historical_authority.push(HistoricalAuthority {
+        review_windows: vec![orphan.clone()],
+        profile: "untrusted display".into(),
+        instance_id: "untrusted display".into(),
+        observation: "Historical only",
+        evidence: vec![],
+        windows: vec![],
+    });
+    let (mut dialog, reads, reviews) = harness();
+    deliver(&mut dialog, &reads, snapshot);
+    dialog.marked = [
+        older.clone(),
+        second.clone(),
+        conflict.clone(),
+        blank.clone(),
+        absent.clone(),
+        orphan.clone(),
+    ]
+    .into_iter()
+    .collect();
+    let marked = dialog.marked.clone();
+    press(&mut dialog, KeyCode::Char('v'));
+    let (selections, labels, _) = reviews.try_recv().unwrap();
+    assert_eq!(selections.into_iter().collect::<BTreeSet<_>>(), marked);
+    assert_eq!(
+        labels.name(&first),
+        review::terminal_text("Duplicate name\n\u{202e}")
+    );
+    assert_eq!(labels.name(&older), labels.name(&second));
+    assert_eq!(labels.name(&conflict), "Session name unavailable");
+    assert_eq!(labels.name(&blank), "Session name unavailable");
+    assert_eq!(labels.name(&absent), "Session name unavailable");
+    assert_eq!(
+        labels.name(&orphan),
+        "Historical session (name unavailable)"
+    );
+    assert!(!labels.names.contains_key(&(
+        "display-only profile".into(),
+        "display-only identity".into()
+    )));
+    press(&mut dialog, KeyCode::Esc);
+    assert_eq!(dialog.marked, marked);
+    assert!(matches!(reviews.try_recv(), Err(mpsc::TryRecvError::Empty)));
 }

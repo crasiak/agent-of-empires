@@ -170,8 +170,37 @@ fn afk_paste_stays_in_review(session_count: usize) {
         assert!(view.live_send.is_none());
         assert!(view.live_send_worker.is_none());
     };
-    env.view.handle_paste("no editor: private review text");
+    env.view
+        .handle_paste("summary without editor: private review text");
     untouched(&env.view);
+    for (code, level) in [
+        (KeyCode::Enter, "Decisions"),
+        (KeyCode::Char('d'), "Diagnostics"),
+        (KeyCode::Char('d'), "Decisions"),
+        (KeyCode::Esc, "Summary"),
+        (KeyCode::Char('d'), "Diagnostics"),
+        (KeyCode::Esc, "Summary"),
+        (KeyCode::Char('?'), "Summary"),
+        (KeyCode::Esc, "Summary"),
+    ] {
+        assert!(env.view.handle_key(key(code), None).is_none());
+        assert!(env.view.afk_overview_dialog.is_some());
+        assert!(render_home_to_string(&mut env.view, 132, 44).contains(level));
+        env.view
+            .handle_paste("decision/diagnostics navigation\nnever runtime input");
+        untouched(&env.view);
+        assert!(env
+            .view
+            .afk_overview_dialog
+            .as_ref()
+            .unwrap()
+            .review_editor_text_for_test()
+            .is_none());
+        assert!(
+            submissions.lock().unwrap().is_empty(),
+            "view navigation and paste must not submit"
+        );
+    }
     for mode in ['j', 'n'] {
         assert!(env
             .view
