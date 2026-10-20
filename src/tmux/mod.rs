@@ -2704,10 +2704,7 @@ mod tests {
                 let _ = std::fs::write(&self.0, "release");
             }
         }
-        for (executable, timeout) in [
-            ("vibe", AGENT_PROBE_TIMEOUT / 5),
-            ("login-shell", LOGIN_SHELL_PROBE_TIMEOUT / 5),
-        ] {
+        for executable in ["vibe", "login-shell"] {
             let home = tempfile::tempdir().unwrap();
             let _env = probe_environment(home.path());
             let memo = AgentAvailabilityGuard::capture();
@@ -2718,11 +2715,18 @@ mod tests {
                 "while [ ! -e {} ]; do /bin/sleep 0.02; done",
                 shell_words::quote(release.to_str().unwrap())
             );
-            let script = format!(
-                "#!/bin/sh\n/bin/sh -c {} &\nchild=$!\ntrap 'kill \"$child\" 2>/dev/null; wait \"$child\" 2>/dev/null; exit 1' TERM\nprintf '%s %s\\n' \"$$\" \"$child\" > {}\nwait \"$child\"\nexit 1\n",
-                shell_words::quote(&wait), shell_words::quote(ready.to_str().unwrap()),
-            );
-            std::fs::write(home.path().join("bin").join(executable), script).unwrap();
+            let script = |ready: &std::path::Path| {
+                format!(
+                    "#!/bin/sh\n/bin/sh -c {} &\nchild=$!\ntrap 'kill \"$child\" 2>/dev/null; wait \"$child\" 2>/dev/null; exit 1' TERM\nprintf '%s %s\\n' \"$$\" \"$child\" > {}\nwait \"$child\"\nexit 1\n",
+                    shell_words::quote(&wait), shell_words::quote(ready.to_str().unwrap()),
+                )
+            };
+            std::fs::write(home.path().join("bin").join(executable), script(&ready)).unwrap();
+            let fallback_ready = home.path().join("fallback-ready");
+            if executable == "vibe" {
+                std::fs::write(home.path().join("bin/login-shell"), script(&fallback_ready))
+                    .unwrap();
+            }
             std::thread::scope(|scope| {
                 let _release = ReleaseProbe(release);
                 let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -2772,7 +2776,6 @@ mod tests {
                 scope.spawn(move || {
                     AGENT_PROBE_LOCK_CONTENDED
                         .with(|slot| *slot.borrow_mut() = Some(waiter_contended));
-                    // Time only the held probe, not an unrelated positive-control process startup.
                     let waiter = crate::agents::agent("claude", "/bin/sh", "fixture");
                     let found = probe_agents_available(&[&waiter]);
                     let _ = waiter_tx.send(("waiter", Some(found)));
@@ -2794,12 +2797,20 @@ mod tests {
                 start_timeout_tx
                     .send(())
                     .expect("holder is awaiting the real timeout");
-                let deadline = Instant::now() + timeout * 2 + Duration::from_secs(2);
+                // The holder can time out both the direct probe and its shell fallback.
+                let deadline = Instant::now()
+                    + (AGENT_PROBE_TIMEOUT + LOGIN_SHELL_PROBE_TIMEOUT) / 5
+                    + Duration::from_secs(5);
                 let mut completed = Vec::new();
                 for _ in 0..3 {
                     let (name, found) = done_rx
                         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                        .expect("a hung probe must not indefinitely hold callers or Recheck");
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "probe {executable} left callers blocked: {error}; completed={completed:?}; diagnostics={}",
+                                std::fs::read_to_string(&diagnostics_path).unwrap_or_default()
+                            )
+                        });
                     match name {
                         "holder" => assert!(found.unwrap().is_empty()),
                         "waiter" => {
@@ -2812,17 +2823,30 @@ mod tests {
                 }
                 completed.sort_unstable();
                 assert_eq!(completed, ["holder", "invalidator", "waiter"]);
-                for (index, pid) in pids.iter().enumerate() {
-                    let output = Command::new("/bin/ps")
-                        .args(["-o", "stat=", "-p", pid])
-                        .output()
-                        .unwrap();
-                    let state = String::from_utf8_lossy(&output.stdout);
-                    assert!(
-                        state.trim().is_empty()
-                            || (index > 0 && state.trim_start().starts_with('Z')),
-                        "probe process {pid} remains alive: {state}"
-                    );
+                let mut process_records = vec![pids];
+                if executable == "vibe" {
+                    let fallback = std::fs::read_to_string(&fallback_ready)
+                        .expect("the direct timeout must reach the hung shell fallback");
+                    let pids = fallback
+                        .split_whitespace()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>();
+                    assert_eq!(pids.len(), 2);
+                    process_records.push(pids);
+                }
+                for pids in process_records {
+                    for (index, pid) in pids.iter().enumerate() {
+                        let output = Command::new("/bin/ps")
+                            .args(["-o", "stat=", "-p", pid])
+                            .output()
+                            .unwrap();
+                        let state = String::from_utf8_lossy(&output.stdout);
+                        assert!(
+                            state.trim().is_empty()
+                                || (index > 0 && state.trim_start().starts_with('Z')),
+                            "probe process {pid} remains alive: {state}"
+                        );
+                    }
                 }
             });
         }
@@ -4192,16 +4216,12 @@ mod tests {
         if run_probe_test_in_subprocess() {
             return;
         }
-        // Scaled timeouts: the login shell outlives the per-agent timeout but not its own.
-        PROBE_TIMEOUT_DIVISOR.set(5).unwrap();
         let home = tempfile::tempdir().unwrap();
         let _env = probe_environment(home.path());
         let log = shell_words::quote(home.path().join("probes").to_str().unwrap()).into_owned();
         std::fs::write(
             home.path().join("bin/login-shell"),
-            format!(
-                "#!/bin/sh\nprintf 'login\n' >> {log}\n/bin/sleep 1.2\nexec /bin/sh -c \"$2\"\n"
-            ),
+            format!("#!/bin/sh\nprintf 'login\n' >> {log}\nexec /bin/sh -c \"$2\"\n"),
         )
         .unwrap();
         let found = login_shell_probe(&[
