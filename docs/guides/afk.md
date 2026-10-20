@@ -808,6 +808,108 @@ response does not refund or replay the permit. Stop the session before manual
 inspection/repair; do not delete its active writer lock or edit live ledger
 files. Preserve ambiguous payloads/preimages until independently reconciled.
 
+## Preparing a private native diagnostic
+
+The engineering adapter at `assets/session/aoe-afk-native.py` is separate from
+controlled-fixture qualification. Its implementation and fake-process tests do
+**not** qualify a native attempt or authorize execution. Native execution needs
+review of the exact candidate, manifest and proposed synthetic pricing, followed
+by two explicit approvals for each attempt. Do not use existing conversations,
+installed executables or a live profile.
+
+Preparation requires existing dependencies, no installation. In a private `0700`
+directory, create a `0600` configuration with these fields:
+
+- `sources`: absolute `aoe`, `pi` and `question` checkout paths. Pi and question
+  must match the adapter's fixed commits. AoE must match the reviewed build
+  receipt and descend from the declared baseline, with no tracked changes.
+- `binary_receipt`: the reviewed build receipt object containing `source_commit`,
+  `source_tree` (Git tree ID), `binary`, `binary_sha256`, `profile` and
+  `installed: false`. A receipt
+  from an earlier build is not valid after changing the candidate source.
+- `tools`: `node`, `python`, `tmux`, `aoe`, `fd`, `rg` and `loader`, each with an
+  absolute `path` and exact `sha256`. `loader` must be that Pi checkout's
+  `node_modules/tsx/dist/loader.mjs`. Python must support `Popen(process_group=)`;
+  tmux must support its foreground `-D` server mode.
+- `node_version`: exact version output, for example `v24.13.0`.
+- `app_name`: `agent-of-empires-dev` for a debug receipt, otherwise
+  `agent-of-empires`.
+- `preview_approval_seconds`: optional, from 1 through 30, default 30. This wait
+  becomes part of the immutable manifest and must be reviewed before execution.
+
+Use a short canonical private path so Unix socket names fit:
+
+```sh
+python3 assets/session/aoe-afk-native.py prepare /private/path/config.json /private/tmp/native-diagnostic
+```
+
+`prepare` hashes source, dependency-directory targets, executables and the scoped
+loader; it probes only Node version metadata. It does not run Pi, AoE, tmux,
+providers or migrations, or inspect live state. Prepared Python launchers use
+isolated, no-site, no-bytecode startup; fixed internal helpers compile bounded
+source bytes rather than accepting an ignored stale bytecode cache. Review the
+resulting private `manifest.json`, its printed digest, and the artificial model/usage/rate table.
+The manifest proposes a 100-nanoUSD local guard, not historical pricing or billing
+proof. Source hashes and approval files are integrity checks, not authentication
+against hostile same-UID writers or proof of human intent outside explicit invocation.
+
+**Only after separate execution approval**, create a new private approval JSON:
+
+```json
+{
+  "kind": "aoe-afk-native-v1",
+  "manifest": "EXACT_REVIEWED_MANIFEST_SHA256",
+  "role": "baseline",
+  "ordinal": 1,
+  "approve_native_execution": true,
+  "approve_synthetic_pricing": true
+}
+```
+
+Then explicitly invoke the prepared `run` launcher with `--approval PATH
+--role baseline --ordinal 1`. It records admission before launch. A fresh private
+HOME/XDG namespace is initialized by the pinned `aoe migrate`; real `aoe add
+--tool pi` and `session start` produce the native binding. No existing profile is
+reused. Before even private migration, its AoE configuration disables systemd
+scopes, update checks, restart wake and general session usage tracking. Native
+question/usage-guard evidence collection remains enabled and independent of that
+optional general tracking. A pane-local parent owns Pi's waitpid and audit/control
+pipes; the outer guardian owns the exact foreground tmux server and terminal identity.
+
+After attributed live question readiness, the controller writes `baseline/preview.json`
+and `baseline/preview-approval-required.json`. **Review the entire preview and
+publish a separate new private `baseline/preview-approval.json` matching the
+required manifest, role, ordinal, operation ID and preview digest, with
+`approve_apply: true`.** The manifest-declared approval wait is bounded. Without
+that exact file the controller never applies. The 60-second AFK window begins
+only on the single explicit apply, not at startup or readiness.
+
+One baseline and one observed slot exist, each one-use. An observed invocation
+requires an independently reviewed successful baseline report and its own
+`role: observed`, `ordinal: 2` approval. Failed or inconclusive admission consumes
+the slot. There is no retry, automatic observed attempt, grant replay, recovery,
+refund or reset. Further attempts require a new decision, not deletion of receipts.
+
+Reports separate endpoint, intent coverage, cancelled SDK settlement, audit EOF,
+waitpid and terminal cleanup. Publication uncertainty stays sticky through final
+audit, including bounded late warning/commit evidence after endpoint capture;
+it vetoes qualification without overwriting the pre-teardown endpoint. Observation covers bridge and exposed refresh calls,
+not startup/timer lexical refreshes or unobserved internal phases. Live prompt
+ownership is not rendered-frame proof.
+The fixed second provider stream emits no tools or effects and remains abortable.
+Completion is armed through a real command-context idle wait before cancellation,
+followed by explicit Off and shutdown. Aborted usage gaps remain retained; this is
+not successful task completion, financial finality or original-race causality.
+Independent capture uses bounded passive reads plus the early read-only
+`__afk-observation-clock` helper, never extra audit/poll timing probes.
+
+If cleanup is uncertain the guardian retains the exact server and cleanup owner
+for inspection instead of blindly killing them. Preserve the private directory
+and its uncertainty receipts. Do not kill a recorded historical PID, remove
+journals or edit guards to make the report green. A returned qualified native
+report still requires independent review; implementation-only testing cannot
+substitute for the later approved experiment.
+
 ## Reproduce the offline qualification
 
 No npm install or provider credentials are required. Point `AOE_PI_ROOT` to an

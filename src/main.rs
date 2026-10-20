@@ -73,6 +73,18 @@ fn main() -> Result<()> {
     let mut args = std::env::args();
     let _ = args.next();
     let helper = args.next();
+    if helper.as_deref() == Some("__afk-observation-clock") {
+        anyhow::ensure!(
+            args.next().is_none(),
+            "observation clock takes no arguments"
+        );
+        let boot = agent_of_empires::process::boot_id()
+            .ok_or_else(|| anyhow::anyhow!("boot identity unavailable"))?;
+        let millis = agent_of_empires::process::monotonic_millis()
+            .ok_or_else(|| anyhow::anyhow!("observation clock unavailable"))?;
+        println!("{}", serde_json::json!({"boot": boot, "millis": millis}));
+        return Ok(());
+    }
     if helper.as_deref() == Some("__afk-bridge") {
         return agent_of_empires::session::afk::run_bridge(
             &args.next().unwrap_or_default(),
