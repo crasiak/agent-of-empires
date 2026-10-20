@@ -174,6 +174,60 @@ fn canonical_main_and_every_afk_cursor_boundary_resume_to_review_without_renumbe
 
 #[test]
 #[serial_test::serial]
+fn work_arc_upgrade_from_review_preserves_authority_and_registry() {
+    let _agent_homes = super::hook_fixtures::unset_agent_home_env();
+    let _home = crate::session::test_support::isolate_app_dir();
+    let app = crate::session::get_app_dir().unwrap();
+    let _cleanup = CleanupRoots(app.clone());
+    legacy_roots(&app);
+    afk::authority::migration::run_at(&app).unwrap();
+    set_version(afk_schema::AUTHORITY).unwrap();
+    afk::authority::migration_v2::run_at(&app).unwrap();
+    set_version(afk_schema::BATCHES).unwrap();
+    afk::authority::migration_v3::run_at(&app).unwrap();
+    afk::wake::initialize(&app).unwrap();
+    set_version(afk_schema::USAGE).unwrap();
+    afk::review::annotations::initialize(&app).unwrap();
+    set_version(afk_schema::REVIEW).unwrap();
+    drop(runner_lock::acquire(std::time::Duration::ZERO).unwrap());
+    let mut row =
+        serde_json::to_value(crate::session::Instance::new("legacy", "/tmp/legacy")).unwrap();
+    row.as_object_mut().unwrap().remove("work_arc_enabled");
+    row.as_object_mut().unwrap().remove("work_arc");
+    let profile = app.join("profiles/alpha");
+    fs::create_dir_all(&profile).unwrap();
+    fs::write(
+        profile.join("sessions.json"),
+        serde_json::to_vec(&vec![row]).unwrap(),
+    )
+    .unwrap();
+    let mut before = tree(&app);
+    before.remove(&app.join(VERSION_FILE));
+    let (report, started) = reporter();
+
+    run_migrations_with(Some(report)).unwrap();
+
+    assert_eq!(*started.lock().unwrap(), vec![50]);
+    assert_eq!(get_current_version(), 50);
+    afk::authority::migration_v3::run_at(&app).unwrap();
+    afk::review::annotations::initialize(&app).unwrap();
+    let mut after = tree(&app);
+    after.remove(&app.join(VERSION_FILE));
+    assert_eq!(
+        after, before,
+        "consent upgrade leaves AFK and legacy rows intact"
+    );
+    let current = tree(&app);
+    run_migrations().unwrap();
+    assert_eq!(
+        tree(&app),
+        current,
+        "replay does not rewrite migrated state"
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn unsafe_current_cursor_and_current_version_shortcut_do_not_bypass_refusal() {
     use std::os::unix::fs::symlink;
     let _home = crate::session::test_support::isolate_app_dir();

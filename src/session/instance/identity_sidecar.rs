@@ -53,16 +53,16 @@ impl Drop for FailNextPiPathWriteGuard {
 
 /// The Pi extension's environment: its identity sidecar, plus the usage
 /// reporter when usage tracking is on (`bin`, instance id, profile).
-fn pi_extension_env(sidecar: &Path, usage: Option<(&Path, &str, &str)>) -> String {
+fn pi_extension_env(sidecar: &Path, instance_id: &str, usage: Option<(&Path, &str)>) -> String {
     let mut env = format!(
-        "AOE_SESSION_ID_FILE={} ",
-        shell_escape(&sidecar.to_string_lossy())
+        "AOE_SESSION_ID_FILE={} AOE_INSTANCE_ID={} ",
+        shell_escape(&sidecar.to_string_lossy()),
+        shell_escape(instance_id)
     );
-    if let Some((bin, instance_id, profile)) = usage {
+    if let Some((bin, profile)) = usage {
         env.push_str(&format!(
-            "AOE_USAGE_BIN={} AOE_INSTANCE_ID={} AOE_PROFILE={} ",
+            "AOE_USAGE_BIN={} AOE_PROFILE={} ",
             shell_escape(&bin.to_string_lossy()),
-            shell_escape(instance_id),
             shell_escape(profile),
         ));
     }
@@ -105,9 +105,8 @@ impl Instance {
                 format!(" -e {}", shell_escape(&extension.to_string_lossy())),
                 pi_extension_env(
                     &sidecar,
-                    usage_bin
-                        .as_deref()
-                        .map(|bin| (bin, self.id.as_str(), profile.as_str())),
+                    &self.id,
+                    usage_bin.as_deref().map(|bin| (bin, profile.as_str())),
                 ),
             ));
         }
@@ -1080,10 +1079,11 @@ pi = "~/.pi-personal"
     fn pi_extension_env_adds_usage_vars_only_when_enabled() {
         let sidecar = std::path::Path::new("/tmp/aoe-hooks-1/abc/session_id");
         let bin = std::path::Path::new("/opt/aoe");
-        let without = pi_extension_env(sidecar, None);
+        let without = pi_extension_env(sidecar, "abc", None);
         assert!(without.starts_with("AOE_SESSION_ID_FILE="));
+        assert!(without.contains("AOE_INSTANCE_ID='abc'"));
         assert!(!without.contains("AOE_USAGE_BIN"));
-        let with = pi_extension_env(sidecar, Some((bin, "abc", "work")));
+        let with = pi_extension_env(sidecar, "abc", Some((bin, "work")));
         for needle in [
             "AOE_USAGE_BIN='/opt/aoe'",
             "AOE_INSTANCE_ID='abc'",

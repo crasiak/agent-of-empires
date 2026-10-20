@@ -54,6 +54,67 @@ fn claims(w: &mut Window, human: bool) -> String {
 }
 
 #[test]
+fn work_arc_schema_keeps_afk_authority_and_review_usable_without_reimport() {
+    let (app, _root, store, w) = setup(2);
+    initialize(app.path());
+    Book {
+        version: 4,
+        windows: vec![w.clone()],
+    }
+    .save(&store)
+    .unwrap();
+    let original = tree(&app.path().join(authority::NAMESPACE));
+    fs::write(
+        app.path().join(".schema_version"),
+        crate::migrations::current_schema_version().to_string(),
+    )
+    .unwrap();
+
+    authority::ready(app.path()).unwrap();
+    authority::migration_v3::run_at(app.path()).unwrap();
+    annotations::initialize(app.path()).unwrap();
+    let selection = selected(&w);
+    let report = service::collect_at(app.path(), std::slice::from_ref(&selection), 2000).unwrap();
+    assert!(report.complete, "{:?}", report.selections);
+    let request = window_note(&w);
+    let id = request.id.clone();
+    annotations::append_at(app.path(), request, 2000).unwrap();
+    let report = service::collect_at(app.path(), &[selection], 2000).unwrap();
+    assert!(report.complete, "{:?}", report.selections);
+    assert_eq!(report.selections[0].annotations.len(), 1);
+    assert_eq!(report.selections[0].annotations[0].id, id);
+    assert_eq!(tree(&app.path().join(authority::NAMESPACE)), original);
+
+    let index = app.path().join("afk-review-v1/annotations/index.json");
+    let saved = fs::read(&index).unwrap();
+    fs::remove_file(&index).unwrap();
+    let before = tree(app.path());
+    assert!(annotations::initialize(app.path()).is_err());
+    assert_eq!(
+        tree(app.path()),
+        before,
+        "missing review data is not recreated"
+    );
+    fs::write(index, saved).unwrap();
+    fs::write(
+        app.path().join(".schema_version"),
+        (crate::migrations::current_schema_version() + 1).to_string(),
+    )
+    .unwrap();
+    let before = tree(app.path());
+    assert!(authority::ready(app.path()).is_err());
+    assert!(authority::migration_v3::run_at(app.path()).is_err());
+    assert!(annotations::initialize(app.path()).is_err());
+    assert!(annotations::append_at(app.path(), window_note(&w), 2000).is_err());
+    assert!(
+        !service::collect_at(app.path(), &[selected(&w)], 2000)
+            .unwrap()
+            .complete
+    );
+    assert_eq!(tree(app.path()), before);
+}
+
+#[test]
 fn review_physical_profile_and_cumulative_read_limits_preserve_all_input() {
     let (app, _root, store, w) = setup(2);
     initialize(app.path());
@@ -380,7 +441,7 @@ fn review_errors_and_exports_are_bounded_private_and_non_mutating() {
     assert_eq!(before, tree(app.path()));
     fs::write(
         app.path().join(".schema_version"),
-        (crate::session::afk::schema::REVIEW + 1).to_string(),
+        (crate::migrations::current_schema_version() + 1).to_string(),
     )
     .unwrap();
     let before = tree(app.path());

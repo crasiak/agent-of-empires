@@ -10,6 +10,8 @@ use crate::tui::styles::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextMenuAction {
+    ToggleWorkArc,
+    ExpandWorkArc,
     ProjectColor(Option<crate::session::repo_appearance::RepoColor>),
     Rename,
     Delete,
@@ -122,6 +124,24 @@ fn row_to_item_idx(area: Rect, items_len: usize, col: u16, row: u16) -> Option<u
 }
 
 impl ContextMenuDialog {
+    pub(crate) fn with_work_arc(mut self, enabled: Option<bool>) -> Self {
+        if let Some(enabled) = enabled {
+            self.items.push((
+                ContextMenuAction::ToggleWorkArc,
+                if enabled {
+                    "Disable work arc"
+                } else {
+                    "Enable work arc…"
+                },
+            ));
+            if enabled {
+                self.items
+                    .push((ContextMenuAction::ExpandWorkArc, "Expand work arc"));
+            }
+        }
+        self
+    }
+
     /// Build the session row's menu. Each `Option` argument hides its row when
     /// `None` and carries the current state when `Some`, which flips the label:
     /// `snooze` (hidden outside Attention sort, matching the `'h'` keybinding),

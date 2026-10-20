@@ -1246,6 +1246,7 @@ impl App {
                 last_ledger_refresh = Some(std::time::Instant::now());
             }
             refresh_needed |= self.home.apply_ledger_updates();
+            refresh_needed |= self.home.tick_work_arc();
 
             if last_session_feed_refresh.elapsed() >= SESSION_FEED_REFRESH_INTERVAL {
                 self.home.request_session_feed_refresh();
