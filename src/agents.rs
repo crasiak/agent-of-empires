@@ -582,8 +582,12 @@ const fn json_hooks(
     })
 }
 
-/// Defaults shared by every registry entry; each entry overrides what differs.
-const fn agent(name: &'static str, binary: &'static str, install_hint: &'static str) -> AgentDef {
+/// Common agent defaults.
+pub(crate) const fn agent(
+    name: &'static str,
+    binary: &'static str,
+    install_hint: &'static str,
+) -> AgentDef {
     AgentDef {
         name,
         binary,

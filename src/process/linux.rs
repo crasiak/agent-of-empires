@@ -607,6 +607,29 @@ fn parse_psi_some_avg10(psi: &str) -> Option<f32> {
     None
 }
 
+pub(super) fn receiver_clock() -> super::ReceiverClock {
+    super::ReceiverClock::UptimeFile {
+        path: "/proc/uptime".into(),
+        resolution_ns: 10_000_000,
+    }
+}
+
+pub(super) fn monotonic_millis() -> Option<u64> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) } != 0
+        || now.tv_sec < 0
+        || !(0..1_000_000_000).contains(&now.tv_nsec)
+    {
+        return None;
+    }
+    (now.tv_sec as u64)
+        .checked_mul(1000)?
+        .checked_add(now.tv_nsec as u64 / 1_000_000)
+}
+
 pub(super) fn boot_id() -> Option<String> {
     std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .ok()

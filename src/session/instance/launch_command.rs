@@ -1425,6 +1425,19 @@ impl Instance {
                         }
                     }
                     apply_first_launch_agent_name(&mut cmd, agent, self, execution, is_existing);
+                    if self.tool == "pi" && !self.is_sandboxed() {
+                        if let (Some(execution), Some(native_id)) =
+                            (execution, self.agent_session_id.as_deref())
+                        {
+                            if execution.agent.name == "pi" && execution.pi_pinnable {
+                                cmd.push_str(&crate::session::afk::launch_arguments(
+                                    self,
+                                    native_id,
+                                    &execution.inputs.launch_id,
+                                )?);
+                            }
+                        }
+                    }
                     apply_agent_launch_env(&mut cmd, agent);
                     let raw_command = format!(
                         "{}{}",

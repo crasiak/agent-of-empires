@@ -1,5 +1,6 @@
 //! Session management module
 
+pub mod afk;
 pub mod repo_appearance;
 
 pub(crate) mod anchored_fs;

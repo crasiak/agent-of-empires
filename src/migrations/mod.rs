@@ -1,8 +1,11 @@
 //! One-time transformations of persisted data, run in order on upgrade. See
 //! `docs/development/adding-a-migration.md` to add one.
 
+#[cfg(test)]
+mod afk_tests;
 mod config_file;
 pub mod progress;
+mod runner_lock;
 mod sessions_file;
 mod store_fs;
 #[cfg(test)]
@@ -48,6 +51,14 @@ mod v038_prime_native_runtime;
 mod v039_prime_control_path;
 mod v040_worker_ownership;
 mod v041_repo_appearances;
+mod v042_afk_control;
+mod v043_afk_runtime;
+mod v044_afk_settlement;
+mod v045_afk_questions;
+mod v046_afk_authority;
+mod v047_afk_batches;
+mod v048_afk_usage_guards;
+mod v049_afk_return_review;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -89,11 +100,12 @@ mod hook_fixtures {
     }
 }
 
+use crate::session::afk::schema as afk_schema;
 use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 41;
+const CURRENT_VERSION: u32 = afk_schema::REVIEW;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -237,6 +249,34 @@ const MIGRATIONS: &[Migration] = &[
         "Shared repository appearances",
         v041_repo_appearances::run,
     ),
+    (afk_schema::CONTROL, "afk_control", v042_afk_control::run),
+    (afk_schema::RUNTIME, "afk_runtime", v043_afk_runtime::run),
+    (
+        afk_schema::SETTLEMENT,
+        "afk_settlement",
+        v044_afk_settlement::run,
+    ),
+    (
+        afk_schema::QUESTIONS,
+        "afk_questions",
+        v045_afk_questions::run,
+    ),
+    (
+        afk_schema::AUTHORITY,
+        "afk_authority",
+        v046_afk_authority::run,
+    ),
+    (afk_schema::BATCHES, "afk_batches", v047_afk_batches::run),
+    (
+        afk_schema::USAGE,
+        "afk_usage_guards",
+        v048_afk_usage_guards::run,
+    ),
+    (
+        afk_schema::REVIEW,
+        "afk_return_review",
+        v049_afk_return_review::run,
+    ),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -312,7 +352,9 @@ pub fn run_migrations_announced(reporter: Option<progress::Reporter>) -> Result<
 fn run_migrations_inner(reporter: Option<progress::Reporter>, announce: bool) -> Result<()> {
     let _installed = progress::install(reporter);
     let _announced = progress::install_announced(announce);
-    let current = get_current_version();
+    let _runner_lock = runner_lock::acquire(std::time::Duration::from_secs(30))?;
+    let app = crate::session::get_app_dir()?;
+    let current = afk_schema::read_cursor(&app)?;
     debug!("Current schema version: {}", current);
 
     if current > CURRENT_VERSION {
@@ -320,6 +362,7 @@ fn run_migrations_inner(reporter: Option<progress::Reporter>, announce: bool) ->
             "data schema version {current} is newer than this build supports ({CURRENT_VERSION}); refusing to downgrade"
         );
     }
+    afk_schema::ensure_mainline(&app, current)?;
     if current == CURRENT_VERSION {
         v027_isolate_sandbox_stores::reconcile_pending(announce)?;
         return v033_isolate_sandbox_content::reconcile_pending(announce);
@@ -377,6 +420,91 @@ fn set_version(version: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn concurrent_new_runners_reread_schema_after_the_stable_lock() {
+        use std::time::Duration;
+        let _home = crate::session::test_support::isolate_app_dir();
+        let app = crate::session::get_app_dir().unwrap();
+        fs::write(app.join(VERSION_FILE), "35").unwrap();
+        let held = runner_lock::acquire(Duration::ZERO).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let peers: Vec<_> = (0..2)
+            .map(|_| {
+                let sent = sent.clone();
+                std::thread::spawn(move || {
+                    assert_eq!(get_current_version(), 35);
+                    assert!(runner_lock::acquire(Duration::ZERO).is_err());
+                    sent.send(()).unwrap();
+                    run_migrations().unwrap();
+                })
+            })
+            .collect();
+        received.recv_timeout(Duration::from_secs(3)).unwrap();
+        received.recv_timeout(Duration::from_secs(3)).unwrap();
+        drop(held);
+        for peer in peers {
+            peer.join().unwrap();
+        }
+        assert_eq!(get_current_version(), CURRENT_VERSION);
+        assert!(crate::session::afk::authority::migration::run_at(&app).is_err());
+        assert!(crate::session::afk::authority::migration_v2::run_at(&app).is_err());
+        crate::session::afk::authority::migration_v3::run_at(&app).unwrap();
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(app.join("afk-authority-v3/migration/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["phase"], "complete");
+        fs::remove_file(app.join(".migration-runner.lock")).unwrap();
+        std::os::unix::fs::symlink("/missing", app.join(".migration-runner.lock")).unwrap();
+        assert!(run_migrations().is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn wake_preparation_sync_failure_retries_before_schema_publication() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let _home = crate::session::test_support::isolate_app_dir();
+        let app = crate::session::get_app_dir().unwrap();
+        crate::session::afk::authority::migration_v2::initialize_test(&app);
+        crate::session::afk::authority::migration_v3::run_at(&app).unwrap();
+        let root = app.join("afk-authority-v3/automatic-wake");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("writer.lock"))
+            .unwrap()
+            .sync_all()
+            .unwrap();
+        let manifest = app.join("afk-authority-v3/migration/manifest.json");
+        let original = fs::read(&manifest).unwrap();
+        crate::session::anchored_fs::FAIL_SYNC_ONCE.set(Some(root.clone()));
+        assert!(run_migrations().is_err());
+        crate::session::anchored_fs::FAIL_SYNC_ONCE.set(None);
+        assert!(
+            root.join("version.json").exists(),
+            "version record rename preceded failed directory sync"
+        );
+        assert_eq!(get_current_version(), afk_schema::BATCHES);
+        run_migrations().unwrap();
+        assert_eq!(get_current_version(), CURRENT_VERSION);
+        assert_eq!(fs::read(&manifest).unwrap(), original);
+        let mut instance = crate::session::Instance::new("later authority", app.to_str().unwrap());
+        instance.source_profile = "alpha".into();
+        crate::session::afk::control(&instance, crate::session::afk::Operation::Off).unwrap();
+        let snapshot = app.join("afk-authority-v3/profiles/alpha/snapshot.json");
+        let advanced = fs::read(&snapshot).unwrap();
+        crate::session::anchored_fs::FAIL_SYNC_ONCE.set(Some(root));
+        assert!(v048_afk_usage_guards::run().is_err());
+        crate::session::anchored_fs::FAIL_SYNC_ONCE.set(None);
+        v048_afk_usage_guards::run().unwrap();
+        assert_eq!(fs::read(snapshot).unwrap(), advanced);
+        assert_eq!(get_current_version(), CURRENT_VERSION);
+    }
 
     #[test]
     fn test_migrations_are_sequential() {

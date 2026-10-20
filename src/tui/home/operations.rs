@@ -546,9 +546,11 @@ impl HomeView {
 
         // Resolve the wake message on the main thread (config access). Empty is
         // the documented opt-out; the worker skips the wake-up then.
-        let wake_message = crate::session::resolve_config(&instance.source_profile)
-            .map(|c| c.session.restart_wake_message.clone())
-            .unwrap_or_else(|_| "wake up: pick up what you were doing".to_string());
+        let wake_message = crate::session::restart::configured_wake(&instance.source_profile)
+            .unwrap_or_else(|_| {
+                tracing::warn!(target:"session.restart", "automatic wake suppressed because configuration is unavailable");
+                String::new()
+            });
 
         self.restart_in_flight.insert(id.clone());
         self.restart_poller.request_restart(RestartRequest {

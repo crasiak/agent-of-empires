@@ -247,6 +247,18 @@ pub mod runner;
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PROCESS_GROUP_TERMINATION_GRACE: Duration = Duration::from_millis(250);
 
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) struct TimeoutStartGate {
+    pub program: &'static str,
+    pub spawned: std::sync::mpsc::Sender<()>,
+    pub start: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+thread_local! {
+    pub(crate) static TIMEOUT_START_GATE: std::cell::RefCell<Option<TimeoutStartGate>> = const { std::cell::RefCell::new(None) };
+}
+
 pub(crate) fn spawn_process_group(command: &mut Command) -> std::io::Result<Child> {
     platform::configure_process_group(command);
     command.spawn()
@@ -480,6 +492,21 @@ fn run_with_timeout_inner(
     cmd.stderr(Stdio::from(stderr_file.reopen()?));
     let mut child = cmd.spawn()?;
 
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+    TIMEOUT_START_GATE.with(|slot| {
+        let targeted = slot.borrow().as_ref().is_some_and(|gate| {
+            std::path::Path::new(cmd.get_program()).file_name()
+                == Some(std::ffi::OsStr::new(gate.program))
+        });
+        if targeted {
+            if let Some(gate) = slot.borrow_mut().take() {
+                if gate.spawned.send(()).is_ok() {
+                    let _ = gate.start.recv();
+                }
+            }
+        }
+    });
+
     let Some(status) = wait_with_timeout_inner(&mut child, timeout, kill_process_group, cancel)?
     else {
         return Ok(None);
@@ -610,6 +637,44 @@ pub fn processes_matching(
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         vec![false; n]
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ReceiverClock {
+    Hrtime { node: String, uv: String },
+    UptimeFile { path: String, resolution_ns: u64 },
+}
+
+pub(crate) fn receiver_clock() -> Option<ReceiverClock> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(linux::receiver_clock())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(macos::receiver_clock())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Cross-process monotonic milliseconds within one boot, including suspend time.
+pub fn monotonic_millis() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::monotonic_millis()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::monotonic_millis()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
     }
 }
 

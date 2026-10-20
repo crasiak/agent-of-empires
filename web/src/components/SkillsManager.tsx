@@ -116,7 +116,8 @@ function SkillGroup({
 export function SkillsManager({ readOnly = false }: { readOnly?: boolean } = {}) {
   const [data, setData] = useState<SkillsResponse | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [detail, setDetail] = useState<SkillDetail | null>(null);
+  const [loadedDetail, setLoadedDetail] = useState<{ key: string; value: SkillDetail | null } | null>(null);
+  const detail = loadedDetail?.key === selectedKey ? loadedDetail.value : null;
   const [draft, setDraft] = useState("");
   const [search, setSearch] = useState("");
   const [hideManagedExternal, setHideManagedExternal] = useState(true);
@@ -140,7 +141,7 @@ export function SkillsManager({ readOnly = false }: { readOnly?: boolean } = {})
     setLoadError(false);
     setData(next);
     if (next.skills.length === 0) {
-      setDetail(null);
+      setLoadedDetail(null);
       setDraft("");
     }
     setSelectedKey((current) => {
@@ -160,9 +161,7 @@ export function SkillsManager({ readOnly = false }: { readOnly?: boolean } = {})
   const selected = data?.skills.find((skill) => skillKey(skill) === selectedKey) ?? null;
   const dirty = detail !== null && draft !== detail.content;
 
-  // Keyed on the selection's primitives, NOT the `selected` object: that object is a fresh `.find()` result on
-  // every render, so depending on it re-ran this effect after any `load()` and reset the draft out from under an
-  // unsaved edit.
+  // List refreshes must not reload detail over an unsaved draft.
   const selectedSource = selected ? sourceId(selected) : null;
   const selectedDirectory = selected?.directory ?? null;
 
@@ -174,7 +173,7 @@ export function SkillsManager({ readOnly = false }: { readOnly?: boolean } = {})
     const read = async () => {
       const next = await fetchSkill(selectedSource, selectedDirectory);
       if (!cancelled) {
-        setDetail(next);
+        setLoadedDetail({ key: `${selectedSource}:${selectedDirectory}`, value: next });
         setDraft(next?.content ?? "");
         if (!next) setNotice("Could not read the selected skill.");
       }
@@ -199,6 +198,7 @@ export function SkillsManager({ readOnly = false }: { readOnly?: boolean } = {})
   const select = (skill: SkillSummary) => {
     if (!confirmDiscard()) return;
     setNotice(null);
+    if (skillKey(skill) !== selectedKey) setLoadedDetail(null);
     setSelectedKey(skillKey(skill));
   };
 
@@ -293,7 +293,9 @@ export function SkillsManager({ readOnly = false }: { readOnly?: boolean } = {})
       () => updateSkill(selected.directory, draft),
       "Could not save skill.",
       async () => {
-        setDetail((current) => (current ? { ...current, content: draft } : current));
+        setLoadedDetail((current) =>
+          current?.value ? { ...current, value: { ...current.value, content: draft } } : current,
+        );
         setNotice("Skill saved.");
         await reload();
       },
@@ -310,7 +312,7 @@ export function SkillsManager({ readOnly = false }: { readOnly?: boolean } = {})
       () => deleteSkill(selected.directory),
       "Could not delete skill.",
       async () => {
-        setDetail(null);
+        setLoadedDetail(null);
         setNotice("Managed skill deleted.");
         await load();
       },

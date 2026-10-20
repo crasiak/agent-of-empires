@@ -56,6 +56,7 @@
       "id": "settings.skills-management",
       "kind": "live-playwright",
       "risk": "high",
+      "notes": "Holds the adopted-copy detail read to verify stale external content cannot become an editable managed draft.",
       "specs": ["tests/live/settings-panels.spec.ts"],
       "components": ["web/src/components/SkillsManager.tsx"]
     },

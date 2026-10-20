@@ -1220,7 +1220,12 @@ mod tests {
             let mut inst = Instance::new("fallback_test", project_dir.to_str().unwrap());
             inst.tool = "claude".to_string();
             inst.source_profile = "fb-test".to_string();
-            let _fake_claude = install_fake_claude(temp.path(), script);
+            let launched = temp.path().join("resume-argv");
+            let script = script.replacen("#!/bin/sh\n", &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n",
+                shell_escape(&launched.to_string_lossy())
+            ), 1);
+            let _fake_claude = install_fake_claude(temp.path(), &script);
             inst.command = "claude".to_string();
             inst.agent_session_id = Some(stale_sid.to_string());
             inst.status = Status::Idle;
@@ -1240,11 +1245,30 @@ mod tests {
             let _ = crate::tmux::tmux_command()
                 .args(["kill-session", "-t", &tmux_name])
                 .output();
+            let _pane = crate::tmux::test_helpers::TmuxTestSession::from_name(tmux_name.clone());
+            let launch_record = launched.clone();
+            POST_SHELL_OBSERVER.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |session| {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+                    loop {
+                        let ran = std::fs::read_to_string(&launch_record)
+                            .is_ok_and(|argv| argv.lines().any(|argument| argument == stale_sid));
+                        let exited = matches!(crate::tmux::utils::probe_pane(session.name()),
+                            crate::tmux::utils::PaneProbe::Dead | crate::tmux::utils::PaneProbe::Missing);
+                        if ran && exited { break; }
+                        assert!(std::time::Instant::now() < deadline, "fake resume must run and exit before asserting failed-resume state");
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }));
+            });
+            let _observer = PostShellObserver;
             let outcome = inst.start_with_resume_fallback(None, true, ResumeAttemptPolicy::Allow);
             let _ = crate::tmux::tmux_command()
                 .args(["kill-session", "-t", &tmux_name])
                 .output();
 
+            let argv = std::fs::read_to_string(&launched).expect("the resume fixture must reach the fake agent, not just a test-binary helper");
+            assert!(argv.lines().any(|argument| argument == stale_sid));
             assert_eq!(
                 outcome.unwrap(),
                 StartOutcome::ResumeFailed {

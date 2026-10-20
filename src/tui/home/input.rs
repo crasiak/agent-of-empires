@@ -1187,6 +1187,12 @@ impl HomeView {
     }
 
     pub fn handle_dialog_click(&mut self, col: u16, row: u16) -> bool {
+        if self.afk_dialog.is_some()
+            || self.afk_overview_dialog.is_some()
+            || self.afk_batch_dialog.is_some()
+        {
+            return true;
+        }
         if let Some(dialog) = &mut self.intro_dialog {
             let click = dialog.handle_click(col, row);
             let preview = dialog.take_pending_preview();
@@ -1978,6 +1984,27 @@ impl HomeView {
                     self.tips_dialog = None;
                     self.persist_tips_outcome(outcome);
                 }
+            }
+            return None;
+        }
+
+        if let Some(dialog) = &mut self.afk_batch_dialog {
+            if matches!(dialog.handle_key(key), DialogResult::Cancel) {
+                self.afk_batch_dialog = None;
+            }
+            return None;
+        }
+
+        if let Some(dialog) = &mut self.afk_overview_dialog {
+            if matches!(dialog.handle_key(key), DialogResult::Cancel) {
+                self.afk_overview_dialog = None;
+            }
+            return None;
+        }
+
+        if let Some(dialog) = &mut self.afk_dialog {
+            if matches!(dialog.handle_key(key), DialogResult::Cancel) {
+                self.afk_dialog = None;
             }
             return None;
         }
@@ -3762,6 +3789,33 @@ impl HomeView {
 
     fn open_command_palette(&mut self) {
         let mut entries: Vec<PaletteCommand> = builtin_commands(self.strict_hotkeys);
+        if self.selected_session.is_some() {
+            entries.push(PaletteCommand {
+                id: "afk-control",
+                title: "AFK control-only: inspect / enable / disable".into(),
+                group: PaletteGroup::Actions,
+                keywords: vec!["away", "afk"],
+                hotkey: String::new(),
+                payload: PaletteAction::AfkControl,
+            });
+        }
+
+        entries.push(PaletteCommand {
+            id: "afk-overview",
+            title: "AFK global overview / return review (read-only)".into(),
+            group: PaletteGroup::Actions,
+            keywords: vec!["away", "afk", "fleet", "profiles", "return", "review"],
+            hotkey: String::new(),
+            payload: PaletteAction::AfkOverview,
+        });
+        entries.push(PaletteCommand {
+            id: "afk-batch",
+            title: "AFK batch: load preview / review / explicitly apply".into(),
+            group: PaletteGroup::Actions,
+            keywords: vec!["away", "afk", "batch", "preview", "apply"],
+            hotkey: String::new(),
+            payload: PaletteAction::AfkBatch,
+        });
 
         // Quit lives in the registry but is excluded from `builtin_commands` (no palette
         // metadata) so it can sit in the Settings group at the end; add it here, still
@@ -3898,6 +3952,27 @@ impl HomeView {
                 self.search_match_index = 0;
                 self.search_query = Input::default();
                 self.run_action(id, update_info)
+            }
+            PaletteAction::AfkBatch => {
+                self.afk_batch_dialog =
+                    Some(super::super::dialogs::afk_batch::AfkBatchDialog::new());
+                None
+            }
+            PaletteAction::AfkOverview => {
+                self.afk_overview_dialog =
+                    Some(super::super::dialogs::afk_overview::AfkOverviewDialog::new());
+                None
+            }
+            PaletteAction::AfkControl => {
+                if let Some(instance) = self
+                    .selected_session
+                    .as_deref()
+                    .and_then(|id| self.get_instance(id))
+                    .cloned()
+                {
+                    self.afk_dialog = Some(super::super::dialogs::afk::AfkDialog::new(instance));
+                }
+                None
             }
             PaletteAction::Activate => self.activate_selected_session(),
             PaletteAction::LiveSend => self.start_live_send(),
@@ -5972,11 +6047,18 @@ impl HomeView {
     /// dialogs come next so multi-line dictation lands where the user is typing. The
     /// settings view is last: its paste handler strips newlines.
     pub fn handle_paste(&mut self, text: &str) {
-        // Any paste drops a finalized preview selection, like `handle_key` does up front:
-        // the highlight pins to cell coords, so once the user pastes anywhere the cells
-        // underneath can change. Doing it here covers the drag-select -> right-click ->
-        // paste-into-dialog sequence, which never goes through `handle_key`.
+        // Right-click pastes also invalidate preview selection coordinates.
         self.clear_preview_selection();
+        if self.afk_batch_dialog.is_some() {
+            return;
+        }
+        if let Some(dialog) = &mut self.afk_overview_dialog {
+            dialog.handle_paste(text);
+            return;
+        }
+        if self.afk_dialog.is_some() {
+            return;
+        }
         if !self.has_non_live_send_overlay() {
             if let Some(state) = self.live_send.clone() {
                 if let Some(worker) = &self.live_send_worker {

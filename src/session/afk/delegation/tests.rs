@@ -1,0 +1,823 @@
+use super::*;
+
+fn setup(requests: u8) -> (tempfile::TempDir, tempfile::TempDir, Store, Window) {
+    let app = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    authority::migration::initialize_test(app.path());
+    let store = Store::authority(app.path(), "default", "test", true).unwrap();
+    let (dev, ino) = AnchoredDir::open(root.path()).unwrap().identity().unwrap();
+    let w = Window { version:4,binding:Binding {instance_id:"test".into(),profile:"default".into(),native_id:"native".into(),launch_id:uuid::Uuid::new_v4().to_string()},generation:uuid::Uuid::new_v4().to_string(),id:uuid::Uuid::new_v4().to_string(),revision:1,root:root.path().into(),control_root:app.path().into(),root_identity:(device_number(dev),ino),grant:serde_json::from_value(json!({"version":4,"task":"scratch","scope":"create disposable scratch text","files":[{"path":"scratch.txt","capability":"create"}],"requests":requests,"assurance":COVERAGE})).unwrap(),issued_at_ms:1000,expires_at_ms:61000,state:"pending".into(),confirmed:true,reservations:vec![],reads:0,records:vec![],permit:None,read_facts:vec![],checkpoints:vec![],nudges:vec![],terminal_reason:None,question:None };
+    Book {
+        version: 4,
+        windows: vec![w.clone()],
+    }
+    .save(&store)
+    .unwrap();
+    (app, root, store, w)
+}
+fn decision() -> Value {
+    json!({"id":uuid::Uuid::new_v4().to_string(),"question":"Which scratch content?","alternatives":[{"name":"hello","pros":"simple","cons":"minimal","scores":[5]},{"name":"other","pros":"longer","cons":"unneeded","scores":[2]}],"criteria":[{"name":"clarity","weight":4}],"evidence":["operator scratch grant"],"assumptions":[],"uncertainties":[],"recommendation":"hello","rationale":"A small reversible scratch change","rollback":"remove scratch manually","reversible":true,"risk":"low","human_required":false,"depends_on":[],"action":{"path":"scratch.txt","expected_hash":null,"content":"hello\n"}})
+}
+fn reserve(store: &Store, w: &Window) -> String {
+    let request = uuid::Uuid::new_v4().to_string();
+    execute(
+        store,
+        &w.binding,
+        &w.generation,
+        Request::Reserve {
+            continuation: None,
+            question: None,
+            window: w.id.clone(),
+            request: request.clone(),
+        },
+        2000,
+    )
+    .unwrap();
+    request
+}
+fn record(store: &Store, w: &Window, request: &str, d: Value) -> Result<Value> {
+    execute(
+        store,
+        &w.binding,
+        &w.generation,
+        Request::Record {
+            window: w.id.clone(),
+            request: request.into(),
+            decision: d,
+        },
+        2000,
+    )
+}
+fn apply(store: &Store, w: &Window, request: &str, d: &Value, now: i64) -> Result<Value> {
+    execute(
+        store,
+        &w.binding,
+        &w.generation,
+        Request::Apply {
+            window: w.id.clone(),
+            request: request.into(),
+            decision: d["id"].as_str().unwrap().into(),
+        },
+        now,
+    )
+}
+
+#[test]
+fn retained_native_history_still_excludes_automatic_wake_after_pruning() {
+    let (_app, _root, store, w) = setup(1);
+    let mut book = Book::load(&store).unwrap();
+    book.prune(w.expires_at_ms + RETENTION_MS + 1);
+    assert!(book.has_native_history(&w.binding.native_id));
+    assert!(!book.has_native_history(&uuid::Uuid::new_v4().to_string()));
+}
+
+#[test]
+fn record_later_apply_outcome_and_last_slot_are_durable() {
+    let (_app, root, store, w) = setup(2);
+    let first = reserve(&store, &w);
+    let d = decision();
+    assert_eq!(
+        record(&store, &w, &first, d.clone()).unwrap()["disposition"],
+        "admitted"
+    );
+    assert_eq!(
+        record(&store, &w, &first, d.clone()).unwrap()["record_request"],
+        1
+    );
+    let mut conflicting = d.clone();
+    conflicting["rationale"] = json!("changed");
+    assert!(record(&store, &w, &first, conflicting).is_err());
+    assert!(apply(&store, &w, &first, &d, 2000).is_err());
+    assert!(!root.path().join("scratch.txt").exists());
+    let last = reserve(&store, &w);
+    assert_eq!(
+        apply(&store, &w, &last, &d, 2000).unwrap()["outcome"],
+        "observed_applied"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("scratch.txt")).unwrap(),
+        "hello\n"
+    );
+    assert!(apply(&store, &w, &last, &d, 2000).is_err());
+    let view = Book::load(&store).unwrap().windows[0]
+        .view(2000)
+        .to_string();
+    assert!(view.contains("observed_applied"));
+    assert!(!view.contains("hello\\n"));
+    assert!(!view.contains("preimage"));
+}
+#[test]
+fn veto_stop_expiry_generation_and_changed_target_never_apply() {
+    for case in [
+        "human",
+        "dependent",
+        "unknown",
+        "stop",
+        "expiry",
+        "generation",
+        "changed",
+    ] {
+        let (_app, root, store, w) = setup(2);
+        let first = reserve(&store, &w);
+        let mut d = decision();
+        match case {
+            "human" => d["human_required"] = json!(true),
+            "dependent" => d["depends_on"] = json!(["blocked"]),
+            "unknown" => d["risk"] = json!("unknown"),
+            _ => {}
+        }
+        record(&store, &w, &first, d.clone()).unwrap();
+        let last = reserve(&store, &w);
+        if case == "stop" {
+            stop(&store).unwrap();
+        }
+        if case == "changed" {
+            std::fs::write(root.path().join("scratch.txt"), "outside writer").unwrap();
+        }
+        let mut request_w = w.clone();
+        if case == "generation" {
+            request_w.generation = uuid::Uuid::new_v4().to_string();
+        }
+        assert!(
+            apply(
+                &store,
+                &request_w,
+                &last,
+                &d,
+                if case == "expiry" { 61000 } else { 2000 }
+            )
+            .is_err(),
+            "{case}"
+        );
+        assert_ne!(
+            std::fs::read_to_string(root.path().join("scratch.txt"))
+                .ok()
+                .as_deref(),
+            Some("hello\n")
+        );
+    }
+}
+#[test]
+fn finite_requests_reads_privacy_and_unsafe_targets() {
+    for limit in [1, 8] {
+        let (_app, _root, store, w) = setup(limit);
+        let first = reserve(&store, &w);
+        let d = decision();
+        record(&store, &w, &first, d.clone()).unwrap();
+        for _ in 1..limit {
+            reserve(&store, &w);
+        }
+        assert!(execute(
+            &store,
+            &w.binding,
+            &w.generation,
+            Request::Reserve {
+                continuation: None,
+                question: None,
+                window: w.id.clone(),
+                request: uuid::Uuid::new_v4().to_string()
+            },
+            2000
+        )
+        .is_err());
+        if limit == 1 {
+            assert!(apply(&store, &w, &first, &d, 2000).is_err());
+        }
+    }
+    let (_app, root, store, w) = setup(8);
+    let req = reserve(&store, &w);
+    for _ in 0..16 {
+        execute(
+            &store,
+            &w.binding,
+            &w.generation,
+            Request::Read {
+                window: w.id.clone(),
+                request: req.clone(),
+                path: "scratch.txt".into(),
+            },
+            2000,
+        )
+        .unwrap();
+    }
+    assert!(execute(
+        &store,
+        &w.binding,
+        &w.generation,
+        Request::Read {
+            window: w.id.clone(),
+            request: req.clone(),
+            path: "scratch.txt".into()
+        },
+        2000
+    )
+    .is_err());
+    for path in [
+        "../scratch.txt",
+        ".git/config",
+        "profiles/data.json",
+        "secrets.txt",
+        "foo.sh",
+        "/etc/file.txt",
+    ] {
+        let mut d = decision();
+        d["action"]["path"] = json!(path);
+        assert!(record(&store, &w, &req, d).is_err());
+    }
+    for value in [
+        "-----BEGIN PRIVATE KEY-----",
+        "key\u{1b}[31m",
+        "ghp_example",
+    ] {
+        let mut d = decision();
+        d["rationale"] = json!(value);
+        assert!(record(&store, &w, &req, d).is_err());
+    }
+    std::os::unix::fs::symlink("/etc/passwd", root.path().join("scratch.txt")).unwrap();
+    assert!(record(&store, &w, &req, decision()).is_err());
+}
+#[test]
+fn failed_store_ambiguous_commit_and_retention_do_not_refund() {
+    let (_app, root, store, w) = setup(2);
+    let first = reserve(&store, &w);
+    let d = decision();
+    record(&store, &w, &first, d.clone()).unwrap();
+    let last = reserve(&store, &w);
+    FAIL_AFTER_ATTEMPT.with(|flag| flag.set(true));
+    assert!(apply(&store, &w, &last, &d, 2000).is_err());
+    assert!(!root.path().join("scratch.txt").exists());
+    assert!(apply(&store, &w, &last, &d, 2000).is_err());
+    let mut book = Book::load(&store).unwrap();
+    book.prune(61001 + RETENTION_MS);
+    assert!(book.windows[0].permit.as_ref().unwrap().content.is_some());
+    assert_eq!(book.windows[0].reservations.len(), 2);
+    let mut broken = serde_json::to_value(&book).unwrap();
+    broken["windows"][0]["reads"] = json!(17);
+    store
+        .corrupt_authority_for_test("ledger.json", &broken)
+        .unwrap();
+    assert!(Book::load(&store).is_err());
+}
+
+#[test]
+fn real_pi_sdk_records_then_applies_through_host_bridge() {
+    use std::io::{BufRead, Write};
+    use std::process::{Command, Stdio};
+    if std::env::var_os("AOE_PI_ROOT").is_none() && std::env::var_os("AOE_PI_SOURCE_ROOT").is_none()
+    {
+        eprintln!("Set AOE_PI_ROOT or AOE_PI_SOURCE_ROOT to pinned Pi 0.87.1 for offline SDK/host integration");
+        return;
+    }
+    for scenario in [
+        "positive",
+        "nudge-one",
+        "nudge-two",
+        "nudge-stop-before",
+        "nudge-stop-during",
+        "nudge-stop-after",
+        "nudge-human",
+        "nudge-extension",
+        "nudge-prior",
+        "nudge-late",
+        "nudge-lost-ack",
+        "nudge-off-before",
+        "nudge-expiry-before",
+        "nudge-off-during",
+        "nudge-expiry-during",
+        "nudge-off-after",
+        "nudge-expiry-after",
+        "nudge-stop-context",
+        "nudge-off-context",
+        "nudge-expiry-context",
+        "nudge-late-human",
+        "nudge-late-extension",
+        "nudge-late-extension-live",
+    ] {
+        let nudging = scenario != "positive";
+        let twice = scenario == "nudge-two";
+        let positive = matches!(
+            scenario,
+            "positive" | "nudge-one" | "nudge-two" | "nudge-late-extension"
+        );
+        let (_app, root, store, mut w) =
+            setup(if twice || scenario == "nudge-late-extension-live" {
+                8
+            } else if nudging {
+                4
+            } else {
+                2
+            });
+        w.grant.settlement_nudges = if twice { 2 } else { u8::from(nudging) };
+        let control_root = tempfile::tempdir().unwrap();
+        let control = Store::open(control_root.path(), "test", true).unwrap();
+        let mut command = Command::new("node");
+        if let Some(source) = std::env::var_os("AOE_PI_SOURCE_ROOT") {
+            let source = std::path::PathBuf::from(source);
+            command
+                .arg("--import")
+                .arg(source.join("node_modules/tsx/dist/loader.mjs"))
+                .env("TSX_TSCONFIG_PATH", source.join("tsconfig.json"));
+        }
+        let mut child = command
+            .args(["assets/session/aoe-afk-sdk.test.mjs", "--host", scenario])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let output = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut initialized = false;
+        let mut observed = false;
+        let mut capability_refused = false;
+        for line in output.lines() {
+            let value: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            if value.get("result").is_some() {
+                capability_refused = value["result"]["capability_refused"] == true;
+                if capability_refused {
+                    observed = true;
+                    break;
+                }
+                assert_eq!(
+                    value["result"]["calls"],
+                    if twice {
+                        8
+                    } else if matches!(
+                        scenario,
+                        "nudge-one" | "nudge-late-extension" | "nudge-late-extension-live"
+                    ) {
+                        5
+                    } else if nudging {
+                        4
+                    } else {
+                        3
+                    },
+                    "{scenario}"
+                );
+                observed = true;
+                break;
+            }
+            if !initialized {
+                w.binding = serde_json::from_value(value["binding"].clone()).unwrap();
+                w.generation = value["generation"].as_str().unwrap().into();
+                w.issued_at_ms = now_ms();
+                w.expires_at_ms = w.issued_at_ms + 60000;
+                Book {
+                    version: 4,
+                    windows: vec![w.clone()],
+                }
+                .save(&store)
+                .unwrap();
+                initialized = true;
+            }
+            if let Some(kind) = value["packet"]["fixture"].as_str() {
+                if kind == "off" {
+                    stop(&store).unwrap();
+                } else {
+                    let _lock = store.lock(TIMEOUT).unwrap();
+                    let mut book = Book::load(&store).unwrap();
+                    let latest = book.windows.last_mut().unwrap();
+                    latest.issued_at_ms = now_ms() - 60001;
+                    latest.expires_at_ms = latest.issued_at_ms + 60000;
+                    book.save(&store).unwrap();
+                }
+                input.write_all(b"{\"ok\":true,\"value\":null}\n").unwrap();
+                input.flush().unwrap();
+                continue;
+            }
+            let packet = serde_json::to_string(&value["packet"]).unwrap() + "\n";
+            let mut reply = Vec::new();
+            super::super::bridge::serve(
+                &control,
+                Some((&store, &w.control_root)),
+                &w.binding,
+                &w.generation,
+                Cursor::new(packet),
+                &mut reply,
+                || Ok(()),
+            )
+            .unwrap();
+            input.write_all(&reply).unwrap();
+            input.flush().unwrap();
+        }
+        drop(input);
+        assert!(child.wait().unwrap().success());
+        assert!(observed);
+        if capability_refused {
+            let view = snapshot(&store).unwrap();
+            assert_eq!(view["state"], "ended");
+            assert_eq!(view["reservations_used"], 0);
+            assert_eq!(view["nudges_used"], 0);
+            assert!(!root.path().join("scratch.txt").exists());
+            eprintln!("Actual stock SDK refuses nonzero nudges; candidate queue-preserving capability matrix remains blocked");
+            break;
+        }
+        assert_eq!(
+            root.path().join("scratch.txt").exists(),
+            positive,
+            "{scenario}"
+        );
+        let book = Book::load(&store).unwrap();
+        let w = &book.windows[0];
+        assert_eq!(
+            w.reservations.len(),
+            if twice {
+                7
+            } else if matches!(
+                scenario,
+                "nudge-one" | "nudge-late-extension" | "nudge-late-extension-live"
+            ) {
+                4
+            } else if nudging {
+                3
+            } else {
+                2
+            },
+            "{scenario}"
+        );
+        if positive {
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("scratch.txt")).unwrap(),
+                "hello\n"
+            );
+            assert_eq!(
+                w.permit.as_ref().unwrap().outcomes,
+                ["unknown", "observed_applied"]
+            );
+            assert_eq!(w.terminal_reason, Some(TerminalReason::Completed));
+            assert!(w
+                .nudges
+                .iter()
+                .all(|n| serde_json::to_value(n).unwrap()["observed_request"].is_string()));
+        } else if scenario == "nudge-late-extension-live" {
+            assert_eq!(w.terminal_reason, Some(TerminalReason::Interrupted));
+            assert!(w
+                .nudges
+                .iter()
+                .all(|n| serde_json::to_value(n).unwrap()["observed_request"].is_string()));
+            assert!(w.permit.as_ref().unwrap().attempted_at_ms.is_none());
+        } else if !matches!(
+            scenario,
+            "nudge-prior"
+                | "nudge-off-before"
+                | "nudge-expiry-before"
+                | "nudge-off-during"
+                | "nudge-expiry-during"
+        ) {
+            assert_eq!(
+                w.terminal_reason,
+                Some(TerminalReason::DeliveryUnknown),
+                "{scenario}"
+            );
+            assert!(w
+                .nudges
+                .iter()
+                .all(|n| serde_json::to_value(n).unwrap()["observed_request"].is_null()));
+        }
+        assert_eq!(
+            w.nudges.len(),
+            if twice {
+                2
+            } else if nudging
+                && !matches!(
+                    scenario,
+                    "nudge-prior"
+                        | "nudge-off-before"
+                        | "nudge-expiry-before"
+                        | "nudge-off-during"
+                        | "nudge-expiry-during"
+                )
+            {
+                1
+            } else {
+                0
+            },
+            "{scenario}"
+        );
+    }
+}
+
+#[test]
+fn replacement_preimage_store_failure_caps_and_expired_body_pruning() {
+    let (app, root, store, mut w) = setup(8);
+    std::fs::write(root.path().join("scratch.txt"), "before").unwrap();
+    w.grant.files[0].capability = Capability::Replace;
+    Book {
+        version: 4,
+        windows: vec![w.clone()],
+    }
+    .save(&store)
+    .unwrap();
+    let first = reserve(&store, &w);
+    let mut d = decision();
+    d["action"]["expected_hash"] = json!(hash("before"));
+    // An unsafe store must deny record and therefore deny all dependent effects.
+    let ledger = app
+        .path()
+        .join("afk-authority-v3/profiles/default/snapshot.json");
+    std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(record(&store, &w, &first, d.clone()).is_err());
+    std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(Book::load(&store).unwrap().windows[0].permit.is_none());
+    let mut large = d.clone();
+    large["rationale"] = json!("é".repeat(RECORD_BYTES / 2));
+    assert!(record(&store, &w, &first, large).is_err());
+    record(&store, &w, &first, d.clone()).unwrap();
+    let second = reserve(&store, &w);
+    apply(&store, &w, &second, &d, 2000).unwrap();
+    stop(&store).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("scratch.txt")).unwrap(),
+        "hello\n"
+    );
+    let mut book = Book::load(&store).unwrap();
+    assert_eq!(
+        book.windows[0].permit.as_ref().unwrap().preimage.as_deref(),
+        Some("before")
+    );
+    book.prune(61001 + RETENTION_MS);
+    book.save(&store).unwrap();
+    assert!(book.windows[0].records[0].claims.is_none());
+    assert!(book.windows[0].permit.as_ref().unwrap().preimage.is_none());
+    assert_eq!(book.windows[0].reservations.len(), 2);
+    assert!(apply(&store, &w, &second, &d, 2000).is_err());
+    let (_app, _root, store, w) = setup(2);
+    let request = reserve(&store, &w);
+    for _ in 0..4 {
+        let mut deferred = decision();
+        deferred["action"] = Value::Null;
+        record(&store, &w, &request, deferred).unwrap();
+    }
+    assert!(record(&store, &w, &request, decision()).is_err());
+    let mut book = Book::load(&store).unwrap();
+    let mut window = book.windows[0].clone();
+    window.grant.scope = "x".repeat(RECORD_BYTES / 2);
+    book.windows = (0..2000)
+        .map(|index| {
+            let mut next = window.clone();
+            next.id = uuid::Uuid::new_v4().to_string();
+            next.revision = index + 1;
+            next
+        })
+        .collect();
+    assert!(book.save(&store).is_err());
+    assert_eq!(Book::load(&store).unwrap().windows.len(), 1);
+}
+
+#[test]
+fn executable_large_and_hardlinked_targets_and_unconfirmed_grants_are_rejected() {
+    let (_app, root, store, mut w) = setup(2);
+    w.confirmed = false;
+    Book {
+        version: 4,
+        windows: vec![w.clone()],
+    }
+    .save(&store)
+    .unwrap();
+    assert!(execute(
+        &store,
+        &w.binding,
+        &w.generation,
+        Request::Reserve {
+            continuation: None,
+            question: None,
+            window: w.id.clone(),
+            request: uuid::Uuid::new_v4().to_string()
+        },
+        2000
+    )
+    .is_err());
+    w.confirmed = true;
+    Book {
+        version: 4,
+        windows: vec![w.clone()],
+    }
+    .save(&store)
+    .unwrap();
+    let request = reserve(&store, &w);
+    let file = root.path().join("scratch.txt");
+    std::fs::write(&file, "plain").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(record(&store, &w, &request, decision()).is_err());
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(&file, vec![b'x'; FILE_BYTES + 1]).unwrap();
+    assert!(w.file("scratch.txt").is_err());
+    std::fs::write(&file, "plain").unwrap();
+    std::fs::hard_link(&file, root.path().join("other.txt")).unwrap();
+    assert!(w.file("scratch.txt").is_err());
+    let result = execute_checked(
+        &store,
+        &w.binding,
+        &w.generation,
+        Request::Read {
+            window: w.id.clone(),
+            request,
+            path: "scratch.txt".into(),
+        },
+        2000,
+        || anyhow::bail!("binding changed after lock"),
+    );
+    assert!(result.is_err());
+    assert_eq!(Book::load(&store).unwrap().windows[0].reads, 0);
+}
+
+#[test]
+#[serial_test::serial]
+fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirmation() {
+    use crate::session::{ActiveExecution, ExecutionBinding, Status};
+    for outcome in ["confirm", "stop", "off"] {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let workspace = tempfile::Builder::new()
+            .prefix("afk-workspace-")
+            .tempdir()
+            .unwrap();
+        let mut instance = Instance::new("pi", workspace.path().to_str().unwrap());
+        instance.tool = "pi".into();
+        instance.status = Status::Running;
+        instance.source_profile = "afk-runtime-test".into();
+        instance.agent_session_id = Some(uuid::Uuid::new_v4().to_string());
+        instance.active_execution = Some(ActiveExecution {
+            launch_id: uuid::Uuid::new_v4().to_string(),
+            capture: None,
+            container: None,
+            binding: ExecutionBinding {
+                agent: "pi".into(),
+                stores: vec![],
+                configuration: vec![],
+                cwd: instance.project_path.clone().into(),
+                cwd_filesystem: "host".into(),
+                filesystem: "host".into(),
+                exported_default_store: None,
+            },
+        });
+        let storage = Storage::new_unwatched("afk-runtime-test").unwrap();
+        storage
+            .update(|rows, _| {
+                rows.push(instance.clone());
+                Ok(())
+            })
+            .unwrap();
+        let app = crate::session::get_app_dir().unwrap();
+        authority::migration::initialize_test(&app);
+        let runtime =
+            Store::authority(&app, &instance.effective_profile(), &instance.id, true).unwrap();
+        let control =
+            Store::transport(&app, &instance.effective_profile(), &instance.id, true).unwrap();
+        let grant = json!({"version":4,"task":"scratch","scope":"create scratch greeting","files":[{"path":"scratch.txt","capability":"create"}],"requests":2,"assurance":COVERAGE});
+        let file = workspace.path().join("grant.json");
+        std::fs::write(&file, serde_json::to_vec(&grant).unwrap()).unwrap();
+        let binding = Binding::for_instance(&instance).unwrap();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let off_instance = instance.clone();
+        let peer = std::thread::spawn(move || {
+            let mut off_worker = None;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut previous = String::new();
+            let mut acks = 0;
+            while acks < 2 {
+                if let Some(probe) = control.read::<RuntimeProbe>("runtime-probe.json").unwrap() {
+                    if probe.challenge != previous {
+                        if let Some(id) = &probe.window {
+                            let book = Book::load(&runtime).unwrap();
+                            assert!(!book.windows.last().unwrap().confirmed);
+                            assert!(execute(
+                                &runtime,
+                                &binding,
+                                &generation,
+                                Request::Reserve {
+                                    continuation: None,
+                                    question: None,
+                                    window: id.clone(),
+                                    request: uuid::Uuid::new_v4().to_string()
+                                },
+                                now_ms()
+                            )
+                            .is_err());
+                            if outcome == "stop" {
+                                stop(&runtime).unwrap();
+                            }
+                            if outcome == "off" {
+                                let epoch = runtime.session().unwrap().epoch;
+                                let instance = off_instance.clone();
+                                off_worker = Some(std::thread::spawn(move || {
+                                    super::super::control(&instance, Operation::Off).unwrap()
+                                }));
+                                loop {
+                                    let revoked = {
+                                        let _lock = runtime.lock_existing(TIMEOUT).unwrap();
+                                        runtime.session().unwrap().epoch != epoch
+                                    };
+                                    if revoked {
+                                        break;
+                                    }
+                                    assert!(
+                                        Instant::now() < deadline,
+                                        "Off could not revoke while transport was held"
+                                    );
+                                    std::thread::yield_now();
+                                }
+                                assert_eq!(snapshot(&runtime).unwrap()["state"], "ended");
+                            }
+                        }
+                        previous = probe.challenge.clone();
+                        let ack = RuntimeAck {
+                            version: BRIDGE_VERSION,
+                            binding: binding.clone(),
+                            challenge: probe.challenge,
+                            window: probe.window,
+                            grant_hash: probe.grant_hash,
+                            budgeted: probe.budgeted,
+                            usage_policy_hash: probe.usage_policy_hash,
+                            usage_coverage: "native-entries-terminal-v2".into(),
+                            generation: generation.clone(),
+                            sdk: "0.87.1".into(),
+                            coverage: COVERAGE.into(),
+                        };
+                        let before = control.bytes("runtime-ack.json").unwrap();
+                        let mut weak = serde_json::to_value(&ack).unwrap();
+                        weak["usage_coverage"] = json!("native-entries-v1");
+                        assert!(acknowledge(
+                            &control,
+                            &binding,
+                            &generation,
+                            serde_json::from_value(weak).unwrap()
+                        )
+                        .is_err());
+                        assert_eq!(control.bytes("runtime-ack.json").unwrap(), before);
+                        acknowledge(&control, &binding, &generation, ack).unwrap();
+                        acks += 1;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "grant handshake did not progress"
+                );
+                std::thread::yield_now();
+            }
+            off_worker
+        });
+        let result = delegate(&instance, 1, &file, None);
+        if let Some(off_worker) = peer.join().unwrap() {
+            let off = off_worker.join().unwrap();
+            assert!(!off.requested_on);
+        }
+        let runtime =
+            Store::authority(&app, &instance.effective_profile(), &instance.id, false).unwrap();
+        if outcome != "confirm" {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("ended or changed before confirmation"));
+            let view = snapshot(&runtime).unwrap();
+            assert_eq!(view["state"], "ended");
+            assert_eq!(view["confirmed"], false);
+            assert_eq!(view["reservations_used"], 0);
+        } else {
+            let result = result.unwrap();
+            assert_eq!(result["state"], "pending");
+            assert_eq!(result["confirmed"], true);
+            assert_eq!(result["reservations_used"], 0);
+        }
+        assert!(!workspace.path().join("scratch.txt").exists());
+        stop(&runtime).unwrap();
+        assert_eq!(snapshot(&runtime).unwrap()["state"], "ended");
+    }
+}
+
+mod batches;
+mod completion;
+mod review;
+mod settlement;
+mod usage;
+
+mod questions;
+
+#[test]
+fn failed_ack_and_stale_confirmation_never_end_a_replacement_window() {
+    let (_app, _root, store, mut old) = setup(2);
+    old.confirmed = false;
+    old.issued_at_ms = now_ms();
+    old.expires_at_ms = old.issued_at_ms + 60000;
+    let mut session = store.session().unwrap();
+    session.book.windows = vec![old.clone()];
+    store.publish_session(session).unwrap();
+    let epoch = store.session().unwrap().epoch;
+    let mut replacement = old.clone();
+    replacement.id = uuid::Uuid::new_v4().to_string();
+    replacement.revision += 1;
+    {
+        let _lock = store.lock(TIMEOUT).unwrap();
+        let mut session = store.session().unwrap();
+        session.revoke().unwrap();
+        session.book.windows.push(replacement.clone());
+        store.publish_session(session).unwrap();
+    }
+    end_attempt(&store, &old.id, epoch).unwrap();
+    let _lock = store.lock(TIMEOUT).unwrap();
+    assert!(confirm_attempt(&store, &old, epoch).is_err());
+    confirm_attempt(&store, &replacement, epoch + 1).unwrap();
+    let session = store.session().unwrap();
+    assert_eq!(session.book.windows.last().unwrap().id, replacement.id);
+    assert!(session.book.windows.last().unwrap().confirmed);
+    assert_eq!(session.book.windows.last().unwrap().state, "pending");
+}

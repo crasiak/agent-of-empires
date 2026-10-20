@@ -56,10 +56,29 @@ fn take_launch_report(command: &mut Option<Commands>) -> Option<cli::session::Se
     None
 }
 
+fn take_afk_inspection(command: &mut Option<Commands>) -> Option<cli::afk::AfkArgs> {
+    if matches!(command.as_ref(), Some(Commands::Session { command: cli::session::SessionCommands::Afk(args) }) if args.is_inspection())
+    {
+        if let Some(Commands::Session {
+            command: cli::session::SessionCommands::Afk(args),
+        }) = command.take()
+        {
+            return Some(args);
+        }
+    }
+    None
+}
+
 fn main() -> Result<()> {
     let mut args = std::env::args();
     let _ = args.next();
     let helper = args.next();
+    if helper.as_deref() == Some("__afk-bridge") {
+        return agent_of_empires::session::afk::run_bridge(
+            &args.next().unwrap_or_default(),
+            &args.next().unwrap_or_default(),
+        );
+    }
     if helper.as_deref() == Some("__frozen-env") {
         return agent_of_empires::process::exec_frozen_environment();
     }
@@ -115,6 +134,11 @@ async fn async_main(helper: Option<String>, mut a: std::env::Args) -> Result<()>
     // They must not migrate stores, flush telemetry, or initialize app state.
     if let Some(command) = take_launch_report(&mut cli.command) {
         return cli::session::run("", command).await;
+    }
+
+    // AFK inspections bypass migrations, logging, telemetry and daemon dispatch.
+    if let Some(args) = take_afk_inspection(&mut cli.command) {
+        return cli::afk::run("", args).await;
     }
 
     if let Some(err) = serve_unavailable_error(&cli) {
@@ -445,5 +469,37 @@ mod launch_report_startup_tests {
         assert!(take_launch_report(&mut normal.command).is_none());
         assert!(normal.command.is_some());
         assert!(Cli::try_parse_from(["aoe", "session", "report-ledger-launch"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod afk_inspection_startup_tests {
+    use super::*;
+    #[test]
+    fn only_afk_inspection_commands_bypass_startup_writes() {
+        for args in [
+            vec!["aoe", "session", "afk", "overview"],
+            vec!["aoe", "session", "afk", "overview", "--active-only"],
+            vec![
+                "aoe",
+                "session",
+                "afk",
+                "batch",
+                "preview",
+                "--manifest",
+                "manifest.json",
+                "--output",
+                "preview.json",
+            ],
+        ] {
+            let mut cli = Cli::try_parse_from(args).unwrap();
+            assert!(take_afk_inspection(&mut cli.command).is_some());
+            assert!(cli.command.is_none());
+        }
+        for command in ["status", "off"] {
+            let mut cli = Cli::try_parse_from(["aoe", "session", "afk", command, "s"]).unwrap();
+            assert!(take_afk_inspection(&mut cli.command).is_none());
+            assert!(cli.command.is_some());
+        }
     }
 }

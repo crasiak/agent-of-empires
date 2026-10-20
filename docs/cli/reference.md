@@ -20,6 +20,23 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe usage export`↴](#aoe-usage-export)
 * [`aoe killall`↴](#aoe-killall)
 * [`aoe session`↴](#aoe-session)
+* [`aoe session afk`↴](#aoe-session-afk)
+* [`aoe session afk review`↴](#aoe-session-afk-review)
+* [`aoe session afk export`↴](#aoe-session-afk-export)
+* [`aoe session afk annotate`↴](#aoe-session-afk-annotate)
+* [`aoe session afk batch`↴](#aoe-session-afk-batch)
+* [`aoe session afk batch preview`↴](#aoe-session-afk-batch-preview)
+* [`aoe session afk batch apply`↴](#aoe-session-afk-batch-apply)
+* [`aoe session afk batch status`↴](#aoe-session-afk-batch-status)
+* [`aoe session afk batch off`↴](#aoe-session-afk-batch-off)
+* [`aoe session afk overview`↴](#aoe-session-afk-overview)
+* [`aoe session afk on`↴](#aoe-session-afk-on)
+* [`aoe session afk delegate`↴](#aoe-session-afk-delegate)
+* [`aoe session afk audit`↴](#aoe-session-afk-audit)
+* [`aoe session afk off`↴](#aoe-session-afk-off)
+* [`aoe session afk opt-out`↴](#aoe-session-afk-opt-out)
+* [`aoe session afk allow-bulk`↴](#aoe-session-afk-allow-bulk)
+* [`aoe session afk status`↴](#aoe-session-afk-status)
 * [`aoe session report-launch`↴](#aoe-session-report-launch)
 * [`aoe session report-ledger-launch`↴](#aoe-session-report-ledger-launch)
 * [`aoe session start`↴](#aoe-session-start)
@@ -455,6 +472,7 @@ Manage session lifecycle (start, stop, attach, etc.)
 
 ###### **Subcommands:**
 
+* `afk` — Inspect AFK presence or explicitly delegate one bounded file cycle for Pi
 * `report-launch` — Report resolved launch identity from inside the agent pane
 * `report-ledger-launch` — Report optional Ledger run attribution from inside the agent pane
 * `start` — Start a session's tmux process
@@ -481,6 +499,241 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `import` — Import existing Claude Code sessions from disk. Scans the given path(s) (default: current directory) for Claude Code conversations whose working directory is at or under a path, and creates an AoE session for each: a terminal/tmux session that resumes the conversation with `claude --resume <id>` (default), or a structured-view session with `--structured`
 * `list-trash` — List the sessions currently in the trash
 * `empty-trash` — Permanently purge every trashed session in the profile (irreversible)
+
+
+
+## `aoe session afk`
+
+Inspect AFK presence or explicitly delegate one bounded file cycle for Pi
+
+**Usage:** `aoe session afk <COMMAND>`
+
+###### **Subcommands:**
+
+* `review` — Inspect exact stored historical windows, without migrations, probes or authority writes
+* `export` — Publish a private redacted return review, never overwriting a file
+* `annotate` — Append an operator note/correction/reviewed claim, never an approval or answer
+* `batch` — Preview, explicitly apply, inspect or stop a frozen profile-scoped batch
+* `overview` — Read stored AFK summaries across all profiles, without probing or enabling sessions
+* `on` — Request control-only AFK. Does not authorize autonomous work
+* `delegate` — One-file delegation during active work; nudges and question deferral require qualified native support
+* `audit` — Export scoped profile-authority audit and legacy evidence references, without payloads or preimages
+* `off` — Revoke AFK and persist a bulk exclusion even if integration is unavailable
+* `opt-out` — Revoke AFK and exclude the session from future batch selections
+* `allow-bulk` — Clear only the bulk exclusion; grants no authority and requires a fresh preview
+* `status` — Probe the current integration; does not enable or renew AFK
+
+
+
+## `aoe session afk review`
+
+Inspect exact stored historical windows, without migrations, probes or authority writes
+
+**Usage:** `aoe session afk review --select <SELECTIONS>`
+
+###### **Options:**
+
+* `--select <SELECTIONS>` — Repeat for up to 16 exact PROFILE/SESSION_ID/WINDOW_UUID identities
+
+
+
+## `aoe session afk export`
+
+Publish a private redacted return review, never overwriting a file
+
+**Usage:** `aoe session afk export --select <SELECTIONS> --format <FORMAT> --output <OUTPUT>`
+
+###### **Options:**
+
+* `--select <SELECTIONS>`
+* `--format <FORMAT>`
+
+  Possible values: `json`, `markdown`
+
+* `--output <OUTPUT>` — New file in an existing owned 0700 directory outside app state
+
+
+
+## `aoe session afk annotate`
+
+Append an operator note/correction/reviewed claim, never an approval or answer
+
+**Usage:** `aoe session afk annotate --request <REQUEST>`
+
+###### **Options:**
+
+* `--request <REQUEST>` — Private 0600 JSON request: id, target {selection, decision, original_hash}, kind, body, prior
+
+
+
+## `aoe session afk batch`
+
+Preview, explicitly apply, inspect or stop a frozen profile-scoped batch
+
+**Usage:** `aoe session afk batch <COMMAND>`
+
+###### **Subcommands:**
+
+* `preview` — Export private preview-v3; never activates on its own
+* `apply` — Apply the exact reviewed preview; retries only report the original operation
+* `status` — Read an operation in the selected profile, without probing members
+* `off` — Stop only this operation's original windows, never later replacements
+
+
+
+## `aoe session afk batch preview`
+
+Export private preview-v3; never activates on its own
+
+**Usage:** `aoe session afk batch preview --manifest <MANIFEST> --output <OUTPUT>`
+
+###### **Options:**
+
+* `--manifest <MANIFEST>` — Private manifest-v1 with one profile, 1..16 exact IDs and explicit protocol-4 grants
+* `--output <OUTPUT>` — New private artifact outside app state; never overwrites an existing file
+
+
+
+## `aoe session afk batch apply`
+
+Apply the exact reviewed preview; retries only report the original operation
+
+**Usage:** `aoe session afk batch apply --preview <PREVIEW> --digest <DIGEST>`
+
+###### **Options:**
+
+* `--preview <PREVIEW>`
+* `--digest <DIGEST>`
+
+
+
+## `aoe session afk batch status`
+
+Read an operation in the selected profile, without probing members
+
+**Usage:** `aoe session afk batch status <OPERATION>`
+
+###### **Arguments:**
+
+* `<OPERATION>`
+
+
+
+## `aoe session afk batch off`
+
+Stop only this operation's original windows, never later replacements
+
+**Usage:** `aoe session afk batch off <OPERATION>`
+
+###### **Arguments:**
+
+* `<OPERATION>`
+
+
+
+## `aoe session afk overview`
+
+Read stored AFK summaries across all profiles, without probing or enabling sessions
+
+**Usage:** `aoe session afk overview [OPTIONS]`
+
+###### **Options:**
+
+* `--active-only` — Hide archived and trashed sessions (shown by default)
+
+
+
+## `aoe session afk on`
+
+Request control-only AFK. Does not authorize autonomous work
+
+**Usage:** `aoe session afk on --minutes <MINUTES> <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>` — Session ID or title
+
+###### **Options:**
+
+* `--minutes <MINUTES>` — Explicit expiry, from 1 to 1440 minutes
+
+
+
+## `aoe session afk delegate`
+
+One-file delegation during active work; nudges and question deferral require qualified native support
+
+**Usage:** `aoe session afk delegate [OPTIONS] --minutes <MINUTES> --grant <GRANT> <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>`
+
+###### **Options:**
+
+* `--minutes <MINUTES>`
+* `--grant <GRANT>` — Protocol-4 grant: requests 1..8; settlement_nudges 0..2; question_deferrals 0..1, both omitted=0
+* `--usage-guard <USAGE_GUARD>` — Optional private observed-token/operator-rate USD guard; no guard is implied
+
+
+
+## `aoe session afk audit`
+
+Export scoped profile-authority audit and legacy evidence references, without payloads or preimages
+
+**Usage:** `aoe session afk audit <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>`
+
+
+
+## `aoe session afk off`
+
+Revoke AFK and persist a bulk exclusion even if integration is unavailable
+
+**Usage:** `aoe session afk off <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>`
+
+
+
+## `aoe session afk opt-out`
+
+Revoke AFK and exclude the session from future batch selections
+
+**Usage:** `aoe session afk opt-out <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>`
+
+
+
+## `aoe session afk allow-bulk`
+
+Clear only the bulk exclusion; grants no authority and requires a fresh preview
+
+**Usage:** `aoe session afk allow-bulk <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>`
+
+
+
+## `aoe session afk status`
+
+Probe the current integration; does not enable or renew AFK
+
+**Usage:** `aoe session afk status <SESSION>`
+
+###### **Arguments:**
+
+* `<SESSION>`
 
 
 

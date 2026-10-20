@@ -267,12 +267,14 @@ fn test_archived_waiting_row_reads_idle_and_migrates_once() {
     );
     assert_eq!(state_of("resting0error001"), "dead");
 
-    // An install predating v028 boots on the same stored rows.
-    std::fs::write(h.sessions_path(), &frozen).expect("rewrite sessions.json");
-    std::fs::write(&version_path, "27").expect("rewind .schema_version");
-    h.run_cli_ok(&["ps", "--json"]);
+    // A legacy upgrade needs legacy state, not a relabelled current namespace.
+    let legacy = TuiTestHarness::new("archive_waiting_legacy");
+    let legacy_version = app_dir_in(legacy.home_path()).join(".schema_version");
+    std::fs::write(legacy.sessions_path(), &frozen).expect("write legacy sessions.json");
+    std::fs::write(&legacy_version, "27").expect("seed legacy schema");
+    legacy.run_cli_ok(&["ps", "--json"]);
 
-    let stored = h.read_sessions();
+    let stored = legacy.read_sessions();
     let stored_row = |id: &str| {
         stored
             .as_array()
@@ -289,13 +291,13 @@ fn test_archived_waiting_row_reads_idle_and_migrates_once() {
         "the archive itself survives the settle"
     );
     assert_eq!(stored_row("resting0error001")["status"], "error");
-    let after: u32 = std::fs::read_to_string(&version_path)
+    let after: u32 = std::fs::read_to_string(&legacy_version)
         .unwrap()
         .trim()
         .parse()
         .unwrap();
     assert_eq!(
         after, stamped,
-        "the rewound install converges on the build's version"
+        "the legacy install converges on the build's version"
     );
 }

@@ -13,6 +13,11 @@ use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Component, Path, PathBuf};
 
+// Preserve the unsigned encoding of native device IDs on signed and unsigned platforms.
+pub(crate) fn device_number(device: libc::dev_t) -> u64 {
+    i128::from(device) as u64
+}
+
 pub(crate) struct AnchoredDir {
     root: PathBuf,
     fd: OwnedFd,
@@ -26,6 +31,22 @@ pub(crate) struct FilePublication<'a> {
 #[cfg(test)]
 thread_local! {
     pub(crate) static FAIL_SYNC_ONCE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn check_sync_fault(directory: &Path) -> Result<()> {
+    if FAIL_SYNC_ONCE.with(|path| {
+        let mut path = path.borrow_mut();
+        if path.as_deref() == Some(directory) {
+            path.take();
+            true
+        } else {
+            false
+        }
+    }) {
+        bail!("injected anchored directory sync failure");
+    }
+    Ok(())
 }
 
 impl AnchoredDir {
@@ -102,24 +123,38 @@ impl AnchoredDir {
         })
     }
 
+    pub(crate) fn metadata(&self) -> Result<FileStat> {
+        Ok(fstat(&self.fd)?)
+    }
+
     pub(crate) fn identity(&self) -> Result<(libc::dev_t, libc::ino_t)> {
         let stat = fstat(&self.fd)?;
         Ok((stat.st_dev, stat.st_ino))
     }
 
+    pub(crate) fn seal_child_creation(&self) -> Result<()> {
+        nix::sys::stat::fchmod(&self.fd, Mode::S_IRUSR | Mode::S_IXUSR)?;
+        self.sync()?;
+        self.qualify_child_creation_seal()
+    }
+
+    pub(crate) fn qualify_child_creation_seal(&self) -> Result<()> {
+        let probe = format!(".aoe-seal-probe-{}", uuid::Uuid::new_v4());
+        match mkdirat(&self.fd, probe.as_str(), Mode::S_IRWXU) {
+            Err(Errno::EACCES | Errno::EPERM) => Ok(()),
+            Err(error) => Err(error).context("qualifying legacy creation seal"),
+            Ok(()) => {
+                unlinkat(&self.fd, probe.as_str(), UnlinkatFlags::RemoveDir)
+                    .context("unsupported creation seal; owned probe cleanup failed")?;
+                self.sync()?;
+                bail!("legacy creation seal unsupported for this identity/filesystem; new authority refused")
+            }
+        }
+    }
+
     pub(crate) fn sync(&self) -> Result<()> {
         #[cfg(test)]
-        if FAIL_SYNC_ONCE.with(|path| {
-            let mut path = path.borrow_mut();
-            if path.as_deref() == Some(self.path()) {
-                path.take();
-                true
-            } else {
-                false
-            }
-        }) {
-            bail!("injected anchored directory sync failure");
-        }
+        check_sync_fault(self.path())?;
         nix::unistd::fsync(&self.fd).context("syncing anchored directory")
     }
 
@@ -228,6 +263,18 @@ impl AnchoredDir {
             names.push(OsString::from_vec(name.to_vec()));
         }
         Ok(names)
+    }
+
+    pub(crate) fn is_empty(&self) -> Result<bool> {
+        let mut dir = Dir::from_fd(self.open_dir(Path::new(""))?)?;
+        for entry in dir.iter() {
+            let entry = entry.context("reading anchored directory entry")?;
+            let name = entry.file_name().to_bytes();
+            if name != b"." && name != b".." {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn regular_modified(
@@ -371,6 +418,8 @@ impl AnchoredDir {
             if publication.is_some() {
                 nix::unistd::fsync(staging)?;
             }
+            #[cfg(test)]
+            check_sync_fault(self.root.join(relative).parent().expect("validated leaf"))?;
             nix::unistd::fsync(&parent)?;
             Ok(true)
         })();

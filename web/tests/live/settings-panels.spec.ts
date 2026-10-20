@@ -64,6 +64,19 @@ test("skills panel adopts, edits, creates, and deletes skills", async ({ page, s
   );
   const notice = (text: string) => page.getByRole("status").filter({ hasText: text });
   const content = page.getByLabel("SKILL.md content");
+  let releaseRead!: () => void;
+  const readGate = new Promise<void>((resolve) => {
+    releaseRead = resolve;
+  });
+  let readStarted!: () => void;
+  const managedRead = new Promise<void>((resolve) => {
+    readStarted = resolve;
+  });
+  await page.route("**/api/skills/aoe-managed/review", async (route) => {
+    readStarted();
+    await readGate;
+    await route.continue();
+  });
 
   await page.goto(`${serve.baseUrl}/settings/skills`);
   await expect(page.getByRole("status", { name: /^Update available/ })).toBeVisible();
@@ -75,6 +88,14 @@ test("skills panel adopts, edits, creates, and deletes skills", async ({ page, s
 
   await page.getByRole("button", { name: "Adopt into AoE" }).click();
   await expect(notice("adopted")).toBeVisible();
+  await managedRead;
+  try {
+    await expect(content).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  } finally {
+    releaseRead();
+  }
+  await expect(content).toBeVisible();
   await expect(content).not.toHaveAttribute("readonly");
   expect(readFileSync(join(serve.home, ".claude", "skills", "review", "SKILL.md"), "utf8")).toBe(original);
 

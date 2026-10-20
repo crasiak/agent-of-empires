@@ -3,8 +3,10 @@
 //! bare repo via `AOE_GITHUB_CLONE_BASE` and release assets come from a local
 //! axum fixture via `AOE_UPDATE_API_BASE`. Never touches the network.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use agent_of_empires::plugin::install::{self, UpdatePreview};
 use agent_of_empires::plugin::lockfile::Lockfile;
@@ -460,6 +462,29 @@ api_version = 2
 #[tokio::test]
 #[serial]
 async fn unverified_github_sources_require_confirmation_without_yes() {
+    if std::io::stdin().is_terminal() {
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "plugin_install::unverified_github_sources_require_confirmation_without_yes",
+                "--nocapture",
+            ])
+            .stdin(Stdio::null());
+        let output = agent_of_empires::process::run_with_timeout_process_group(
+            &mut child,
+            Duration::from_secs(30),
+        )
+        .expect("spawn nonterminal refusal test")
+        .expect("nonterminal refusal test deadline");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let _home = isolate();
     for (repo, source) in [
         ("norel", "gh:acme/norel"),
@@ -928,11 +953,24 @@ command = ["false"]
     )
     .unwrap();
 
-    let err = install::update("acme.upd", false)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("build step"), "got: {err}");
+    let UpdatePreview::ConsentRequired { consent, .. } =
+        install::preview_update("acme.upd").await.unwrap()
+    else {
+        panic!("changed build must require consent");
+    };
+    assert_eq!(consent.build_steps, ["false"]);
+    let err = install::apply_update(
+        "acme.upd",
+        Some(consent.fingerprint),
+        &install::OperationLog::Inherit,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("build step 1 (false) failed with"),
+        "got: {err}"
+    );
 
     // The prior install is intact: directory, artifact, and recorded version.
     assert!(
@@ -949,9 +987,7 @@ command = ["false"]
     assert!(!installed.with_file_name("acme.upd.bak").exists());
 }
 
-/// A changed build recipe on update must re-prompt even when capabilities are
-/// unchanged, so a modified (possibly malicious) build cannot run unattended.
-/// Non-interactively that prompt bails, leaving the prior version untouched.
+/// A changed build recipe requires newly reviewed consent even with unchanged capabilities.
 #[cfg(unix)]
 #[tokio::test]
 #[serial]
@@ -1001,13 +1037,18 @@ command = ["cp", "aoe-plugin.toml", "marker-v2"]
     )
     .unwrap();
 
-    // The changed recipe forces a prompt, which bails on non-terminal stdin
-    // instead of silently running the new build.
-    let err = install::update("acme.recipe", false)
+    let UpdatePreview::ConsentRequired { consent, .. } =
+        install::preview_update("acme.recipe").await.unwrap()
+    else {
+        panic!("changed recipe must require a new consent fingerprint");
+    };
+    assert_eq!(consent.prior_capabilities, consent.new_capabilities);
+    assert_eq!(consent.build_steps, ["cp aoe-plugin.toml marker-v2"]);
+    let err = install::apply_update("acme.recipe", None, &install::OperationLog::Inherit)
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("not a terminal"), "got: {err}");
+    assert!(err.contains("requires the fingerprint"), "got: {err}");
 
     // Prior version is fully intact: v1 artifact present, v2 never ran.
     let installed = agent_of_empires::plugin::plugins_dir()
