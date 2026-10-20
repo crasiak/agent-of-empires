@@ -460,6 +460,48 @@ class PureTests(unittest.TestCase):
                     adapter.admit(root / "manifest.json", root / "observed-approval.json", "observed", 2)
                 self.assertFalse((root / "admitted-2.json").exists())
 
+    def test_question_peer_only_checkout_seals_the_pinned_host_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            sources = {name: root / name for name in ["aoe", "pi", "question"]}
+            for path in sources.values():
+                path.mkdir()
+                (path / "index.ts").write_text("fixed source")
+            deps = sources["pi"] / "node_modules"
+            deps.mkdir()
+            (deps / "peer.js").write_text("fixed peer")
+            commit, tree, binary_hash = "a" * 40, "b" * 40, "c" * 64
+            config = {"sources": {name: str(path) for name, path in sources.items()},
+                      "binary_receipt": {"source_commit": commit, "source_tree": tree, "binary_sha256": binary_hash},
+                      "tools": {"aoe": {"sha256": binary_hash}}}
+            def git_output(argv, **_kwargs):
+                name = Path(argv[2]).name
+                if argv[3:] == ["rev-parse", "HEAD"]:
+                    return commit if name == "aoe" else adapter.PINS[name]
+                if argv[3:] == ["rev-parse", "HEAD^{tree}"]:
+                    return tree
+                if argv[3:] == ["status", "--porcelain", "--untracked-files=no"]:
+                    return b""
+                if argv[3:] == ["ls-files", "-z"]:
+                    return b"index.ts\0"
+                raise AssertionError(argv)
+            with patch.object(adapter.subprocess, "check_output", side_effect=git_output), patch.object(adapter.subprocess, "run"):
+                before = adapter.source_seal(config)
+                self.assertEqual(before["question"]["dependencies"],
+                                 {"provided_by": "pinned-pi", "closure": before["pi"]["dependencies"]})
+                (deps / "peer.js").write_text("changed peer")
+                changed = adapter.source_seal(config)
+                self.assertNotEqual(changed["question"]["dependencies"], before["question"]["dependencies"])
+                own = sources["question"] / "node_modules"
+                own.mkdir()
+                (own / "local.js").write_text("explicit local dependency")
+                self.assertEqual(adapter.source_seal(config)["question"]["dependencies"], adapter.dependency_hash(own))
+                (own / "local.js").unlink()
+                own.rmdir()
+                own.symlink_to(root / "missing-dependencies", target_is_directory=True)
+                with self.assertRaises(FileNotFoundError):
+                    adapter.source_seal(config)
+
     def test_symlink_dependency_contents_and_cycles_are_sealed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

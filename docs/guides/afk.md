@@ -844,7 +844,10 @@ python3 assets/session/aoe-afk-native.py prepare /private/path/config.json /priv
 ```
 
 `prepare` hashes source, dependency-directory targets, executables and the scoped
-loader; it probes only Node version metadata. It does not run Pi, AoE, tmux,
+loader. The pinned peer-only question checkout may omit `node_modules`; its seal
+then names Pi's pinned dependency closure. Any local dependency directory is
+sealed separately, and broken links are refused. Preparation probes only Node
+version metadata. It does not run Pi, AoE, tmux,
 providers or migrations, or inspect live state. Prepared Python launchers use
 isolated, no-site, no-bytecode startup; fixed internal helpers compile bounded
 source bytes rather than accepting an ignored stale bytecode cache. Review the

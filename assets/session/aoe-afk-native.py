@@ -182,7 +182,12 @@ def source_seal(config):
             seals[key]["git_tree"] = git_tree
             seals[key]["baseline"] = BASE
         if key != "aoe":
-            seals[key]["dependencies"] = tree_hash(root / "node_modules")
+            dependencies = root / "node_modules"
+            if key == "question" and not os.path.lexists(dependencies):
+                # The pinned peer-only question package uses Pi's source loader.
+                seals[key]["dependencies"] = {"provided_by": "pinned-pi", "closure": seals["pi"]["dependencies"]}
+            else:
+                seals[key]["dependencies"] = tree_hash(dependencies)
     # New adapter files need coverage even before they are committed.
     seals["adapter"] = {str(p): file_hash(p) for p in sorted(HERE.glob("aoe-afk-native*")) if p.is_file()}
     return seals
