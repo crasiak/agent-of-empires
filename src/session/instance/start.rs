@@ -670,6 +670,117 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn python_fixture_interpreter(command: &std::path::Path) -> Result<std::path::PathBuf> {
+        let mut probe = std::process::Command::new(command);
+        probe
+            .args([
+                "-c",
+                "import os, sys; print(os.path.realpath(sys.executable))",
+            ])
+            .stdin(std::process::Stdio::null());
+        let output =
+            crate::process::run_with_timeout(&mut probe, std::time::Duration::from_secs(5))
+                .with_context(|| {
+                    format!(
+                        "Python fixture interpreter discovery could not run {}",
+                        command.display()
+                    )
+                })?
+                .context("Python fixture interpreter discovery timed out")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "Python fixture interpreter discovery failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let path = std::path::Path::new(
+            std::str::from_utf8(&output.stdout)
+                .context("Python fixture interpreter path is not UTF-8")?
+                .trim(),
+        );
+        anyhow::ensure!(
+            path.is_absolute(),
+            "Python fixture interpreter path is not absolute"
+        );
+        let path = path
+            .canonicalize()
+            .context("Python fixture interpreter path cannot be resolved")?;
+        anyhow::ensure!(path.is_file(), "Python fixture interpreter is not a file");
+        Ok(path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn python_fixture_interpreter_rejects_broken_discovery() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let command = directory.path().join("python-shim");
+        for body in ["exit 7", "printf '\\n'", "printf 'relative/path\\n'"] {
+            std::fs::write(&command, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let error = python_fixture_interpreter(&command).unwrap_err();
+            assert!(
+                error.to_string().contains("Python fixture interpreter"),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn python_fixture_interpreter_resolves_shim_before_isolated_launch() {
+        use std::os::unix::fs::PermissionsExt;
+        let _environment = crate::session::test_support::EnvGuard::read_lock();
+        let Ok(python) = which::which("python3") else {
+            return;
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let shim = directory.path().join("python-shim");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = -c ] || exit 23\nexec {} \"$@\"\n",
+                crate::session::environment::shell_escape(python.to_str().unwrap())
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let interpreter = python_fixture_interpreter(&shim).unwrap();
+        let fixture = directory.path().join("opencode");
+        std::fs::write(
+            &fixture,
+            format!(
+                "#!{}\nimport sys\nprint({{'--help': '--auto --session', '--version': '2.0.24+31bdd8e'}}[sys.argv[1]])\n",
+                interpreter.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for (flag, expected) in [
+            ("--help", "--auto --session"),
+            ("--version", "2.0.24+31bdd8e"),
+        ] {
+            let mut command = std::process::Command::new(&fixture);
+            command
+                .arg(flag)
+                .env_clear()
+                .env("HOME", directory.path())
+                .env("PATH", "/usr/bin:/bin")
+                .current_dir(directory.path())
+                .stdin(std::process::Stdio::null());
+            let output =
+                crate::process::run_with_timeout(&mut command, std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .expect("fixture probe timed out");
+            assert!(
+                output.status.success(),
+                "{flag}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), expected);
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     #[serial_test::serial]
     fn default_opencode_restart_preserves_native_resume_without_an_attested_store() {
@@ -680,6 +791,8 @@ mod tests {
         let Ok(python) = which::which("python3") else {
             return;
         };
+        let python = python_fixture_interpreter(&python)
+            .expect("resolve Python fixture interpreter before isolating HOME");
         crate::tmux::test_helpers::require_tmux!();
         use crate::session::instance::test_helpers::{seed_disk_for_sidecar_test, tool_instance};
         const SID: &str = "ses_saved000000000000000000000000";
@@ -803,6 +916,8 @@ sys.stdin.read()
         let Ok(python) = which::which("python3") else {
             return;
         };
+        let python = python_fixture_interpreter(&python)
+            .expect("resolve Python fixture interpreter before isolating HOME");
         if which::which("tmux").is_err() {
             return;
         }
