@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import type { SkillDetail, SkillMutationResult, SkillSummary, SkillSyncResult, SkillsResponse } from "../../lib/api";
 
@@ -119,6 +119,32 @@ describe("SkillsManager", () => {
     expect(screen.getAllByText("review", { selector: "button span" })).toHaveLength(1);
     fireEvent.click(screen.getByLabelText("Hide external skills already managed"));
     expect(screen.getAllByText("review", { selector: "button span" })).toHaveLength(2);
+  });
+
+  it("waits for the adopted copy's detail before exposing an editable draft", async () => {
+    const adopted = { ...managed, directory: external.directory, name: external.name };
+    let finishRead!: (value: SkillDetail) => void;
+    const managedRead = new Promise<SkillDetail>((resolve) => {
+      finishRead = resolve;
+    });
+    fetchSkills.mockResolvedValueOnce(response([external])).mockResolvedValueOnce(response([adopted, external]));
+    fetchSkill.mockImplementation((source) =>
+      source === "aoe-managed" ? managedRead : Promise.resolve(detail(external)),
+    );
+    render(<SkillsManager />);
+
+    expect(((await screen.findByLabelText("SKILL.md content")) as HTMLTextAreaElement).readOnly).toBe(true);
+    fireEvent.click(screen.getByText("Adopt into AoE"));
+    await waitFor(() => expect(fetchSkill).toHaveBeenCalledWith("aoe-managed", "review"));
+    expect(screen.queryByLabelText("SKILL.md content")).toBeNull();
+    expect((screen.getByRole("button", { name: "Save", exact: true }) as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => finishRead(detail(adopted)));
+    const editor = await screen.findByLabelText("SKILL.md content");
+    expect((editor as HTMLTextAreaElement).readOnly).toBe(false);
+    fireEvent.change(editor, { target: { value: "edited adopted copy" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save", exact: true }));
+    await waitFor(() => expect(updateSkill).toHaveBeenCalledWith("review", "edited adopted copy"));
   });
 
   it("creates, edits, and deletes managed skills with dirty-state protection", async () => {
