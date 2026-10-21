@@ -293,7 +293,7 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) work_arc_enabled: bool,
     #[serde(default)]
-    pub(crate) work_arc: crate::session::work_arc::ArcState,
+    pub(crate) work_arc: Box<crate::session::work_arc::ArcState>,
     #[serde(skip)]
     pub(crate) work_arc_status: Option<crate::session::work_arc::ArcStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

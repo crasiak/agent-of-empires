@@ -14,7 +14,7 @@ pub(super) struct ArcRefresh {
 
 struct ArcUpdate {
     before: Instance,
-    state: Option<ArcState>,
+    state: Option<Box<ArcState>>,
     status: ArcStatus,
 }
 

@@ -260,6 +260,50 @@ mod tests {
     }
 
     #[test]
+    fn session_json_preserves_arc_state_and_defaults_legacy_rows() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut session = Instance::new("synthetic", "/tmp/synthetic");
+        session.tool = "pi".into();
+        session.work_arc_enabled = true;
+        let mut state = ArcState::default();
+        let nonce = state.reserve(&identity(), now).unwrap();
+        let record = StoredArc {
+            identity: identity(),
+            at: now,
+            arc: WorkArc::from_json(
+                r#"{"goal":"Goal","now":"Reported progress","remaining":"Unknown","next":"Review"}"#,
+            )
+            .unwrap(),
+            selected_route: "route/auto".into(),
+            provider: "fake".into(),
+            model: "test".into(),
+            usage: None,
+        };
+        assert!(state.finish(&nonce, Some(record), None));
+        let expected = serde_json::to_value(&state).unwrap();
+        session.work_arc = serde_json::from_value(expected.clone()).unwrap();
+        session.work_arc_status = Some(ArcStatus::Current);
+        let mut row = serde_json::to_value(&session).unwrap();
+        assert_eq!(row["work_arc"], expected);
+        assert!(row["work_arc"]["record"].is_object());
+        assert!(row.get("work_arc_status").is_none());
+        let restored: Instance = serde_json::from_value(row.clone()).unwrap();
+        assert!(restored.work_arc_enabled);
+        assert_eq!(serde_json::to_value(&restored.work_arc).unwrap(), expected);
+        assert!(restored.work_arc_status.is_none());
+
+        row.as_object_mut().unwrap().remove("work_arc");
+        row.as_object_mut().unwrap().remove("work_arc_enabled");
+        let legacy: Instance = serde_json::from_value(row).unwrap();
+        assert!(!legacy.work_arc_enabled);
+        assert_eq!(
+            serde_json::to_value(&legacy.work_arc).unwrap(),
+            serde_json::to_value(ArcState::default()).unwrap()
+        );
+        assert_eq!(projection(&legacy), ArcStatus::Off);
+    }
+
+    #[test]
     fn projection_never_restores_current_from_disk_or_another_session() {
         let mut session = Instance::new("synthetic", "/tmp/synthetic");
         session.tool = "pi".into();
