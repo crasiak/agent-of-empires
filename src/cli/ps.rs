@@ -480,6 +480,15 @@ fn is_agent_session_name(name: &str) -> bool {
         && !name.starts_with(crate::tmux::TOOL_PREFIX)
 }
 
+/// First-pane pid from the batch `list-panes` snapshot (the same `^.0` pane
+/// `process::get_pane_pid` targets), so ps spawns no tmux per instance.
+fn batch_pane_pid(
+    meta: &std::collections::HashMap<String, crate::tmux::PaneMetadata>,
+    name: &str,
+) -> Option<u32> {
+    meta.get(name).and_then(|m| m.pane_pid)
+}
+
 fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
     use std::collections::HashSet;
 
@@ -526,7 +535,7 @@ fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
         states.push(TmuxState {
             session_name: name.clone(),
             status: inst.status,
-            pid: crate::process::get_pane_pid(&name),
+            pid: batch_pane_pid(&meta, &name),
             activity_epoch: crate::tmux::session_activity(&name),
             agent,
         });
@@ -544,7 +553,7 @@ fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
             } else {
                 Status::Idle
             },
-            pid: crate::process::get_pane_pid(name),
+            pid: batch_pane_pid(&meta, name),
             activity_epoch: crate::tmux::session_activity(name),
             agent: m.pane_current_command.clone().unwrap_or_default(),
         });
@@ -659,6 +668,37 @@ mod tests {
             title: title.to_string(),
             created_at_epoch: CREATED_AT,
         }
+    }
+
+    fn pane(pid: Option<u32>) -> crate::tmux::PaneMetadata {
+        crate::tmux::PaneMetadata {
+            launch_report: None,
+            pane_dead: false,
+            pane_current_command: None,
+            pane_start_command_is_protected: false,
+            pane_pid: pid,
+            pane_title: None,
+            window_activity: None,
+            window_size: None,
+        }
+    }
+
+    // CRA-1130: ps reads each session's first-pane pid from the one batch
+    // list-panes snapshot instead of one tmux display-message per instance
+    // (215 extra spawns, ~2.4 s, on a 90-session profile set).
+    #[test]
+    fn pane_pid_comes_from_the_batch_snapshot() {
+        let meta = std::collections::HashMap::from([
+            ("aoe_live_1".to_string(), pane(Some(4242))),
+            ("aoe_nopid_2".to_string(), pane(None)),
+        ]);
+        assert_eq!(batch_pane_pid(&meta, "aoe_live_1"), Some(4242));
+        assert_eq!(batch_pane_pid(&meta, "aoe_nopid_2"), None);
+        assert_eq!(
+            batch_pane_pid(&meta, "aoe_absent_3"),
+            None,
+            "no session, no spawn, no pid"
+        );
     }
 
     fn tmux_state(name: &str, status: Status) -> TmuxState {
