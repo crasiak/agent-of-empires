@@ -30,7 +30,9 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async_tls_with_config, Connector, MaybeTlsStream, WebSocketStream,
+};
 use tracing::{debug, warn};
 
 use super::discovery::DaemonEndpoint;
@@ -170,19 +172,50 @@ async fn connect_authed(
     url: &str,
     cache: &PassphraseSessionCache,
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, WsError> {
+    let config = Arc::new(tls_config(mozilla_roots())?);
     let had_cached_session = cache.get(endpoint).is_some();
     let request = build_authed_request(endpoint, url, cache).await?;
-    match connect_async(request).await {
+    match connect_async_tls_with_config(
+        request,
+        None,
+        false,
+        Some(Connector::Rustls(config.clone())),
+    )
+    .await
+    {
         Ok((stream, _)) => Ok(stream),
         Err(err) if had_cached_session && is_unauthorized(&err) => {
             cache.invalidate(endpoint);
             let request = build_authed_request(endpoint, url, cache).await?;
-            let (stream, _) = connect_async(request).await?;
+            let (stream, _) = connect_async_tls_with_config(
+                request,
+                None,
+                false,
+                Some(Connector::Rustls(config)),
+            )
+            .await?;
             Ok(stream)
         }
         Err(err) => Err(err.into()),
     }
 }
+
+fn mozilla_roots() -> rustls::RootCertStore {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    roots
+}
+
+fn tls_config(roots: rustls::RootCertStore) -> Result<rustls::ClientConfig, WsError> {
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|error| tokio_tungstenite::tungstenite::Error::Tls(error.into()))?;
+    Ok(builder.with_root_certificates(roots).with_no_client_auth())
+}
+
+#[cfg(test)]
+mod tls_tests;
 
 /// Build the WS upgrade request. A resolved bearer token already rides the
 /// URL (see [`ws_url`]); a passphrase instead needs the login session's

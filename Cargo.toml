@@ -183,10 +183,11 @@ tar = "0.4"
 flate2 = "1"
 xz2 = "0.1"
 
-# WebSocket client for the structured view-in-TUI view: subscribes to the daemon's
-# `/sessions/{id}/acp/ws` stream and pumps frames into the local reducer. The
-# daemon itself uses axum's built-in WS support and never pulls this in.
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
+# WebSocket client for the structured view-in-TUI view. Supply patched Mozilla
+# roots explicitly; tokio-tungstenite's automatic bundle still pulls in 0.26.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["__rustls-tls", "connect"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+webpki-roots = "1.0.10"
 
 # Capability-safe file opens for the session file-read endpoint (#3088): open
 # beneath a Dir so a component swapped after the containment check cannot
