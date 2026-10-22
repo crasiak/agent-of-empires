@@ -421,6 +421,30 @@ fn set_version(version: u32) -> Result<()> {
 mod tests {
     use super::*;
 
+    // CRA-1131: an app dir that is the user's own symlink (for example
+    // ~/.config/agent-of-empires -> ~/.agent-of-empires) must still run
+    // migrations; anchoring refused the symlinked leaf, so every command failed.
+    #[test]
+    #[serial_test::serial]
+    fn migrations_run_when_the_app_dir_is_a_symlink() {
+        let home = crate::session::test_support::isolate_app_dir();
+        let app = crate::session::get_app_dir().unwrap();
+        let real = home.path().join("real-app-dir");
+        fs::remove_dir_all(&app).unwrap();
+        fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &app).unwrap();
+        run_migrations().expect("migrations through a symlinked app dir");
+        assert_eq!(get_current_version(), CURRENT_VERSION);
+        assert!(
+            real.join(".migration-runner.lock").exists(),
+            "lock lives in the resolved dir"
+        );
+        assert!(
+            fs::symlink_metadata(&app).unwrap().file_type().is_symlink(),
+            "the user's symlink is kept"
+        );
+    }
+
     #[test]
     #[serial_test::serial]
     fn concurrent_new_runners_reread_schema_after_the_stable_lock() {

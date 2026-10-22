@@ -234,6 +234,17 @@ fn resolve_app_dir_with_fallback(xdg: PathBuf, legacy: PathBuf, xdg_env_set: boo
     }
 }
 
+/// When `path` is exactly the app dir and the app dir is a symlink, the directory it resolves
+/// to; otherwise `None`. Anchoring trusts this one user-owned symlink (CRA-1131).
+pub(crate) fn symlinked_app_dir_target(path: &Path) -> Option<PathBuf> {
+    let app = get_app_dir_path().ok()?;
+    if path != app || !fs::symlink_metadata(path).ok()?.file_type().is_symlink() {
+        return None;
+    }
+    let resolved = fs::canonicalize(path).ok()?;
+    resolved.is_dir().then_some(resolved)
+}
+
 pub fn get_app_dir() -> Result<PathBuf> {
     let dir = get_app_dir_path()?;
     if !dir.exists() {

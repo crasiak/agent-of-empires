@@ -51,8 +51,18 @@ fn check_sync_fault(directory: &Path) -> Result<()> {
 
 impl AnchoredDir {
     /// Anchor at `path`, whose ancestors are resolved the way any other caller resolves them and
-    /// whose own leaf may not be a symlink.
+    /// whose own leaf may not be a symlink. The one exception is the app dir itself: when it is
+    /// the user's own symlink (for example `~/.config/agent-of-empires` -> `~/.agent-of-empires`,
+    /// CRA-1131) its leaf is resolved once, like an ancestor, and the anchor guards everything
+    /// beneath the resolved directory. `path()` keeps reporting the app-dir path callers use.
     pub(crate) fn open(path: &Path) -> Result<Self> {
+        if let Some(resolved) = crate::session::symlinked_app_dir_target(path) {
+            let fd = Self::open(&resolved)?.fd;
+            return Ok(Self {
+                root: path.to_path_buf(),
+                fd,
+            });
+        }
         let root = path.to_path_buf();
         for component in path.components() {
             if !matches!(
@@ -621,6 +631,35 @@ mod tests {
                 .unwrap()
                 .identity()
                 .unwrap()
+        );
+    }
+
+    // CRA-1131: only the app dir's own symlink is resolved; any other symlinked
+    // leaf is still refused (see the test below).
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn a_symlinked_app_dir_anchors_its_target_and_keeps_its_path() {
+        let home = crate::session::test_support::isolate_app_dir();
+        let app = crate::session::get_app_dir().unwrap();
+        let real = home.path().join("real-app");
+        std::fs::remove_dir_all(&app).unwrap();
+        std::fs::create_dir_all(real.join("store")).unwrap();
+        std::fs::write(real.join("store/id"), b"anchored").unwrap();
+        std::os::unix::fs::symlink(&real, &app).unwrap();
+        let dir = AnchoredDir::open(&app).expect("the app dir symlink is trusted");
+        assert_eq!(dir.path(), app.as_path(), "callers keep the app-dir path");
+        assert_eq!(
+            dir.read_regular(Path::new("store/id"), 64)
+                .unwrap()
+                .as_deref(),
+            Some(&b"anchored"[..])
+        );
+        let elsewhere = home.path().join("other-link");
+        std::os::unix::fs::symlink(&real, &elsewhere).unwrap();
+        assert!(
+            AnchoredDir::open(&elsewhere).is_err(),
+            "other symlinked leaves stay refused"
         );
     }
 
