@@ -433,6 +433,14 @@ mod tests {
         fs::remove_dir_all(&app).unwrap();
         fs::create_dir(&real).unwrap();
         std::os::unix::fs::symlink(&real, &app).unwrap();
+        // Start just below the AFK schema: the runner lock and AFK migrations
+        // still anchor the symlinked app dir, but no historical host-hook
+        // migration (agent homes, /tmp/aoe-hooks) runs from this test.
+        fs::write(
+            real.join(VERSION_FILE),
+            (crate::session::afk::schema::CONTROL - 1).to_string(),
+        )
+        .unwrap();
         run_migrations().expect("migrations through a symlinked app dir");
         assert_eq!(get_current_version(), CURRENT_VERSION);
         assert!(

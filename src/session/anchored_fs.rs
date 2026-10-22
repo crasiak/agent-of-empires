@@ -56,14 +56,9 @@ impl AnchoredDir {
     /// CRA-1131) its leaf is resolved once, like an ancestor, and the anchor guards everything
     /// beneath the resolved directory. `path()` keeps reporting the app-dir path callers use.
     pub(crate) fn open(path: &Path) -> Result<Self> {
-        if let Some(resolved) = crate::session::symlinked_app_dir_target(path) {
-            let fd = Self::open(&resolved)?.fd;
-            return Ok(Self {
-                root: path.to_path_buf(),
-                fd,
-            });
-        }
         let root = path.to_path_buf();
+        // Validate the path callers named before any exception, so the app-dir
+        // symlink below never admits a non-normal component.
         for component in path.components() {
             if !matches!(
                 component,
@@ -74,6 +69,10 @@ impl AnchoredDir {
                     path.display()
                 );
             }
+        }
+        if let Some(resolved) = crate::session::symlinked_app_dir_target(path) {
+            let fd = Self::open(&resolved)?.fd;
+            return Ok(Self { root, fd });
         }
         let resolving = OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_RDONLY;
         let (Some(parent), Some(leaf)) = (path.parent(), path.file_name()) else {
@@ -660,6 +659,35 @@ mod tests {
         assert!(
             AnchoredDir::open(&elsewhere).is_err(),
             "other symlinked leaves stay refused"
+        );
+    }
+
+    // CRA-1131 review: the app-dir exception never bypasses component
+    // validation; an app dir named through `..` is refused, real or symlinked.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn an_app_dir_named_through_a_parent_component_is_refused() {
+        let home = crate::session::test_support::isolate_app_dir();
+        std::fs::create_dir_all(home.path().join("base")).unwrap();
+        let _xdg = crate::session::test_support::EnvGuard::set(&[(
+            "XDG_CONFIG_HOME",
+            home.path().join("base/../.config"),
+        )]);
+        let app = crate::session::get_app_dir().unwrap();
+        assert!(
+            app.components().any(|c| c == Component::ParentDir),
+            "{}",
+            app.display()
+        );
+        assert!(AnchoredDir::open(&app).is_err(), "real app dir through ..");
+        let real = home.path().join("real-app");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::remove_dir_all(&app).unwrap();
+        std::os::unix::fs::symlink(&real, &app).unwrap();
+        assert!(
+            AnchoredDir::open(&app).is_err(),
+            "symlinked app dir through .."
         );
     }
 
