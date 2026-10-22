@@ -480,6 +480,25 @@ fn is_agent_session_name(name: &str) -> bool {
         && !name.starts_with(crate::tmux::TOOL_PREFIX)
 }
 
+/// First-pane pid from the batch `list-panes` snapshot (the same first pane
+/// `process::get_pane_pid` targets with `^.0`), so ps spawns no tmux per
+/// instance. Falls back to `lookup` only for a session not known to be absent
+/// whose pid the snapshot lacks (it keeps only pane index 0).
+fn pane_pid_for(
+    meta: &std::collections::HashMap<String, crate::tmux::PaneMetadata>,
+    name: &str,
+    exists: impl Fn(&str) -> Option<bool>,
+    lookup: impl Fn(&str) -> Option<u32>,
+) -> Option<u32> {
+    if let Some(pid) = meta.get(name).and_then(|m| m.pane_pid) {
+        return Some(pid);
+    }
+    if exists(name) == Some(false) {
+        return None;
+    }
+    lookup(name)
+}
+
 fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
     use std::collections::HashSet;
 
@@ -526,7 +545,12 @@ fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
         states.push(TmuxState {
             session_name: name.clone(),
             status: inst.status,
-            pid: crate::process::get_pane_pid(&name),
+            pid: pane_pid_for(
+                &meta,
+                &name,
+                crate::tmux::session_exists_from_cache,
+                crate::process::get_pane_pid,
+            ),
             activity_epoch: crate::tmux::session_activity(&name),
             agent,
         });
@@ -544,7 +568,12 @@ fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
             } else {
                 Status::Idle
             },
-            pid: crate::process::get_pane_pid(name),
+            pid: pane_pid_for(
+                &meta,
+                name,
+                crate::tmux::session_exists_from_cache,
+                crate::process::get_pane_pid,
+            ),
             activity_epoch: crate::tmux::session_activity(name),
             agent: m.pane_current_command.clone().unwrap_or_default(),
         });
@@ -659,6 +688,62 @@ mod tests {
             title: title.to_string(),
             created_at_epoch: CREATED_AT,
         }
+    }
+
+    fn pane(pid: Option<u32>) -> crate::tmux::PaneMetadata {
+        crate::tmux::PaneMetadata {
+            launch_report: None,
+            pane_dead: false,
+            pane_current_command: None,
+            pane_start_command_is_protected: false,
+            pane_pid: pid,
+            pane_title: None,
+            window_activity: None,
+            window_size: None,
+        }
+    }
+
+    // CRA-1130: ps reads each session's first-pane pid from the one batch
+    // list-panes snapshot, and never spawns tmux for an instance whose session
+    // the cache says is absent (most of 215 extra spawns, ~2.4 s, on a
+    // 90-session profile set). A live session the snapshot lacks (its first
+    // pane is not index 0, e.g. pane-base-index 1) still gets the `^.0` lookup.
+    #[test]
+    fn pane_pid_prefers_the_batch_snapshot_and_skips_absent_sessions() {
+        let meta = std::collections::HashMap::from([
+            ("aoe_live_1".to_string(), pane(Some(4242))),
+            ("aoe_nopid_2".to_string(), pane(None)),
+        ]);
+        let lookups = std::cell::RefCell::new(Vec::new());
+        let lookup = |name: &str| {
+            lookups.borrow_mut().push(name.to_string());
+            Some(7)
+        };
+        let exists = |name: &str| match name {
+            "aoe_absent_3" => Some(false),
+            "aoe_unknown_5" => None,
+            _ => Some(true),
+        };
+        assert_eq!(
+            pane_pid_for(&meta, "aoe_live_1", exists, lookup),
+            Some(4242)
+        );
+        assert_eq!(pane_pid_for(&meta, "aoe_absent_3", exists, lookup), None);
+        assert_eq!(
+            pane_pid_for(&meta, "aoe_base_index_one_4", exists, lookup),
+            Some(7)
+        );
+        assert_eq!(
+            pane_pid_for(&meta, "aoe_unknown_5", exists, lookup),
+            Some(7),
+            "unknown existence keeps the lookup"
+        );
+        assert_eq!(pane_pid_for(&meta, "aoe_nopid_2", exists, lookup), Some(7));
+        assert_eq!(
+            *lookups.borrow(),
+            ["aoe_base_index_one_4", "aoe_unknown_5", "aoe_nopid_2"],
+            "no lookup for a snapshot hit or an absent session"
+        );
     }
 
     fn tmux_state(name: &str, status: Status) -> TmuxState {
