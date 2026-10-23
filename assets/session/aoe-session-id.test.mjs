@@ -35,8 +35,11 @@ test("each lifecycle event writes AoE's status vocabulary and the attention file
     for (const path of [f.base, f.dir]) assert.equal(statSync(path).mode & 0o7777, 0o700, path);
     assert.equal(statSync(join(f.dir, "status")).mode & 0o777, 0o600);
 
+    const inode = () => statSync(join(f.dir, "status")).ino;
+    const before = inode();
     f.pi.fire("tool_execution_start", { type: "tool_execution_start", toolCallId: "b1", toolName: "bash", args: { command: "ls" } });
     assert.equal(f.read("status"), "running", "an ordinary tool leaves the turn running");
+    assert.notEqual(inode(), before, "an ordinary tool start refreshes the running write");
     assert.equal(f.read("attention"), undefined);
 
     f.pi.fire("tool_execution_start", ask("q1", { question: "Ship it?" }));
@@ -44,6 +47,8 @@ test("each lifecycle event writes AoE's status vocabulary and the attention file
     assert.equal(f.read("attention"), "Ship it?");
     assert.equal(statSync(join(f.dir, "attention")).mode & 0o777, 0o600);
 
+    f.pi.fire("tool_execution_start", { type: "tool_execution_start", toolCallId: "b2", toolName: "read", args: {} });
+    assert.equal(f.read("status"), "waiting", "another tool starting does not answer the question");
     f.pi.fire("tool_execution_end", { type: "tool_execution_end", toolCallId: "b1", toolName: "bash", isError: false });
     assert.equal(f.read("status"), "waiting", "another tool ending does not answer the question");
     f.pi.fire("tool_execution_end", askEnd("q1"));

@@ -95,7 +95,11 @@ export function registerHookStatus(pi, { base, instanceId }) {
     write("status", "running");
   }));
   pi.on("tool_execution_start", guard(event => {
-    if (!WAITING_TOOLS.has(event?.toolName)) return;
+    if (!WAITING_TOOLS.has(event?.toolName)) {
+      // Refresh the write's age, which AoE bounds, unless a question is open.
+      if (waiting.size === 0) write("status", "running");
+      return;
+    }
     waiting.add(event.toolCallId);
     // Attention first: a reader that sees `waiting` finds its summary.
     write("attention", attentionSummary(event.args));
