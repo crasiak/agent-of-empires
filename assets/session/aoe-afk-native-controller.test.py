@@ -28,8 +28,11 @@ class FixedIO:
         self.b = {"instance_id": "session", "profile": "default", "native_id": "native", "launch_id": "launch"}
 
     def aoe(self, *args):
-        policy = tomllib.loads((Path(self.attempt["app"]) / "config.toml").read_text())
-        if policy != {"systemd": {"enabled": False}, "updates": {"update_check_mode": "off"},
+        app = Path(self.attempt["app"])
+        if not (app / "profiles/default").is_dir():
+            raise AssertionError("explicit private profile missing before managed command")
+        policy = tomllib.loads((app / "config.toml").read_text())
+        if policy != {"default_profile": "default", "systemd": {"enabled": False}, "updates": {"update_check_mode": "off"},
                       "session": {"restart_wake_message": "", "usage_tracking": False}}:
             raise AssertionError("private isolation policy missing before managed command")
         self.events.append(tuple(args))

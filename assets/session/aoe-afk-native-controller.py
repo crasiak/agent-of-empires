@@ -156,7 +156,9 @@ def initialize(root, manifest, role, ordinal):
                "app": str(root / "config" / manifest["config"]["app_name"]), "root": str(root)}
     app = Path(attempt["app"])
     app.mkdir(mode=0o700)
-    a.publish_bytes(app / "config.toml", b'[systemd]\nenabled = false\n[updates]\nupdate_check_mode = "off"\n[session]\nrestart_wake_message = ""\nusage_tracking = false\n')
+    (app / "profiles").mkdir(mode=0o700)
+    (app / "profiles/default").mkdir(mode=0o700)
+    a.publish_bytes(app / "config.toml", b'default_profile = "default"\n[systemd]\nenabled = false\n[updates]\nupdate_check_mode = "off"\n[session]\nrestart_wake_message = ""\nusage_tracking = false\n')
     a.publish(root / "attempt.json", attempt, 0o400)
     a.publish(root / "agent/settings.json", {"compaction": {"enabled": False},
               "retry": {"enabled": False, "provider": {"maxRetries": 0}}, "cacheWarming": "off", "quietStartup": True})
