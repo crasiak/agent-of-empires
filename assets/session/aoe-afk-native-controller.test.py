@@ -7,6 +7,7 @@ import tempfile
 import time
 import tomllib
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("controller", Path(__file__).with_name("aoe-afk-native-controller.py"))
 c = importlib.util.module_from_spec(spec)
@@ -135,6 +136,32 @@ class ControllerTests(unittest.TestCase):
                     self.assertNotIn("cancel", io.events)
                 if failure:
                     self.assertTrue((root / "controller-error.json").exists())
+
+    def test_adapter_seal_covers_observer_and_runtime_imports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            assets = root / "assets"
+            assets.mkdir()
+            names = ["aoe-afk-native.py", "aoe-afk-observer-fixture.mjs", "aoe-afk-observer-probes.mjs",
+                     "aoe-afk-observer-diagnostic.mjs", "aoe-afk-observer-audit.mjs", "aoe-afk.mjs"]
+            for name in names:
+                (assets / name).write_text("fixed source\n")
+            config = {"binary_receipt": {"source_commit": "head", "source_tree": "tree", "binary_sha256": "binary"},
+                      "sources": {"aoe": str(root)}, "tools": {"aoe": {"sha256": "binary"}}}
+            def git_output(args, **kwargs):
+                return b"" if "status" in args else "tree\n" if "HEAD^{tree}" in args else "head\n"
+            with patch.object(a, "HERE", assets), patch.object(a, "PINS", {}), \
+                 patch.object(a, "tree_hash", return_value="fixed tracked tree"), \
+                 patch.object(a.subprocess, "check_output", side_effect=git_output), \
+                 patch.object(a.subprocess, "run"):
+                before = a.source_seal(config)["adapter"]
+                self.assertEqual(set(before), {str(assets / name) for name in names})
+                for name in names[1:]:
+                    path = assets / name
+                    path.write_text("changed source\n")
+                    after = a.source_seal(config)["adapter"]
+                    self.assertNotEqual(before[str(path)], after[str(path)], name)
+                    path.write_text("fixed source\n")
 
     def test_capture_is_bounded_read_only_and_refuses_linked_native_source(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -188,8 +188,8 @@ def source_seal(config):
                 seals[key]["dependencies"] = {"provided_by": "pinned-pi", "closure": seals["pi"]["dependencies"]}
             else:
                 seals[key]["dependencies"] = tree_hash(dependencies)
-    # New adapter files need coverage even before they are committed.
-    seals["adapter"] = {str(p): file_hash(p) for p in sorted(HERE.glob("aoe-afk-native*")) if p.is_file()}
+    # Include the adapter's runtime and observer imports.
+    seals["adapter"] = {str(p): file_hash(p) for p in sorted(HERE.glob("aoe-afk*")) if p.is_file()}
     return seals
 
 
