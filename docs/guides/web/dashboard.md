@@ -30,6 +30,8 @@ The palette (top-bar button or keyboard shortcut) is a fuzzy launcher for global
 
 When an embedded agent or paired terminal, or the structured-session composer, has keyboard focus, press `Ctrl+Q` to return focus to the active session in the sidebar. Then press `a` to move to the next session needing attention; `a` works when a terminal or text field is not focused.
 
+With a session row focused, use **↑** and **↓** to move through visible rows without opening one; press **Enter** to open the focused row.
+
 Individual settings appear under `Settings`: a writable toggle flips inline with a toast, while read-only servers and settings needing elevation open the settings view instead. The Settings header has its own search box (the TUI settings screen uses `/`) that filters across every tab.
 
 ## First-run onboarding
@@ -84,9 +86,11 @@ Add one with the **+** on the section header (browse or type a path, optionally 
 
 ![The settings view with its section groups and the profile picker on the Session tab](../../assets/web/settings.png)
 
-Settings are grouped into **Dashboard** (Theme, Notifications for [web push](../../push-notifications.md), Terminal, Panels, Diff, Devices, Security), **Sessions** (Profiles, session defaults, Structured view, MCP servers, Skills), **Environment** (Sandbox, Worktree, Tmux, Systemd, Sound), and **System** (Updates, Telemetry, Logging, Plugins). On a phone, Settings opens on this grouped list. The panel is generated from the same settings schema as the TUI, so a field declared once appears on both and they cannot drift; fields only the TUI reads sit under a **Terminal UI** fold. The host environment list is the one config knob the dashboard does not surface.
+Settings are grouped into **Dashboard** (Theme, Notifications for [web push](../../push-notifications.md), Terminal, Panels, Diff, Devices, Security), **Sessions** (Profiles, session defaults, Structured view, MCP servers, Skills), **Environment** (Sandbox, Worktree, Tmux, Systemd, Sound), and **System** (Updates, Telemetry, Logging, Logs, Plugins). On a phone, Settings opens on this grouped list. The panel is generated from the same settings schema as the TUI, so a field declared once appears on both and they cannot drift; fields only the TUI reads sit under a **Terminal UI** fold. The host environment list is the one config knob the dashboard does not surface.
 
 The profile picker, shown beside the title of tabs that hold profile-overridable fields, scopes which profile you are editing; global settings apply where a profile does not override a field. The **Profiles** tab (`/settings/profiles`) creates, renames, deletes, and sets the default profile, and its **Edit configuration** buttons deep-link into a tab scoped to that profile. Lifecycle hooks are shown read-only with their source, since hooks run arbitrary shell commands; the same applies to agent-command and environment fields. Creating, deleting, or renaming a profile, and saving global settings, are [step-up](../web-dashboard.md#security) actions.
+
+**Logs** (System) shows the last 500 lines of the log file, with a Download button. Tokens, passphrases, passwords, secrets, API keys, and authorization and cookie values are redacted on the server before they reach the browser; other log content is shown as written. The tab is hidden on read-only servers.
 
 **Conversation display** (Sessions > Structured view) sets the base font size of the structured-view transcript, separately for mobile and desktop, from 6px to 28px with a 14px default. Prose, headings, lists, tables, and code all scale from it. The mobile value applies on a coarse pointer under 768px, switching live as you resize or rotate. The size is relative to your browser's own font setting, so it stacks with zoom and accessibility preferences. Both values are dashboard preferences stored with your web settings, not agent config, so they follow you across devices and never appear in `config.toml`.
 

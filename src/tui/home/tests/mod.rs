@@ -73,6 +73,7 @@ mod session_info;
 mod settings_scroll_wiring;
 mod shortcut_bar;
 mod sidebar_position;
+mod split_terminal;
 mod stacked_single_seam;
 mod status_rows_menu;
 mod store_move;
