@@ -284,9 +284,24 @@ impl HomeView {
                 }),
             });
         }
+        self.filter_empty_group_headers(&mut items);
         append_archived_section(&mut items, &pool, self.archived_section_collapsed);
         append_trash_section(&mut items, &pool, self.trashed_section_collapsed);
         items
+    }
+
+    fn filter_empty_group_headers(&self, items: &mut Vec<Item>) {
+        if self.hide_empty_groups {
+            items.retain(|item| {
+                !matches!(
+                    item,
+                    Item::Group {
+                        session_count: 0,
+                        ..
+                    }
+                )
+            });
+        }
     }
 
     pub(super) fn instance_matches_highlight_view(&self, inst: &Instance) -> bool {
@@ -338,7 +353,7 @@ impl HomeView {
             .filter(|i| !i.is_archived() && !i.is_trashed())
             .cloned()
             .collect();
-        // Seeded before hiding, so a group whose sessions are all hidden keeps its header.
+        // Keep the seed so empty headers remain available when their setting allows them.
         (shown_in_groups(grouped, hide_stopped), tree_seed)
     }
 
@@ -356,6 +371,7 @@ impl HomeView {
             tree.set_collapsed(path, true);
         }
         let mut items = flatten_tree(&tree, grouped, self.sort_order);
+        self.filter_empty_group_headers(&mut items);
         append_archived_section_by_project(
             &mut items,
             grouped,
@@ -374,7 +390,7 @@ impl HomeView {
             .map(|i| i.group_path.clone())
             .filter(|p| !p.is_empty())
             .collect();
-        // Pinned registered projects with no live session render as empty headers.
+        // Seed pinned projects even without live sessions.
         let mut seed_groups: Vec<Group> = crate::session::projects::unpopulated_projects(
             &populated_labels,
             &self.registered_projects,

@@ -4434,8 +4434,20 @@
       "id": "triage.empty-group-hide",
       "kind": "vitest",
       "risk": "medium",
-      "specs": ["src/lib/__tests__/sidebarSort.test.ts", "tests/live/triage.spec.ts"],
-      "components": ["web/src/lib/sidebarSort.ts", "web/src/components/WorkspaceSidebar.tsx"]
+      "specs": [
+        "src/lib/__tests__/sidebarSort.test.ts",
+        "src/lib/__tests__/hideEmptyGroups.test.ts",
+        "src/components/__tests__/WorkspaceSidebarFilter.test.tsx",
+        "src/components/__tests__/SettingsView.session.test.tsx",
+        "tests/live/triage.spec.ts"
+      ],
+      "components": [
+        "web/src/lib/sidebarSort.ts",
+        "web/src/lib/hideEmptyGroups.ts",
+        "web/src/App.tsx",
+        "web/src/components/WorkspaceSidebar.tsx"
+      ],
+      "notes": "Empty headers are hidden by default on repo, nested, and org axes; the global settings toggle restores them without removing registrations. Archives and trash remain reachable."
     },
     {
       "id": "sidebar.edit-workdir-name",

@@ -103,6 +103,7 @@ import { IdleDecayWindowContext, parseIdleDecayWindowMs } from "./lib/idleDecay"
 import { parseUnreadIndicatorEnabled, UnreadIndicatorContext, useUnreadIndicatorEnabled } from "./lib/unreadIndicator";
 import { parseSessionRowTagMode, SessionRowTagContext, type SessionRowTagMode } from "./lib/sessionRowTag";
 import { parseSessionColorsEnabled, SessionColorsContext } from "./lib/sessionColors";
+import { HideEmptyGroupsContext, parseHideEmptyGroups } from "./lib/hideEmptyGroups";
 import { onSettingsChanged } from "./lib/settingsEvents";
 import { parseSystemHealthEnabled, SystemHealthEnabledContext } from "./lib/systemHealth";
 import { parseUsageOverlayEnabled, UsageOverlayEnabledContext } from "./lib/usage";
@@ -201,6 +202,7 @@ export default function App() {
   const [unreadIndicatorEnabled, setUnreadIndicatorEnabled] = useState(true);
   const [sessionRowTagMode, setSessionRowTagMode] = useState<SessionRowTagMode>("branch");
   const [sessionColorsEnabled, setSessionColorsEnabled] = useState(true);
+  const [hideEmptyGroups, setHideEmptyGroups] = useState(true);
   const [systemHealthEnabled, setSystemHealthEnabled] = useState(false);
   const [usageOverlayEnabled, setUsageOverlayEnabled] = useState(true);
   const [ledgerOverlayEnabled, setLedgerOverlayEnabled] = useState(true);
@@ -211,6 +213,7 @@ export default function App() {
     setUnreadIndicatorEnabled(parseUnreadIndicatorEnabled(settings));
     setSessionRowTagMode(parseSessionRowTagMode(settings));
     setSessionColorsEnabled(parseSessionColorsEnabled(settings));
+    setHideEmptyGroups(parseHideEmptyGroups(settings));
     setSystemHealthEnabled(parseSystemHealthEnabled(settings));
     setUsageOverlayEnabled(parseUsageOverlayEnabled(settings));
     setLedgerOverlayEnabled(parseLedgerOverlayEnabled(settings));
@@ -305,23 +308,29 @@ export default function App() {
     <IdleDecayWindowContext.Provider value={idleDecayWindowMs}>
       <UnreadIndicatorContext.Provider value={unreadIndicatorEnabled}>
         <SessionRowTagContext.Provider value={sessionRowTagMode}>
-          <SessionColorsContext.Provider value={sessionColorsEnabled}>
-            <SystemHealthEnabledContext.Provider value={systemHealthEnabled}>
-              <UsageOverlayEnabledContext.Provider value={usageOverlayEnabled}>
-                <LedgerOverlayEnabledContext.Provider value={ledgerOverlayEnabled}>
-                  <HeadroomOverlayEnabledContext.Provider value={headroomOverlayEnabled}>
-                    {/* PluginUiProvider must sit above AppContent: AppContent itself reads
+          <HideEmptyGroupsContext.Provider value={hideEmptyGroups}>
+            <SessionColorsContext.Provider value={sessionColorsEnabled}>
+              <SystemHealthEnabledContext.Provider value={systemHealthEnabled}>
+                <UsageOverlayEnabledContext.Provider value={usageOverlayEnabled}>
+                  <LedgerOverlayEnabledContext.Provider value={ledgerOverlayEnabled}>
+                    <HeadroomOverlayEnabledContext.Provider value={headroomOverlayEnabled}>
+                      {/* PluginUiProvider must sit above AppContent: AppContent itself reads
                       the plugin UI snapshot (usePluginPanes), so the provider can't live
                       inside its own return. */}
-                    <PluginUiProvider>
-                      <AppContent loginRequired={loginRequired} onLogout={handleLogout} resolvedTheme={resolvedTheme} />
-                    </PluginUiProvider>
-                    <ElevationPrompt />
-                  </HeadroomOverlayEnabledContext.Provider>
-                </LedgerOverlayEnabledContext.Provider>
-              </UsageOverlayEnabledContext.Provider>
-            </SystemHealthEnabledContext.Provider>
-          </SessionColorsContext.Provider>
+                      <PluginUiProvider>
+                        <AppContent
+                          loginRequired={loginRequired}
+                          onLogout={handleLogout}
+                          resolvedTheme={resolvedTheme}
+                        />
+                      </PluginUiProvider>
+                      <ElevationPrompt />
+                    </HeadroomOverlayEnabledContext.Provider>
+                  </LedgerOverlayEnabledContext.Provider>
+                </UsageOverlayEnabledContext.Provider>
+              </SystemHealthEnabledContext.Provider>
+            </SessionColorsContext.Provider>
+          </HideEmptyGroupsContext.Provider>
         </SessionRowTagContext.Provider>
       </UnreadIndicatorContext.Provider>
     </IdleDecayWindowContext.Provider>
