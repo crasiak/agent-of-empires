@@ -55,7 +55,7 @@ test("each lifecycle event writes AoE's status vocabulary and the attention file
     assert.equal(f.read("status"), "running");
     assert.equal(f.read("attention"), undefined);
 
-    for (const settle of ["agent_settled", "agent_end"]) {
+    for (const settle of ["agent_settled"]) {
       f.pi.fire("agent_start", { type: "agent_start" });
       f.pi.fire("tool_execution_start", ask(`q-${settle}`, { question: "Which?" }));
       assert.equal(f.read("status"), "waiting");
@@ -67,6 +67,8 @@ test("each lifecycle event writes AoE's status vocabulary and the attention file
     f.pi.fire("agent_start", { type: "agent_start" });
     f.pi.fire("agent_end", { type: "agent_end", messages: [], willRetry: true });
     assert.equal(f.read("status"), "running", "a run Pi is about to retry is not idle");
+    f.pi.fire("agent_end", { type: "agent_end", messages: [] });
+    assert.equal(f.read("status"), "running", "only agent_settled is idle: follow-ups may run after agent_end");
 
     assert.deepEqual(readdirSync(f.dir).sort(), ["status"], "atomic writes leave no temp files");
   } finally {
@@ -204,9 +206,10 @@ test("the extension registers the status writer only for a valid AOE_INSTANCE_ID
       const pi = bus();
       aoeSessionId(pi);
       // Registration only: firing would write under the real per-user base.
-      for (const name of ["agent_start", "tool_execution_start", "tool_execution_end", "agent_end"]) {
+      for (const name of ["agent_start", "tool_execution_start", "tool_execution_end"]) {
         assert.equal(pi.handlers.has(name), expected, `${id}: ${name}`);
       }
+      assert.equal(pi.handlers.has("agent_end"), false, "agent_end never writes idle");
       assert.ok(pi.handlers.has("agent_settled"), "usage reporting keeps its handler");
       assert.ok(pi.handlers.has("session_start"));
     }

@@ -110,9 +110,8 @@ export function registerHookStatus(pi, { base, instanceId }) {
     write("status", "running");
     remove("attention");
   }));
-  pi.on("agent_end", guard(event => {
-    if (event?.willRetry !== true) settle();
-  }));
+  // Only agent_settled means idle: queued follow-ups can start a new run
+  // after agent_end, and a brief idle there would set AoE's unread marker.
   pi.on("agent_settled", guard(settle));
 }
 
