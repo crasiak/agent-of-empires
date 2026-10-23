@@ -23,6 +23,8 @@ aoe serve --open                # Open the URL in a browser when ready
 aoe serve --remote --read-only  # Monitor without sending keystrokes
 ```
 
+From the TUI, press `R` (`Ctrl+R` with strict hotkeys), shown as `R Web` in the shortcut bar, to start a background server on your network or over a tunnel. While it runs, the entry reads `R ● Web` in green.
+
 The server prints a URL carrying an auth token; the token becomes a cookie on first visit. `--open` is suppressed with `--daemon`, `--remote`, and whenever no browser you could see is reachable (SSH without `DISPLAY`, a Linux host with no display server); setting `BROWSER` overrides that check except on macOS.
 
 In `--remote` mode the token rotates every 4 hours, so a URL captured at startup eventually stops working. `aoe url` prints the live one against a running daemon (`--all` for every labeled URL, `--token-only` for scripted login), and `--remote` prints a QR code for phone pairing.
@@ -76,7 +78,7 @@ The upstream must set `X-Forwarded-For` (or `cf-connecting-ip`); aoe reads the l
 
 ### Running under systemd
 
-A foreground `aoe serve` reports readiness over `sd_notify` when systemd sets `NOTIFY_SOCKET`, so a unit can use `Type=notify`. `READY=1` is sent once the listener is bound, plugin workers are launched and background tasks are running; `STOPPING=1` is sent when shutdown starts. If aoe runs as a child of a wrapper (for example `cargo run`), add `NotifyAccess=all`, since systemd otherwise accepts messages only from the main process.
+`aoe serve` supports `Type=notify` when `NOTIFY_SOCKET` is set, using pathname or Linux abstract (`@name`) sockets. It sends `READY=1` after binding the listener and starting workers/tasks, and `STOPPING=1` when shutdown starts. Writes run outside async workers and each has a one-second timeout; a receiver that remains full can still cause `READY=1` to be lost. Wrappers such as `cargo run` require `NotifyAccess=all`, since systemd otherwise accepts messages only from the main process.
 
 ## Security
 
@@ -87,6 +89,7 @@ A foreground `aoe serve` reports readiness over `sd_notify` when systemd sets `N
 - **Token rotation**: in `--remote` mode the token rotates every 4 hours, with a 5-minute grace for active sessions.
 - **Connected devices**: signed-in devices (browser, origin IP, last seen) are listed under Settings > Web Dashboard > Connected Devices, where you can revoke one or sign every device out.
 - **Session persistence**: login sessions persist to an owner-only `login_sessions.toml`, so devices stay signed in across a daemon restart. A passphrase change drops them all; `auth.persist_sessions = false` opts out.
+- **Passkeys**: with a passphrase configured, Settings > Web Dashboard > Connected Devices can enrol a passkey that signs in with the device biometric or screen lock instead of the passphrase. It needs HTTPS or `localhost` and an origin in the allowlist (add `--allowed-origin` if the proxy uses a nonstandard port); a passkey only works on the origin it was enrolled on, so the passphrase stays the fallback. Public keys live in an owner-only `passkeys.json`, and a passphrase change drops every passkey, as it drops login sessions. Adding or removing one needs the step-up passphrase, and a passkey sign-in does not satisfy step-up.
 - **Step-up elevation**: writes that could plant code for, or widen, the next session spawn need a passphrase confirmation valid for 15 minutes. That covers the `sandbox` and `worktree` sections plus `acp.restrict_agents`, `skills.auto_propagate`, `session.smart_rename_model`, and `session.inherit_host_environment`; the gate is per field, and localhost browsers skip it entirely, since a same-host caller already passes the filesystem trust boundary.
 - **Local-only fields**: agent commands and status-hook shell commands map names to arbitrary host commands, so the server rejects any PATCH touching them. Edit those in the TUI on the host.
 
@@ -94,7 +97,7 @@ Responses carry `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and 
 
 ### Plugin pages
 
-A plugin page is framed with `sandbox="allow-scripts"` and served under its own policy (see [Pages](../plugin-api.md#pages)), so its script runs in an opaque origin: it cannot read the dashboard's token, binding secret, storage or cookies, call the API, or navigate the dashboard. Because a frame load cannot send the device-binding header, the dashboard first mints a page ticket through a bound request. The ticket rides an `HttpOnly` cookie scoped to that page's URL, lasts 60 seconds, and authenticates only that page for the still-signed-in session that minted it; it never appears in the frame URL or document. That route is the only one framable, and only by the dashboard.
+A plugin page is framed with `sandbox="allow-scripts allow-downloads"` and served under its own policy (see [Pages](../plugin-api.md#pages)), so its script runs in an opaque origin: it cannot read the dashboard's token, binding secret, storage or cookies, call the API, or navigate the dashboard; it can save files to the downloads folder, subject to the browser's download protections. Because a frame load cannot send the device-binding header, the dashboard first mints a page ticket through a bound request. The ticket rides an `HttpOnly` cookie scoped to that page's URL, lasts 60 seconds, and authenticates only that page for the still-signed-in session that minted it; it never appears in the frame URL or document. That route is the only one framable, and only by the dashboard.
 
 ### DNS rebinding
 

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { parseRequest, resolveRequest, type BridgeGrants } from "../pluginBridge";
 
+const RW = ["session.read", "session.write"];
+const MENU = { id: "s", x: 10, y: 20 };
 const open: BridgeGrants = { capabilities: ["session.read"], readOnly: false, cityhall: false };
 
 describe("parseRequest", () => {
@@ -48,10 +50,56 @@ describe("resolveRequest", () => {
     { method: "action", params: { method: "move", sessionId: 3 }, grants: {}, error: "invalid_params" },
     { method: "openSession", params: { id: "s" }, grants: { readOnly: true, cityhall: true }, error: null },
     { method: "openSession", params: {}, grants: {}, error: "invalid_params" },
+    { method: "session.archive", params: { id: "s" }, grants: { capabilities: RW }, error: null },
+    { method: "session.trash", params: { id: "s" }, grants: { capabilities: RW }, error: null },
+    { method: "session.archive", params: { id: "s" }, grants: {}, error: "capability_denied" },
+    { method: "session.trash", params: { id: "s" }, grants: {}, error: "capability_denied" },
+    { method: "session.trash", params: {}, grants: { capabilities: RW }, error: "invalid_params" },
+    {
+      method: "session.trash",
+      params: { id: "s" },
+      grants: { capabilities: ["session.write"] },
+      error: "capability_denied",
+    },
+    {
+      method: "session.archive",
+      params: { id: "s" },
+      grants: { capabilities: RW, readOnly: true },
+      error: "read_only",
+    },
+    {
+      method: "session.trash",
+      params: { id: "s" },
+      grants: { capabilities: RW, cityhall: true },
+      error: "cityhall_mode",
+    },
+    { method: "session.contextMenu", params: MENU, grants: { readOnly: true, cityhall: true }, error: null },
+    { method: "session.contextMenu", params: MENU, grants: { capabilities: [] }, error: "capability_denied" },
+    { method: "session.contextMenu", params: { id: "s", x: 1 }, grants: {}, error: "invalid_params" },
+    { method: "session.contextMenu", params: { ...MENU, x: -1 }, grants: {}, error: "invalid_params" },
+    { method: "session.contextMenu", params: { ...MENU, items: [{ id: "a" }] }, grants: {}, error: "invalid_params" },
+    {
+      method: "session.contextMenu",
+      params: { ...MENU, items: Array.from({ length: 21 }, (_, i) => ({ id: `${i}`, label: "x" })) },
+      grants: {},
+      error: "invalid_params",
+    },
     { method: "sessions.archive", params: {}, grants: {}, error: "unknown_method" },
     { method: "toString", params: {}, grants: {}, error: "unknown_method" },
   ])("$method with $grants -> $error", ({ method, params, grants, error }) => {
     expect(errorOf(resolve(method, params, grants))).toBe(error);
+  });
+
+  it("maps a session target to the call", () => {
+    expect(resolve("session.trash", { id: "s" }, { capabilities: RW })).toEqual({
+      call: { method: "session.trash", sessionId: "s" },
+    });
+  });
+
+  it("maps a context menu to the call, items defaulting to none", () => {
+    expect(resolve("session.contextMenu", MENU)).toEqual({
+      call: { method: "session.contextMenu", sessionId: "s", x: 10, y: 20, items: [] },
+    });
   });
 
   it("maps action params to the call", () => {

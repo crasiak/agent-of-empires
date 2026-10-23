@@ -91,6 +91,23 @@ fn tui_serve_dialog_mode_picker_opens_and_escapes() {
     h.wait_for("No sessions yet");
 }
 
+/// The shortcut bar advertises `R` while nothing is served, then turns the same entry into
+/// a running status once a daemon starts, without restarting the TUI.
+#[test]
+#[parallel]
+fn tui_footer_web_entry_tracks_the_daemon() {
+    require_tmux!();
+    let what = if cfg!(feature = "web") { "Web" } else { "API" };
+    let mut h = TuiTestHarness::new("serve_footer_entry");
+    h.stop_daemon_on_drop();
+    h.spawn_tui();
+    h.wait_for(" aoe ");
+    h.wait_for(&format!("R {what}"));
+
+    h.start_daemon();
+    h.wait_for(&format!("R \u{25CF} {what}"));
+}
+
 /// The daemon child binds the port and survives (it must not self-detect its
 /// own pre-written PID), logs through the tracing sink rather than a revived
 /// `serve.log` (#1124), replays its launch state on `--restart` (#1794), and
@@ -635,4 +652,68 @@ fn cli_acp_tail_connects_to_behind_proxy_passphrase_daemon() {
             );
         }
     }
+}
+
+/// Daemon controls reach their own handlers without running startup
+/// migrations or taking the lifetime lock (#4671). v040 would fail on the
+/// `acp-workers` file, so a migration run shows up as a different error.
+#[test]
+#[parallel]
+fn cli_serve_controls_skip_migrations_and_lock() {
+    use fs2::FileExt as _;
+
+    let mut h = TuiTestHarness::new("serve_controls_skip_migrations");
+    h.remove_env("AOE_DAEMON_URL");
+    let app = app_dir_in(h.home_path());
+    std::fs::create_dir_all(&app).unwrap();
+    let version = app.join(".schema_version");
+    std::fs::write(&version, "39").unwrap();
+    let workers = app.join("acp-workers");
+    std::fs::write(&workers, "not a directory").unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(app.join("serve.lock"))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+
+    let cases = [
+        ("--status", "Daemon: not running"),
+        ("--stop", "No running daemon found"),
+        ("--restart", "No running aoe serve daemon to restart"),
+    ];
+    for (flag, expected) in cases {
+        let stderr = h.run_cli_err(&["serve", flag]);
+        assert!(stderr.contains(expected), "{flag}: {stderr}");
+        assert_eq!(std::fs::read_to_string(&version).unwrap(), "39", "{flag}");
+        assert_eq!(
+            std::fs::read_to_string(&workers).unwrap(),
+            "not a directory",
+            "{flag}"
+        );
+    }
+}
+
+/// A replacement daemon that fails its own startup migration makes
+/// `--restart` fail instead of reporting a successful restart (#4671).
+#[test]
+#[parallel]
+fn cli_serve_restart_reports_replacement_startup_failure() {
+    let mut h = TuiTestHarness::new("serve_restart_child_fails");
+    h.remove_env("AOE_DAEMON_URL");
+    h.stop_daemon_on_drop();
+    h.start_daemon();
+
+    let app = app_dir_in(h.home_path());
+    std::fs::write(app.join(".schema_version"), "39").unwrap();
+    let workers = app.join("acp-workers");
+    let _ = std::fs::remove_dir_all(&workers);
+    std::fs::write(&workers, "not a directory").unwrap();
+
+    let stderr = h.run_cli_err(&["serve", "--restart"]);
+    assert!(
+        stderr.contains("replacement daemon exited during startup"),
+        "{stderr}"
+    );
 }

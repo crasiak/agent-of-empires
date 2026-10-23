@@ -13,6 +13,7 @@ use crate::acp::client::HttpClient;
 use crate::daemon::{ContextResumeAvailability, SessionResponse};
 use crate::plugin::ui_state::UiSnapshot;
 use crate::session::config::{resolve_theme_name, resolve_theme_palette_mode};
+use crate::tui::plugin_ui::{self, SortSpec};
 use crate::tui::styles::Theme;
 use anyhow::Result;
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyEventKind};
@@ -45,6 +46,9 @@ pub struct RemoteHomeState {
     pub last_error: Option<String>,
     pub loading: bool,
     pub plugin_ui: UiSnapshot,
+    /// `(plugin_id, entry_id)` of the chosen `sort-key`; `None` sorts by title.
+    /// Ephemeral, like the web sidebar's.
+    active_sort: Option<(String, String)>,
 }
 
 impl RemoteHomeState {
@@ -63,6 +67,7 @@ impl RemoteHomeState {
             last_error: None,
             loading: true,
             plugin_ui: UiSnapshot::default(),
+            active_sort: None,
         })
     }
 
@@ -81,8 +86,52 @@ impl RemoteHomeState {
             .cloned()
             .collect();
         self.cursor = selected
-            .and_then(|id| self.sessions.iter().position(|s| s.id == id))
+            .as_ref()
+            .and_then(|id| self.sessions.iter().position(|s| &s.id == id))
             .unwrap_or_else(|| self.cursor.min(self.sessions.len().saturating_sub(1)));
+        // Filtered rows keep the active plugin `sort-key` order.
+        self.resort(selected);
+    }
+
+    /// The chosen `sort-key`, if the current snapshot still publishes it.
+    pub fn active_sort_spec(&self) -> Option<SortSpec> {
+        let (plugin_id, entry_id) = self.active_sort.as_ref()?;
+        plugin_ui::sort_specs(&self.plugin_ui)
+            .into_iter()
+            .find(|s| &s.plugin_id == plugin_id && &s.entry_id == entry_id)
+    }
+
+    /// Advance title, then each published `sort-key`, then back to title.
+    pub fn cycle_sort(&mut self) {
+        let specs = plugin_ui::sort_specs(&self.plugin_ui);
+        let next = match self.active_sort_spec() {
+            None => 0,
+            Some(cur) => specs.iter().position(|s| *s == cur).map_or(0, |i| i + 1),
+        };
+        self.active_sort = specs
+            .get(next)
+            .map(|s| (s.plugin_id.clone(), s.entry_id.clone()));
+        let selected = self.sessions.get(self.cursor).map(|s| s.id.clone());
+        self.resort(selected);
+    }
+
+    /// Title order, then the active `sort-key` as a stable sort so ties keep
+    /// title order. The cursor follows `selected` to its new row.
+    fn resort(&mut self, selected: Option<String>) {
+        self.sessions.sort_by(|a, b| a.title.cmp(&b.title));
+        if let Some(spec) = self.active_sort_spec() {
+            let values = plugin_ui::sort_values(&self.plugin_ui, &spec);
+            self.sessions.sort_by(|a, b| {
+                plugin_ui::compare_sort_values(
+                    values.get(a.id.as_str()),
+                    values.get(b.id.as_str()),
+                    spec.descending,
+                )
+            });
+        }
+        if let Some(i) = selected.and_then(|id| self.sessions.iter().position(|s| s.id == id)) {
+            self.cursor = i;
+        }
     }
 
     pub fn move_cursor(&mut self, delta: i32) {
@@ -226,6 +275,7 @@ async fn run(
                     pending = Some(start_refresh(&state));
                 }
             }
+            KeyCode::Char('s') => state.cycle_sort(),
             KeyCode::Down | KeyCode::Char('j') => state.move_cursor(1),
             KeyCode::Up | KeyCode::Char('k') => state.move_cursor(-1),
             KeyCode::Enter => {
@@ -300,6 +350,15 @@ struct RemoteSnapshot {
 }
 type RefreshFuture = std::pin::Pin<Box<dyn std::future::Future<Output = RemoteSnapshot> + Send>>;
 
+/// One awaited refresh (tests and callers without an event loop).
+#[cfg(test)]
+async fn refresh(state: &mut RemoteHomeState) {
+    state.loading = true;
+    state.last_error = None;
+    let snapshot = start_refresh(state).await;
+    apply_snapshot(state, snapshot);
+}
+
 enum RemoteEvent {
     Input(Option<std::io::Result<CrosstermEvent>>),
     Refreshed(RemoteSnapshot),
@@ -322,24 +381,21 @@ where
 }
 
 fn start_refresh(state: &RemoteHomeState) -> RefreshFuture {
-    let endpoint = state.endpoint.clone();
     let client = state.client.clone();
     Box::pin(async move {
+        // The state's client carries any passphrase session (upstream v1.21.0).
         let sessions = async {
-            match endpoint.daemon_client() {
-                Ok(client) => client
-                    .list_sessions(None)
-                    .await
-                    .map(|envelope| sessions_from_snapshot(envelope.sessions))
-                    .map_err(|error| error.to_string()),
-                Err(error) => Err(error.to_string()),
-            }
+            client
+                .list_sessions(None)
+                .await
+                .map(|envelope| sessions_from_snapshot(envelope.sessions))
+                .map_err(|error| error.to_string())
         };
-        let (sessions, appearances, plugin_ui) = tokio::join!(
-            sessions,
-            client.repo_appearances(),
-            client.plugin_ui_state()
-        );
+        // Sessions first: on a passphrase daemon that call opens the session
+        // the other two reuse; concurrent first requests race the login.
+        let sessions = sessions.await;
+        let (appearances, plugin_ui) =
+            tokio::join!(client.repo_appearances(), client.plugin_ui_state());
         RemoteSnapshot {
             sessions,
             appearances,
@@ -356,7 +412,7 @@ fn apply_snapshot(state: &mut RemoteHomeState, snapshot: RemoteSnapshot) {
             tracing::warn!(target: "tui.remote_home", "repository appearance fetch failed: {error}")
         }
     }
-    apply_session_result(state, snapshot.sessions);
+    // Plugin state first: rebuilding the rows applies its active `sort-key`.
     state.plugin_ui = match snapshot.plugin_ui {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -364,6 +420,7 @@ fn apply_snapshot(state: &mut RemoteHomeState, snapshot: RemoteSnapshot) {
             UiSnapshot::default()
         }
     };
+    apply_session_result(state, snapshot.sessions);
     state.loading = false;
 }
 #[cfg(test)]
@@ -405,6 +462,62 @@ mod tests {
         .unwrap()
     }
 
+    fn with_sort_keys(state: &mut RemoteHomeState, ids: &[&str], values: &[(&str, f64)]) {
+        state.sessions = ids.iter().map(|id| session(id)).collect();
+        let mut entries = vec![serde_json::json!({
+            "plugin_id": "gh", "slot": "sort-key", "id": "k",
+            "payload": {"label": "Attention", "column": "att", "direction": "desc"}})];
+        entries.extend(values.iter().map(|(sid, v)| {
+            serde_json::json!({
+                "plugin_id": "gh", "slot": "row-column", "id": "att", "session_id": sid,
+                "payload": {"text": "t", "sort_value": v}})
+        }));
+        state.plugin_ui =
+            serde_json::from_value(serde_json::json!({"entries": entries, "notifications": []}))
+                .unwrap();
+    }
+
+    fn order(state: &RemoteHomeState) -> Vec<&str> {
+        state.sessions.iter().map(|s| s.id.as_str()).collect()
+    }
+
+    #[test]
+    fn cycle_sort_orders_by_plugin_value_and_keeps_the_cursor_row() {
+        let mut state = state();
+        with_sort_keys(&mut state, &["a", "b", "c", "d"], &[("c", 9.0), ("a", 1.0)]);
+        state.cursor = 3; // "d"
+
+        state.cycle_sort();
+        // Descending, unvalued rows last in title order.
+        assert_eq!(order(&state), ["c", "a", "b", "d"]);
+        assert_eq!(state.sessions[state.cursor].id, "d");
+
+        state.cycle_sort();
+        assert_eq!(order(&state), ["a", "b", "c", "d"]);
+        assert!(state.active_sort_spec().is_none());
+    }
+
+    #[test]
+    fn cycle_sort_without_sort_keys_keeps_title_order() {
+        let mut state = state();
+        state.sessions = vec![session("a"), session("b")];
+        state.cycle_sort();
+        assert_eq!(order(&state), ["a", "b"]);
+        assert!(state.active_sort_spec().is_none());
+    }
+
+    #[test]
+    fn vanished_sort_key_falls_back_to_title_on_resort() {
+        let mut state = state();
+        with_sort_keys(&mut state, &["a", "b"], &[("b", 1.0)]);
+        state.cycle_sort();
+        assert_eq!(order(&state), ["b", "a"]);
+
+        state.plugin_ui = UiSnapshot::default();
+        state.resort(None);
+        assert_eq!(order(&state), ["a", "b"]);
+    }
+
     #[test]
     fn snapshot_failure_clears_stale_sessions() {
         let mut state = state();
@@ -438,6 +551,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["first", "second"]
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn refresh_lists_sessions_through_a_passphrase_session() {
+        use crate::acp::client::passphrase_session::test_daemon::{TestDaemon, PASSPHRASE};
+        let _env = crate::session::test_support::EnvGuard::unset(&["AOE_DAEMON_PASSPHRASE"]);
+
+        let daemon = TestDaemon::start(PASSPHRASE).await;
+        let mut state = RemoteHomeState::new(daemon.endpoint.clone()).unwrap();
+        refresh(&mut state).await;
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.sessions.len(), 1);
+
+        let wrong = TestDaemon::start("other").await;
+        let mut state = RemoteHomeState::new(wrong.endpoint.clone()).unwrap();
+        refresh(&mut state).await;
+        assert!(state.last_error.is_some());
+        assert!(state.sessions.is_empty());
     }
 }
 
