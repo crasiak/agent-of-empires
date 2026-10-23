@@ -24,6 +24,10 @@ const ROOTS: [(&str, u32); 8] = [
     ("afk-review-v1", REVIEW),
 ];
 
+pub(crate) fn includes_migration(current: u32, introduced: u32) -> bool {
+    (introduced..=crate::migrations::current_schema_version()).contains(&current)
+}
+
 pub(crate) fn read_cursor(app: &Path) -> Result<u32> {
     let dir = AnchoredDir::open(app)?;
     let path = Path::new(".schema_version");

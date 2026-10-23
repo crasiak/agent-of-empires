@@ -32,6 +32,7 @@ mod store_move;
 mod tests;
 mod user_action;
 mod watchers;
+mod work_arc;
 
 use std::collections::{HashMap, HashSet};
 
@@ -297,6 +298,7 @@ pub struct HomeView {
     pub(super) usage_summary: Option<(String, crate::usage::UsageSummary)>,
     pub(super) show_usage_overlay: bool,
     pub(super) ledger_poller: super::ledger_poller::LedgerPoller,
+    work_arc_refresh: work_arc::ArcRefresh,
     pub(super) pending_ledger_refresh: bool,
     /// Ledger run view for one instance id; drawn only while that id is selected.
     pub(super) ledger_view: Option<(String, crate::ledger_run::LedgerRunView)>,

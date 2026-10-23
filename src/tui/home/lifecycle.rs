@@ -368,6 +368,7 @@ impl HomeView {
             usage_summary: None,
             show_usage_overlay: resolved.session.show_usage_overlay,
             ledger_poller: crate::tui::ledger_poller::LedgerPoller::new(),
+            work_arc_refresh: Default::default(),
             pending_ledger_refresh: false,
             ledger_view: None,
             show_ledger_overlay: resolved.session.show_ledger_overlay,

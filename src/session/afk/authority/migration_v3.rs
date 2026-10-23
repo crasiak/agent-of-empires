@@ -148,11 +148,10 @@ fn verify_seal(app: &Path, m: &Manifest) -> Result<()> {
 }
 fn ready_manifest(app: &Path, m: &Manifest) -> Result<()> {
     ensure!(
-        matches!(cursor::read_cursor(app)?, cursor::USAGE | cursor::REVIEW)
+        cursor::includes_migration(cursor::read_cursor(app)?, cursor::USAGE)
             && m.phase == Phase::Complete,
-        "completed AFK usage import and global schema {} or {} required",
-        cursor::USAGE,
-        cursor::REVIEW
+        "completed AFK usage import and a supported global schema >= {} required",
+        cursor::USAGE
     );
     verify_seal(app, m)
 }
@@ -397,12 +396,13 @@ fn save(store: &Store, m: &mut Manifest, phase: Phase) -> Result<()> {
 thread_local! { static INTERRUPT: std::cell::Cell<Option<Phase>> = const { std::cell::Cell::new(None) }; }
 
 pub(crate) fn run_at(app: &Path) -> Result<()> {
-    if cursor::read_cursor(app)? == cursor::REVIEW {
-        // Additive review storage does not reopen the frozen authority import.
+    let schema = cursor::read_cursor(app)?;
+    if cursor::includes_migration(schema, cursor::REVIEW) {
+        // Later schemas validate without reopening the frozen authority import.
         return ready(app);
     }
     ensure!(
-        matches!(cursor::read_cursor(app)?, cursor::BATCHES | cursor::USAGE),
+        matches!(schema, cursor::BATCHES | cursor::USAGE),
         "AFK usage import requires global schema {} or {}",
         cursor::BATCHES,
         cursor::USAGE

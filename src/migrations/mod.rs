@@ -59,6 +59,7 @@ mod v046_afk_authority;
 mod v047_afk_batches;
 mod v048_afk_usage_guards;
 mod v049_afk_return_review;
+mod v050_work_arc_consent;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -105,7 +106,7 @@ use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = afk_schema::REVIEW;
+const CURRENT_VERSION: u32 = 50;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -277,6 +278,7 @@ const MIGRATIONS: &[Migration] = &[
         "afk_return_review",
         v049_afk_return_review::run,
     ),
+    (50, "work_arc_consent", v050_work_arc_consent::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
