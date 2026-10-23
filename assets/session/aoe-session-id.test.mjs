@@ -14,12 +14,12 @@ function bus() {
   };
 }
 
-function fixture(instanceId = "inst_1-A") {
+function fixture(instanceId = "inst_1-A", options = {}) {
   const root = mkdtempSync(join(tmpdir(), "aoe-session-id-hooks-"));
   const base = join(root, "aoe-hooks");
   const dir = join(base, instanceId);
   const pi = bus();
-  registerHookStatus(pi, { base, instanceId });
+  registerHookStatus(pi, { base, instanceId, ...options });
   const read = name => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : undefined);
   return { root, base, dir, pi, read, done: () => rmSync(root, { recursive: true, force: true }) };
 }
@@ -217,4 +217,82 @@ test("the extension registers the status writer only for a valid AOE_INSTANCE_ID
     if (saved.id === undefined) delete process.env.AOE_INSTANCE_ID; else process.env.AOE_INSTANCE_ID = saved.id;
     if (saved.source === undefined) delete process.env.AOE_SESSION_SOURCE; else process.env.AOE_SESSION_SOURCE = saved.source;
   }
+});
+
+test("session_start clears a waiting status a crashed Pi left behind", () => {
+  const f = fixture();
+  try {
+    f.pi.fire("agent_start", { type: "agent_start" });
+    f.pi.fire("tool_execution_start", ask("q", { question: "Before the crash?" }));
+    assert.equal(f.read("status"), "waiting");
+    // The process dies here; a restarted Pi registers afresh on the same dir.
+    const restarted = bus();
+    registerHookStatus(restarted, { base: f.base, instanceId: "inst_1-A" });
+    restarted.fire("session_start", { type: "session_start" });
+    assert.equal(f.read("status"), "idle");
+    assert.equal(f.read("attention"), undefined);
+  } finally {
+    f.done();
+  }
+});
+
+test("a long turn keeps its running write fresh, at most once a minute", () => {
+  let now = 0;
+  const f = fixture("inst_1-A", { now: () => now });
+  try {
+    const inode = () => statSync(join(f.dir, "status")).ino;
+    f.pi.fire("agent_start", { type: "agent_start" });
+    const first = inode();
+    for (const name of ["turn_start", "message_update", "tool_execution_update", "message_end"]) {
+      now += 20_000;
+      f.pi.fire(name, { type: name });
+    }
+    assert.notEqual(inode(), first, "80 s of activity refreshed the write");
+    const refreshed = inode();
+    now += 10_000;
+    f.pi.fire("message_update", { type: "message_update" });
+    assert.equal(inode(), refreshed, "throttled within a minute");
+
+    now += 61_000;
+    f.pi.fire("tool_execution_start", ask("q", { question: "Ok?" }));
+    now += 61_000;
+    f.pi.fire("message_update", { type: "message_update" });
+    assert.equal(f.read("status"), "waiting", "activity never overwrites an open question");
+
+    f.pi.fire("agent_settled", { type: "agent_settled" });
+    now += 61_000;
+    f.pi.fire("message_end", { type: "message_end" });
+    assert.equal(f.read("status"), "idle", "activity after settling does not mean running");
+  } finally {
+    f.done();
+  }
+});
+
+test("with two open questions the attention file shows one still open", () => {
+  const f = fixture();
+  try {
+    f.pi.fire("agent_start", { type: "agent_start" });
+    f.pi.fire("tool_execution_start", ask("q1", { question: "First?" }));
+    f.pi.fire("tool_execution_start", ask("q2", { question: "Second?" }));
+    assert.equal(f.read("attention"), "Second?");
+    f.pi.fire("tool_execution_end", askEnd("q2"));
+    assert.equal(f.read("status"), "waiting");
+    assert.equal(f.read("attention"), "First?", "the answered question is gone");
+    f.pi.fire("tool_execution_end", askEnd("q1"));
+    assert.equal(f.read("status"), "running");
+    assert.equal(f.read("attention"), undefined);
+  } finally {
+    f.done();
+  }
+});
+
+test("summaries drop format characters and ids follow AoE's 64-byte cap", () => {
+  assert.equal(attentionSummary({ question: "Ship \u202Egnp.exe\u2066 now\u200B?\uFEFF" }), "Ship gnp.exe now?");
+  assert.ok(!/\p{Cf}/u.test(attentionSummary({ question: "\u061C\u200E\u2069x" })));
+  const pi = bus();
+  registerHookStatus(pi, { base: tmpdir(), instanceId: "a".repeat(65) });
+  assert.equal(pi.handlers.size, 0, "a 65-byte id registers nothing");
+  const ok = bus();
+  registerHookStatus(ok, { base: join(tmpdir(), "never-written"), instanceId: "a".repeat(64) });
+  assert.ok(ok.handlers.has("agent_start"));
 });

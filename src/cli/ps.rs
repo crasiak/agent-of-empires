@@ -621,7 +621,10 @@ fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
             crate::session::unread_enabled().then_some(inst.unread),
             inst.status,
             inst.idle_entered_at,
-            crate::hooks::read_hook_attention(&inst.id),
+            // Only a row that is waiting carries attention.
+            (inst.status == Status::Waiting)
+                .then(|| crate::hooks::read_hook_attention(&inst.id))
+                .flatten(),
         );
         let agent = if inst.tool.is_empty() {
             meta.get(&name)
@@ -928,10 +931,12 @@ async fn watch_loop(
 
 #[tracing::instrument(target = "cli.ps", skip_all, fields(profile = %profile))]
 pub async fn run(profile: &str, profile_explicit: bool, args: PsArgs) -> Result<()> {
+    // `unread_indicator` is global-only, so the global config is enough; a
+    // missing or unreadable one keeps the feature's default (on).
     crate::session::set_unread_enabled(
-        crate::session::config::profile_config::resolve_config_or_warn(profile)
-            .session
-            .unread_indicator,
+        crate::session::config::Config::load()
+            .map(|config| config.session.unread_indicator)
+            .unwrap_or(true),
     );
     if let Some(identifier) = &args.session {
         let row = detail_row(profile, profile_explicit, identifier)?;
