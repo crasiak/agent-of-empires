@@ -216,6 +216,10 @@ pub(crate) struct SessionRead {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub worktree: Option<WorktreeRead>,
     pub workspace_repos: Vec<WorkspaceRepo>,
+    /// Fork: the live pane's reported launch identity. Optional on the wire so
+    /// a daemon that omits it still decodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_identity: Option<crate::session::launch_identity::LaunchIdentity>,
 }
 
 impl SessionRead {
@@ -262,6 +266,7 @@ impl SessionRead {
                     branch: repo.branch.clone(),
                 })
                 .collect(),
+            launch_identity: row.launch_identity.cloned(),
         }
     }
 }
@@ -1276,6 +1281,7 @@ mod tests {
             has_managed_worktree: false,
             worktree: None,
             workspace_repos: vec![],
+            launch_identity: None,
         };
         value.sessions = vec![base.clone()];
         assert_eq!(
@@ -1354,6 +1360,7 @@ mod tests {
             has_managed_worktree: false,
             worktree: None,
             workspace_repos: vec![],
+            launch_identity: None,
         };
         value.sessions = (0..len)
             .map(|index| {
@@ -1681,6 +1688,7 @@ mod tests {
             has_managed_worktree: false,
             worktree: None,
             workspace_repos: repos,
+            launch_identity: None,
         }
     }
     #[test]

@@ -2376,7 +2376,6 @@ thread_local! {
     static AGENT_PROBE_LOCK_CONTENDED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
 fn lock_agent_probe() -> std::sync::MutexGuard<'static, ()> {
     #[cfg(test)]
     if let Some(contended) = AGENT_PROBE_LOCK_CONTENDED.with(|slot| slot.borrow_mut().take()) {
@@ -2458,7 +2457,7 @@ fn probe_agents_available_inner(
             }
         }
     } else {
-        AGENT_PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        lock_agent_probe()
     };
     if force {
         *AGENT_AVAILABILITY

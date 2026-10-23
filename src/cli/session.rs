@@ -572,6 +572,7 @@ struct SessionDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_session_id: Option<String>,
     profile: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     launch_identity: Option<crate::session::launch_identity::LaunchIdentity>,
 }
 

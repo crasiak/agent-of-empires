@@ -441,6 +441,8 @@ fn render_show(
             #[serde(skip_serializing_if = "Option::is_none")]
             parent_session_id: Option<String>,
             profile: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            launch_identity: Option<crate::session::launch_identity::LaunchIdentity>,
         }
         return json_lines(&ShowJson {
             id: session.id.clone(),
@@ -458,6 +460,7 @@ fn render_show(
             agent_session_id: session.agent_session_id.clone(),
             parent_session_id: session.parent_session_id.clone(),
             profile: profile_name.to_string(),
+            launch_identity: session.launch_identity.clone(),
         })
         .map(Projection::text);
     }
@@ -970,6 +973,7 @@ mod tests {
             has_managed_worktree: false,
             worktree: None,
             workspace_repos: vec![],
+            launch_identity: None,
         }
     }
 
@@ -1242,6 +1246,38 @@ mod tests {
         .unwrap()
         .stdout;
         assert!(human.contains("  Status:  Waiting\n"), "{human}");
+    }
+
+    /// Fork launch identity: the served `session show --json` carries it like
+    /// the local command, and both omit it when no pane reported one, so the
+    /// two transports print the same bytes.
+    #[test]
+    fn show_json_carries_launch_identity_only_when_reported() {
+        use crate::session::launch_identity::{LaunchAccount, LaunchIdentity, Launcher};
+        let show = |row: SessionRead| {
+            render_show(
+                &ShowArgs {
+                    identifier: Some("a".into()),
+                    json: true,
+                },
+                &snapshot(vec![row]),
+                &source(),
+            )
+            .unwrap()
+            .stdout
+        };
+        let plain = show(session("a", WireStatus::Idle));
+        assert!(!plain.contains("launch_identity"), "{plain}");
+        let mut reported = session("a", WireStatus::Idle);
+        reported.launch_identity = Some(LaunchIdentity {
+            agent: "claude".into(),
+            account: LaunchAccount::Work,
+            launcher: Launcher::Ledger,
+            profile: "work".into(),
+        });
+        let json = show(reported);
+        assert!(json.contains("\"launch_identity\": {"), "{json}");
+        assert!(json.contains("\"launcher\": \"ledger\""), "{json}");
     }
 
     #[test]

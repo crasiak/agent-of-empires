@@ -31,6 +31,8 @@ pub(crate) struct SessionProjection<'a> {
     pub parent_session_id: Option<&'a str>,
     pub worktree: Option<&'a WorktreeInfo>,
     pub workspace_repos: &'a [WorkspaceRepo],
+    /// Fork: the identity the live pane's launcher reported, if any.
+    pub launch_identity: Option<&'a crate::session::launch_identity::LaunchIdentity>,
 }
 
 impl<'a> SessionProjection<'a> {
@@ -57,6 +59,7 @@ impl<'a> SessionProjection<'a> {
             parent_session_id: inst.parent_session_id.as_deref(),
             worktree: inst.worktree_info.as_ref(),
             workspace_repos: inst.all_repos(),
+            launch_identity: inst.current_launch_identity(),
         }
     }
 
