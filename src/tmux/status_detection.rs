@@ -2141,6 +2141,85 @@ enter to select · esc to cancel";
         }
     }
 
+    /// Pi's extension writes the hook file on every turn boundary, so a write
+    /// outranks the screen either way; with no write the screen still decides.
+    #[test]
+    fn pi_hook_outranks_the_screen_and_the_screen_is_the_fallback() {
+        let parked = PI_FINISHED_PANE_WITH_ACTIVITY_PROSE;
+        let busy = PI_RUNNING_PANE;
+        let buried = pane_with_line_at_depth("⠴ Working...", 10);
+        for (desc, hook, pane, expected) in [
+            ("no hook, busy", None, busy, Status::Running),
+            ("no hook, parked", None, parked, Status::Idle),
+            (
+                "no hook, spinner past the footer",
+                None,
+                buried.as_str(),
+                Status::Idle,
+            ),
+            (
+                "waiting over a busy screen",
+                hook(Status::Waiting, secs(0)),
+                busy,
+                Status::Waiting,
+            ),
+            (
+                "waiting over a parked screen",
+                hook(Status::Waiting, secs(0)),
+                parked,
+                Status::Waiting,
+            ),
+            (
+                "hours-old waiting still stands",
+                hook(Status::Waiting, secs(7200)),
+                parked,
+                Status::Waiting,
+            ),
+            (
+                "fresh running over a parked screen",
+                hook(Status::Running, secs(1)),
+                parked,
+                Status::Running,
+            ),
+            (
+                "running over a buried spinner",
+                hook(Status::Running, secs(600)),
+                buried.as_str(),
+                Status::Running,
+            ),
+            (
+                "stale running falls back to the screen",
+                hook(Status::Running, secs(901)),
+                parked,
+                Status::Idle,
+            ),
+            (
+                "stale running, busy screen",
+                hook(Status::Running, secs(901)),
+                busy,
+                Status::Running,
+            ),
+            (
+                "idle over a busy screen",
+                hook(Status::Idle, secs(0)),
+                busy,
+                Status::Idle,
+            ),
+            (
+                "hours-old idle still stands",
+                hook(Status::Idle, secs(7200)),
+                busy,
+                Status::Idle,
+            ),
+        ] {
+            assert_eq!(
+                detect_via_manifest("pi", pane, "", hook),
+                expected,
+                "{desc}"
+            );
+        }
+    }
+
     #[test]
     fn test_claude_background_wait_only_counts_in_the_status_slot() {
         let stale = "\

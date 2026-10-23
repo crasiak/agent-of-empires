@@ -1563,4 +1563,68 @@ Esc to cancel \u{b7} Tab to amend \u{b7} ctrl+e to explain\n\
             "death outranks a protected wrapper and title"
         );
     }
+
+    /// Pi's extension-written hook file decides its status over the screen,
+    /// the screen still decides without one, and a dead pane is an Error.
+    #[test]
+    #[serial_test::serial]
+    fn pi_hook_status_outranks_the_screen() {
+        let home = crate::session::test_support::isolate_app_dir();
+        let (_hooks, _base, _hooks_tmp) = crate::hooks::test_support::BaseGuard::ready();
+        if !tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+
+        // A parked Pi frame: no spinner, prompt rules, footer.
+        let rule = "\u{2500}".repeat(40);
+        let pane = format!(
+            "Twelve is a dozen.\n{rule}\n\n{rule}\n/tmp\n0.0%/272k (auto)   gpt-5.5 \u{2022} medium\n"
+        );
+        let pane_file = home.path().join("pane.txt");
+        std::fs::write(&pane_file, pane).expect("write pane fixture");
+
+        let probe = Instance::new("aoe_test_pi_hook", "/tmp");
+        let session_name = tmux::Session::generate_name(&probe.id, &probe.title);
+        let _guard = spawn_pane(
+            &session_name,
+            &format!("cat {}; sleep 300", shell_quote(&pane_file)),
+        );
+        assert!(
+            wait_for_pane(&session_name, "Twelve is a dozen."),
+            "Pi fixture never painted into the tmux pane"
+        );
+        let cache = crate::tmux::SessionCacheGuard::capture();
+        let live = agent_pane_metadata("pi", None);
+        let dead = tmux::PaneMetadata {
+            pane_dead: true,
+            ..agent_pane_metadata("pi", None)
+        };
+
+        for (hook, metadata, expected) in [
+            (None, &live, Status::Idle),
+            (Some("running"), &live, Status::Running),
+            (Some("waiting"), &live, Status::Waiting),
+            (Some("idle"), &live, Status::Idle),
+            (Some("running"), &dead, Status::Error),
+        ] {
+            let mut inst = Instance::new("aoe_test_pi_hook", "/tmp");
+            inst.id = probe.id.clone();
+            inst.tool = "pi".into();
+            inst.view = crate::session::View::Terminal;
+            inst.status = Status::Idle;
+            crate::hooks::cleanup_hook_status_dir(&inst.id);
+            if let Some(status) = hook {
+                write_hook_status(&inst.id, status);
+            }
+            cache.force_present(&[session_name.as_str()]);
+            inst.update_status_once(Some(metadata), Some(&session_name));
+            assert_eq!(
+                inst.status, expected,
+                "hook={hook:?} dead={}",
+                metadata.pane_dead
+            );
+        }
+        crate::hooks::cleanup_hook_status_dir(&probe.id);
+    }
 }
