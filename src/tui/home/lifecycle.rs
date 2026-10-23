@@ -486,6 +486,7 @@ impl HomeView {
                 .unwrap_or(true),
             trashed_section_collapsed: true,
             hide_stopped_in_groups: false,
+            hide_empty_groups: resolved.session.hide_empty_groups,
             group_totals: HashMap::new(),
             recovery_rx: None,
             opener_exits: Vec::new(),

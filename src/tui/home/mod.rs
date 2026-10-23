@@ -443,6 +443,7 @@ pub struct HomeView {
 
     /// Stopped sessions inside groups are left out of the sidebar, for this run only.
     pub(super) hide_stopped_in_groups: bool,
+    pub(super) hide_empty_groups: bool,
     /// While stopped sessions are hidden, each group header's full count, keyed by path and
     /// profile, so the header can show `visible/total`.
     pub(super) group_totals: HashMap<(String, Option<String>), usize>,

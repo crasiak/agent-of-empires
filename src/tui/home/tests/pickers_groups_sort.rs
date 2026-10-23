@@ -600,6 +600,7 @@ fn test_delete_group_with_sessions_updates_groups_field() {
         crate::file_watch::FileWatchService::noop(),
     )
     .unwrap();
+    view.hide_empty_groups = false;
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
     view.update_selected();
@@ -2369,6 +2370,7 @@ fn test_cross_group_move_lands_in_an_empty_neighbour() {
         instance_in("c1", "/tmp/c1", "gamma"),
     ];
     let mut env = seeded_env(test_home(), &instances, true);
+    env.view.hide_empty_groups = false;
     // "beta" sits between them with no sessions of its own.
     Storage::open_unwatched("test")
         .unwrap()
@@ -2812,6 +2814,7 @@ fn test_an_empty_group_moves_in_a_unified_single_profile_view() {
         .unwrap();
 
     let mut view = test_view(None);
+    view.hide_empty_groups = false;
     assert!(view.active_profile.is_none(), "a unified view");
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.apply_sort_order(SortOrder::Custom);
