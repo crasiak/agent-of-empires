@@ -105,6 +105,56 @@ struct TmuxState {
     pid: Option<u32>,
     activity_epoch: Option<i64>,
     agent: String,
+    signals: Signals,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AttentionJson {
+    summary: String,
+    since: String,
+}
+
+/// Live signals appended to a JSON row, each omitted when unknown.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+struct Signals {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_activity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unread: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idle_since: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attention: Option<AttentionJson>,
+}
+
+fn rfc3339(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+impl Signals {
+    /// `unread` is `None` when the indicator is off; `idle_entered_at` counts
+    /// only for a row that is idle now.
+    fn new(
+        window_activity: Option<i64>,
+        unread: Option<bool>,
+        status: Status,
+        idle_entered_at: Option<chrono::DateTime<chrono::Utc>>,
+        attention: Option<crate::hooks::HookAttention>,
+    ) -> Self {
+        Self {
+            last_activity: window_activity
+                .and_then(|epoch| chrono::DateTime::from_timestamp(epoch, 0))
+                .map(rfc3339),
+            unread,
+            idle_since: idle_entered_at
+                .filter(|_| status == Status::Idle)
+                .map(rfc3339),
+            attention: attention.map(|attention| AttentionJson {
+                summary: attention.summary,
+                since: rfc3339(attention.since.into()),
+            }),
+        }
+    }
 }
 
 struct AcpExtra {
@@ -138,6 +188,7 @@ struct Row {
     is_orphan: bool,
     acp_extra: Option<AcpExtra>,
     started_at: u64,
+    signals: Signals,
 }
 
 fn normalize_tmux_state(status: Status) -> &'static str {
@@ -203,6 +254,7 @@ fn merge_rows(
             is_orphan,
             acp_extra: None,
             started_at: 0,
+            signals: st.signals.clone(),
         });
     }
 
@@ -233,6 +285,7 @@ fn merge_rows(
             is_orphan,
             acp_extra: st.acp_extra,
             started_at: st.started_at,
+            signals: Signals::default(),
         });
     }
 
@@ -267,6 +320,8 @@ struct RowJson {
     pid: Option<u32>,
     age_secs: Option<u64>,
     agent: String,
+    #[serde(flatten)]
+    signals: Signals,
 }
 
 fn rows_json(rows: &[Row]) -> Vec<RowJson> {
@@ -278,6 +333,7 @@ fn rows_json(rows: &[Row]) -> Vec<RowJson> {
             pid: r.pid,
             age_secs: r.age_secs,
             agent: r.agent.clone(),
+            signals: r.signals.clone(),
         })
         .collect()
 }
@@ -560,6 +616,13 @@ fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
             &crate::tmux::Session::generate_name(&inst.id, &inst.title),
         );
         inst.update_status_once(meta.get(&name), Some(&name));
+        let signals = Signals::new(
+            meta.get(&name).and_then(|m| m.window_activity),
+            crate::session::unread_enabled().then_some(inst.unread),
+            inst.status,
+            inst.idle_entered_at,
+            crate::hooks::read_hook_attention(&inst.id),
+        );
         let agent = if inst.tool.is_empty() {
             meta.get(&name)
                 .and_then(|m| m.pane_current_command.clone())
@@ -578,6 +641,7 @@ fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
             ),
             activity_epoch: crate::tmux::session_activity(&name),
             agent,
+            signals,
         });
         known.insert(name);
     }
@@ -602,6 +666,7 @@ fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
             ),
             activity_epoch: crate::tmux::session_activity(name),
             agent: m.pane_current_command.clone().unwrap_or_default(),
+            signals: Signals::new(m.window_activity, None, Status::Idle, None, None),
         });
     }
 
@@ -830,6 +895,7 @@ fn detail_row(profile: &str, profile_explicit: bool, identifier: &str) -> Result
         is_orphan: false,
         acp_extra: None,
         started_at: 0,
+        signals: Signals::default(),
     }))
 }
 
@@ -862,6 +928,11 @@ async fn watch_loop(
 
 #[tracing::instrument(target = "cli.ps", skip_all, fields(profile = %profile))]
 pub async fn run(profile: &str, profile_explicit: bool, args: PsArgs) -> Result<()> {
+    crate::session::set_unread_enabled(
+        crate::session::config::profile_config::resolve_config_or_warn(profile)
+            .session
+            .unread_indicator,
+    );
     if let Some(identifier) = &args.session {
         let row = detail_row(profile, profile_explicit, identifier)?;
         if args.json {
@@ -980,6 +1051,7 @@ mod tests {
             pid: Some(42),
             activity_epoch: Some(ACTIVITY),
             agent: "claude".to_string(),
+            signals: Signals::default(),
         }
     }
 
@@ -1015,6 +1087,7 @@ mod tests {
             is_orphan,
             acp_extra: None,
             started_at: 0,
+            signals: Signals::default(),
         }
     }
 
@@ -1178,6 +1251,100 @@ mod tests {
 
         assert!(rows_json(&[]).is_empty());
         assert_eq!(serde_json::to_string(&rows_json(&[])).unwrap(), "[]");
+    }
+
+    /// The switchboard contract: the old keys keep their order, the live
+    /// signals follow them, and each signal is omitted when unknown.
+    #[test]
+    fn row_json_appends_live_signals_and_omits_unknown_ones() {
+        const OLD_KEYS: [&str; 6] = ["session", "substrate", "state", "pid", "age_secs", "agent"];
+        let instances = vec![inst("abcd1234ef567890", "My Session")];
+        let idle_entered = chrono::DateTime::from_timestamp(1_700_000_050, 123_000_000).unwrap();
+        let asked = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_100);
+        let attention = || crate::hooks::HookAttention {
+            summary: "Ship it?".to_string(),
+            since: asked,
+        };
+        let cases = [
+            (Signals::default(), serde_json::json!({})),
+            (
+                Signals::new(
+                    Some(1_700_000_000),
+                    Some(false),
+                    Status::Running,
+                    None,
+                    None,
+                ),
+                serde_json::json!({ "last_activity": "2023-11-14T22:13:20Z", "unread": false }),
+            ),
+            (
+                Signals::new(
+                    Some(1_700_000_000),
+                    Some(true),
+                    Status::Idle,
+                    Some(idle_entered),
+                    None,
+                ),
+                serde_json::json!({
+                    "last_activity": "2023-11-14T22:13:20Z",
+                    "unread": true,
+                    "idle_since": "2023-11-14T22:14:10Z",
+                }),
+            ),
+            // A stale `idle_entered_at` on a row that is no longer idle says nothing.
+            (
+                Signals::new(None, None, Status::Running, Some(idle_entered), None),
+                serde_json::json!({}),
+            ),
+            (
+                Signals::new(None, None, Status::Waiting, None, Some(attention())),
+                serde_json::json!({
+                    "attention": { "summary": "Ship it?", "since": "2023-11-14T22:15:00Z" },
+                }),
+            ),
+        ];
+        for (signals, expected) in cases {
+            let mut tmux = tmux_state("aoe_My_Session_abcd1234", Status::Running);
+            tmux.signals = signals;
+            let rows = merge_rows(
+                &instances,
+                &[tmux],
+                vec![],
+                2000,
+                SubstrateFilter::All,
+                false,
+            );
+            let value = serde_json::to_value(rows_json(&rows)).unwrap();
+            let row = value[0].as_object().unwrap();
+            let keys: Vec<&str> = row.keys().map(String::as_str).collect();
+            let added: Vec<&str> = expected
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(keys, [&OLD_KEYS[..], &added[..]].concat(), "{expected}");
+            assert_eq!(row["session"], "abcd1234ef567890");
+            assert_eq!(row["state"], "running");
+            assert_eq!(row["pid"], 42);
+            assert_eq!(row["age_secs"], 1000);
+            assert_eq!(row["agent"], "claude");
+            for (key, want) in expected.as_object().unwrap() {
+                assert_eq!(&row[key], want, "{key}");
+            }
+        }
+
+        // An ACP row carries none of them.
+        let rows = merge_rows(
+            &instances,
+            &[],
+            vec![acp_state("abcd1234ef567890", "running", 1500)],
+            2000,
+            SubstrateFilter::All,
+            false,
+        );
+        let value = serde_json::to_value(rows_json(&rows)).unwrap();
+        assert_eq!(value[0].as_object().unwrap().len(), OLD_KEYS.len());
     }
 
     #[test]

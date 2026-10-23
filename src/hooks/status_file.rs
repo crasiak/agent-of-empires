@@ -25,6 +25,10 @@ const STATUS_FILE_READ_CAP: usize = 64;
 const SESSION_ID_FILE_MAX_PAYLOAD: usize = crate::session::capture::MAX_SESSION_ID_LEN + 1;
 const SESSION_ID_FILE_READ_CAP: usize = SESSION_ID_FILE_MAX_PAYLOAD + 1;
 const ATTENTION_FILE_READ_CAP: usize = 16 * 1024;
+/// Room for a full summary of four-byte characters; the rest is never read.
+const ATTENTION_SUMMARY_READ_CAP: usize = 1024;
+const ATTENTION_SUMMARY_MAX_CHARS: usize = 200;
+const ATTENTION_SUMMARY_FALLBACK: &str = "Waiting for your answer";
 
 /// `<host base>/<instance_id>`. The base is the per-user directory
 /// `/tmp/aoe-hooks-<euid>` resolved by `dir_guard::hook_base_path()`.
@@ -180,6 +184,51 @@ pub(crate) fn read_hook_session_id_within(
     }
     let id = std::str::from_utf8(&bytes).ok()?.trim().to_string();
     crate::session::capture::is_valid_session_id(&id).then_some(id)
+}
+
+/// What a waiting agent is asking, from the hook-written `attention` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookAttention {
+    /// One line of at most 200 characters, with no control characters.
+    pub summary: String,
+    /// The file's mtime: when the agent started waiting.
+    pub since: std::time::SystemTime,
+}
+
+/// The `attention` summary, present only while the hook status is `waiting`.
+///
+/// The file is sanitized whatever wrote it: invalid UTF-8 is replaced,
+/// controls and whitespace runs collapse to one space, and the result is
+/// capped at 200 characters, falling back to a fixed summary when empty.
+pub fn read_hook_attention(instance_id: &str) -> Option<HookAttention> {
+    if read_hook_status(instance_id)? != Status::Waiting {
+        return None;
+    }
+    let dir = dir_guard::open_instance_dir_read_only(instance_id).ok()??;
+    let since = dir_guard::metadata_at(dir.as_fd(), "attention")
+        .ok()??
+        .modified()
+        .ok()?;
+    let bytes =
+        dir_guard::read_file_at(dir.as_fd(), "attention", ATTENTION_SUMMARY_READ_CAP).ok()??;
+    Some(HookAttention {
+        summary: sanitize_attention_summary(&bytes),
+        since,
+    })
+}
+
+fn sanitize_attention_summary(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let line = text
+        .split(|c: char| c.is_control() || c.is_whitespace())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let capped: String = line.chars().take(ATTENTION_SUMMARY_MAX_CHARS).collect();
+    match capped.trim_end() {
+        "" => ATTENTION_SUMMARY_FALLBACK.to_string(),
+        summary => summary.to_string(),
+    }
 }
 
 /// Read the urgent flag from the hook-written `attention.json`.
@@ -357,6 +406,72 @@ mod tests {
                 write_attention_json(id, body);
             }
             assert_eq!(read_hook_urgent(id), expected, "{id}");
+        }
+    }
+
+    /// The summary is read only under a `waiting` status, dated by the file's
+    /// mtime, and always sanitized: whatever wrote it, the result is one line
+    /// of at most 200 characters with no controls.
+    #[test]
+    #[serial_test::serial(hook_base)]
+    fn read_hook_attention_is_gated_on_waiting_and_always_sanitized() {
+        let (_g, base, _tmp) = BaseGuard::ready();
+        let mut hostile = b"  Deploy\x00now?\r\n\x1b[31m\t\xff\xfe".to_vec();
+        hostile.extend_from_slice("\u{85}\u{2028}é".repeat(300).as_bytes());
+        hostile.extend_from_slice(&[b'z'; 4096]);
+        let cases: [(&str, &str, Option<&[u8]>, Option<String>); 7] = [
+            (
+                "att_plain",
+                "waiting",
+                Some(b"Ship it?"),
+                Some("Ship it?".into()),
+            ),
+            ("att_absent", "waiting", None, None),
+            ("att_running", "running", Some(b"Ship it?"), None),
+            ("att_idle", "idle", Some(b"Ship it?"), None),
+            (
+                "att_empty",
+                "waiting",
+                Some(b" \n\t\x07 "),
+                Some("Waiting for your answer".into()),
+            ),
+            (
+                "att_collapsed",
+                "waiting",
+                Some(b"a \n\n  b\x7fc"),
+                Some("a b c".into()),
+            ),
+            (
+                "att_hostile",
+                "waiting",
+                Some(&hostile),
+                Some(
+                    format!("Deploy now? [31m \u{fffd}\u{fffd} {}", "é ".repeat(300))
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string(),
+                ),
+            ),
+        ];
+        for (id, status, attention, expected) in cases {
+            write_status_via_guard(id, status);
+            if let Some(bytes) = attention {
+                let dir = dir_guard::open_instance_dir(id).unwrap();
+                dir_guard::write_short(dir.as_fd(), "attention", bytes).unwrap();
+            }
+            let got = read_hook_attention(id);
+            assert_eq!(got.as_ref().map(|a| a.summary.clone()), expected, "{id}");
+            if let Some(got) = got {
+                assert!(got.summary.chars().count() <= 200, "{id}");
+                assert!(!got.summary.chars().any(char::is_control), "{id}");
+                let mtime = std::fs::metadata(base.join(id).join("attention"))
+                    .unwrap()
+                    .modified()
+                    .unwrap();
+                assert_eq!(got.since, mtime, "{id}");
+            }
         }
     }
 
