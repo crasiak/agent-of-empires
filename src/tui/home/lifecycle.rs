@@ -165,6 +165,7 @@ impl HomeView {
             crate::tui::styles::idle_decay_window(resolved.theme.idle_decay_minutes);
         crate::session::set_unread_enabled(resolved.session.unread_indicator);
         crate::session::set_favorites_first(resolved.session.favorites_first);
+        crate::session::set_preview_link_prefixes(&resolved.session.preview_link_prefixes);
         let user_config = load_config().ok().flatten();
         let sort_order = user_config
             .as_ref()
@@ -198,6 +199,7 @@ impl HomeView {
 
         let config_watch = ConfigWatchState {
             dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            link_policy_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             handles: HashMap::new(),
         };
 
@@ -356,6 +358,7 @@ impl HomeView {
             pending_status_refresh: false,
             show_diagnostics: resolved.session.show_diagnostics_pane,
             show_shortcut_bar: resolved.session.show_shortcut_bar,
+            preview_link_prefixes: resolved.session.preview_link_prefixes.clone(),
             metrics_poller: crate::tui::metrics_poller::MetricsPoller::new(),
             pending_metrics_refresh: false,
             metrics: crate::process::metrics::MetricsSnapshot::default(),
@@ -444,9 +447,9 @@ impl HomeView {
             confirm_before_quit,
             host_tab_title,
             active_tui_count: 1,
-            serve_badge: None,
+            serve_running: false,
             serve_probe: crate::tui::worker::Worker::spawn("aoe-serve-probe", |()| {
-                crate::cli::serve::serve_badge()
+                crate::cli::serve::daemon_pid().is_some()
             }),
             serve_probe_in_flight: false,
             idle_decay_window,
@@ -471,6 +474,12 @@ impl HomeView {
                 .as_ref()
                 .and_then(|c| c.app_state.show_preview_info)
                 .unwrap_or(true),
+            split_terminal: user_config
+                .as_ref()
+                .and_then(|c| c.app_state.home_split_terminal)
+                .unwrap_or(false),
+            split_capture_worker: None,
+            split_capture_target: None,
             archived_section_collapsed: user_config
                 .as_ref()
                 .and_then(|c| c.app_state.archived_section_collapsed)
@@ -479,6 +488,7 @@ impl HomeView {
             hide_stopped_in_groups: false,
             group_totals: HashMap::new(),
             recovery_rx: None,
+            opener_exits: Vec::new(),
             recovery_lock: None,
             recovery_in_flight: std::collections::HashSet::new(),
             restart_cooldown_at: std::collections::HashMap::new(),
@@ -523,71 +533,6 @@ impl HomeView {
             }
         }
 
-        // Batch-sync instance and captured session ids to tmux hidden env so other AoE
-        // instances' build_exclusion_set() sees them. One observation serves both walks
-        // below, which visit every instance, so a per-item `list-sessions` fork would scale
-        // with the whole store and dominate this pass's tmux cost.
-        let live = crate::tmux::LiveSessionSnapshot::new();
-        {
-            let mut set_batch: Vec<(String, String, String)> = Vec::new();
-            let mut unset_batch: Vec<(String, String)> = Vec::new();
-            for inst in view.instances.values() {
-                // This publication is one-shot: no reload re-runs it and a poller does not
-                // re-emit an unchanged sid, so a row dropped here stays unpublished until
-                // an unrelated sid change. A snapshot that could not reach the server is
-                // therefore probed per row rather than read as "no live pane".
-                let Some(tmux_name) = inst.tmux_env_session_name_in_or_probe(&live) else {
-                    continue;
-                };
-
-                set_batch.push((
-                    tmux_name.clone(),
-                    crate::tmux::env::AOE_INSTANCE_ID_KEY.to_string(),
-                    inst.id.clone(),
-                ));
-                if let Some(ref sid) = inst.agent_session_id {
-                    set_batch.push((
-                        tmux_name,
-                        crate::tmux::env::AOE_CAPTURED_SESSION_ID_KEY.to_string(),
-                        sid.clone(),
-                    ));
-                } else {
-                    unset_batch.push((
-                        tmux_name,
-                        crate::tmux::env::AOE_CAPTURED_SESSION_ID_KEY.to_string(),
-                    ));
-                }
-            }
-            if !set_batch.is_empty() {
-                let batch_refs: Vec<(&str, &str, &str)> = set_batch
-                    .iter()
-                    .map(|(s, k, v)| (s.as_str(), k.as_str(), v.as_str()))
-                    .collect();
-                if let Err(e) = crate::tmux::env::set_hidden_env_batch(&batch_refs) {
-                    tracing::warn!(target: "tui.home", "Batch env sync failed: {}", e);
-                }
-            }
-            if !unset_batch.is_empty() {
-                let batch_refs: Vec<(&str, &str)> = unset_batch
-                    .iter()
-                    .map(|(s, k)| (s.as_str(), k.as_str()))
-                    .collect();
-                if let Err(e) = crate::tmux::env::remove_hidden_env_batch(&batch_refs) {
-                    tracing::warn!(target: "tui.home", "Batch env unset failed: {}", e);
-                }
-            }
-        }
-
-        // Recover session IDs for pre-existing sessions via pollers.
-        for inst in view.instances.values_mut() {
-            let has_live_tmux = inst.has_live_tmux_pane_in(&live);
-            if !has_live_tmux {
-                continue;
-            }
-
-            inst.repair_session_id_poller_if_needed(&live);
-        }
-
         view.refresh_registered_projects();
         view.refresh_flat_items();
         view.update_selected();
@@ -598,10 +543,7 @@ impl HomeView {
         let mut initial_disk_profiles: Vec<String> = view.storages.keys().cloned().collect();
         initial_disk_profiles.sort();
         view.rewire_disk_subscriptions(&initial_disk_profiles);
-        // Trashed-worktree relocation (#2522) and repairing a worktree moved outside aoe
-        // (#2002) are healing work, not render input, and cost a git spawn and a storage
-        // write per broken row, so they sweep the loaded profiles on a worker and never
-        // delay the first frame (#3611).
+        // Healing and tmux environment publication run before auto-recovery, off the UI thread.
         view.reconcile_poller.request(initial_disk_profiles.clone());
         // Startup auto-recovery restarts resume-capable sessions whose pane is missing,
         // launching each from its recorded `project_path` and recording the attempt in a

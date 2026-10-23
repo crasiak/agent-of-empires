@@ -877,6 +877,11 @@ pub struct AppStateConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_preview_info: Option<bool>,
 
+    /// Split the home preview into the agent above its paired terminal. `None`/absent
+    /// means a single preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_split_terminal: Option<bool>,
+
     /// True once the user has answered the telemetry opt-in prompt (in any
     /// surface, either by enabling or declining). Gates the one-time
     /// standalone consent popup shown to users who completed the walkthrough
@@ -1724,6 +1729,24 @@ pub struct SessionConfig {
     )]
     pub show_shortcut_bar: bool,
 
+    /// Link targets beyond http and https that a click in the preview may open,
+    /// as `scheme://authority/` prefixes: `vscode://file/` lets an agent print a
+    /// short relative path that opens the file in VS Code. An entry not in that
+    /// form is ignored, and `file:`, `javascript:`, `data:` and `vbscript:`
+    /// never open. Applies to links printed after the change. Empty by default:
+    /// only web links open, and other targets are not passed to the terminal.
+    #[serde(default)]
+    #[setting(
+        label = "Preview link prefixes",
+        widget = "list",
+        category = "Interaction",
+        web = "local_only:hands pane-supplied links to the host's URL handlers",
+        global_only,
+        tui_only,
+        advanced
+    )]
+    pub preview_link_prefixes: Vec<String>,
+
     /// Keep an aoe-managed worktree session's directory leaf in sync with its
     /// title. When enabled (default), renaming the session also moves its
     /// worktree directory, and new sessions derive the directory leaf from the
@@ -1837,9 +1860,13 @@ impl AcpConfig {
     }
 
     pub fn acp_defaults_for(&self, agent: &str) -> Option<&AcpAgentDefaults> {
-        self.acp_defaults
-            .get(agent)
-            .filter(|defaults| !defaults.is_empty())
+        let non_empty = |key: &str| self.acp_defaults.get(key).filter(|d| !d.is_empty());
+        non_empty(agent).or_else(|| {
+            // `claude-code` is the legacy alias stored by older session records.
+            (agent == "claude-code")
+                .then(|| non_empty("claude"))
+                .flatten()
+        })
     }
 
     /// The model `agent` is pinned to (`pin_model` with a non-empty `model`).
@@ -2054,6 +2081,7 @@ impl Default for SessionConfig {
             favorites_first: true,
             show_tips: true,
             show_shortcut_bar: true,
+            preview_link_prefixes: Vec::new(),
             tie_workdir_to_name: true,
         }
     }
@@ -2328,6 +2356,13 @@ pub struct WebConfig {
     #[serde(default = "default_true")]
     #[setting(label = "Notify on scheduled wake", widget = "toggle", global_only)]
     pub notify_on_wake_fire: bool,
+
+    /// Serve a Model Context Protocol server at `/mcp` on the daemon so MCP
+    /// clients holding the daemon token can list and drive sessions. When
+    /// false the route does not exist. Read at daemon startup.
+    #[serde(default)]
+    #[setting(label = "MCP server", widget = "toggle", global_only)]
+    pub mcp_enabled: bool,
 }
 
 impl Default for WebConfig {
@@ -2338,6 +2373,7 @@ impl Default for WebConfig {
             notify_on_idle: false,
             notify_on_error: true,
             notify_on_wake_fire: true,
+            mcp_enabled: false,
         }
     }
 }
@@ -4490,6 +4526,47 @@ mod tests {
         assert_eq!(config.pinned_model_for("gemini"), None);
     }
 
+    /// The legacy `claude-code` key prefers its own non-empty entry and only
+    /// falls back to `claude` when it has none.
+    #[test]
+    fn acp_defaults_claude_code_alias_prefers_its_own_entry() {
+        let entry = |model: Option<&str>| AcpAgentDefaults {
+            model: model.map(str::to_string),
+            pin_model: model.is_some(),
+            ..Default::default()
+        };
+        let cases: [(&[(&str, Option<&str>)], Option<&str>); 4] = [
+            (&[("claude", Some("canon"))], Some("canon")),
+            (&[("claude-code", Some("alias"))], Some("alias")),
+            (
+                &[("claude", Some("canon")), ("claude-code", Some("alias"))],
+                Some("alias"),
+            ),
+            (
+                &[("claude", Some("canon")), ("claude-code", None)],
+                Some("canon"),
+            ),
+        ];
+        for (entries, want) in cases {
+            let mut config = AcpConfig::default();
+            for (key, model) in entries {
+                config.acp_defaults.insert(key.to_string(), entry(*model));
+            }
+            assert_eq!(
+                config
+                    .acp_defaults_for("claude-code")
+                    .and_then(|d| d.model.as_deref()),
+                want,
+                "{entries:?}"
+            );
+            assert_eq!(
+                config.pinned_model_for("claude-code").as_deref(),
+                want,
+                "{entries:?}"
+            );
+        }
+    }
+
     /// Spawn resolution precedence: a pin replaces the request, an explicit
     /// request otherwise beats the configured default, blank values on either
     /// side are unset, and the per-model effort is keyed on the model that
@@ -4540,6 +4617,7 @@ mod tests {
             (Some(&flat), Some("  "), Some(""), Some("def"), Some("lo")),
             (Some(&keyed), None, None, Some("def"), Some("hi")),
             (Some(&keyed), Some("req"), None, Some("req"), Some("lo")),
+            (Some(&keyed), None, Some("med"), Some("def"), Some("med")),
             (
                 Some(&bare),
                 Some(" def "),
