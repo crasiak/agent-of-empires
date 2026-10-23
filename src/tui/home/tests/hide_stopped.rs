@@ -34,7 +34,9 @@ fn env_with_stopped(manual: bool) -> TestEnv {
             Status::Stopped,
         ),
     ];
-    seeded_env(test_home(), &instances, manual)
+    let home = test_home();
+    crate::session::update_config(|config| config.session.hide_empty_groups = false).unwrap();
+    seeded_env(home, &instances, manual)
 }
 
 fn session_titles(view: &HomeView) -> Vec<String> {
@@ -108,6 +110,7 @@ fn hide_stopped_composes_with_highlight_filters_and_project_aliases() {
 
     for grouping in [GroupByMode::Manual, GroupByMode::Project] {
         let mut env = seeded_env(test_home(), &instances, true);
+        env.view.hide_empty_groups = false;
         env.view.group_by = grouping;
         env.view.sort_order = SortOrder::AZ;
         for group in ["alpha", "beta", "gamma"] {
@@ -448,6 +451,7 @@ fn each_profile_counts_its_own_copy_of_a_group() {
         ],
     );
     let mut view = test_view(None);
+    view.hide_empty_groups = false;
     view.group_by = GroupByMode::Manual;
     view.rebuild_flat_items();
     view.update_selected();

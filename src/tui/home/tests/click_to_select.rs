@@ -756,6 +756,7 @@ fn create_all_profiles_env_with_shared_group_path(temp: &TempDir) -> HomeView {
         .unwrap();
 
     let _ = temp;
+    crate::session::update_config(|config| config.session.hide_empty_groups = false).unwrap();
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view =
         HomeView::new_for_test(None, tools, crate::file_watch::FileWatchService::noop()).unwrap();

@@ -53,6 +53,7 @@ mod dialog_mouse;
 mod divider_drag;
 mod footer_toolbar;
 mod fork_rename_dialogs;
+mod hide_empty_groups;
 mod hide_stopped;
 mod keys_and_nav;
 mod live_send_boot_size_tests;
