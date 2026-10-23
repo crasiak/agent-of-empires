@@ -1117,12 +1117,20 @@ mod tests {
         });
         let mut empty_path = named("empty-path", "main");
         empty_path.project_path.clear();
+        let mut rows: Vec<SessionRead> = [session, empty_path]
+            .iter()
+            .map(SessionRead::from_instance)
+            .collect();
+        // Fork: a row whose live pane reported its launch identity.
+        rows[0].launch_identity = Some(crate::session::launch_identity::LaunchIdentity {
+            agent: "claude".into(),
+            account: crate::session::launch_identity::LaunchAccount::Work,
+            launcher: crate::session::launch_identity::Launcher::LedgerHeadroom,
+            profile: "work".into(),
+        });
         let sampled = build_snapshot(
             &RuntimeState::new(),
-            [session, empty_path]
-                .iter()
-                .map(SessionRead::from_instance)
-                .collect(),
+            rows,
             Owner::remote(),
             Utc::now(),
             &crate::server::reload::RuntimeReadCache::accepted_inventory(),
@@ -1132,6 +1140,12 @@ mod tests {
             (SNAPSHOT_SCHEMA, snapshot_frame(&sampled)),
         ] {
             let frame: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if schema == SNAPSHOT_SCHEMA {
+                assert!(
+                    frame["data"].to_string().contains("\"launch_identity\""),
+                    "the reported identity must actually be emitted"
+                );
+            }
             validate_data(schema, &frame["data"]).unwrap();
         }
     }

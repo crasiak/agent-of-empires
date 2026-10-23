@@ -466,13 +466,19 @@ fn render_show(
     }
 
     let mut output = format!(
-        "Session: {}\n  ID:      {}\n  Path:    {}\n  Group:   {}\n  Tool:    {}\n  Command: {}\n  Status:  {}\n",
+        "Session: {}\n  ID:      {}\n  Path:    {}\n  Group:   {}\n  Tool:    {}\n  Command: {}\n  Launch:  {}\n  Status:  {}\n",
         terminal_text(&session.title),
         session.id,
         terminal_text(&session.project_path),
         terminal_text(&session.group_path),
         terminal_text(&session.tool),
         terminal_text(&session.command),
+        // Fork: the same line the local `aoe session show` prints.
+        session
+            .launch_identity
+            .as_ref()
+            .map(|identity| terminal_text(&identity.description()).into_owned())
+            .unwrap_or_else(|| "unknown".into()),
         session.status.as_str()
     );
     let timestamp = match session.state {
@@ -1275,9 +1281,34 @@ mod tests {
             launcher: Launcher::Ledger,
             profile: "work".into(),
         });
-        let json = show(reported);
+        let json = show(reported.clone());
         assert!(json.contains("\"launch_identity\": {"), "{json}");
         assert!(json.contains("\"launcher\": \"ledger\""), "{json}");
+
+        // The human view prints the same `Launch:` line as the local command.
+        let human = |row: SessionRead| {
+            render_show(
+                &ShowArgs {
+                    identifier: Some("a".into()),
+                    json: false,
+                },
+                &snapshot(vec![row]),
+                &source(),
+            )
+            .unwrap()
+            .stdout
+        };
+        let plain = human(session("a", WireStatus::Idle));
+        assert!(
+            plain.contains("  Command: \n  Launch:  unknown\n  Status:  Idle\n"),
+            "{plain}"
+        );
+        let described = reported.launch_identity.as_ref().unwrap().description();
+        let shown = human(reported);
+        assert!(
+            shown.contains(&format!("  Launch:  {described}\n  Status:")),
+            "{shown}"
+        );
     }
 
     #[test]

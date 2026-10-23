@@ -327,7 +327,20 @@
         "worktree": {
           "oneOf": [{ "$ref": "#/$defs/worktree_read" }, { "type": "null" }]
         },
-        "workspace_repos": { "type": "array", "items": { "$ref": "#/$defs/workspace_repo" } }
+        "workspace_repos": { "type": "array", "items": { "$ref": "#/$defs/workspace_repo" } },
+        "launch_identity": { "$ref": "#/$defs/launch_identity" }
+      }
+    },
+    "launch_identity": {
+      "type": "object",
+      "description": "Fork: the identity the live pane's launcher reported. Optional; omitted when no pane reported one.",
+      "additionalProperties": false,
+      "required": ["agent", "account", "launcher", "profile"],
+      "properties": {
+        "agent": { "type": "string" },
+        "account": { "enum": ["personal", "work", "unknown"] },
+        "launcher": { "enum": ["direct", "headroom", "ledger", "ledger-headroom", "unknown"] },
+        "profile": { "type": "string" }
       }
     }
   }
