@@ -2,7 +2,7 @@
 // report context resets, prompts, and turns to AoE's usage log, and write AoE's
 // hook status file so a turn's state does not depend on reading the screen.
 import { spawn } from "node:child_process";
-import { closeSync, lstatSync, mkdirSync, openSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 // AoE's validate_instance_id: 1 to 64 bytes of [0-9a-zA-Z_-].
@@ -187,7 +187,7 @@ export default function (pi) {
   const writeAtomic = (target, value) => {
     let tmp;
     try {
-      mkdirSync(dirname(target), { recursive: true });
+      mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
       // Rename so a reader never sees a half-written value.
       tmp = join(dirname(target), `.${target.split("/").pop()}.${process.pid}.tmp`);
       writeFileSync(tmp, `${value}\n`, { mode: 0o600 });
