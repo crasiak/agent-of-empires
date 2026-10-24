@@ -270,7 +270,7 @@ pub(crate) struct LiveSession {
 
 #[cfg(test)]
 impl LiveSession {
-    fn unmarked() -> Self {
+    pub(crate) fn unmarked() -> Self {
         Self {
             activity: 0,
             kind: None,
@@ -1200,7 +1200,9 @@ fn split_pane_metadata_tail(line: &str) -> (&str, Option<&str>, Option<&str>) {
     }
 }
 
-/// Filters to aoe sessions, pane index 0, first window per session.
+/// Filters to aoe sessions and keeps each session's first-listed pane:
+/// `list-panes -a` lists windows by index, then panes by index, so that is the
+/// lowest window's lowest pane whatever `pane-base-index` is.
 fn parse_pane_metadata(output: &str) -> HashMap<String, PaneMetadata> {
     let mut map = HashMap::new();
 
@@ -1221,7 +1223,7 @@ fn parse_pane_metadata(output: &str) -> HashMap<String, PaneMetadata> {
         let mut parts = line.splitn(7, FIELD_SEP);
         let (
             Some(session_name),
-            Some(pane_index),
+            Some(_pane_index),
             Some(pane_dead),
             Some(window_width),
             Some(window_height),
@@ -1249,10 +1251,6 @@ fn parse_pane_metadata(output: &str) -> HashMap<String, PaneMetadata> {
             None => (rest, None),
         };
         if !session_name.starts_with(SESSION_PREFIX) {
-            continue;
-        }
-
-        if pane_index != "0" {
             continue;
         }
 
@@ -4181,7 +4179,7 @@ mod tests {
         }
     }
 
-    /// One row per aoe session: pane and window zero, first line wins.
+    /// One row per aoe session: its first-listed pane wins.
     #[test]
     fn parse_pane_metadata_row_selection_table() {
         type Want<'a> = &'a [(&'a str, Option<&'a str>, bool)];
@@ -4199,7 +4197,7 @@ mod tests {
                 &[("proj_abc12345", Some("claude"), false)],
             ),
             (
-                "non-zero panes filtered",
+                "later panes filtered",
                 format!(
                     "{P}proj_abc12345|0|0|190|52|claude|claude\n{P}proj_abc12345|1|0|190|52|bash|bash\n"
                 ),
@@ -4246,6 +4244,35 @@ mod tests {
             }
         }
     }
+
+    // CRA-1199: under `pane-base-index 1` a session has no pane 0. Its first
+    // listed pane (list-panes -a orders by window, then pane) is the agent
+    // pane; dropping it cost every such session a pid and a pane_dead spawn.
+    #[test]
+    fn parse_pane_metadata_keeps_the_first_listed_pane_whatever_its_index() {
+        let output = format!(
+            "{P}one_abc12345|1|0|190|52|claude|claude|101\n\
+             {P}two_def67890|1|1|190|52|bash|bash|201\n\
+             {P}two_def67890|2|0|190|52|claude|claude|202\n"
+        );
+        let map = parse_pane_metadata(&output);
+        assert_eq!(map.len(), 2, "{map:?}");
+        for (suffix, pid, dead, command) in [
+            ("one_abc12345", 101, false, "claude"),
+            ("two_def67890", 201, true, "bash"),
+        ] {
+            let name = format!("{P}{suffix}");
+            let meta = map.get(&name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(meta.pane_pid, Some(pid), "{name}");
+            assert_eq!(meta.pane_dead, dead, "{name}");
+            assert_eq!(
+                meta.pane_current_command.as_deref(),
+                Some(command),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn a_failed_pane_snapshot_is_an_answer_so_rows_do_not_re_fork() {
