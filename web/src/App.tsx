@@ -134,6 +134,7 @@ import { AppShellSkeleton, MainPaneSkeleton } from "./components/AppShellSkeleto
 import { ContentSplit } from "./components/ContentSplit";
 import { SessionInfo } from "./components/SessionInfo";
 import { TerminalSessionStack } from "./components/TerminalSessionStack";
+import { TailoredSessionsOverlay, type CaptureAccount } from "./components/TailoredSessionsOverlay";
 // Lazy-load the acp surface so non-acp users never download
 // the @assistant-ui/react, shiki, and in-house StringDiff/DiffLine
 // dependency tree. Cuts ~hundreds of KB off the cold-start bundle
@@ -810,6 +811,8 @@ function AppContent({
   // session the user never opens the shell on.
   const [pairedMounted, setPairedMounted] = useState(false);
   const [showSessionWizard, setShowSessionWizard] = useState(false);
+  const [showTailored, setShowTailored] = useState(false);
+  const [captureAccount, setCaptureAccount] = useState<CaptureAccount>("personal");
   const [showHelp, setShowHelp] = useState(false);
   const tipsAutoPoppedRef = useRef(false);
   // Pending `requestAnimationFrame` id for the tips auto-pop, cancelled only on
@@ -1781,6 +1784,11 @@ function AppContent({
         onJumpToAttention: handleJumpToAttention,
         onFocusSidebar: handleFocusSidebar,
         onNewScratch: handleNewScratch,
+        onTailored: () => {
+          if (serverAbout?.read_only || !caps.canUseTerminal) return;
+          if (!showTailored && document.querySelector('[aria-modal="true"]')) return;
+          setShowTailored((open) => !open);
+        },
         onDiff: () => toggleDiff(),
         // Escape closes local UI surfaces only (dialogs, palette,
         // wizard, settings, help, file viewer). Never wire this to
@@ -1833,6 +1841,9 @@ function AppContent({
         handleNewScratch,
         handleJumpToAttention,
         handleFocusSidebar,
+        serverAbout?.read_only,
+        caps.canUseTerminal,
+        showTailored,
       ],
     ),
   );
@@ -1993,6 +2004,7 @@ function AppContent({
                     </Suspense>
                   ) : (
                     <TerminalSessionStack
+                      active={!showTailored}
                       activeSessionId={activeSessionId!}
                       sessions={sessions.filter((session) => session.view !== "structured")}
                       persistent={webSettings.persistentTerminals}
@@ -2307,6 +2319,7 @@ function AppContent({
     !activeSessionId &&
     !fullPageView &&
     !showSessionWizard &&
+    !showTailored &&
     !showHelp &&
     !showAbout &&
     !showPalette &&
@@ -2520,6 +2533,17 @@ function AppContent({
             {renderContent()}
           </div>
         </div>
+
+        {showTailored && (
+          <TailoredSessionsOverlay
+            account={captureAccount}
+            onAccountChange={setCaptureAccount}
+            profile={serverAbout?.profile}
+            bootId={serverAbout?.create_boot_id}
+            onCreated={injectSession}
+            onClose={() => setShowTailored(false)}
+          />
+        )}
 
         {showSessionWizard && (
           <SessionWizard

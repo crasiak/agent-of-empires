@@ -380,6 +380,7 @@ export interface DockerStatusResponse {
 }
 
 export interface CreateSessionRequest {
+  tailored?: { preset: "capture-idea"; account: "personal" | "work"; idea: string; immediately: boolean };
   title?: string;
   path: string;
   tool: string;

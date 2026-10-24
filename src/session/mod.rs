@@ -42,6 +42,8 @@ pub mod smart_rename;
 pub mod stop;
 mod storage;
 pub(crate) mod sync;
+pub mod tailored;
+mod tailored_surface;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod trash;

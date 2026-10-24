@@ -13,6 +13,8 @@ pub struct RepoBaseInput {
 
 #[derive(Deserialize)]
 pub struct CreateSessionBody {
+    #[serde(default)]
+    pub tailored: Option<crate::session::tailored::TailoredRequest>,
     pub title: Option<String>,
     pub path: String,
     pub tool: String,
@@ -100,6 +102,72 @@ pub struct CreateSessionBody {
     /// whether it ran, so it refuses rather than run it, and its hooks, again.
     #[serde(default)]
     pub retry_origin: Option<String>,
+}
+
+fn tailored_launch(
+    body: &CreateSessionBody,
+    request: &crate::session::tailored::TailoredRequest,
+    cityhall: bool,
+) -> anyhow::Result<crate::session::tailored::TailoredLaunch> {
+    if cityhall
+        || !body.scratch
+        || !body.path.is_empty()
+        || body.tool != "pi"
+        || body.sandbox
+        || body.worktree_enabled
+        || body.worktree_branch.is_some()
+        || !body.extra_repo_paths.is_empty()
+        || !body.command_override.is_empty()
+        || !body.extra_args.is_empty()
+        || !body.extra_env.is_empty()
+        || body.fork_from.is_some()
+        || body.import_acp_session_id.is_some()
+        || body.view != crate::session::View::Terminal
+        || body.custom_instruction.is_some()
+        || body.agent_name.is_some()
+        || body.agent_model.is_some()
+        || body.agent_effort.is_some()
+    {
+        anyhow::bail!("Tailored Sessions require an unmodified scratch Pi launch in Terminal view");
+    }
+    request.launch()
+}
+
+#[cfg(test)]
+mod tailored_tests {
+    use super::*;
+
+    #[test]
+    fn capture_refuses_client_launch_overrides_and_cityhall() {
+        let value = serde_json::json!({ "path": "", "tool": "pi", "scratch": true,
+            "tailored": { "preset": "capture-idea", "account": "work", "idea": "Capture this" } });
+        let body: CreateSessionBody = serde_json::from_value(value.clone()).unwrap();
+        let request = body.tailored.as_ref().unwrap();
+        assert!(tailored_launch(&body, request, false).is_ok());
+        assert!(tailored_launch(&body, request, true).is_err());
+        for (key, extra) in [
+            ("tool", serde_json::json!("claude")),
+            ("scratch", serde_json::json!(false)),
+            ("path", serde_json::json!("/tmp/repo")),
+            ("view", serde_json::json!("structured")),
+            ("command_override", serde_json::json!("wrapper")),
+            ("extra_args", serde_json::json!("--extension other")),
+            ("extra_env", serde_json::json!(["SECRET=value"])),
+            ("worktree_enabled", serde_json::json!(true)),
+            ("sandbox", serde_json::json!(true)),
+            ("fork_from", serde_json::json!("parent")),
+            ("agent_model", serde_json::json!("other")),
+            ("custom_instruction", serde_json::json!("other")),
+        ] {
+            let mut changed = value.clone();
+            changed[key] = extra;
+            let body: CreateSessionBody = serde_json::from_value(changed).unwrap();
+            assert!(
+                tailored_launch(&body, body.tailored.as_ref().unwrap(), false).is_err(),
+                "{key}"
+            );
+        }
+    }
 }
 
 /// Hard cap on one `idempotency_key`'s length, so a request cannot persist an
@@ -978,6 +1046,36 @@ pub async fn create_session(
         if let Err(msg) = crate::server::callback::validate_callback_url(url) {
             return api_error(StatusCode::BAD_REQUEST, "validation_failed", msg);
         }
+    }
+
+    if let Some(request) = body.tailored.take() {
+        let launch = match tailored_launch(&body, &request, state.cityhall_mode) {
+            Ok(launch) => launch,
+            Err(error) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "validation_failed",
+                    error.to_string(),
+                )
+            }
+        };
+        match tokio::task::spawn_blocking(move || request.verify_profile()).await {
+            Ok(Ok(())) => {}
+            result => {
+                let message = match result {
+                    Ok(Err(error)) => format!("{error:#}"),
+                    Err(error) => error.to_string(),
+                    Ok(Ok(())) => unreachable!(),
+                };
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "tailored_profile_unavailable",
+                    message,
+                );
+            }
+        }
+        body.command_override = launch.command;
+        body.extra_args = launch.extra_args;
     }
 
     let profile = body.profile.unwrap_or_else(|| state.profile.clone());

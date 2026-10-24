@@ -108,7 +108,7 @@ const DIAGNOSTICS_STRIP_HEIGHT: u16 = 1;
 
 const LIVE_SEND_RESIZE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
-fn live_resize_retry_due(
+pub(super) fn live_resize_retry_due(
     retry_at: &mut Option<Instant>,
     resize_failed: bool,
     now: Instant,
@@ -1293,6 +1293,9 @@ impl HomeView {
         );
         if let Some(dialog) = &self.highlight_filter_dialog {
             dialog.render(frame, theme);
+        }
+        if let Some(window) = &mut self.tailored_window {
+            window.render(frame, area, theme);
         }
     }
 

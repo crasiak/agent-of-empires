@@ -10,6 +10,7 @@ export interface ShortcutActions {
   onJumpToAttention: () => void;
   /** Opens the wizard on the Review step for a scratch session. */
   onNewScratch: () => void;
+  onTailored: () => void;
   onDiff: () => void;
   onEscape: () => void;
   onHelp: () => void;
@@ -28,6 +29,7 @@ export type ShortcutId =
   | "terminalFocus"
   | "new"
   | "newScratch"
+  | "tailored"
   | "jumpAttention"
   | "diff"
   | "settings"
@@ -73,6 +75,22 @@ export interface ShortcutDef {
 
 // Overlay display order; matches are mutually exclusive, so order never decides a keydown.
 export const SHORTCUTS: readonly ShortcutDef[] = [
+  {
+    id: "tailored",
+    action: "onTailored",
+    description: "Open Tailored Sessions",
+    chord: { ctrl: true, base: "Y" },
+    trigger: {
+      scope: "global",
+      ctrl: true,
+      meta: false,
+      shift: false,
+      alt: false,
+      code: "KeyY",
+      preventDefault: true,
+      stopPropagation: true,
+    },
+  },
   {
     id: "palette",
     action: "onPalette",

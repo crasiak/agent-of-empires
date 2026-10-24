@@ -28,6 +28,7 @@ mod selection;
 mod send;
 mod status;
 mod store_move;
+mod tailored;
 #[cfg(test)]
 mod tests;
 mod user_action;
@@ -183,6 +184,8 @@ pub struct HomeView {
     pub(super) show_help: bool,
     pub(super) help_scroll: u16,
     pub(super) new_dialog: Option<NewSessionDialog>,
+    pub(super) tailored_window: Option<tailored::TailoredWindow>,
+    pub(super) tailored_account: crate::session::tailored::CaptureAccount,
     pub(super) confirm_dialog: Option<ConfirmDialog>,
     pub(super) unified_delete_dialog: Option<UnifiedDeleteDialog>,
     pub(super) group_delete_options_dialog: Option<GroupDeleteOptionsDialog>,

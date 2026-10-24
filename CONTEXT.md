@@ -40,6 +40,11 @@ A new Session seeded from a parent Session's Agent conversation.
 **Scratch session**:
 A Session with no Project. It runs in a temporary directory AoE owns.
 
+**Tailored Session**:
+A Session launched from a purpose-scoped preset with its own minimal Ledger profile,
+shown in an overlay without leaving the current Session. See
+[the capture workflow](docs/guides/tailored-sessions.md).
+
 **Group**:
 A named container in the session sidebar, addressed by a slash-separated path. Can be collapsed or archived. Archived, Trash and Scratch are synthetic Groups.
 _Avoid_: folder, section

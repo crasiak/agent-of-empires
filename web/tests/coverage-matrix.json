@@ -3,6 +3,26 @@
   "description": "Surface/flow coverage matrix for the agent-of-empires web dashboard. Every component file under web/src/components/** must appear in at least one entry's `components` list (covered, deferred, or out-of-scope), or in coverage-matrix.exempt.json. CI validates this on every PR via tests/validate-coverage-matrix.mjs.",
   "surfaces": [
     {
+      "id": "sessions.tailored-capture.browser",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/tailored-sessions.spec.ts"],
+      "components": [
+        "web/src/components/TailoredSessionsOverlay.tsx",
+        "web/src/components/LiveTerminalView.tsx",
+        "web/src/App.tsx"
+      ],
+      "notes": "Global shortcut from active Session input, portal above the entire shell, inert background, form focus trap, original route preservation, terminal input targeting and focus restoration, plus read-only gating."
+    },
+    {
+      "id": "sessions.tailored-capture",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": ["src/components/__tests__/TailoredSessionsOverlay.test.tsx", "src/hooks/useKeyboardShortcuts.test.ts"],
+      "components": ["web/src/components/TailoredSessionsOverlay.tsx", "web/src/App.tsx"],
+      "notes": "Minimal scratch request, account and Immediately policy, explicit failure, stable-key retry and daemon fencing, pending dismissal, and modal shortcut ownership. Browser focus and route coverage is tracked separately."
+    },
+    {
       "id": "settings.dialog-escape",
       "kind": "mocked-playwright",
       "risk": "high",

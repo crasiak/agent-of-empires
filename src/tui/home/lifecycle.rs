@@ -258,6 +258,8 @@ impl HomeView {
             show_help: false,
             help_scroll: 0,
             new_dialog: None,
+            tailored_window: None,
+            tailored_account: crate::session::tailored::CaptureAccount::Personal,
             confirm_dialog: None,
             unified_delete_dialog: None,
             group_delete_options_dialog: None,

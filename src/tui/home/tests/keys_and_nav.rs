@@ -3,6 +3,35 @@
 use super::*;
 
 #[test]
+#[serial]
+fn tailored_shortcut_and_modal_input_preserve_the_underlying_selection() {
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances().next().unwrap().id.clone();
+    env.view.select_and_reveal_session(&id);
+    let previous = env.view.selected_session.clone();
+    let shortcut = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
+    assert!(env.view.routes_tailored_key(&shortcut));
+    assert!(!env
+        .view
+        .routes_tailored_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    env.view.handle_key(shortcut, None);
+    assert!(env.view.tailored_window.is_some());
+    assert!(env.view.has_non_live_send_overlay());
+    assert!(env
+        .view
+        .routes_tailored_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    env.view.handle_paste("idea");
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), None);
+    env.view.handle_paste("Keep my current Session open");
+    assert!(env.view.send_message_dialog.is_none());
+    assert_eq!(env.view.selected_session, previous);
+    env.view.handle_key(shortcut, None);
+    assert!(env.view.tailored_window.is_none());
+    assert_eq!(env.view.selected_session, previous);
+}
+
+#[test]
 fn duplicate_session_ids_are_excluded_from_home_map() {
     let mut first = Instance::new("first", "/tmp/first");
     first.id = "duplicate-id".to_string();

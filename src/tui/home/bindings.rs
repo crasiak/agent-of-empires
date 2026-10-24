@@ -33,6 +33,7 @@ pub enum ActionId {
     ProjectContext,
     SearchNext,
     NewSession,
+    TailoredSessions,
     NewFromSelection,
     NewFromProject,
     AttachTerminal,
@@ -118,6 +119,12 @@ const fn ctrl(c: char) -> Chord {
         ctrl: true,
         alt: false,
     }
+}
+
+const TAILORED_CHORD: Chord = ctrl('y');
+
+pub(in crate::tui) fn is_tailored_shortcut(key: &KeyEvent) -> bool {
+    chord_matches(&TAILORED_CHORD, key)
 }
 
 const fn f(n: u8) -> Chord {
@@ -623,6 +630,21 @@ pub static BINDINGS: &[Binding] = &[
             desc: "Search",
         }),
         palette: None,
+    },
+    Binding {
+        id: ActionId::TailoredSessions,
+        non_strict: &[TAILORED_CHORD],
+        strict: &[TAILORED_CHORD],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Tailored Sessions",
+        }),
+        palette: Some(PaletteMeta {
+            title: "Tailored Sessions",
+            keywords: &["capture", "idea", "preset"],
+            group: PaletteGroup::Actions,
+        }),
     },
     Binding {
         id: ActionId::NewSession,
@@ -1164,6 +1186,7 @@ pub static BINDINGS: &[Binding] = &[
 pub fn palette_id(id: ActionId) -> &'static str {
     match id {
         ActionId::NewSession => "new-session",
+        ActionId::TailoredSessions => "tailored-sessions",
         ActionId::NewFromSelection => "new-from-selection",
         ActionId::NewFromProject => "new-from-project",
         ActionId::AttachTerminal => "attach-terminal",
