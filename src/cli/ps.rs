@@ -636,7 +636,7 @@ fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
             inst.idle_entered_at,
             // Only a row that is waiting carries attention.
             (inst.status == Status::Waiting)
-                .then(|| crate::hooks::read_hook_attention(&inst.id))
+                .then(|| inst.hook_attention())
                 .flatten(),
         );
         let agent = if inst.tool.is_empty() {

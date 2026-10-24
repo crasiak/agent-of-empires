@@ -186,6 +186,46 @@ pub(crate) fn read_hook_session_id_within(
     crate::session::capture::is_valid_session_id(&id).then_some(id)
 }
 
+/// The status in an instance's recorded hook directory, and how long it has stood.
+pub(crate) fn read_hook_observation_from(
+    source: &crate::session::SessionSidecarSource,
+    instance_id: &str,
+) -> Option<(Status, Option<Duration>)> {
+    let (bytes, modified) = source.read_prefix(instance_id, "status", STATUS_FILE_READ_CAP)?;
+    Some((parse_status(&bytes)?, modified.elapsed().ok()))
+}
+
+/// [`read_hook_attention`] from an instance's recorded hook directory.
+pub(crate) fn read_hook_attention_from(
+    source: &crate::session::SessionSidecarSource,
+    instance_id: &str,
+) -> Option<HookAttention> {
+    if read_hook_observation_from(source, instance_id)?.0 != Status::Waiting {
+        return None;
+    }
+    let (bytes, since) =
+        source.read_prefix(instance_id, "attention", ATTENTION_SUMMARY_READ_CAP)?;
+    Some(HookAttention {
+        summary: sanitize_attention_summary(&bytes),
+        since,
+    })
+}
+
+pub(crate) fn read_hook_sidecar_prefix_at(
+    instance_id: &str,
+    directory: &std::path::Path,
+    leaf: &str,
+    cap: usize,
+) -> Option<(Vec<u8>, std::time::SystemTime)> {
+    let dir = dir_guard::open_recorded_instance_dir(instance_id, directory).ok()??;
+    let modified = dir_guard::metadata_at(dir.as_fd(), leaf)
+        .ok()??
+        .modified()
+        .ok()?;
+    let bytes = dir_guard::read_file_at(dir.as_fd(), leaf, cap).ok()??;
+    Some((bytes, modified))
+}
+
 /// What a waiting agent is asking, from the hook-written `attention` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookAttention {
@@ -557,6 +597,110 @@ mod tests {
                 assert_eq!(got.since, mtime, "{id}");
             }
         }
+    }
+
+    /// A sandboxed Pi's files are read through the anchored sandbox store: no
+    /// symlink anywhere on the path, regular files only, bounded, and parsed
+    /// and sanitized exactly like the host's.
+    #[test]
+    fn sandbox_hook_files_read_through_the_anchored_store() {
+        use crate::session::SessionSidecarSource;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = tmp.path().join("store");
+        let id = "sbx_pi";
+        let dir = store.join("aoe-session").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = SessionSidecarSource::SandboxDir(dir.clone());
+        let observe = || read_hook_observation_from(&source, id);
+
+        assert_eq!(observe(), None, "no status file");
+        for (written, expected) in [
+            ("running", Some(Status::Running)),
+            ("waiting\n", Some(Status::Waiting)),
+            ("idle", Some(Status::Idle)),
+            ("bogus", None),
+        ] {
+            std::fs::write(dir.join("status"), written).unwrap();
+            assert_eq!(observe().map(|(status, _)| status), expected, "{written:?}");
+        }
+        std::fs::write(dir.join("status"), "waiting").unwrap();
+        let (_, age) = observe().unwrap();
+        assert!(
+            age.is_some_and(|age| age < Duration::from_secs(5)),
+            "{age:?}"
+        );
+
+        assert_eq!(
+            read_hook_attention_from(&source, id),
+            None,
+            "no attention file"
+        );
+        let mut hostile = "Ship \u{202e}it\u{2066}\n\tnow?".as_bytes().to_vec();
+        hostile.extend_from_slice(&[b'z'; 8192]);
+        std::fs::write(dir.join("attention"), &hostile).unwrap();
+        let attention = read_hook_attention_from(&source, id).expect("attention while waiting");
+        assert!(
+            attention.summary.starts_with("Ship it now?zzz"),
+            "{}",
+            attention.summary
+        );
+        assert_eq!(
+            attention.summary.chars().count(),
+            200,
+            "an oversized file is read capped"
+        );
+        let mtime = std::fs::metadata(dir.join("attention"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(attention.since, mtime);
+        std::fs::write(dir.join("status"), "running").unwrap();
+        assert_eq!(
+            read_hook_attention_from(&source, id),
+            None,
+            "attention is gated on waiting"
+        );
+
+        let other = SessionSidecarSource::SandboxDir(store.join("aoe-session").join("other"));
+        assert_eq!(
+            read_hook_observation_from(&other, id),
+            None,
+            "a source for another id"
+        );
+
+        std::fs::write(tmp.path().join("decoy"), "waiting").unwrap();
+        std::fs::remove_file(dir.join("status")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("decoy"), dir.join("status")).unwrap();
+        assert_eq!(observe(), None, "a symlinked status leaf");
+        std::fs::remove_file(dir.join("status")).unwrap();
+        std::fs::create_dir(dir.join("status")).unwrap();
+        assert_eq!(observe(), None, "a status that is not a regular file");
+        std::fs::remove_dir(dir.join("status")).unwrap();
+
+        let foreign = tmp.path().join("foreign");
+        std::fs::create_dir_all(foreign.join(id)).unwrap();
+        std::fs::write(foreign.join(id).join("status"), "waiting").unwrap();
+        std::fs::remove_dir_all(store.join("aoe-session")).unwrap();
+        std::os::unix::fs::symlink(&foreign, store.join("aoe-session")).unwrap();
+        assert_eq!(observe(), None, "a symlinked aoe-session ancestor");
+    }
+
+    #[test]
+    #[serial_test::serial(hook_base)]
+    fn a_recorded_host_hook_dir_reads_the_same_way() {
+        let (_g, base, _tmp) = BaseGuard::ready();
+        write_status_via_guard("host_rec", "waiting");
+        let dir = dir_guard::open_instance_dir("host_rec").unwrap();
+        dir_guard::write_short(dir.as_fd(), "attention", b"Ship\nit?").unwrap();
+        let source = crate::session::SessionSidecarSource::HostHooks(base.join("host_rec"));
+        let (status, age) = read_hook_observation_from(&source, "host_rec").unwrap();
+        assert_eq!(status, Status::Waiting);
+        assert!(age.is_some());
+        assert_eq!(
+            read_hook_attention_from(&source, "host_rec").map(|a| a.summary),
+            Some("Ship it?".to_string())
+        );
+        assert_eq!(read_hook_observation_from(&source, "other"), None);
     }
 
     fn write_session_id_sidecar(instance_id: &str, content: &str) {

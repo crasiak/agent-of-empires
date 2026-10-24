@@ -1567,6 +1567,33 @@ fn configured_status_map<'a>(
         .filter(|status_map| !status_map.is_empty())
 }
 
+/// `ask_user` plus the valid `[agents.pi] waiting_tools`, at most 32 in all.
+pub(crate) fn pi_waiting_tools(config: &crate::session::config::Config) -> Vec<String> {
+    const MAX_TOOLS: usize = 32;
+    let valid = |name: &&String| {
+        (1..=64).contains(&name.len())
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'))
+    };
+    let mut tools = vec!["ask_user".to_string()];
+    for name in config
+        .agents
+        .get("pi")
+        .into_iter()
+        .flat_map(|pi| pi.waiting_tools.iter())
+        .filter(valid)
+    {
+        if tools.len() == MAX_TOOLS {
+            break;
+        }
+        if !tools.contains(name) {
+            tools.push(name.clone());
+        }
+    }
+    tools
+}
+
 // Duplicate events with different matchers collapse to the first default.
 fn default_status_map_for_agent(agent: &AgentDef) -> BTreeMap<String, HookStatus> {
     let mut map = BTreeMap::new();
@@ -2458,6 +2485,62 @@ if [ "$PROBE_MODE" = legacy ]; then printf '%s\n' 'FLAGS --fork fork session'; e
             .status_map
             .insert(event.to_string(), status);
         config
+    }
+
+    #[test]
+    fn pi_waiting_tools_extend_ask_user_and_drop_invalid_names() {
+        let mut config = crate::session::config::Config::default();
+        assert_eq!(pi_waiting_tools(&config), vec!["ask_user"]);
+        let configured = &mut config
+            .agents
+            .entry("pi".to_string())
+            .or_default()
+            .waiting_tools;
+        *configured = [
+            "permission_gate",
+            "my.tool:v2-x",
+            "bad name",
+            "a/b",
+            "",
+            "ask_user",
+        ]
+        .map(String::from)
+        .to_vec();
+        configured.push("permission_gate".to_string());
+        configured.push("x".repeat(65));
+        assert_eq!(
+            pi_waiting_tools(&config),
+            vec!["ask_user", "permission_gate", "my.tool:v2-x"]
+        );
+        config.agents.get_mut("pi").unwrap().waiting_tools =
+            (0..40).map(|i| format!("t{i}")).collect();
+        let capped = pi_waiting_tools(&config);
+        assert_eq!(capped.len(), 32, "ask_user included");
+        assert_eq!(capped[0], "ask_user");
+        assert_eq!(capped[31], "t30");
+        // The extension applies the same rule (`waitingTools` in aoe-session-id.js).
+        config.agents.get_mut("pi").unwrap().waiting_tools =
+            ["ask_user", "t0", "t0"].map(String::from).to_vec();
+        config
+            .agents
+            .get_mut("pi")
+            .unwrap()
+            .waiting_tools
+            .extend((0..40).map(|i| format!("t{i}")));
+        let deduped = pi_waiting_tools(&config);
+        assert_eq!(deduped.len(), 32, "duplicates take no slot");
+        assert_eq!(deduped[31], "t30");
+        config.agents.clear();
+        config
+            .agents
+            .entry("claude".to_string())
+            .or_default()
+            .waiting_tools = vec!["other_agent".to_string()];
+        assert_eq!(
+            pi_waiting_tools(&config),
+            vec!["ask_user"],
+            "only [agents.pi] counts"
+        );
     }
 
     #[test]

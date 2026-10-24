@@ -137,6 +137,12 @@ pub struct AgentRuntimeConfig {
     /// Compiled into `tmux::status_rules` on config resolve.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub status_rules: Vec<StatusRule>,
+
+    /// Pi only: tools that block on the user, beside `ask_user`, which always
+    /// counts. Their run is AoE's `waiting`. Names outside
+    /// `[A-Za-z0-9_.:-]{1,64}` are dropped, and at most 32 are passed on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting_tools: Vec<String>,
 }
 
 /// One declarative pane status rule. `status` is required; exactly one of
