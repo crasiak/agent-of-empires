@@ -254,8 +254,9 @@ pub(crate) fn host_hook_disclosure(
             }
             if event.attention {
                 effects.push(format!(
-                    "runs aoe __hook-attention{} (records a short question or permission summary \
-                     in {}/$AOE_INSTANCE_ID/attention, never the tool input; its output is \
+                    "runs aoe __hook-attention{} (records a short summary in \
+                     {}/$AOE_INSTANCE_ID/attention: an AskUserQuestion question, a notification \
+                     message, or the permission's tool name; no other tool input; its output is \
                      discarded, so it never makes or alters a permission decision)",
                     crate::hooks::identity_publisher_arg(event.publisher),
                     crate::hooks::hook_base_path().display(),
@@ -1456,9 +1457,12 @@ mod tests {
             for effect in &disclosed {
                 if effect.contains("__hook-attention") {
                     for needle in [
-                        "records a short question or permission summary",
+                        "records a short summary",
+                        "an AskUserQuestion question",
+                        "a notification message",
+                        "the permission's tool name",
                         "/$AOE_INSTANCE_ID/attention",
-                        "never the tool input",
+                        "no other tool input",
                         "never makes or alters a permission decision",
                     ] {
                         assert!(
