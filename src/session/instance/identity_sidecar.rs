@@ -51,12 +51,17 @@ impl Drop for FailNextPiPathWriteGuard {
     }
 }
 
-/// The Pi extension's environment: its identity sidecar, plus the usage
-/// reporter when usage tracking is on (`bin`, instance id, profile).
-fn pi_extension_env(sidecar: &Path, usage: Option<(&Path, &str, &str)>) -> String {
+/// The Pi extension's environment: its identity sidecar and waiting tools, plus
+/// the usage reporter when usage tracking is on (`bin`, instance id, profile).
+fn pi_extension_env(
+    sidecar: &Path,
+    usage: Option<(&Path, &str, &str)>,
+    waiting_tools: &[String],
+) -> String {
     let mut env = format!(
-        "AOE_SESSION_ID_FILE={} ",
-        shell_escape(&sidecar.to_string_lossy())
+        "AOE_SESSION_ID_FILE={} {}",
+        shell_escape(&sidecar.to_string_lossy()),
+        pi_waiting_tools_env(waiting_tools),
     );
     if let Some((bin, instance_id, profile)) = usage {
         env.push_str(&format!(
@@ -67,6 +72,13 @@ fn pi_extension_env(sidecar: &Path, usage: Option<(&Path, &str, &str)>) -> Strin
         ));
     }
     env
+}
+
+fn pi_waiting_tools_env(waiting_tools: &[String]) -> String {
+    format!(
+        "AOE_PI_WAITING_TOOLS={} ",
+        shell_escape(&waiting_tools.join(","))
+    )
 }
 
 impl Instance {
@@ -95,12 +107,12 @@ impl Instance {
                 .ok()?
                 .join("session_id");
             let profile = self.effective_profile();
-            let usage_bin =
-                crate::session::config::profile_config::resolve_config_or_warn(&profile)
-                    .session
-                    .usage_tracking
-                    .then(std::env::current_exe)
-                    .and_then(Result::ok);
+            let config = crate::session::config::profile_config::resolve_config_or_warn(&profile);
+            let usage_bin = config
+                .session
+                .usage_tracking
+                .then(std::env::current_exe)
+                .and_then(Result::ok);
             return Some((
                 format!(" -e {}", shell_escape(&extension.to_string_lossy())),
                 pi_extension_env(
@@ -108,6 +120,7 @@ impl Instance {
                     usage_bin
                         .as_deref()
                         .map(|bin| (bin, self.id.as_str(), profile.as_str())),
+                    &crate::agents::pi_waiting_tools(&config),
                 ),
             ));
         }
@@ -139,10 +152,59 @@ impl Instance {
         if container_known && container.mount_fingerprint_matches(&config).ok()? != Some(true) {
             return None;
         }
+        let waiting_tools = crate::agents::pi_waiting_tools(
+            &crate::session::config::profile_config::resolve_config_or_warn(
+                &self.effective_profile(),
+            ),
+        );
+        // The extension writes status beside the sidecar only when named this exact base.
         Some((
             flag,
-            format!("AOE_SESSION_ID_FILE={sidecar_root}/{}/session_id ", self.id),
+            format!(
+                "AOE_SESSION_ID_FILE={sidecar_root}/{}/session_id AOE_HOOK_BASE={sidecar_root} {}",
+                self.id,
+                pi_waiting_tools_env(&waiting_tools),
+            ),
         ))
+    }
+
+    /// A sandboxed Pi's hook files, which its extension writes beside the
+    /// identity sidecar in the config mount; `None` is the host base.
+    pub(crate) fn hook_source(&self) -> Option<SessionSidecarSource> {
+        if !self.is_sandboxed() {
+            return None;
+        }
+        self.pi_sidecar_source()
+            .filter(|source| matches!(source, SessionSidecarSource::SandboxDir(_)))
+    }
+
+    /// The hook status this pane's own store reports.
+    pub(crate) fn hook_status(&self) -> Option<Status> {
+        match self.hook_source() {
+            Some(source) => crate::hooks::read_hook_observation_from(&source, &self.id)
+                .map(|(status, _)| status),
+            None => crate::hooks::read_hook_status(&self.id),
+        }
+    }
+
+    pub(crate) fn hook_observation(&self) -> Option<tmux::detect::HookObservation> {
+        match self.hook_source() {
+            Some(source) => crate::hooks::read_hook_observation_from(&source, &self.id)
+                .map(|(status, age)| tmux::detect::HookObservation { status, age }),
+            None => crate::hooks::read_hook_status(&self.id).map(|status| {
+                tmux::detect::HookObservation {
+                    status,
+                    age: crate::hooks::read_hook_status_age(&self.id),
+                }
+            }),
+        }
+    }
+
+    pub(crate) fn hook_attention(&self) -> Option<crate::hooks::HookAttention> {
+        match self.hook_source() {
+            Some(source) => crate::hooks::read_hook_attention_from(&source, &self.id),
+            None => crate::hooks::read_hook_attention(&self.id),
+        }
     }
 
     /// Read the ID and path from the publisher recorded for this launch.
@@ -1080,16 +1142,104 @@ pi = "~/.pi-personal"
     fn pi_extension_env_adds_usage_vars_only_when_enabled() {
         let sidecar = std::path::Path::new("/tmp/aoe-hooks-1/abc/session_id");
         let bin = std::path::Path::new("/opt/aoe");
-        let without = pi_extension_env(sidecar, None);
+        let tools = ["ask_user".to_string(), "permission_gate".to_string()];
+        let without = pi_extension_env(sidecar, None, &tools);
         assert!(without.starts_with("AOE_SESSION_ID_FILE="));
         assert!(!without.contains("AOE_USAGE_BIN"));
-        let with = pi_extension_env(sidecar, Some((bin, "abc", "work")));
+        assert!(
+            !without.contains("AOE_HOOK_BASE"),
+            "the host keeps the default base"
+        );
+        let with = pi_extension_env(sidecar, Some((bin, "abc", "work")), &tools);
         for needle in [
             "AOE_USAGE_BIN='/opt/aoe'",
             "AOE_INSTANCE_ID='abc'",
             "AOE_PROFILE='work'",
+            "AOE_PI_WAITING_TOOLS='ask_user,permission_gate'",
         ] {
             assert!(with.contains(needle), "{with}");
+        }
+        assert!(without.contains("AOE_PI_WAITING_TOOLS='ask_user,permission_gate' "));
+    }
+
+    /// The sandbox env names the config mount as the hook base, and only from
+    /// the branch whose gates admit the identity publisher at all.
+    #[test]
+    #[serial_test::serial]
+    fn sandboxed_pi_names_its_hook_base_only_through_the_mount_gates() {
+        let _guard = crate::session::test_support::isolate_app_dir();
+        let app_dir = crate::session::get_app_dir().unwrap();
+        std::fs::write(
+            app_dir.join("config.toml"),
+            "[agents.pi]\nwaiting_tools = [\"permission_gate\", \"bad name\"]\n",
+        )
+        .unwrap();
+        let mut inst = tool_instance("pi", "/tmp/pi-hook-base");
+        inst.sandbox_info = Some(test_sandbox("aoe-pi-hook-base", None));
+        admit_sandbox_fixture(&inst);
+        let (_, env) = inst
+            .identity_extension_launch()
+            .expect("the default sandbox admits the publisher");
+        let entries = shell_words::split(&env).unwrap();
+        for entry in [
+            format!(
+                "AOE_SESSION_ID_FILE=/root/.pi/aoe-session/{}/session_id",
+                inst.id
+            ),
+            "AOE_HOOK_BASE=/root/.pi/aoe-session".to_string(),
+            "AOE_PI_WAITING_TOOLS=ask_user,permission_gate".to_string(),
+        ] {
+            assert!(entries.contains(&entry), "{entry} missing from {entries:?}");
+        }
+
+        let mut other_home = inst.clone();
+        other_home.sandbox_info.as_mut().unwrap().extra_env = Some(vec!["HOME=/home/agent".into()]);
+        assert!(
+            other_home.identity_extension_launch().is_none(),
+            "a non-default container home has no mount to name"
+        );
+    }
+
+    /// A sandboxed Pi's status and attention come from its config mount, beside
+    /// its identity sidecar; every other row keeps the host base.
+    #[test]
+    #[serial_test::serial]
+    fn sandboxed_pi_reads_its_hook_files_from_its_config_mount() {
+        let (_hooks, _base, _hooks_tmp) = crate::hooks::test_support::BaseGuard::ready();
+        let _app = crate::session::test_support::isolate_app_dir();
+        let write_host = |id: &str, status: &str| {
+            let dir = crate::hooks::ensure_instance_dir_path(id).unwrap();
+            std::fs::write(dir.join("status"), status).unwrap();
+        };
+
+        let mut inst = tool_instance("pi", "/tmp/pi-sbx-hook");
+        inst.sandbox_info = Some(test_sandbox("aoe-pi-sbx-hook", None));
+        admit_sandbox_fixture(&inst);
+        let Some(SessionSidecarSource::SandboxDir(dir)) = inst.hook_source() else {
+            panic!("a sandboxed Pi reads hook files from its config mount");
+        };
+        assert_eq!(inst.pi_sidecar_source(), inst.hook_source());
+        write_host(&inst.id, "idle");
+        assert_eq!(inst.hook_status(), None, "the host base is not this pane's");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("status"), "waiting").unwrap();
+        std::fs::write(dir.join("attention"), "Deploy now?").unwrap();
+        assert_eq!(inst.hook_status(), Some(Status::Waiting));
+        let observed = inst.hook_observation().expect("a sandbox status");
+        assert_eq!(observed.status, Status::Waiting);
+        assert!(observed.age.is_some());
+        assert_eq!(
+            inst.hook_attention().map(|a| a.summary),
+            Some("Deploy now?".to_string())
+        );
+
+        let host = tool_instance("pi", "/tmp/pi-host-hook");
+        let mut claude = tool_instance("claude", "/tmp/claude-sbx-hook");
+        claude.sandbox_info = Some(test_sandbox("aoe-claude-sbx-hook", None));
+        for other in [&host, &claude] {
+            assert_eq!(other.hook_source(), None, "{}", other.tool);
+            write_host(&other.id, "running");
+            assert_eq!(other.hook_status(), Some(Status::Running), "{}", other.tool);
         }
     }
 }

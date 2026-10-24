@@ -89,9 +89,7 @@ pub fn needs_restart(instance: &Instance, session: &crate::tmux::Session) -> (bo
     let pane_dead = exists && session.is_pane_dead();
     let needs = if !exists || pane_dead {
         true
-    } else if crate::hooks::read_hook_status(&instance.id).is_some()
-        || instance.has_command_override()
-    {
+    } else if instance.hook_status().is_some() || instance.has_command_override() {
         false
     } else {
         !instance.expects_shell() && session.is_pane_running_shell()
