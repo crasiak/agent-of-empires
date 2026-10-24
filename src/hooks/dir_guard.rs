@@ -458,19 +458,40 @@ pub(crate) fn write_session_id_via_guard(
     write_atomic(dir.as_fd(), &leaf, session_id.as_bytes())
 }
 
+/// Write the `attention` summary a waiting agent shows.
+pub(crate) fn write_attention_via_guard(instance_id: &str, summary: &str) -> Result<()> {
+    let dir = open_instance_dir(instance_id)?;
+    write_atomic(dir.as_fd(), "attention", summary.as_bytes())
+}
+
 /// Delete the `session_id` sidecar with `unlinkat` against a verified
 /// per-instance dirfd, so deletion runs under the same discipline as every
 /// other hook write. Idempotent; `Err` only on guard validation or a hard
 /// `unlinkat` failure, and callers treat that as best-effort.
 pub(crate) fn unlink_session_id_via_guard(instance_id: &str) -> Result<()> {
+    unlink_leaves_via_guard(instance_id, &["session_id"])
+}
+
+/// [`unlink_session_id_via_guard`] for any set of leaves. A symlinked leaf is
+/// removed itself, never its target. Every leaf is attempted, so one that
+/// cannot be removed leaves no other behind; the first failure is returned.
+pub(crate) fn unlink_leaves_via_guard(instance_id: &str, leaves: &[&str]) -> Result<()> {
     let Some(dir) = open_instance_dir_read_only(instance_id)? else {
         return Ok(());
     };
-    match unlinkat(dir.as_fd(), "session_id", UnlinkatFlags::NoRemoveDir) {
-        Ok(()) => Ok(()),
-        Err(Errno::ENOENT) => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("unlinkat session_id in {instance_id}")),
+    let mut first_error = None;
+    for leaf in leaves {
+        let result = validate_hook_leaf(leaf).and_then(|()| {
+            match unlinkat(dir.as_fd(), *leaf, UnlinkatFlags::NoRemoveDir) {
+                Ok(()) | Err(Errno::ENOENT) => Ok(()),
+                Err(e) => Err(e).with_context(|| format!("unlinkat {leaf} in {instance_id}")),
+            }
+        });
+        if let Err(e) = result {
+            first_error.get_or_insert(e);
+        }
     }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Create the per-instance hook directory under `dir_guard` discipline and
@@ -688,6 +709,27 @@ mod tests {
         // Note: read_only does NOT mkdir; absent means None.
         let got = open_instance_dir_read_only("missing_inst").unwrap();
         assert!(got.is_none());
+    }
+
+    /// One leaf that cannot be removed must not leave the others behind.
+    #[test]
+    #[serial(hook_base)]
+    fn unlink_leaves_attempts_every_leaf_and_reports_the_first_failure() {
+        let (_g, base, _tmp) = BaseGuard::ready();
+        let dir = open_instance_dir("unlink_all").unwrap();
+        std::fs::create_dir(base.join("unlink_all").join("status")).unwrap();
+        write_short(dir.as_fd(), "attention", b"Which database?").unwrap();
+        write_short(dir.as_fd(), "session_id", b"sid").unwrap();
+
+        let err = unlink_leaves_via_guard("unlink_all", &["status", "..", "attention"])
+            .expect_err("a directory leaf must fail its unlink");
+        assert!(err.to_string().contains("status"), "first failure: {err:#}");
+        let mut left: Vec<_> = std::fs::read_dir(base.join("unlink_all"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["session_id", "status"]);
     }
 
     #[test]

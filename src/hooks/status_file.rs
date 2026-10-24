@@ -287,7 +287,7 @@ fn is_format_char(c: char) -> bool {
     )
 }
 
-fn sanitize_attention_summary(bytes: &[u8]) -> String {
+pub(crate) fn sanitize_attention_summary(bytes: &[u8]) -> String {
     let text: String = String::from_utf8_lossy(bytes)
         .chars()
         .filter(|&c| !is_format_char(c))
@@ -334,6 +334,17 @@ pub fn read_hook_urgent(instance_id: &str) -> bool {
         }
     }
     true
+}
+
+/// Remove the `status` and `attention` a previous run left, keeping the
+/// directory and its identity sidecars. A launch calls this before the agent
+/// starts: Claude writes no status on `SessionStart`, so a `waiting` from a
+/// crashed pane would otherwise outlive the restart.
+pub fn clear_hook_status(instance_id: &str) {
+    if let Err(e) = dir_guard::unlink_leaves_via_guard(instance_id, &["status", "attention"]) {
+        tracing::warn!(target: "hooks.status",
+            "Failed to clear hook status for {}: {}", instance_id, e);
+    }
 }
 
 /// Remove the hook status directory for a given instance (cleanup on stop/delete).
@@ -397,6 +408,38 @@ mod tests {
     fn test_read_hook_status_age_none_when_absent() {
         let (_g, _, _tmp) = BaseGuard::ready();
         assert_eq!(read_hook_status_age("age_absent_instance"), None);
+    }
+
+    #[test]
+    #[serial_test::serial(hook_base)]
+    fn clear_hook_status_keeps_identity_and_never_follows_links() {
+        let (_g, base, tmp) = BaseGuard::ready();
+        let decoy = tmp.path().join("decoy");
+        std::fs::write(&decoy, "waiting").unwrap();
+        for (id, linked) in [("clear_files", false), ("clear_links", true)] {
+            let dir = dir_guard::open_instance_dir(id).unwrap();
+            for leaf in ["status", "attention"] {
+                if linked {
+                    std::os::unix::fs::symlink(&decoy, base.join(id).join(leaf)).unwrap();
+                } else {
+                    dir_guard::write_short(dir.as_fd(), leaf, b"waiting").unwrap();
+                }
+            }
+            dir_guard::write_short(dir.as_fd(), "session_id", b"sid").unwrap();
+            dir_guard::write_short(dir.as_fd(), "session_path", b"/p").unwrap();
+
+            clear_hook_status(id);
+            let mut left: Vec<_> = std::fs::read_dir(base.join(id))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            left.sort();
+            assert_eq!(left, ["session_id", "session_path"], "{id}");
+        }
+        assert_eq!(std::fs::read_to_string(&decoy).unwrap(), "waiting");
+        clear_hook_status("clear_absent");
+        clear_hook_status("../escape");
+        assert!(!base.join("clear_absent").exists());
     }
 
     #[test]

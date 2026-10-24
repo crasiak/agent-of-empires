@@ -8,24 +8,33 @@ use serde_json::{Map, Value};
 
 use crate::agents::ResolvedHookEvent;
 
-use super::command::{hook_command_session_id, json_command_is_aoe, status_command_for_event};
+use super::command::{
+    hook_command_attention, hook_command_session_id, json_command_is_aoe, status_command_for_event,
+};
 use super::config_io::{
     log_installed, log_removed, log_unchanged, parse_json_or_empty, with_config_lock, write_json,
 };
 use super::HookInstallTarget;
 
 /// Commands for one event: the identity extractor first (it must see stdin
-/// first), then the usage recorder, then the status writer.
+/// first), then the usage recorder, the status writer and the attention writer.
 fn event_commands(event: &ResolvedHookEvent, target: HookInstallTarget) -> Vec<String> {
+    let host = target == HookInstallTarget::Host;
     let identity = event
         .identity_field
         .map(|field| hook_command_session_id(target, field, event.publisher));
-    let usage = (event.usage && target == HookInstallTarget::Host)
-        .then(super::command::hook_command_usage_event);
+    let usage = (event.usage && host).then(super::command::hook_command_usage_event);
     let status = event
         .status
         .map(|status| status_command_for_event(status, &event.waiting_tools, target));
-    identity.into_iter().chain(usage).chain(status).collect()
+    // The sandbox image has no `aoe` to parse the payload.
+    let attention = (event.attention && host).then(|| hook_command_attention(event.publisher));
+    identity
+        .into_iter()
+        .chain(usage)
+        .chain(status)
+        .chain(attention)
+        .collect()
 }
 
 /// One matcher group per event, appended under the event name so events that
@@ -300,6 +309,7 @@ mod tests {
             // A turn killed by an API error fires StopFailure, not Stop.
             ("StopFailure", &["printf idle"]),
             ("ElicitationResult", &["printf running"]),
+            ("PermissionRequest", &["printf waiting"]),
         ] {
             let groups = hooks[event].as_array().unwrap();
             assert_eq!(groups.len(), 1, "{event}");
@@ -344,6 +354,138 @@ mod tests {
                 }
             }
         }
+        assert!(
+            !hooks.to_string().contains("__hook-attention"),
+            "the sandbox has no aoe to write attention"
+        );
+    }
+
+    /// On the host the attention writer joins only the waiting events, so no
+    /// process is spawned per tool call.
+    #[test]
+    fn host_attention_writer_rides_only_the_waiting_events() {
+        let hooks = Value::Object(build_aoe_hooks(
+            &agent_events("claude", &[]),
+            HookInstallTarget::Host,
+        ));
+        let mut with_attention = Vec::new();
+        for (event, groups) in hooks.as_object().unwrap() {
+            for group in groups.as_array().unwrap() {
+                let cmds = commands(group);
+                let attention: Vec<_> = cmds
+                    .iter()
+                    .filter(|cmd| cmd.contains("__hook-attention"))
+                    .collect();
+                if attention.is_empty() {
+                    continue;
+                }
+                assert_eq!(attention.len(), 1, "{event}: {cmds:?}");
+                assert!(attention[0].contains("__hook-attention --agent claude"));
+                let statuses: Vec<_> = cmds
+                    .iter()
+                    .filter(|cmd| cmd.contains("> \"$D/status\""))
+                    .collect();
+                with_attention.push((
+                    event.clone(),
+                    group
+                        .get("matcher")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    statuses.len(),
+                    statuses.iter().all(|cmd| cmd.contains("printf waiting")),
+                ));
+            }
+        }
+        with_attention.sort();
+        let waiting_notifications =
+            "permission_prompt|elicitation_dialog|agent_needs_input".to_string();
+        assert_eq!(
+            with_attention,
+            [
+                (
+                    "Notification".to_string(),
+                    Some(waiting_notifications),
+                    1,
+                    true
+                ),
+                ("PermissionRequest".to_string(), None, 1, true),
+                (
+                    "PreToolUse".to_string(),
+                    Some("AskUserQuestion".to_string()),
+                    0,
+                    true
+                ),
+            ]
+        );
+        let pre_tool = hooks["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool.len(), 2, "{pre_tool:?}");
+        assert!(pre_tool[0].get("matcher").is_none());
+        assert!(!commands(&pre_tool[0])
+            .iter()
+            .any(|cmd| cmd.contains("__hook-attention")));
+    }
+
+    /// A launch reinstalls over the entries an earlier AoE wrote, which carry
+    /// other command bytes. They are replaced, never kept beside the new ones.
+    #[test]
+    fn reinstall_replaces_earlier_aoe_entries_without_duplicating() {
+        let tmp = TempDir::new().unwrap();
+        let user_group = serde_json::json!({
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "echo user-hook"}]
+        });
+        let fresh = tmp.path().join("fresh.json");
+        std::fs::write(
+            &fresh,
+            serde_json::json!({"hooks": {"PreToolUse": [user_group.clone()]}}).to_string(),
+        )
+        .unwrap();
+        install_hooks(&fresh, agent_events("claude", &[]), HookInstallTarget::Host).unwrap();
+
+        // The previous release: no attention writer, no PermissionRequest
+        // event, and status writers that leave `attention` behind.
+        let previous: Vec<_> = agent_events("claude", &[])
+            .into_iter()
+            .filter(|event| event.name != "PermissionRequest")
+            .map(|event| ResolvedHookEvent {
+                attention: false,
+                ..event
+            })
+            .collect();
+        let mut old = Value::Object(build_aoe_hooks(&previous, HookInstallTarget::Host));
+        for groups in old.as_object_mut().unwrap().values_mut() {
+            for group in groups.as_array_mut().unwrap() {
+                for hook in group["hooks"].as_array_mut().unwrap() {
+                    let cmd = hook["command"].as_str().unwrap().to_string();
+                    hook["command"] = Value::String(
+                        cmd.replace("rm -f \"$D/attention\" 2>/dev/null; ", "")
+                            .replace("[ \"$S\" = waiting ] || ", ""),
+                    );
+                }
+            }
+        }
+        // A v015-era legacy writer recognised by its path sentinel.
+        old["Stop"].as_array_mut().unwrap().push(serde_json::json!({"hooks": [{"type": "command", "command":
+            "sh -c '[ -n \"$AOE_INSTANCE_ID\" ] || exit 0; mkdir -p /tmp/aoe-hooks/$AOE_INSTANCE_ID && printf idle > /tmp/aoe-hooks/$AOE_INSTANCE_ID/status'"}]}));
+        old["PreToolUse"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, user_group);
+        let upgraded = tmp.path().join("upgraded.json");
+        std::fs::write(&upgraded, serde_json::json!({"hooks": old}).to_string()).unwrap();
+        assert_ne!(
+            read_json(&upgraded),
+            read_json(&fresh),
+            "precondition: old bytes differ"
+        );
+
+        install_hooks(
+            &upgraded,
+            agent_events("claude", &[]),
+            HookInstallTarget::Host,
+        )
+        .unwrap();
+        assert_eq!(read_json(&upgraded), read_json(&fresh));
     }
 
     #[test]
@@ -378,9 +520,11 @@ mod tests {
             assert!(content["hooks"][event].is_array(), "{event}");
         }
         let pre_tool = content["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool.len(), 2, "legacy AoE group replaced: {pre_tool:?}");
+        // The user's group, then AoE's status writer and its AskUserQuestion attention writer.
+        assert_eq!(pre_tool.len(), 3, "legacy AoE group replaced: {pre_tool:?}");
         assert_eq!(pre_tool[0]["matcher"], "Bash");
         assert!(is_aoe_hook_command(commands(&pre_tool[1])[0]));
+        assert!(is_aoe_hook_command(commands(&pre_tool[2])[0]));
 
         assert!(uninstall_hooks(&path).unwrap());
         let content = read_json(&path);
@@ -481,6 +625,7 @@ mod tests {
             identity_field: Some(HookIdentityField::ConversationIdOrSessionId),
             waiting_tools: Vec::new(),
             usage: false,
+            attention: false,
             publisher: Some("agent"),
         }];
 

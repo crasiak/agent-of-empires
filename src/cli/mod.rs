@@ -9,6 +9,7 @@ pub mod definition;
 pub mod extract_session_id;
 pub mod graft;
 pub mod group;
+pub mod hook_attention;
 pub(crate) mod hook_input;
 pub mod hooks;
 pub mod init;
