@@ -260,6 +260,7 @@ impl Instance {
         );
 
         self.clear_pane_identity_sidecar();
+        crate::hooks::clear_hook_status(&self.id);
 
         let mut omp_capture_metadata = if let Some(plan) = prepared.omp_capture_plan {
             let launched_at_ms = SystemTime::now()
@@ -1119,6 +1120,59 @@ else:
             assert_eq!(std::fs::read_to_string(forks).unwrap(), "fork\n");
         }
     }
+    /// CRA-1189: a `waiting` left by a crashed agent must not outlive the relaunch, and the clear
+    /// must come before the pane, whose hooks could otherwise lose their first write to it. The
+    /// project directory is missing, so tmux refuses the pane after the clear would have run.
+    #[test]
+    #[serial_test::serial]
+    fn every_launch_path_clears_hook_status_before_creating_the_pane() {
+        type Launch = fn(&mut Instance) -> Result<()>;
+        let launches: &[(&str, Launch)] = &[
+            ("start", |i| i.start()),
+            ("restart", |i| {
+                i.restart_with_resume_policy(None, false, ResumeAttemptPolicy::Allow)
+                    .map(|_| ())
+            }),
+        ];
+        for (label, launch) in launches {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = crate::session::test_support::isolate_home(temp.path());
+            let (_hooks, base, _hooks_tmp) = crate::hooks::test_support::BaseGuard::ready();
+            crate::session::config::update_app_state(|state| {
+                state.has_acknowledged_agent_hooks = true;
+            })
+            .unwrap();
+            let profile = "clear-hook-status";
+            let config =
+                crate::session::config::profile_config::get_profile_config_path(profile).unwrap();
+            std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+            std::fs::write(&config, "[session]\nagent_status_hooks = false\n").unwrap();
+            let missing = temp.path().join("missing-project");
+            let mut inst = crate::session::instance::test_helpers::tool_instance(
+                "claude",
+                missing.to_str().unwrap(),
+            );
+            inst.source_profile = profile.to_string();
+            inst.command = "sleep 30".to_string();
+            crate::session::instance::test_helpers::seed_disk_for_sidecar_test(profile, &inst);
+            crate::hooks::write_session_id_via_guard(&inst.id, "sid", None).unwrap();
+            crate::hooks::write_attention_via_guard(&inst.id, "Which database?").unwrap();
+            std::fs::write(base.join(&inst.id).join("status"), "waiting").unwrap();
+
+            let error = launch(&mut inst).expect_err("tmux must refuse the missing directory");
+            assert!(
+                format!("{error:#}").contains("working directory"),
+                "{label}: the launch must reach pane creation: {error:#}"
+            );
+            assert!(!inst.tmux_session().unwrap().exists(), "{label}");
+            let left: Vec<_> = std::fs::read_dir(base.join(&inst.id))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            assert_eq!(left, ["session_id"], "{label}");
+        }
+    }
+
     #[test]
     fn start_with_size_opts_returns_skipped_for_structured() {
         let mut inst = Instance::new("Test", "/tmp/test");

@@ -2220,6 +2220,50 @@ enter to select · esc to cancel";
         }
     }
 
+    /// The `ask_user` frame is waiting without the extension's hook file, over
+    /// a live spinner too; a hook write still outranks it, and the prompt's
+    /// words without its frame, or a spinner alone, are not a question.
+    #[test]
+    fn pi_ask_user_frame_is_waiting_below_the_hook_rules() {
+        let pi_matches = |pane: &str| {
+            super::super::detect::rule_matches("pi", "ask_user_prompt", pane, "", None)
+        };
+        for pane in [
+            PI_ASK_USER_SINGLE_PANE,
+            PI_ASK_USER_MULTI_SELECT_PANE,
+            PI_ASK_USER_BATCH_PANE,
+            PI_ASK_USER_BATCH_REVIEW_PANE,
+        ] {
+            assert!(pi_matches(pane), "{pane}");
+            assert_eq!(
+                detect_via_manifest("pi", pane, "", None),
+                Status::Waiting,
+                "{pane}"
+            );
+            for (written, expected) in [
+                (hook(Status::Idle, secs(0)), Status::Idle),
+                (hook(Status::Running, secs(1)), Status::Running),
+            ] {
+                assert_eq!(
+                    detect_via_manifest("pi", pane, "", written),
+                    expected,
+                    "{pane}"
+                );
+            }
+        }
+        for (pane, expected) in [
+            (PI_TRANSCRIPT_QUOTING_ASK_USER_PANE, Status::Idle),
+            (PI_RUNNING_PANE, Status::Running),
+        ] {
+            assert!(!pi_matches(pane), "{pane}");
+            assert_eq!(
+                detect_via_manifest("pi", pane, "", None),
+                expected,
+                "{pane}"
+            );
+        }
+    }
+
     #[test]
     fn test_claude_background_wait_only_counts_in_the_status_slot() {
         let stale = "\
@@ -2612,6 +2656,115 @@ Still more prose in the second section.\n\
 ────────────────────────────────────────\n\
 Closing prose line.\n\
 Final prose line.\n";
+
+    // pi-ask-user 0.16.0 frames, as its own `AskComponent` and `BatchAskComponent`
+    // render them (ANSI stripped), laid over a Pi transcript.
+    /// One question in the overlay, over a live turn's spinner.
+    const PI_ASK_USER_SINGLE_PANE: &str = concat!(
+        " ask_user Which database should the service use?\n",
+        "   2 option(s): Postgres, SQLite\n",
+        " Waiting for user input...\n",
+        "   ╭─ ask_user ─────────────────────────────────────────────╮\n",
+        "   │  Which database should the service use?                │\n",
+        "   │                                                        │\n",
+        "   │ Filter: type to filter                                 │\n",
+        "   │ → 1. Postgres                                          │\n",
+        "   │       Relational, strong consistency                   │\n",
+        "   │   2. SQLite                                            │\n",
+        "   │       Embedded file                                    │\n",
+        "   │     Type something. — Enter a custom response          │\n",
+        "   │  type filter • PgUp/PgDn prompt • backspace erase •    │\n",
+        "   │  ↑↓ navigate • alt+o hide • enter select • esc         │\n",
+        "   ╰────────────────────────────────────────────── v0.16.0 ─╯\n",
+        "⠋ Working...\n",
+        "────────────────────────────────────────────────────────────────\n",
+        "\n",
+        "────────────────────────────────────────────────────────────────\n",
+        "/tmp\n",
+        "0.0%/272k (auto)                      gpt-5.5 • medium\n",
+    );
+
+    /// The same question as a multi-select, inline in Pi's input dock.
+    const PI_ASK_USER_MULTI_SELECT_PANE: &str = concat!(
+        " ask_user Which database should the service use?\n",
+        "   2 option(s): Postgres, SQLite\n",
+        " Waiting for user input...\n",
+        "╭─ ask_user ───────────────────────────────────────────────────╮\n",
+        "│  Which database should the service use?                      │\n",
+        "│                                                              │\n",
+        "│ → 1. [ ] Postgres                                            │\n",
+        "│       Relational, strong consistency                         │\n",
+        "│   2. [ ] SQLite                                              │\n",
+        "│       Embedded file                                          │\n",
+        "│     Type something. — Enter a custom response                │\n",
+        "│                                                              │\n",
+        "│  ↑↓ navigate • space toggle • enter submit • escape/ctrl+c   │\n",
+        "│  cancel                                                      │\n",
+        "╰──────────────────────────────────────────────────── v0.16.0 ─╯\n",
+        "/tmp\n",
+        "0.0%/272k (auto)                      gpt-5.5 • medium\n",
+    );
+
+    /// A two-question batch on its first page.
+    const PI_ASK_USER_BATCH_PANE: &str = concat!(
+        " ask_user 2 questions\n",
+        "  1. Which database should the service use? (2 option(s))\n",
+        "  2. Deploy to which region? (2 option(s))\n",
+        " Waiting for user input...\n",
+        "   ╭─ ask_user [1] 2 · review ──────────────────────────────╮\n",
+        "   │  Which database should the service use?                │\n",
+        "   │                                                        │\n",
+        "   │ Filter: type to filter                                 │\n",
+        "   │ → 1. Postgres                                          │\n",
+        "   │       Relational                                       │\n",
+        "   │   2. SQLite                                            │\n",
+        "   │     Type something. — Enter a custom response          │\n",
+        "   │  tab/shift+tab questions • type filter • PgUp/PgDn     │\n",
+        "   │  prompt • backspace erase • ↑↓ navigate • alt+o hide   │\n",
+        "   ╰────────────────────────────────────────────── v0.16.0 ─╯\n",
+        "────────────────────────────────────────────────────────────────\n",
+        "\n",
+        "────────────────────────────────────────────────────────────────\n",
+        "/tmp\n",
+        "0.0%/272k (auto)                      gpt-5.5 • medium\n",
+    );
+
+    /// The batch's review page.
+    const PI_ASK_USER_BATCH_REVIEW_PANE: &str = concat!(
+        " ask_user 2 questions\n",
+        " Waiting for user input...\n",
+        "   ╭─ ask_user 1 2 · [review] ──────────────────────────────╮\n",
+        "   │ Review answers                                         │\n",
+        "   │                                                        │\n",
+        "   │ ○ 1. Which database should the service use?            │\n",
+        "   │    unanswered                                          │\n",
+        "   │ ○ 2. Deploy to which region?                           │\n",
+        "   │    unanswered                                          │\n",
+        "   │                                                        │\n",
+        "   │ enter submit with skips • 1-2 edit • tab/shift+tab     │\n",
+        "   │ questions • alt+o hide • escape/ctrl+c cancel          │\n",
+        "   ╰────────────────────────────────────────────── v0.16.0 ─╯\n",
+        "────────────────────────────────────────────────────────────────\n",
+        "\n",
+        "────────────────────────────────────────────────────────────────\n",
+        "/tmp\n",
+        "0.0%/272k (auto)                      gpt-5.5 • medium\n",
+    );
+
+    /// After the answer the transcript quotes the prompt's words, with no frame drawn.
+    const PI_TRANSCRIPT_QUOTING_ASK_USER_PANE: &str = concat!(
+        " ask_user Which database should the service use?\n",
+        "   2 option(s): Postgres, SQLite\n",
+        " ✓ Postgres\n",
+        "Postgres it is. The ask_user prompt read \"Question: Which database should\n",
+        "the service use?\" over \"Type something. — Enter a custom response\", with\n",
+        "the hints \"↑↓ navigate • enter select • esc cancel\" and v0.16.0 in its footer.\n",
+        "────────────────────────────────────────────────────────────────\n",
+        "\n",
+        "────────────────────────────────────────────────────────────────\n",
+        "/tmp\n",
+        "0.0%/272k (auto)                      gpt-5.5 • medium\n",
+    );
 
     fn pane_with_line_at_depth(line: &str, depth: usize) -> String {
         let filler = "Footer filler line.\n".repeat(depth.saturating_sub(1));

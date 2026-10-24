@@ -558,7 +558,7 @@ fn is_agent_session_name(name: &str, marker: Option<&str>) -> bool {
 /// First-pane pid from the batch `list-panes` snapshot (the same first pane
 /// `process::get_pane_pid` targets with `^.0`), so ps spawns no tmux per
 /// instance. Falls back to `lookup` only for a session not known to be absent
-/// whose pid the snapshot lacks (it keeps only pane index 0).
+/// whose pid the snapshot lacks.
 fn pane_pid_for(
     meta: &std::collections::HashMap<String, crate::tmux::PaneMetadata>,
     name: &str,
@@ -572,6 +572,19 @@ fn pane_pid_for(
         return None;
     }
     lookup(name)
+}
+
+/// Session existence for `pane_pid_for` from this run's own session scan, so
+/// a run slower than the global cache TTL never re-probes absent instances. A
+/// failed scan is not absence; it falls back to the cache.
+fn exists_in_run(
+    live: Option<&std::collections::HashMap<String, crate::tmux::LiveSession>>,
+    name: &str,
+) -> Option<bool> {
+    match live {
+        Some(live) => Some(live.contains_key(name)),
+        None => crate::tmux::session_exists_from_cache(name),
+    }
 }
 
 fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
@@ -623,7 +636,7 @@ fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
             inst.idle_entered_at,
             // Only a row that is waiting carries attention.
             (inst.status == Status::Waiting)
-                .then(|| crate::hooks::read_hook_attention(&inst.id))
+                .then(|| inst.hook_attention())
                 .flatten(),
         );
         let agent = if inst.tool.is_empty() {
@@ -639,7 +652,7 @@ fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
             pid: pane_pid_for(
                 &meta,
                 &name,
-                crate::tmux::session_exists_from_cache,
+                |name| exists_in_run(live.as_ref(), name),
                 crate::process::get_pane_pid,
             ),
             activity_epoch: crate::tmux::session_activity(&name),
@@ -664,7 +677,7 @@ fn collect_tmux_states(instances: &mut [Instance]) -> Vec<TmuxState> {
             pid: pane_pid_for(
                 &meta,
                 name,
-                crate::tmux::session_exists_from_cache,
+                |name| exists_in_run(live.as_ref(), name),
                 crate::process::get_pane_pid,
             ),
             activity_epoch: crate::tmux::session_activity(name),
@@ -1009,9 +1022,10 @@ mod tests {
     // CRA-1130: ps reads each session's first-pane pid from the one batch
     // list-panes snapshot, and never spawns tmux for an instance whose session
     // the cache says is absent (most of 215 extra spawns, ~2.4 s, on a
-    // 90-session profile set). A live session the snapshot lacks (its first
-    // pane is not index 0, e.g. pane-base-index 1) still gets the `^.0` lookup.
+    // 90-session profile set). A live session the snapshot lacks still gets
+    // the `^.0` lookup.
     #[test]
+    #[serial_test::serial]
     fn pane_pid_prefers_the_batch_snapshot_and_skips_absent_sessions() {
         let meta = std::collections::HashMap::from([
             ("aoe_live_1".to_string(), pane(Some(4242))),
@@ -1047,6 +1061,38 @@ mod tests {
             ["aoe_base_index_one_4", "aoe_unknown_5", "aoe_nopid_2"],
             "no lookup for a snapshot hit or an absent session"
         );
+
+        // CRA-1199: existence comes from the run's own session scan, not the
+        // 2 s TTL global cache. A run slower than the TTL used to look up every
+        // absent stopped instance again (79 extra spawns in one slow run).
+        let guard = crate::tmux::SessionCacheGuard::capture();
+        guard.force_present(&[]);
+        guard.force_stale();
+        assert_eq!(
+            crate::tmux::session_exists_from_cache("aoe_absent_6"),
+            None,
+            "the global cache is stale, so it cannot answer"
+        );
+        let live = std::collections::HashMap::from([(
+            "aoe_base_index_one_4".to_string(),
+            crate::tmux::LiveSession::unmarked(),
+        )]);
+        lookups.borrow_mut().clear();
+        let exists = |name: &str| exists_in_run(Some(&live), name);
+        assert_eq!(pane_pid_for(&meta, "aoe_absent_6", exists, lookup), None);
+        assert_eq!(
+            pane_pid_for(&meta, "aoe_base_index_one_4", exists, lookup),
+            Some(7)
+        );
+        assert_eq!(
+            *lookups.borrow(),
+            ["aoe_base_index_one_4"],
+            "an absent instance never spawns, however stale the global cache"
+        );
+        // A failed scan is no evidence of absence: fall back to the cache.
+        guard.force_present(&["aoe_cached_7"]);
+        assert_eq!(exists_in_run(None, "aoe_cached_7"), Some(true));
+        assert_eq!(exists_in_run(None, "aoe_absent_6"), Some(false));
     }
 
     fn tmux_state(name: &str, status: Status) -> TmuxState {

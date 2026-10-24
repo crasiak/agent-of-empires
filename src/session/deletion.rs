@@ -824,6 +824,7 @@ fn perform_deletion_core(
     // Stage 6: hook status cleanup
     tracing::debug!(target: "session.delete", session_id = %request.session_id, stage = "hook_status_cleanup", "perform_deletion: stage");
     crate::hooks::cleanup_hook_status_dir(&request.instance.id);
+    request.instance.clear_sandbox_hook_status();
 
     if !errors.is_empty() {
         tracing::debug!(target: "session.delete",

@@ -8,6 +8,7 @@ use super::add::AddArgs;
 use super::cityhall::CityHallCommands;
 use super::extract_session_id::ExtractSessionIdArgs;
 use super::group::GroupCommands;
+use super::hook_attention::HookAttentionArgs;
 use super::hooks::HooksCommands;
 use super::init::InitArgs;
 use super::killall::KillallArgs;
@@ -259,6 +260,11 @@ pub enum Commands {
     #[command(name = "__extract-session-id", hide = true)]
     ExtractSessionId(ExtractSessionIdArgs),
 
+    /// Internal: write what a waiting agent asks to the `attention` sidecar.
+    /// Spawned by host hooks on the agent's waiting events. Hidden from help.
+    #[command(name = "__hook-attention", hide = true)]
+    HookAttention(HookAttentionArgs),
+
     /// Internal: record one agent hook event in the usage log. Spawned by
     /// host hooks and the Pi extension. Hidden from help.
     #[command(name = "__usage-event", hide = true)]
@@ -359,7 +365,7 @@ pub fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Url(_) => "url",
         Commands::Acp { .. } => "acp",
         Commands::AcpRunner(_) | Commands::PrimeRunner(_) => return None,
-        Commands::ExtractSessionId(_) => return None,
+        Commands::ExtractSessionId(_) | Commands::HookAttention(_) => return None,
         Commands::UsageEvent(_) => return None,
         Commands::Uninstall(_) => "uninstall",
         Commands::Update(_) => "update",
@@ -399,8 +405,13 @@ mod tests {
                 "`{name}` is not an identifier-safe token"
             );
         }
-        let cli = Cli::try_parse_from(["aoe", "__extract-session-id"]).expect("parse");
-        assert_eq!(command_name(cli.command.as_ref().expect("command")), None);
+        for argv in [
+            &["aoe", "__extract-session-id"][..],
+            &["aoe", "__hook-attention", "--agent", "claude"],
+        ] {
+            let cli = Cli::try_parse_from(argv).expect("parse");
+            assert_eq!(command_name(cli.command.as_ref().expect("command")), None);
+        }
     }
 
     #[test]

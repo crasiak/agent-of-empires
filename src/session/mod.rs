@@ -83,7 +83,7 @@ pub(crate) use instance::test_helpers::publish_host_pi_transcript;
 pub(crate) use instance::ActiveExecution;
 pub(crate) use instance::{
     duplicate_session_error, find_duplicate_session, is_duplicate_session,
-    persist_session_to_storage, PassiveStatusPatch, ResumeIntent, SidWrite,
+    persist_session_to_storage, PassiveStatusPatch, ResumeIntent, SessionSidecarSource, SidWrite,
     NEWER_GENERATION_BUSY_REASON,
 };
 pub(crate) use instance::{
