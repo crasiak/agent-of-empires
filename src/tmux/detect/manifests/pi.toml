@@ -41,8 +41,18 @@ priority = 1000
 region = "hook"
 hook_status = "idle"
 
-# Without the hook file Pi always auto-approves, so the only question is
-# whether a turn is live.
+# pi-ask-user's prompt frame, by its titled top border and versioned bottom
+# border, for a Pi without the extension. It outranks the spinner a turn keeps
+# drawing under the overlay.
+[[rules]]
+id = "ask_user_prompt"
+state = "waiting"
+priority = 980
+region = "whole_recent"
+visible = true
+line_regex = ['╭─ ask_user [^╮]*─╮', '╰─+ v\d+(?:\.\d+)*\S* ─╯']
+
+# Otherwise the only question is whether a turn is live.
 [[rules]]
 extends = "spinner"
 id = "spinner"

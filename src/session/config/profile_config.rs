@@ -560,6 +560,20 @@ mod tests {
                     assert_eq!(merged.sandbox.port_mappings, vec!["3000:3000"]);
                 },
             ),
+            // A profile's Pi waiting tools replace the global list.
+            (
+                |global| {
+                    let pi = global.agents.entry("pi".to_string()).or_default();
+                    pi.waiting_tools = vec!["global_gate".to_string()];
+                    pi.status_map
+                        .insert("x".to_string(), crate::agents::HookStatus::Idle);
+                },
+                json!({"agents": {"pi": {"waiting_tools": ["profile_gate"]}}}),
+                |merged| {
+                    assert_eq!(merged.agents["pi"].waiting_tools, vec!["profile_gate"]);
+                    assert_eq!(merged.agents["pi"].status_map.len(), 1);
+                },
+            ),
             (
                 |global| global.environment = vec!["FROM_GLOBAL=1".to_string()],
                 json!({"environment": ["FROM_PROFILE=2"]}),
