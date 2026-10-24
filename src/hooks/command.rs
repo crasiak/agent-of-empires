@@ -311,12 +311,12 @@ mod tests {
             .stderr(Stdio::piped());
         configure(&mut command);
         let mut child = command.spawn().expect("spawn shell");
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(stdin.as_bytes())
-            .unwrap();
+        // A hook that never reads stdin may exit first; on Linux the write then
+        // fails with EPIPE. The hook's exit status, checked below, is the result.
+        match child.stdin.take().unwrap().write_all(stdin.as_bytes()) {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            other => other.unwrap(),
+        }
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success(), "hook must exit 0: {output:?}");
         output
