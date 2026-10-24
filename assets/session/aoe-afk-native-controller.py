@@ -227,17 +227,21 @@ class NativeIO:
 def orchestrate(io, manifest, attempt):
     """One monotonic attempt, never reapply or recover after ambiguity. Injectable fixed-fake seam."""
     root = io.root
-    session = None
+    session, stage = None, "migrate"
     try:
         io.aoe("migrate")
+        stage = "add"
         io.aoe("add", str(root / "work"), "--tool", "pi", "--title", "native-question-diagnostic")
         rows = a.read_json(Path(attempt["app"]) / "profiles/default/sessions.json", 8 * 1024 * 1024, False)
         if len(rows) != 1 or rows[0]["tool"] != "pi" or rows[0].get("command", ""):
             raise ValueError("not a sole managed direct Pi session")
         session = rows[0]["id"]
         initial_deadline = time.monotonic() + manifest["initial_seconds"]
+        stage = "start"
         io.aoe("session", "start", session)
+        stage = "terminal"
         io.terminal()
+        stage = "ready"
         ready = io.marker("ready.json", max(0, initial_deadline - time.monotonic()))
         bootstrap = a.read_json(root / "bootstrap.json")
         if ready.get("binding") != bootstrap["binding"] or ready["binding"]["instance_id"] != session or not ready.get("ready"):
@@ -245,6 +249,7 @@ def orchestrate(io, manifest, attempt):
         batch = {"version": 1, "profile": "default", "minutes": 1, "shared_requests": None,
                  "members": [{"session_id": session, "grant": attempt["grant"], "usage_guard": attempt["usage_guard"]}]}
         a.publish(root / "batch.json", batch)
+        stage = "preview"
         io.aoe("session", "afk", "batch", "preview", "--manifest", str(root / "batch.json"), "--output", str(root / "preview.json"))
         preview = a.read_json(root / "preview.json")
         content = {key: value for key, value in preview.items() if key != "digest"}
@@ -257,13 +262,16 @@ def orchestrate(io, manifest, attempt):
             raise ValueError("unqualified preview member")
         expected = preview_approval(manifest, attempt, preview)
         a.publish(root / "preview-approval-required.json", expected, 0o400)
+        stage = "preview-approval"
         approval = io.marker("preview-approval.json", manifest["preview_approval_seconds"])
         if a.canonical(approval) != a.canonical(expected):
             raise ValueError("exact preview approval differs")
         # Consume exact apply admission before entering AoE, including any failed publication.
         a.publish(root / "apply-admitted.json", expected, 0o400)
+        stage = "apply"
         apply_output = io.aoe("session", "afk", "batch", "apply", "--preview", str(root / "preview.json"), "--digest", preview["digest"])
         a.publish(root / "apply-result.json", json.loads(apply_output))
+        stage = "endpoint"
         io.marker("pending.json", 10)
         # Passive reads can wait for the ordinary runtime's own publication, never add a poll RPC.
         deadline = min(io.deadline, time.monotonic() + 5)
@@ -291,12 +299,14 @@ def orchestrate(io, manifest, attempt):
                 io.wait_capture_change(last, deadline)
             else:
                 pause()
+        stage = "cancel"
         io.arm()
         if io.marker("wait-armed.json", 5) != {"armed": True}:
             raise ValueError("native completion not armed")
         io.control("cancel")
         if io.marker("run-completed.json", 10) != {"completed": True}:
             raise ValueError("cancelled SDK completion unavailable")
+        stage = "off"
         io.aoe("session", "afk", "off", session)
         off_snapshot = a.read_json(Path(attempt["app"]) / "afk-authority-v3/profiles/default/snapshot.json", 32 * 1024 * 1024)
         stored = off_snapshot["sessions"][session]
@@ -306,11 +316,12 @@ def orchestrate(io, manifest, attempt):
         io.control("off")
         if io.marker("off-seen.json", 5) != {"off": True}:
             raise ValueError("native Off observation unavailable")
+        stage = "shutdown"
         io.control("shutdown")
         io.marker("process.json", 10)
         return {"controller": "completed", "session": session}
     except Exception as error:
-        a.publish(root / "controller-error.json", {"error": str(error), "session": session, "classification": "native_inconclusive"})
+        a.publish(root / "controller-error.json", {"error": str(error), "session": session, "stage": stage, "classification": "native_inconclusive"})
         # No retry, guard recovery, refund, extra grant or simulated successful cleanup.
         raise
 
@@ -325,6 +336,42 @@ def recv_line(channel, cap=4096):
         if len(data) > cap:
             raise ValueError("private controller frame cap")
     return bytes(data)
+
+
+def assemble_report(root, manifest, env):
+    failure = optional(root / "controller-error.json")
+    primary = None
+    if failure is not None:
+        if isinstance(failure, dict) and isinstance(failure.get("error"), str):
+            stage = failure.get("stage", "controller")
+            primary = f"{stage}: {failure['error']}"[:4096]
+        else:
+            primary = "controller: invalid error receipt"
+        if absent(root / "capture.json"):
+            return {"kind": a.KIND, "classification": "native_inconclusive", "error": primary, "manifest": a.digest(manifest)}
+    try:
+        output = a.bounded_command([manifest["tools"]["node"]["path"], str(a.HERE / "aoe-afk-native-report.mjs"), str(root)], env, root, 5)
+        report = json.loads(output)
+    except Exception as error:
+        report = {"kind": a.KIND, "classification": "native_inconclusive", "error": primary or str(error)}
+    report["manifest"] = a.digest(manifest)
+    return report
+
+
+def retire_terminal_socket(server, path, identity):
+    if server.returncode is None:
+        raise ValueError("terminal server has not been reaped")
+    if server.returncode != 0:
+        return False
+    try:
+        current = path.lstat()
+    except FileNotFoundError:
+        return True
+    if (not stat.S_ISSOCK(current.st_mode) or current.st_uid != os.getuid()
+            or current.st_nlink != 1 or (current.st_dev, current.st_ino) != identity):
+        return False
+    path.unlink()
+    return absent(path)
 
 
 def process_identity(pid, env, cwd):
@@ -391,6 +438,11 @@ def run(manifest, role, ordinal):
     deadline = time.monotonic() + manifest["attempt_seconds"]
     try:
         await_value(lambda: server.poll() is None and not absent(env["AOE_TMUX_SOCKET"]), time.monotonic() + 5)
+        tmux_socket = Path(env["AOE_TMUX_SOCKET"])
+        tmux_meta = tmux_socket.lstat()
+        if not stat.S_ISSOCK(tmux_meta.st_mode) or tmux_meta.st_uid != os.getuid() or tmux_meta.st_nlink != 1:
+            raise ValueError("unsafe terminal socket")
+        tmux_identity = (tmux_meta.st_dev, tmux_meta.st_ino)
         controller = os.fork()
         if controller == 0:
             parent.close()
@@ -469,8 +521,8 @@ def run(manifest, role, ordinal):
             clean = True
         if clean:
             a.bounded_command([manifest["tools"]["tmux"]["path"], "-S", env["AOE_TMUX_SOCKET"], "kill-server"], env, root, 5)
-            server_code = server.wait(timeout=5)
-            cleanup = server_code == 0 and absent(env["AOE_TMUX_SOCKET"])
+            server.wait(timeout=5)
+            cleanup = retire_terminal_socket(server, tmux_socket, tmux_identity)
         else:
             a.publish(root / "terminal-uncertain.json", {"cleanup": False, "owner_retained": owner, "server": server.pid})
             # Retain guardian, terminal and evidence until external inspection. Never kill the cleanup owner.
@@ -487,13 +539,15 @@ def run(manifest, role, ordinal):
         else:
             cleanup = False
         cleanup = cleanup and absent(root / "controller.sock")
+        if controller and status is None:
+            while True:
+                try:
+                    status = os.waitpid(controller, 0)[1]
+                    break
+                except InterruptedError:
+                    continue
         a.publish(root / "terminal-cleanup.json", {"cleanup": cleanup, "watchdog": watchdog, "controller_status": status})
-        try:
-            output = a.bounded_command([manifest["tools"]["node"]["path"], str(a.HERE / "aoe-afk-native-report.mjs"), str(root)], env, root, 5)
-            report = json.loads(output)
-        except Exception as error:
-            report = {"kind": a.KIND, "classification": "native_inconclusive", "error": str(error)}
-        report["manifest"] = a.digest(manifest)
+        report = assemble_report(root, manifest, env)
         a.publish(root / "report.json", report, 0o400)
         print(json.dumps(report))
     except Exception as error:

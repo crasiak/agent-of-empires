@@ -2,7 +2,9 @@
 import importlib.util
 import json
 import os
+import socket
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import time
 import tomllib
@@ -73,6 +75,8 @@ class FixedIO:
 
     def terminal(self):
         self.events.append("terminal")
+        if self.failure == "terminal":
+            raise TimeoutError("fixed terminal deadline")
         return {"pane": "%0"}
 
     def marker(self, name, seconds):
@@ -106,7 +110,7 @@ class FixedIO:
 
 class ControllerTests(unittest.TestCase):
     def test_ordered_one_use_flow_and_failures_do_not_reapply(self):
-        for failure in [None, "approval-timeout", "wrong-approval", "apply-fails", "not-armed", "endpoint"]:
+        for failure in [None, "terminal", "approval-timeout", "wrong-approval", "apply-fails", "not-armed", "endpoint"]:
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 prepared = Path(directory).resolve()
                 root = prepared / "baseline"
@@ -119,7 +123,7 @@ class ControllerTests(unittest.TestCase):
                 self.assertEqual(attempt["usage_guard"]["usd"]["limit_nano"], 100)
                 io = FixedIO(root, manifest, attempt, failure)
                 if failure:
-                    with self.assertRaises(ValueError):
+                    with self.assertRaises(TimeoutError if failure == "terminal" else ValueError):
                         c.orchestrate(io, manifest, attempt)
                 else:
                     self.assertEqual(c.orchestrate(io, manifest, attempt)["controller"], "completed")
@@ -136,6 +140,9 @@ class ControllerTests(unittest.TestCase):
                     self.assertNotIn("cancel", io.events)
                 if failure:
                     self.assertTrue((root / "controller-error.json").exists())
+                if failure == "terminal":
+                    self.assertEqual(a.read_json(root / "controller-error.json")["stage"], "terminal")
+                    self.assertEqual(applies, [])
 
     def test_adapter_seal_covers_observer_and_runtime_imports(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -162,6 +169,72 @@ class ControllerTests(unittest.TestCase):
                     after = a.source_seal(config)["adapter"]
                     self.assertNotEqual(before[str(path)], after[str(path)], name)
                     path.write_text("fixed source\n")
+
+    def test_primary_controller_failure_is_not_replaced_by_projection_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            a.publish(root / "controller-error.json", {"classification": "native_inconclusive", "error": "fixed handshake deadline",
+                      "session": "session", "stage": "terminal"})
+            manifest = {"tools": {"node": {"path": "/fixed/node"}}}
+            with patch.object(c.a, "bounded_command", side_effect=AssertionError("secondary projector must not execute")) as command:
+                report = c.assemble_report(root, manifest, {})
+            self.assertEqual(report["classification"], "native_inconclusive")
+            self.assertEqual(report["error"], "terminal: fixed handshake deadline")
+            self.assertEqual(report["manifest"], a.digest(manifest))
+            command.assert_not_called()
+
+    def test_retained_capture_projection_is_not_discarded_after_controller_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            a.publish(root / "controller-error.json", {"error": "fixed late failure", "stage": "shutdown"})
+            a.publish(root / "capture.json", {"retained": True})
+            manifest = {"tools": {"node": {"path": "/fixed/node"}}}
+            projected = {"kind": a.KIND, "classification": "fixture-positive-prefix", "retained": True}
+            with patch.object(c.a, "bounded_command", return_value=json.dumps(projected).encode()) as command:
+                report = c.assemble_report(root, manifest, {})
+            self.assertEqual(report, {**projected, "manifest": a.digest(manifest)})
+            command.assert_called_once()
+
+    def test_terminal_socket_retirement_requires_reap_and_same_inode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / "tmux.sock"
+            first = socket.socket(socket.AF_UNIX)
+            second = None
+            try:
+                first.bind(str(path))
+                identity = (path.lstat().st_dev, path.lstat().st_ino)
+                with self.assertRaises(ValueError):
+                    c.retire_terminal_socket(SimpleNamespace(returncode=None), path, identity)
+                self.assertTrue(path.exists())
+                self.assertFalse(c.retire_terminal_socket(SimpleNamespace(returncode=1), path, identity))
+                self.assertTrue(path.exists())
+                path.unlink()
+                second = socket.socket(socket.AF_UNIX)
+                second.bind(str(path))
+                self.assertNotEqual(identity, (path.lstat().st_dev, path.lstat().st_ino))
+                self.assertFalse(c.retire_terminal_socket(SimpleNamespace(returncode=0), path, identity))
+                self.assertTrue(path.exists())
+                second.close()
+                path.unlink()
+                path.symlink_to(root / "foreign")
+                self.assertFalse(c.retire_terminal_socket(SimpleNamespace(returncode=0), path, identity))
+                self.assertTrue(path.is_symlink())
+                path.unlink()
+                self.assertTrue(c.retire_terminal_socket(SimpleNamespace(returncode=0), path, identity))
+                second = socket.socket(socket.AF_UNIX)
+                second.bind(str(path))
+                identity = (path.lstat().st_dev, path.lstat().st_ino)
+                second.close()
+                with patch.object(Path, "unlink", side_effect=OSError("fixed unlink failure")), self.assertRaises(OSError):
+                    c.retire_terminal_socket(SimpleNamespace(returncode=0), path, identity)
+                self.assertTrue(path.exists())
+                self.assertTrue(c.retire_terminal_socket(SimpleNamespace(returncode=0), path, identity))
+                self.assertFalse(path.exists())
+            finally:
+                first.close()
+                if second is not None:
+                    second.close()
 
     def test_capture_is_bounded_read_only_and_refuses_linked_native_source(self):
         with tempfile.TemporaryDirectory() as directory:

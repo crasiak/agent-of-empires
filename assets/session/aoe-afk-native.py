@@ -400,11 +400,11 @@ def isolated_env(root, manifest):
 
 
 def validate_forwarded(argv, manifest, attempt):
-    if len(argv) != 6 or argv[0] != "--session-id" or argv[2] != "-e" or argv[4] != "--aoe-afk-binding":
+    if len(argv) != 8 or argv[0] != "-e" or argv[2] != "--session-id" or argv[4] != "-e" or argv[6] != "--aoe-afk-binding":
         raise ValueError("only exact fresh managed Pi argv accepted")
-    if len(argv[5].encode()) > 16 * 1024:
+    if len(argv[7].encode()) > 16 * 1024:
         raise ValueError("oversized managed bootstrap")
-    bootstrap = json.loads(argv[5])
+    bootstrap = json.loads(argv[7])
     binding = bootstrap["binding"]
     if set(binding) != {"instance_id", "profile", "native_id", "launch_id"}:
         raise ValueError("invalid binding shape")
@@ -416,10 +416,14 @@ def validate_forwarded(argv, manifest, attempt):
     app = Path(attempt["app"])
     if bootstrap["version"] != 6 or bootstrap["app_dir"] != str(app) or bootstrap["aoe_bin"] != manifest["tools"]["aoe"]["path"]:
         raise ValueError("foreign bootstrap binary/app")
-    if binding["native_id"] != argv[1] or binding["profile"] != "default":
+    if binding["native_id"] != argv[3] or binding["profile"] != "default":
         raise ValueError("foreign native binding")
+    identity = app / "agent-extensions" / "pi-aoe-session-id.js"
+    identity_source = Path(manifest["sources"]["aoe"]["path"]) / "assets/session/aoe-session-id.js"
+    if argv[1] != str(identity) or identity.is_symlink() or file_hash(identity) != file_hash(identity_source):
+        raise ValueError("not exact generated session identity extension")
     expected = app / "agent-extensions" / "aoe-afk-runtime.mjs"
-    if argv[3] != str(expected):
+    if argv[5] != str(expected):
         raise ValueError("not exact generated AFK extension")
     for name in ["aoe-afk.mjs", "aoe-afk-runtime.mjs", "aoe-afk-wake.mjs", "aoe-afk-usage.mjs", "aoe-afk-usage-guard.mjs", "aoe-afk-questions.mjs"]:
         path = app / "agent-extensions" / name
@@ -732,11 +736,11 @@ def pane(manifest_path, argv):
     env["TMUX_PANE"] = os.environ.get("TMUX_PANE", "")
     source = Path(manifest["sources"]["pi"]["path"])
     args = [manifest["tools"]["node"]["path"], "--import", manifest["tools"]["loader"]["path"],
-            str(source / "packages/coding-agent/src/cli.ts"), "--session-id", argv[1], "--session-dir", str(root / "sessions"),
+            str(source / "packages/coding-agent/src/cli.ts"), "--session-id", bootstrap["binding"]["native_id"], "--session-dir", str(root / "sessions"),
             "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve",
             "--tools", "ask_user,aoe_afk_read,aoe_afk_record,aoe_afk_apply,aoe_afk_checkpoint",
             "-e", str(HERE / "aoe-afk-native-entry.mjs"), "-e", str(Path(manifest["sources"]["question"]["path"]) / "index.ts"),
-            "--aoe-afk-binding", argv[5], "--provider", attempt["model"]["provider"], "--model", attempt["model"]["id"],
+            "--aoe-afk-binding", canonical(bootstrap).decode("utf8"), "--provider", attempt["model"]["provider"], "--model", attempt["model"]["id"],
             "Open the fixed disposable diagnostic question."]
     with socket.socket(socket.AF_UNIX) as channel:
         channel.connect(str(root / "controller.sock"))
