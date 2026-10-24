@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import aoeSessionId, { attentionSummary, registerHookStatus } from "./aoe-session-id.js";
+import aoeSessionId, { attentionSummary, hookBase, registerHookStatus, waitingTools } from "./aoe-session-id.js";
 
 function bus() {
   const handlers = new Map();
@@ -320,5 +320,177 @@ test("session_start publishes the session id and transcript path (AOE_SESSION_ID
       if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("AOE_HOOK_BASE is honoured only when it names the sandbox mount exactly", () => {
+  assert.deepEqual(hookBase({ AOE_HOOK_BASE: "/root/.pi/aoe-session" }, 501), { base: "/root/.pi/aoe-session", sandbox: true });
+  for (const value of [undefined, "", "/root/.pi/aoe-session/", "/root/.pi/aoe-session/../x", "/tmp/aoe-hooks-0", "/root/.pi", " /root/.pi/aoe-session"]) {
+    assert.deepEqual(hookBase({ AOE_HOOK_BASE: value }, 501), { base: "/tmp/aoe-hooks-501", sandbox: false }, JSON.stringify(value));
+  }
+});
+
+test("the sandbox base skips the uid check but keeps the mode and symlink checks", () => {
+  const foreign = process.geteuid() + 1;
+  const write = (f) => {
+    f.pi.fire("agent_start", { type: "agent_start" });
+    f.pi.fire("tool_execution_start", ask("q", { question: "Allowed?" }));
+  };
+  const cases = [
+    ["a fresh instance dir under a foreign-uid view", { sandbox: true, euid: foreign }, () => {}, true],
+    ["a 0755 base without group or other write", { sandbox: true, euid: foreign }, f => { mkdirSync(f.base, { mode: 0o700 }); chmodSync(f.base, 0o755); }, true],
+    ["the host base still checks the uid", { euid: foreign }, () => {}, false],
+    ["a group-writable base", { sandbox: true }, f => { mkdirSync(f.base, { mode: 0o700 }); chmodSync(f.base, 0o775); }, false],
+    ["a symlinked base", { sandbox: true }, f => { const decoy = join(f.root, "decoy"); mkdirSync(decoy, { mode: 0o700 }); symlinkSync(decoy, f.base); }, false],
+    ["a symlinked instance dir", { sandbox: true }, f => { const decoy = join(f.root, "decoy"); mkdirSync(f.base, { mode: 0o700 }); mkdirSync(decoy, { mode: 0o700 }); symlinkSync(decoy, f.dir); }, false],
+    ["a 0750 instance dir", { sandbox: true }, f => { mkdirSync(f.dir, { recursive: true, mode: 0o700 }); chmodSync(f.dir, 0o750); }, false],
+    ["a legacy 0755 dir some other uid owns", { sandbox: true, euid: foreign }, f => { mkdirSync(f.dir, { recursive: true, mode: 0o700 }); chmodSync(f.dir, 0o755); }, false],
+  ];
+  for (const [label, options, arrange, writes] of cases) {
+    const root = mkdtempSync(join(tmpdir(), "aoe-session-id-sandbox-"));
+    const base = join(root, "aoe-session");
+    const dir = join(base, "inst");
+    const f = { root, base, dir, pi: bus() };
+    try {
+      arrange(f);
+      registerHookStatus(f.pi, { base, instanceId: "inst", ...options });
+      write(f);
+      assert.equal(existsSync(join(dir, "status")) && readFileSync(join(dir, "status"), "utf8"), writes && "waiting", label);
+      assert.equal(existsSync(join(dir, "attention")), writes, label);
+      if (label.includes("0755 dir")) assert.equal(statSync(dir).mode & 0o7777, 0o755, `${label}: left as found`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("the sandbox base repairs its own legacy 0755 instance dir", () => {
+  const root = mkdtempSync(join(tmpdir(), "aoe-session-id-legacy-"));
+  try {
+    const base = join(root, "aoe-session");
+    const dir = join(base, "inst");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(base, 0o755);
+    chmodSync(dir, 0o755);
+    writeFileSync(join(dir, "session_id"), "sess\n");
+    const pi = bus();
+    registerHookStatus(pi, { base, instanceId: "inst", sandbox: true });
+    pi.fire("agent_start", { type: "agent_start" });
+    assert.equal(statSync(dir).mode & 0o7777, 0o700);
+    assert.equal(readFileSync(join(dir, "status"), "utf8"), "running");
+    assert.equal(readFileSync(join(dir, "session_id"), "utf8"), "sess\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a blocking UI prompt is waiting, and its end returns to running in a turn and idle outside one", () => {
+  const f = fixture();
+  try {
+    f.pi.fire("agent_start", { type: "agent_start" });
+    f.pi.fire("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind: "confirm", title: "Allow \u202Erm\u2066 -rf\nbuild?" });
+    assert.equal(f.read("status"), "waiting");
+    assert.equal(f.read("attention"), "Allow rm -rf build?", "the title is sanitized like a question");
+    f.pi.fire("ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind: "confirm" });
+    assert.equal(f.read("status"), "running");
+    assert.equal(f.read("attention"), undefined);
+    f.pi.fire("ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind: "confirm" });
+    assert.equal(f.read("status"), "running", "an unmatched end changes nothing");
+
+    f.pi.fire("agent_settled", { type: "agent_settled" });
+    for (const [kind, summary] of [
+      ["confirm", "Waiting for confirmation"],
+      ["select", "Waiting for a choice"],
+      ["input", "Waiting for your input"],
+      ["editor", "Waiting for your input"],
+      ["custom", "Waiting for your input"],
+      [undefined, "Waiting for your input"],
+    ]) {
+      f.pi.fire("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind, title: " \u200B " });
+      assert.equal(f.read("status"), "waiting", String(kind));
+      assert.equal(f.read("attention"), summary, String(kind));
+      f.pi.fire("ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind });
+      assert.equal(f.read("status"), "idle", `${kind}: no turn is running`);
+      assert.equal(f.read("attention"), undefined, String(kind));
+    }
+  } finally {
+    f.done();
+  }
+});
+
+test("ask_user and its own UI prompt nest without closing each other", () => {
+  for (const order of ["prompt ends first", "tool ends first"]) {
+    const f = fixture();
+    try {
+      f.pi.fire("agent_start", { type: "agent_start" });
+      f.pi.fire("tool_execution_start", ask("q", { question: "Ship it?" }));
+      f.pi.fire("ui_prompt_start", { type: "ui_prompt_start", reason: "ui_prompt", kind: "custom" });
+      assert.equal(f.read("attention"), "Ship it?", `${order}: the question outranks the prompt`);
+      const ends = [
+        ["ui_prompt_end", { type: "ui_prompt_end", reason: "ui_prompt", kind: "custom" }],
+        ["tool_execution_end", askEnd("q")],
+      ];
+      if (order === "tool ends first") ends.reverse();
+      f.pi.fire(...ends[0]);
+      assert.equal(f.read("status"), "waiting", `${order}: one wait is still open`);
+      assert.ok(f.read("attention"), order);
+      f.pi.fire(...ends[1]);
+      assert.equal(f.read("status"), "running", order);
+      assert.equal(f.read("attention"), undefined, order);
+    } finally {
+      f.done();
+    }
+  }
+});
+
+test("configured waiting tools extend ask_user and invalid names are dropped", () => {
+  assert.deepEqual([...waitingTools(undefined)], ["ask_user"]);
+  assert.deepEqual([...waitingTools("permission_gate,my.tool:v2-x,bad name,a/b,,ask_user," + "x".repeat(65))], ["ask_user", "permission_gate", "my.tool:v2-x"]);
+  const many = Array.from({ length: 40 }, (_, i) => `t${i}`).join(",");
+  assert.equal(waitingTools(many).size, 33, "ask_user plus at most 32 configured names");
+  assert.ok(!waitingTools(many).has("t32"));
+
+  const f = fixture("inst_1-A", { waitingTools: waitingTools("permission_gate") });
+  try {
+    f.pi.fire("agent_start", { type: "agent_start" });
+    f.pi.fire("tool_execution_start", { type: "tool_execution_start", toolCallId: "p", toolName: "permission_gate", args: {} });
+    assert.equal(f.read("status"), "waiting");
+    assert.equal(f.read("attention"), "Waiting for your answer");
+    f.pi.fire("tool_execution_end", { type: "tool_execution_end", toolCallId: "p", toolName: "permission_gate" });
+    assert.equal(f.read("status"), "running");
+    f.pi.fire("tool_execution_start", ask("q", { question: "Still asks?" }));
+    assert.equal(f.read("status"), "waiting", "ask_user is always a waiting tool");
+  } finally {
+    f.done();
+  }
+});
+
+test("session_shutdown removes status and attention and keeps the session id", () => {
+  const f = fixture();
+  try {
+    f.pi.fire("agent_start", { type: "agent_start" });
+    f.pi.fire("tool_execution_start", ask("q", { question: "Quit?" }));
+    writeFileSync(join(f.dir, "session_id"), "sess\n");
+    f.pi.fire("session_shutdown", { type: "session_shutdown", reason: "quit" });
+    assert.deepEqual(readdirSync(f.dir).sort(), ["session_id"]);
+  } finally {
+    f.done();
+  }
+});
+
+test("the extension wires prompt and shutdown handlers with the status writer", () => {
+  const saved = { id: process.env.AOE_INSTANCE_ID, source: process.env.AOE_SESSION_SOURCE };
+  try {
+    delete process.env.AOE_SESSION_SOURCE;
+    for (const [id, expected] of [["valid_id", true], ["bad/id", false]]) {
+      process.env.AOE_INSTANCE_ID = id;
+      const pi = bus();
+      aoeSessionId(pi);
+      for (const name of ["ui_prompt_start", "ui_prompt_end"]) assert.equal(pi.handlers.has(name), expected, `${id}: ${name}`);
+      assert.equal(pi.handlers.get("session_shutdown")?.length, expected ? 2 : 1, `${id}: usage plus the status writer`);
+    }
+  } finally {
+    if (saved.id === undefined) delete process.env.AOE_INSTANCE_ID; else process.env.AOE_INSTANCE_ID = saved.id;
+    if (saved.source === undefined) delete process.env.AOE_SESSION_SOURCE; else process.env.AOE_SESSION_SOURCE = saved.source;
   }
 });
