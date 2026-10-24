@@ -1730,6 +1730,11 @@ mod tests {
         );
         assert_eq!(value("AOE_HOOK_BASE"), Some("/root/.pi/aoe-session"));
         assert_eq!(value("AOE_PI_WAITING_TOOLS"), Some("ask_user"));
+        assert_eq!(
+            value("AOE_PI_EXTENSION_PID"),
+            Some(""),
+            "the env-file clears the extension's owner claim"
+        );
 
         let parts = inst
             .build_launch_command(Some(&execution), &mut inst.conversation_state())

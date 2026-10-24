@@ -58,8 +58,9 @@ fn pi_extension_env(
     usage: Option<(&Path, &str, &str)>,
     waiting_tools: &[String],
 ) -> String {
+    // An inherited `AOE_HOOK_BASE` would move the host Pi's status writes.
     let mut env = format!(
-        "AOE_SESSION_ID_FILE={} {}",
+        "AOE_SESSION_ID_FILE={} AOE_HOOK_BASE='' {}",
         shell_escape(&sidecar.to_string_lossy()),
         pi_waiting_tools_env(waiting_tools),
     );
@@ -74,9 +75,12 @@ fn pi_extension_env(
     env
 }
 
+/// The waiting tools, and an empty owner claim: the extension lets only the
+/// first Pi of a process tree write, so a Pi this launch starts must not
+/// inherit a claim from the environment `aoe` or tmux was started in.
 fn pi_waiting_tools_env(waiting_tools: &[String]) -> String {
     format!(
-        "AOE_PI_WAITING_TOOLS={} ",
+        "AOE_PI_WAITING_TOOLS={} AOE_PI_EXTENSION_PID='' ",
         shell_escape(&waiting_tools.join(","))
     )
 }
@@ -1162,10 +1166,13 @@ pi = "~/.pi-personal"
         let without = pi_extension_env(sidecar, None, &tools);
         assert!(without.starts_with("AOE_SESSION_ID_FILE="));
         assert!(!without.contains("AOE_USAGE_BIN"));
-        assert!(
-            !without.contains("AOE_HOOK_BASE"),
-            "the host keeps the default base"
-        );
+        let entries = shell_words::split(&without).unwrap();
+        for cleared in ["AOE_HOOK_BASE=", "AOE_PI_EXTENSION_PID="] {
+            assert!(
+                entries.iter().any(|entry| entry == cleared),
+                "the host clears an inherited {cleared} so a Pi AoE launched owns the default base: {entries:?}"
+            );
+        }
         let with = pi_extension_env(sidecar, Some((bin, "abc", "work")), &tools);
         for needle in [
             "AOE_USAGE_BIN='/opt/aoe'",
@@ -1204,6 +1211,8 @@ pi = "~/.pi-personal"
             ),
             "AOE_HOOK_BASE=/root/.pi/aoe-session".to_string(),
             "AOE_PI_WAITING_TOOLS=ask_user,permission_gate".to_string(),
+            // A Pi this launch starts owns the pane, whatever the env it inherits.
+            "AOE_PI_EXTENSION_PID=".to_string(),
         ] {
             assert!(entries.contains(&entry), "{entry} missing from {entries:?}");
         }

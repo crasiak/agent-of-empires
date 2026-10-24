@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import aoeSessionId, { attentionSummary, hookBase, registerHookStatus, waitingTools } from "./aoe-session-id.js";
 
 function bus() {
@@ -496,4 +498,81 @@ test("the extension wires prompt and shutdown handlers with the status writer", 
     if (saved.id === undefined) delete process.env.AOE_INSTANCE_ID; else process.env.AOE_INSTANCE_ID = saved.id;
     if (saved.source === undefined) delete process.env.AOE_SESSION_SOURCE; else process.env.AOE_SESSION_SOURCE = saved.source;
   }
+});
+
+// The process that owns this pane's hook writes; AoE's launch sets it empty.
+const OWNER = "AOE_PI_EXTENSION_PID";
+const AOE_ENV = ["AOE_INSTANCE_ID", "AOE_SESSION_SOURCE", "AOE_SESSION_ID_FILE", "AOE_USAGE_BIN", OWNER];
+
+/** Run `fn` with the extension's environment set to `vars` (undefined deletes), then restore it. */
+function withEnv(vars, fn) {
+  const saved = Object.fromEntries(AOE_ENV.map(k => [k, process.env[k]]));
+  try {
+    for (const k of AOE_ENV) {
+      const v = k in vars ? vars[k] : saved[k];
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+}
+
+// A pid that was live a moment ago and is not any ancestor of this process.
+const deadPid = () => String(spawnSync(process.execPath, ["-e", ""]).pid);
+
+const sessionEnv = { AOE_INSTANCE_ID: "child_guard", AOE_SESSION_SOURCE: undefined, AOE_SESSION_ID_FILE: "/nonexistent/aoe-child-guard/session_id", AOE_USAGE_BIN: "/nonexistent/aoe" };
+
+test("a Pi another Pi started registers no handlers at all", () => {
+  // A live foreign owner (this test's parent) and one that has since exited:
+  // a background subagent can outlive the Pi that started it.
+  for (const owner of [String(process.ppid), deadPid()]) {
+    withEnv({ ...sessionEnv, [OWNER]: owner }, () => {
+      const pi = bus();
+      aoeSessionId(pi);
+      assert.deepEqual([...pi.handlers.keys()], [], `owner ${owner}: no status, attention, id or usage writer`);
+      assert.equal(process.env[OWNER], owner, "a child leaves the claim as it found it");
+    });
+  }
+});
+
+test("the first Pi claims the session and keeps it across a reload", () => {
+  // Absent, or the empty value AoE's launch sets so a Pi it (re)starts owns its pane.
+  for (const start of [undefined, ""]) {
+    withEnv({ ...sessionEnv, [OWNER]: start }, () => {
+      for (const label of ["load", "reload"]) {
+        const pi = bus();
+        aoeSessionId(pi);
+        assert.equal(process.env[OWNER], String(process.pid), `${JSON.stringify(start)} ${label}`);
+        for (const name of ["session_start", "agent_start", "tool_execution_start", "ui_prompt_start", "agent_settled"]) {
+          assert.ok(pi.handlers.has(name), `${JSON.stringify(start)} ${label}: ${name}`);
+        }
+      }
+    });
+  }
+});
+
+test("a process spawned after the claim inherits it and stays silent", () => {
+  const module = fileURLToPath(new URL("./aoe-session-id.js", import.meta.url));
+  const probe = `const { default: ext } = await import(${JSON.stringify(module)});
+    const names = new Set(); ext({ on: n => names.add(n) });
+    process.stdout.write(JSON.stringify({ handlers: names.size, owner: process.env.${OWNER} }));`;
+  const run = env => {
+    const out = spawnSync(process.execPath, ["--input-type=module", "-e", probe], { env, encoding: "utf8" });
+    assert.equal(out.status, 0, out.stderr);
+    return { ...JSON.parse(out.stdout), pid: out.pid };
+  };
+  withEnv({ ...sessionEnv, [OWNER]: undefined }, () => {
+    aoeSessionId(bus());
+    // Pi's bash tool and pi-subagents both spawn with `{ ...process.env }`.
+    const child = run({ ...process.env });
+    assert.equal(child.handlers, 0, "a `pi -p` or subagent writes nothing for its parent's pane");
+    assert.equal(child.owner, String(process.pid));
+    // A Pi AoE (re)starts gets the empty claim from its launch env, whatever tmux holds.
+    const restarted = run({ ...process.env, [OWNER]: "" });
+    assert.ok(restarted.handlers > 0, "a Pi AoE launched owns its pane");
+    assert.equal(restarted.owner, String(restarted.pid));
+  });
 });

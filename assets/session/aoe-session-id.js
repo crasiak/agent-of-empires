@@ -272,7 +272,28 @@ export function registerHookStatus(pi, {
   pi.on("agent_settled", guard(settle));
 }
 
+// The pid of the Pi that owns this pane's hook writes. A Pi this Pi starts (a
+// `pi -p` from its bash tool, a subagent) inherits AoE's session env, so without
+// this it would write its own idle, shutdown, questions and session id over the
+// parent's. AoE's launch sets it empty, so a Pi AoE (re)starts always owns.
+export const PI_EXTENSION_OWNER_ENV = "AOE_PI_EXTENSION_PID";
+
+/**
+ * Claim the pane's hook writes for this process, or say another Pi holds them.
+ * Children spawned after the claim inherit it. An owner that has since exited
+ * still wins: a background subagent can outlive the Pi that started it.
+ */
+export function claimHookWrites(env = process.env, pid = process.pid) {
+  const owner = env[PI_EXTENSION_OWNER_ENV];
+  if (owner && owner !== String(pid)) return false;
+  env[PI_EXTENSION_OWNER_ENV] = String(pid);
+  return true;
+}
+
 export default function (pi) {
+  // Before any writer: a child Pi reports nothing, usage included, because
+  // AoE files every event under the parent's instance id.
+  if (!claimHookWrites()) return;
   const idTarget = process.env.AOE_SESSION_ID_FILE;
   const usageBin = process.env.AOE_USAGE_BIN;
   const source = process.env.AOE_SESSION_SOURCE;
