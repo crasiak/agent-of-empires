@@ -296,3 +296,29 @@ test("summaries drop format characters and ids follow AoE's 64-byte cap", () => 
   registerHookStatus(ok, { base: join(tmpdir(), "never-written"), instanceId: "a".repeat(64) });
   assert.ok(ok.handlers.has("agent_start"));
 });
+
+test("session_start publishes the session id and transcript path (AOE_SESSION_ID_FILE)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "aoe-session-id-publish-"));
+  const saved = { file: process.env.AOE_SESSION_ID_FILE, id: process.env.AOE_INSTANCE_ID, usage: process.env.AOE_USAGE_BIN, source: process.env.AOE_SESSION_SOURCE };
+  try {
+    const target = join(root, "fresh", "session_id");
+    process.env.AOE_SESSION_ID_FILE = target;
+    delete process.env.AOE_INSTANCE_ID;
+    delete process.env.AOE_USAGE_BIN;
+    delete process.env.AOE_SESSION_SOURCE;
+    const pi = bus();
+    aoeSessionId(pi);
+    const ctx = { sessionManager: { getSessionId: () => "sess-123", getSessionFile: () => "/x/y.jsonl" } };
+    for (const fn of pi.handlers.get("session_start") ?? []) await fn({ type: "session_start", reason: "startup" }, ctx);
+    assert.equal(readFileSync(target, "utf8"), "sess-123\n");
+    assert.equal(statSync(target).mode & 0o777, 0o600);
+    assert.equal(statSync(join(root, "fresh")).mode & 0o777, 0o700, "a created sidecar dir is private");
+    const published = readdirSync(join(root, "fresh")).sort();
+    assert.ok(published.every(name => !name.endsWith(".tmp")), `no temp files: ${published}`);
+  } finally {
+    for (const [k, v] of [["AOE_SESSION_ID_FILE", saved.file], ["AOE_INSTANCE_ID", saved.id], ["AOE_USAGE_BIN", saved.usage], ["AOE_SESSION_SOURCE", saved.source]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
