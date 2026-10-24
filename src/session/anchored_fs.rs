@@ -240,6 +240,23 @@ impl AnchoredDir {
         Ok(Some(bytes))
     }
 
+    /// The first `max_bytes` of a regular file and its mtime, both from one
+    /// no-follow descriptor, so the date belongs to the bytes read.
+    pub(crate) fn read_regular_prefix(
+        &self,
+        relative: &Path,
+        max_bytes: usize,
+    ) -> Result<Option<(Vec<u8>, std::time::SystemTime)>> {
+        let Some(file) = self.open_regular(relative, usize::MAX)? else {
+            return Ok(None);
+        };
+        let modified = file.metadata()?.modified()?;
+        let mut bytes = Vec::with_capacity(max_bytes.min(4096));
+        file.take(u64::try_from(max_bytes).unwrap_or(u64::MAX))
+            .read_to_end(&mut bytes)?;
+        Ok(Some((bytes, modified)))
+    }
+
     /// Create `relative` for writing, or `None` when an entry is already
     /// there. `O_EXCL | O_NOFOLLOW` so a planted symlink is never followed
     /// and an existing file is never truncated.

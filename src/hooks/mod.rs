@@ -39,7 +39,8 @@ pub(crate) use dir_guard::{
     write_session_id_via_guard,
 };
 pub(crate) use status_file::{
-    read_hook_session_id_within, read_hook_sidecar_at, SESSION_ID_SIDECAR_MAX_AGE,
+    read_hook_attention_from, read_hook_observation_from, read_hook_session_id_within,
+    read_hook_sidecar_at, read_hook_sidecar_prefix_at, SESSION_ID_SIDECAR_MAX_AGE,
 };
 pub(crate) const SESSION_SOURCE_ENV: &str = "AOE_SESSION_SOURCE";
 pub use hermes::{install_hermes_hooks_with_events, uninstall_hermes_hooks, HERMES_ALLOWLIST_FILE};

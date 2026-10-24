@@ -89,8 +89,11 @@ impl Instance {
     fn log_status_transition(&self, prev: Status) {
         let detection_tool =
             tmux::status_rules::detection_tool(&self.source_profile, &self.tool, &self.detect_as);
-        let hook = crate::hooks::read_hook_status(&self.id);
-        let hook_age_ms = crate::hooks::read_hook_status_age(&self.id).map(|age| age.as_millis());
+        let observed = self.hook_observation();
+        let hook = observed.map(|hook| hook.status);
+        let hook_age_ms = observed
+            .and_then(|hook| hook.age)
+            .map(|age| age.as_millis());
         tracing::info!(target: "session.status_change",
             "{} [{}] {:?} -> {:?} (hook={:?} hook_age_ms={:?} rule={})",
             self.id, detection_tool, prev, self.status, hook, hook_age_ms,
@@ -276,11 +279,7 @@ impl Instance {
         let pane_tool =
             tmux::status_rules::detection_tool(&self.source_profile, &self.tool, &self.detect_as);
 
-        let hook =
-            crate::hooks::read_hook_status(&self.id).map(|status| tmux::detect::HookObservation {
-                status,
-                age: crate::hooks::read_hook_status_age(&self.id),
-            });
+        let hook = self.hook_observation();
 
         // A dead pane outranks every other signal, and only for a session that
         // reported hooks at all: a hookless agent's pane is allowed to end.
@@ -1626,5 +1625,68 @@ Esc to cancel \u{b7} Tab to amend \u{b7} ctrl+e to explain\n\
             );
         }
         crate::hooks::cleanup_hook_status_dir(&probe.id);
+    }
+
+    /// A sandboxed Pi's extension writes beside its identity sidecar in the
+    /// config mount, so detection reads that store and not the host base.
+    #[test]
+    #[serial_test::serial]
+    fn sandboxed_pi_status_comes_from_its_config_mount() {
+        let home = crate::session::test_support::isolate_app_dir();
+        let (_hooks, _base, _hooks_tmp) = crate::hooks::test_support::BaseGuard::ready();
+        if !tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let rule = "\u{2500}".repeat(40);
+        let pane = format!(
+            "Twelve is a dozen.\n{rule}\n\n{rule}\n/tmp\n0.0%/272k (auto)   gpt-5.5 \u{2022} medium\n"
+        );
+        let pane_file = home.path().join("pane.txt");
+        std::fs::write(&pane_file, pane).expect("write pane fixture");
+
+        let mut inst = Instance::new("aoe_test_pi_sbx_hook", "/tmp");
+        inst.tool = "pi".into();
+        inst.view = crate::session::View::Terminal;
+        inst.sandbox_info = Some(test_sandbox("aoe-pi-sbx-status", None));
+        admit_sandbox_fixture(&inst);
+        let session_name = tmux::Session::generate_name(&inst.id, &inst.title);
+        let _guard = spawn_pane(
+            &session_name,
+            &format!("cat {}; sleep 300", shell_quote(&pane_file)),
+        );
+        assert!(
+            wait_for_pane(&session_name, "Twelve is a dozen."),
+            "Pi fixture never painted into the tmux pane"
+        );
+        let Some(crate::session::instance::SessionSidecarSource::SandboxDir(dir)) =
+            inst.hook_source()
+        else {
+            panic!("a sandboxed Pi reads its config mount");
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        write_hook_status(&inst.id, "running");
+        let cache = crate::tmux::SessionCacheGuard::capture();
+        let live = agent_pane_metadata("pi", None);
+        // A fresh host `running` would win if it were read; only the mount's file counts.
+        for (status, expected) in [
+            (None, Status::Idle),
+            (Some("waiting"), Status::Waiting),
+            (Some("running"), Status::Running),
+            (Some("idle"), Status::Idle),
+        ] {
+            match status {
+                Some(status) => std::fs::write(dir.join("status"), status).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(dir.join("status"));
+                }
+            }
+            let mut inst = inst.clone();
+            inst.status = Status::Idle;
+            cache.force_present(&[session_name.as_str()]);
+            inst.update_status_once(Some(&live), Some(&session_name));
+            assert_eq!(inst.status, expected, "sandbox status={status:?}");
+        }
+        crate::hooks::cleanup_hook_status_dir(&inst.id);
     }
 }

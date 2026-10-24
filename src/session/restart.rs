@@ -155,7 +155,7 @@ fn spawn_wake_worker(instance: Instance, wake_message: String) {
                     return;
                 }
                 let pane_alive = !tmux_session.is_pane_dead();
-                let hook_active = crate::hooks::read_hook_status(&instance.id).is_some();
+                let hook_active = instance.hook_status().is_some();
                 if pane_alive && (hook_active || !tmux_session.is_pane_running_shell()) {
                     break;
                 }
