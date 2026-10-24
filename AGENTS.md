@@ -37,6 +37,11 @@ change rather than running several to be thorough. `--all-targets` links all
 twenty-odd test binaries separately; keep it for a pre-push check, not routine
 iteration.
 
+Build locations, caches and parallelism come from the machine, not the repo.
+Do not run `cargo clean` or set `CARGO_TARGET_DIR`, `RUSTC_WRAPPER` or other
+build-location variables; read `docs/agents/building.md` before changing how
+anything is built or when a build blocks on a lock.
+
 Run cargo in the foreground. Do not detach it with `&`, `nohup`, or
 `sh -c '...' &`: if that cargo is killed, its `rustc` children keep running
 under PID 1, each holding several GB of memory with no consumer.
