@@ -73,7 +73,7 @@ pub(crate) fn status_command_for_event(
 
 /// Writes `waiting` when stdin names one of `waiting_tools`, else `default_status`.
 /// Matches the compact `"tool_name":"X"` bytes, which an escaped mention inside
-/// a JSON string value cannot produce.
+/// a JSON string value cannot produce. Only a `waiting` write keeps `attention`.
 fn hook_command_waiting_tools_with_base(
     default_status: &str,
     waiting_tools: &[String],
@@ -87,15 +87,24 @@ fn hook_command_waiting_tools_with_base(
     let write = format!(
         "IN=$(cat 2>/dev/null); S={default_status}; \
          case \"$IN\" in {patterns}) S=waiting ;; esac; \
-         printf %s \"$S\" > \"$D/status\" 2>/dev/null; ",
+         printf %s \"$S\" > \"$D/status\" 2>/dev/null; \
+         [ \"$S\" = waiting ] || {CLEAR_ATTENTION}",
         patterns = patterns.join("|")
     );
     hook_command_with_write(&write, base, target)
 }
 
+/// Any status but `waiting` ends the wait, so its question must not show at the next one.
+const CLEAR_ATTENTION: &str = "rm -f \"$D/attention\" 2>/dev/null; ";
+
 fn hook_command_with_base(status: &str, base: &str, target: HookInstallTarget) -> String {
+    let clear = if status == HookStatus::Waiting.as_str() {
+        ""
+    } else {
+        CLEAR_ATTENTION
+    };
     hook_command_with_write(
-        &format!("printf {status} > \"$D/status\" 2>/dev/null; "),
+        &format!("printf {status} > \"$D/status\" 2>/dev/null; {clear}"),
         base,
         target,
     )
@@ -148,20 +157,24 @@ pub(crate) fn hook_command_session_id(
     field: HookIdentityField,
     publisher: Option<&str>,
 ) -> String {
-    // The command is a single-quoted `sh -c` body; a publisher outside this alphabet would need
-    // quoting there, and every built-in agent binary fits it.
-    let publisher = publisher.filter(|name| {
-        !name.is_empty()
-            && name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-    });
+    let publisher = bakeable_publisher(publisher);
     match target {
         HookInstallTarget::Host => hook_command_session_id_host(field, publisher),
         HookInstallTarget::Sandbox => {
             hook_command_session_id_sandbox(HOOK_STATUS_BASE_IN_CONTAINER, field, publisher)
         }
     }
+}
+
+/// The command is a single-quoted `sh -c` body; a publisher outside this alphabet would need
+/// quoting there, and every built-in agent binary fits it.
+fn bakeable_publisher(publisher: Option<&str>) -> Option<&str> {
+    publisher.filter(|name| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    })
 }
 
 /// The `--field` value an identity hook extracts. Named here so the command
@@ -189,6 +202,19 @@ fn hook_command_session_id_host(field: HookIdentityField, publisher: Option<&str
          [ -n \"$AOE_HOOK_BIN\" ] || exit 0; \
          [ -x \"$AOE_HOOK_BIN\" ] || exit 0; \
          \"$AOE_HOOK_BIN\" __extract-session-id --field {field}{agent} 2>/dev/null; exit 0 # {AOE_HOOK_MARKER}'"
+    )
+}
+
+/// Records what the waiting agent asks in the `attention` file. Host only: the sandbox has no
+/// `aoe`. Output is discarded because Claude reads a `PermissionRequest` hook's stdout as its
+/// decision.
+pub(crate) fn hook_command_attention(publisher: Option<&str>) -> String {
+    let agent = identity_publisher_arg(bakeable_publisher(publisher));
+    format!(
+        "sh -c '[ -n \"$AOE_INSTANCE_ID\" ] || exit 0; \
+         [ -n \"$AOE_HOOK_BIN\" ] || exit 0; \
+         [ -x \"$AOE_HOOK_BIN\" ] || exit 0; \
+         \"$AOE_HOOK_BIN\" __hook-attention{agent} >/dev/null 2>&1; exit 0 # {AOE_HOOK_MARKER}'"
     )
 }
 
@@ -705,6 +731,119 @@ mod tests {
                 want,
                 "{payload}"
             );
+        }
+    }
+
+    /// A writer of any status but `waiting` drops the last question, which
+    /// would otherwise show, with its old `since`, at the next wait.
+    #[test]
+    fn non_waiting_writers_remove_attention() {
+        let ask = r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion"}"#;
+        let bash = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#;
+        let tools = ["AskUserQuestion".to_string()];
+        for target in [HookInstallTarget::Host, HookInstallTarget::Sandbox] {
+            let tmp = TempDir::new().unwrap();
+            let base = tight_dir(&tmp.path().join("aoe-hooks"));
+            let base_str = base.to_str().unwrap();
+            let cases: [(&str, String, &str, &str, bool); 6] = [
+                (
+                    "running",
+                    hook_command_with_base("running", base_str, target),
+                    "",
+                    "running",
+                    false,
+                ),
+                (
+                    "idle",
+                    hook_command_with_base("idle", base_str, target),
+                    "",
+                    "idle",
+                    false,
+                ),
+                (
+                    "error",
+                    hook_command_with_base("error", base_str, target),
+                    "",
+                    "error",
+                    false,
+                ),
+                (
+                    "waiting",
+                    hook_command_with_base("waiting", base_str, target),
+                    "",
+                    "waiting",
+                    true,
+                ),
+                (
+                    "gated_ask",
+                    hook_command_waiting_tools_with_base("running", &tools, base_str, target),
+                    ask,
+                    "waiting",
+                    true,
+                ),
+                (
+                    "gated_other",
+                    hook_command_waiting_tools_with_base("running", &tools, base_str, target),
+                    bash,
+                    "running",
+                    false,
+                ),
+            ];
+            for (id, cmd, payload, status, kept) in cases {
+                let dir = tight_dir(&base.join(id));
+                std::fs::write(dir.join("attention"), "Which one?").unwrap();
+                run_hook("sh", &cmd, id, payload, |_| {});
+                let label = format!("{target:?} {id}");
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("status")).unwrap(),
+                    status,
+                    "{label}"
+                );
+                assert_eq!(dir.join("attention").exists(), kept, "{label}");
+            }
+        }
+    }
+
+    /// The attention writer hands stdin to the pinned binary and discards its
+    /// output, which Claude would read as a permission decision.
+    #[test]
+    fn attention_command_runs_the_pinned_binary_quietly() {
+        let cmd = hook_command_attention(Some("claude"));
+        assert!(is_aoe_hook_command(&cmd), "{cmd}");
+        let tmp = TempDir::new().unwrap();
+        let bin = tmp.path().join("aoe");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nprintf '%s ' \"$@\" > \"$OUT/args\"\ncat > \"$OUT/stdin\"\necho noise\necho err >&2\nexit 3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let not_executable = tmp.path().join("aoe-plain");
+        std::fs::write(&not_executable, "#!/bin/sh\n: > \"$OUT/args\"\n").unwrap();
+        let payload = r#"{"hook_event_name":"Notification","message":"m"}"#;
+        for (label, id, hook_bin, invoked) in [
+            ("pinned binary", "inst", Some(&bin), true),
+            ("no instance", "", Some(&bin), false),
+            ("no binary", "inst", None, false),
+            ("not executable", "inst", Some(&not_executable), false),
+        ] {
+            let out = tight_dir(&tmp.path().join(label.replace(' ', "_")));
+            let output = run_hook("sh", &cmd, id, payload, |c| {
+                c.env("OUT", &out).env_remove("AOE_HOOK_BIN");
+                if let Some(bin) = hook_bin {
+                    c.env("AOE_HOOK_BIN", bin);
+                }
+            });
+            assert!(
+                output.stdout.is_empty() && output.stderr.is_empty(),
+                "{label}: {output:?}"
+            );
+            let args = std::fs::read_to_string(out.join("args")).ok();
+            assert_eq!(args.is_some(), invoked, "{label}");
+            if invoked {
+                assert_eq!(args.as_deref(), Some("__hook-attention --agent claude "));
+                assert_eq!(std::fs::read_to_string(out.join("stdin")).unwrap(), payload);
+            }
         }
     }
 
