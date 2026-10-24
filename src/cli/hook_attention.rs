@@ -52,19 +52,23 @@ fn read_payload<R: Read>(stdin: R) -> Result<Value> {
 }
 
 /// The text the user is asked. A permission request names only its tool:
-/// `tool_input` can hold a command line with secrets in it.
+/// `tool_input` can hold a command line with secrets in it. The one exception
+/// is AskUserQuestion, whose question Claude shows in a permission dialog: its
+/// PermissionRequest fires after the PreToolUse that wrote the question, so it
+/// writes the same question (and nothing else from `tool_input`) rather than
+/// replacing it with "Allow AskUserQuestion?".
 fn summary(agent: &str, payload: &Value) -> Option<String> {
     if agent != "claude" {
         return None;
     }
     let text = |pointer: &str| payload.pointer(pointer).and_then(Value::as_str);
+    let question = || text("/tool_input/questions/0/question").map(str::to_string);
     let summary = match text("/hook_event_name")? {
-        "PreToolUse" if text("/tool_name")? == "AskUserQuestion" => {
-            text("/tool_input/questions/0/question")?.to_string()
-        }
+        "PreToolUse" if text("/tool_name")? == "AskUserQuestion" => question()?,
         "Notification" => text("/message")?.to_string(),
         "PermissionRequest" => match text("/tool_name")? {
             "" => return None,
+            "AskUserQuestion" => question()?,
             tool => format!("Allow {tool}?"),
         },
         _ => return None,
@@ -144,6 +148,30 @@ mod tests {
                 })
                 .to_string(),
                 Some("Allow Bash?"),
+            ),
+            (
+                "permission_for_ask_keeps_the_question",
+                "claude",
+                serde_json::json!({
+                    "hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion",
+                    "tool_input": {"questions": [
+                        {"question": "Which database?", "header": "TOKEN=hunter2",
+                         "options": [{"label": "pg", "description": "TOKEN=hunter2"}]},
+                        {"question": "Second?"},
+                    ]},
+                })
+                .to_string(),
+                Some("Which database?"),
+            ),
+            (
+                "permission_for_ask_without_question",
+                "claude",
+                serde_json::json!({
+                    "hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion",
+                    "tool_input": {"questions": [{"header": "TOKEN=hunter2"}]},
+                })
+                .to_string(),
+                None,
             ),
             ("ask_oversized", "claude", oversized_ask, None),
             (
