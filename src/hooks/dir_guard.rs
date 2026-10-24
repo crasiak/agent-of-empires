@@ -469,14 +469,23 @@ pub(crate) fn write_attention_via_guard(instance_id: &str, summary: &str) -> Res
 /// other hook write. Idempotent; `Err` only on guard validation or a hard
 /// `unlinkat` failure, and callers treat that as best-effort.
 pub(crate) fn unlink_session_id_via_guard(instance_id: &str) -> Result<()> {
+    unlink_leaves_via_guard(instance_id, &["session_id"])
+}
+
+/// [`unlink_session_id_via_guard`] for any set of leaves. A symlinked leaf is
+/// removed itself, never its target.
+pub(crate) fn unlink_leaves_via_guard(instance_id: &str, leaves: &[&str]) -> Result<()> {
     let Some(dir) = open_instance_dir_read_only(instance_id)? else {
         return Ok(());
     };
-    match unlinkat(dir.as_fd(), "session_id", UnlinkatFlags::NoRemoveDir) {
-        Ok(()) => Ok(()),
-        Err(Errno::ENOENT) => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("unlinkat session_id in {instance_id}")),
+    for leaf in leaves {
+        validate_hook_leaf(leaf)?;
+        match unlinkat(dir.as_fd(), *leaf, UnlinkatFlags::NoRemoveDir) {
+            Ok(()) | Err(Errno::ENOENT) => {}
+            Err(e) => return Err(e).with_context(|| format!("unlinkat {leaf} in {instance_id}")),
+        }
     }
+    Ok(())
 }
 
 /// Create the per-instance hook directory under `dir_guard` discipline and

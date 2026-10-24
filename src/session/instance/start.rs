@@ -260,6 +260,7 @@ impl Instance {
         );
 
         self.clear_pane_identity_sidecar();
+        crate::hooks::clear_hook_status(&self.id);
 
         let mut omp_capture_metadata = if let Some(plan) = prepared.omp_capture_plan {
             let launched_at_ms = SystemTime::now()
