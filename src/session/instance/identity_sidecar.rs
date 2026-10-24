@@ -469,6 +469,20 @@ impl Instance {
         }
     }
 
+    /// Remove the status and question a sandboxed Pi's extension wrote beside
+    /// its identity sidecar, which the host base cleanup never reaches.
+    pub(crate) fn clear_sandbox_hook_status(&self) {
+        if !self.is_sandboxed() {
+            return;
+        }
+        if let Some(root) = self.sandbox_store_root() {
+            let base = Path::new("aoe-session").join(&self.id);
+            for name in ["status", "attention"] {
+                let _ = root.remove_file(&base.join(name));
+            }
+        }
+    }
+
     pub(super) fn clear_pane_identity_sidecar(&self) {
         // Prime's root_session survives failed launches and is replaced only by a root.
         let host_sidecar = match self.resolved_capture_backend() {
@@ -478,6 +492,8 @@ impl Instance {
                     source.matches_host_hooks(&self.id)
                 }
                 Some(SessionSidecarSource::SandboxDir(_)) => {
+                    // A crashed Pi's `waiting` would otherwise show until it boots.
+                    self.clear_sandbox_hook_status();
                     if let Some(root) = self.sandbox_store_root() {
                         let base = Path::new("aoe-session").join(&self.id);
                         let _ = root.remove_file(&base.join("session_id"));
@@ -1241,5 +1257,59 @@ pi = "~/.pi-personal"
             write_host(&other.id, "running");
             assert_eq!(other.hook_status(), Some(Status::Running), "{}", other.tool);
         }
+    }
+
+    /// Launch, stop and delete leave a sandboxed Pi no stale status or question.
+    /// Stop and delete keep its identity sidecar; launch drops that as before.
+    #[test]
+    #[serial_test::serial]
+    fn sandboxed_pi_hook_files_are_cleared_at_launch_stop_and_delete() {
+        let (_hooks, _base, _hooks_tmp) = crate::hooks::test_support::BaseGuard::ready();
+        let _app = crate::session::test_support::isolate_app_dir();
+        let mut inst = tool_instance("pi", "/tmp/pi-sbx-clear");
+        inst.sandbox_info = Some(test_sandbox("aoe-pi-sbx-clear", None));
+        admit_sandbox_fixture(&inst);
+        let Some(SessionSidecarSource::SandboxDir(dir)) = inst.hook_source() else {
+            panic!("a sandboxed Pi has its hook files in its config mount");
+        };
+        let seed = || {
+            std::fs::create_dir_all(&dir).unwrap();
+            for (name, value) in [
+                ("status", "waiting"),
+                ("attention", "Deploy now?"),
+                ("session_id", "sess\n"),
+            ] {
+                std::fs::write(dir.join(name), value).unwrap();
+            }
+        };
+        let left = || {
+            let mut names: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        seed();
+        inst.clear_sandbox_hook_status();
+        assert_eq!(left(), ["session_id"], "stop and delete keep the identity");
+
+        seed();
+        inst.clear_pane_identity_sidecar();
+        assert!(
+            left().is_empty(),
+            "launch clears status, attention and identity"
+        );
+
+        let host = tool_instance("pi", "/tmp/pi-host-clear");
+        let host_dir = crate::hooks::ensure_instance_dir_path(&host.id).unwrap();
+        std::fs::write(host_dir.join("status"), "running").unwrap();
+        host.clear_sandbox_hook_status();
+        assert_eq!(
+            host.hook_status(),
+            Some(Status::Running),
+            "the host base is cleanup_hook_status_dir's"
+        );
     }
 }

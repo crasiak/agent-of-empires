@@ -445,6 +445,7 @@ impl Instance {
                     Status::Stopped,
                 )?;
                 crate::hooks::cleanup_hook_status_dir(&self.id);
+                self.clear_sandbox_hook_status();
                 Ok(())
             }
             Err(error) => {
@@ -700,6 +701,47 @@ mod tests {
                 !sidecar.exists(),
                 "sidecar must be cleaned after path persists"
             );
+        }
+    }
+
+    /// A sandboxed Pi writes its status and question into its config mount,
+    /// which the host base cleanup never reaches; stop clears them there too.
+    #[test]
+    #[serial_test::serial]
+    fn stop_clears_a_sandboxed_pi_status_and_question() {
+        use crate::session::instance::test_helpers::{
+            admit_sandbox_fixture, install_container_transport, test_sandbox,
+        };
+        let (_guard, _base, _tmp) = crate::hooks::test_support::BaseGuard::ready();
+        let home = tempfile::tempdir().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(home.path());
+        let profile = "stop-sandboxed-pi-hooks";
+        let mut inst = Instance::new("pi", home.path().to_str().unwrap());
+        inst.source_profile = profile.into();
+        inst.tool = "pi".into();
+        inst.sandbox_info = Some(test_sandbox("aoe-pi-stop-hooks", None));
+        admit_sandbox_fixture(&inst);
+        let config = inst.build_container_config().unwrap();
+        let _transport =
+            install_container_transport(home.path(), "aoe-pi-stop-hooks", &config.volumes);
+        let storage = crate::session::storage::Storage::new_unwatched(profile).unwrap();
+        storage
+            .update(|rows, _| {
+                rows.push(inst.clone());
+                Ok(())
+            })
+            .unwrap();
+        let Some(SessionSidecarSource::SandboxDir(dir)) = inst.hook_source() else {
+            panic!("a sandboxed Pi has its hook files in its config mount");
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("status"), "waiting").unwrap();
+        std::fs::write(dir.join("attention"), "Deploy now?").unwrap();
+        assert_eq!(inst.hook_status(), Some(Status::Waiting));
+
+        inst.stop().unwrap();
+        for name in ["status", "attention"] {
+            assert!(!dir.join(name).exists(), "stop left the sandbox {name}");
         }
     }
 
