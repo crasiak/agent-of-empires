@@ -458,6 +458,12 @@ pub(crate) fn write_session_id_via_guard(
     write_atomic(dir.as_fd(), &leaf, session_id.as_bytes())
 }
 
+/// Write the `attention` summary a waiting agent shows.
+pub(crate) fn write_attention_via_guard(instance_id: &str, summary: &str) -> Result<()> {
+    let dir = open_instance_dir(instance_id)?;
+    write_atomic(dir.as_fd(), "attention", summary.as_bytes())
+}
+
 /// Delete the `session_id` sidecar with `unlinkat` against a verified
 /// per-instance dirfd, so deletion runs under the same discipline as every
 /// other hook write. Idempotent; `Err` only on guard validation or a hard

@@ -36,10 +36,11 @@ pub(crate) use config_io::with_config_lock_policy;
 pub use config_io::SymlinkPolicy;
 pub(crate) use dir_guard::{
     ensure_instance_dir_path, hook_base_path, session_id_leaf, unlink_session_id_via_guard,
-    write_session_id_via_guard,
+    write_attention_via_guard, write_session_id_via_guard,
 };
 pub(crate) use status_file::{
-    read_hook_session_id_within, read_hook_sidecar_at, SESSION_ID_SIDECAR_MAX_AGE,
+    read_hook_session_id_within, read_hook_sidecar_at, sanitize_attention_summary,
+    SESSION_ID_SIDECAR_MAX_AGE,
 };
 pub(crate) const SESSION_SOURCE_ENV: &str = "AOE_SESSION_SOURCE";
 pub use hermes::{install_hermes_hooks_with_events, uninstall_hermes_hooks, HERMES_ALLOWLIST_FILE};

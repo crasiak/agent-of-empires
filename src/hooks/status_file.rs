@@ -247,7 +247,7 @@ fn is_format_char(c: char) -> bool {
     )
 }
 
-fn sanitize_attention_summary(bytes: &[u8]) -> String {
+pub(crate) fn sanitize_attention_summary(bytes: &[u8]) -> String {
     let text: String = String::from_utf8_lossy(bytes)
         .chars()
         .filter(|&c| !is_format_char(c))
