@@ -446,9 +446,12 @@ test("ask_user and its own UI prompt nest without closing each other", () => {
 test("configured waiting tools extend ask_user and invalid names are dropped", () => {
   assert.deepEqual([...waitingTools(undefined)], ["ask_user"]);
   assert.deepEqual([...waitingTools("permission_gate,my.tool:v2-x,bad name,a/b,,ask_user," + "x".repeat(65))], ["ask_user", "permission_gate", "my.tool:v2-x"]);
-  const many = Array.from({ length: 40 }, (_, i) => `t${i}`).join(",");
-  assert.equal(waitingTools(many).size, 33, "ask_user plus at most 32 configured names");
-  assert.ok(!waitingTools(many).has("t32"));
+  // AoE's own rule (`agents::pi_waiting_tools`): at most 32 in all, ask_user
+  // included, and a repeated name takes no slot.
+  const many = ["ask_user", "t0", "t0", ...Array.from({ length: 40 }, (_, i) => `t${i}`)].join(",");
+  assert.equal(waitingTools(many).size, 32, "at most 32 names, ask_user included");
+  assert.ok(waitingTools(many).has("t30"), "duplicates do not use up the cap");
+  assert.ok(!waitingTools(many).has("t31"));
 
   const f = fixture("inst_1-A", { waitingTools: waitingTools("permission_gate") });
   try {

@@ -2492,6 +2492,18 @@ if [ "$PROBE_MODE" = legacy ]; then printf '%s\n' 'FLAGS --fork fork session'; e
         assert_eq!(capped.len(), 32, "ask_user included");
         assert_eq!(capped[0], "ask_user");
         assert_eq!(capped[31], "t30");
+        // The extension applies the same rule (`waitingTools` in aoe-session-id.js).
+        config.agents.get_mut("pi").unwrap().waiting_tools =
+            ["ask_user", "t0", "t0"].map(String::from).to_vec();
+        config
+            .agents
+            .get_mut("pi")
+            .unwrap()
+            .waiting_tools
+            .extend((0..40).map(|i| format!("t{i}")));
+        let deduped = pi_waiting_tools(&config);
+        assert_eq!(deduped.len(), 32, "duplicates take no slot");
+        assert_eq!(deduped[31], "t30");
         config.agents.clear();
         config
             .agents

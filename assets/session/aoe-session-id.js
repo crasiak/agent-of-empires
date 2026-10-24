@@ -44,12 +44,17 @@ function promptSummary(kind, title) {
   return summaryLine(title) || PROMPT_FALLBACK[kind] || PROMPT_FALLBACK_DEFAULT;
 }
 
-/** `ask_user` plus the valid names in AoE's comma-separated `AOE_PI_WAITING_TOOLS`. */
+/**
+ * `ask_user` plus the valid names in AoE's comma-separated `AOE_PI_WAITING_TOOLS`,
+ * at most 32 in all: the same rule as AoE's `pi_waiting_tools`.
+ */
 export function waitingTools(raw) {
   const tools = new Set(DEFAULT_WAITING_TOOLS);
   if (typeof raw !== "string") return tools;
-  const names = raw.split(",").filter(name => WAITING_TOOL_NAME.test(name));
-  for (const name of names.slice(0, WAITING_TOOLS_MAX)) tools.add(name);
+  for (const name of raw.split(",")) {
+    if (tools.size >= WAITING_TOOLS_MAX) break;
+    if (WAITING_TOOL_NAME.test(name)) tools.add(name);
+  }
   return tools;
 }
 
