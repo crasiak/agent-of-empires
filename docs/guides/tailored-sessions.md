@@ -13,9 +13,32 @@ does not waive a destination skill's scope, provenance, or review requirements.
 Capture opens a new scratch Session in an overlay above the sidebar and current
 Session. Ctrl+Y closes the overlay without stopping capture or changing the current
 Session. Escape closes the picker/form; inside the capture terminal it goes to the
-agent. The TUI also accepts Ctrl+Q to close the overlay. Continue a closed capture
-from the Session list. Scratch captures appear in Scratch when grouped by project,
-or in Tailored when grouped manually.
+agent. The TUI also accepts Ctrl+Q to close the overlay.
+
+## Check previous captures
+
+Ctrl+Y shows the new-capture action and recent runs together. Search by idea,
+Title, account, Profile, or Status, then open an existing run to continue that same
+Session in the overlay. Reopening does not create another Session or change the
+underlying selection. F2 returns from a capture or its form to history; the web
+also has a Back to history button.
+
+Use **Hide** to remove an entry from recent history without stopping, archiving,
+trashing, or deleting its Session. This preference is shared by TUI and web and
+survives restarts. Use **Hidden** and **Restore** to bring an entry back. In the TUI,
+arrow keys select, Enter opens, Delete hides/restores, and F3 switches recent/hidden.
+Both clients refresh history while the window is open. Archived and trashed
+Sessions stay outside this view; restore them through the normal Session list.
+
+Captures also remain in the normal Session list: Scratch when grouped by project,
+or Tailored when grouped manually. A hidden capture can still run and await input.
+Hiding is a view preference, not a substitute for a Session stop or trash action.
+
+Shared visibility is stored separately in `state.toml`, keyed by Profile and
+Session id. Migration v050 initializes that UI state and preserves a backup of the
+old state file without rewriting Session records. This advances the app schema;
+older builds refuse that newer schema. Close older AoE clients before using a
+newly installed build, and do not lower the cursor to force a downgrade.
 
 ## Minimal Ledger profiles
 
@@ -109,5 +132,5 @@ purge rules apply; purging a scratch Session can remove that local capture.
 Web creates use the existing durable, keyed-create reconciliation. A lost response
 can be retried under the same key. Closing during creation leaves reconciliation
 running; check the Session list before starting another capture. A changed or
-shelved TUI capture target closes its overlay rather than forwarding input to a
+shelved TUI capture target returns to history rather than forwarding input to a
 stale tmux session.

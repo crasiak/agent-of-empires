@@ -379,6 +379,18 @@ export interface DockerStatusResponse {
   runtime: string | null;
 }
 
+export interface TailoredHistoryEntry {
+  id: string;
+  profile: string;
+  title: string;
+  account: "personal" | "work";
+  input_preview: string;
+  status: string;
+  created_at: string;
+  hidden: boolean;
+  session: SessionResponse;
+}
+
 export interface CreateSessionRequest {
   tailored?: { preset: "capture-idea"; account: "personal" | "work"; idea: string; immediately: boolean };
   title?: string;

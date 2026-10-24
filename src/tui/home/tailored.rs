@@ -1,16 +1,22 @@
+mod history;
+
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use history::{HistoryAction, HistoryPicker};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{prelude::*, widgets::*};
 use ratatui_textarea::TextArea;
-use tui_input::backend::crossterm::EventHandler;
 
 use super::{live_send, HomeView};
 use crate::session::tailored::{CaptureAccount, TailoredRequest};
 use crate::tui::styles::Theme;
 
 pub(in crate::tui) struct TailoredWindow {
-    query: tui_input::Input,
+    picker: HistoryPicker,
+    history_refreshed: Option<Instant>,
+    draft_committed: bool,
     composing: bool,
     idea: TextArea<'static>,
     account: CaptureAccount,
@@ -22,6 +28,13 @@ pub(in crate::tui) struct TailoredWindow {
     account_rect: Rect,
     immediately_rect: Rect,
     submit_rect: Rect,
+}
+
+pub(super) enum WindowAction {
+    Continue,
+    Close,
+    Open(String),
+    Visibility { id: String, hidden: bool },
 }
 
 struct CaptureTerminal {
@@ -38,7 +51,9 @@ struct CaptureTerminal {
 impl TailoredWindow {
     fn new(account: CaptureAccount) -> Self {
         Self {
-            query: tui_input::Input::default(),
+            picker: HistoryPicker::default(),
+            history_refreshed: None,
+            draft_committed: false,
             composing: false,
             idea: TextArea::default(),
             account,
@@ -53,11 +68,23 @@ impl TailoredWindow {
         }
     }
 
-    pub(super) fn handle_key(&mut self, key: KeyEvent) -> bool {
+    pub(super) fn handle_key(&mut self, key: KeyEvent) -> WindowAction {
         if super::bindings::is_tailored_shortcut(&key)
             || (key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q'))
         {
-            return self.checking.is_none();
+            return if self.checking.is_none() {
+                WindowAction::Close
+            } else {
+                WindowAction::Continue
+            };
+        }
+        if key.code == KeyCode::F(2) && self.checking.is_none() {
+            self.terminal = None;
+            self.composing = false;
+            self.picker.recent();
+            self.history_refreshed = None;
+            self.error = None;
+            return WindowAction::Continue;
         }
         if let Some(terminal) = &self.terminal {
             if let live_send::LiveDispatch::Send(key) = live_send::translate(key) {
@@ -65,23 +92,17 @@ impl TailoredWindow {
                     terminal.send.send(key);
                 }
             }
-            return false;
+            return WindowAction::Continue;
         }
         if self.checking.is_some() {
-            return false;
+            return WindowAction::Continue;
         }
         if key.code == KeyCode::Esc {
-            return true;
+            return WindowAction::Close;
         }
         if !self.composing {
-            if key.code == KeyCode::Enter {
-                if self.matches_preset() {
-                    self.composing = true;
-                }
-            } else {
-                self.query.handle_event(&crossterm::event::Event::Key(key));
-            }
-            return false;
+            let action = self.picker.handle_key(key);
+            return self.picker_action(action);
         }
         match key.code {
             KeyCode::Tab => self.focus = (self.focus + 1) % 4,
@@ -109,7 +130,26 @@ impl TailoredWindow {
             }
             _ => {}
         }
-        false
+        WindowAction::Continue
+    }
+
+    fn picker_action(&mut self, action: HistoryAction) -> WindowAction {
+        match action {
+            HistoryAction::None => WindowAction::Continue,
+            HistoryAction::New => {
+                if self.draft_committed {
+                    self.idea = TextArea::default();
+                    self.immediately = false;
+                    self.draft_committed = false;
+                }
+                self.composing = true;
+                self.focus = 0;
+                self.error = None;
+                WindowAction::Continue
+            }
+            HistoryAction::Open(id) => WindowAction::Open(id),
+            HistoryAction::Visibility { id, hidden } => WindowAction::Visibility { id, hidden },
+        }
     }
 
     pub(super) fn handle_paste(&mut self, text: &str) {
@@ -123,14 +163,18 @@ impl TailoredWindow {
             if self.composing && self.focus == 0 {
                 self.idea.insert_str(text);
             } else if !self.composing {
-                self.query = tui_input::Input::new(format!("{}{text}", self.query.value()));
+                self.picker.handle_paste(text);
             }
         }
     }
 
-    pub(super) fn handle_click(&mut self, col: u16, row: u16) {
+    pub(super) fn handle_click(&mut self, col: u16, row: u16) -> WindowAction {
         if self.checking.is_some() || self.terminal.is_some() {
-            return;
+            return WindowAction::Continue;
+        }
+        if !self.composing {
+            let action = self.picker.handle_click(col, row);
+            return self.picker_action(action);
         }
         let pos = Position::new(col, row);
         if self.account_rect.contains(pos) {
@@ -140,14 +184,11 @@ impl TailoredWindow {
             self.focus = 2;
             self.immediately = !self.immediately;
         } else if self.submit_rect.contains(pos) {
-            if self.composing {
-                self.submit();
-            } else if self.matches_preset() {
-                self.composing = true;
-            }
+            self.submit();
         } else {
             self.focus = 0;
         }
+        WindowAction::Continue
     }
 
     fn toggle_account(&mut self) {
@@ -155,10 +196,6 @@ impl TailoredWindow {
             CaptureAccount::Personal => CaptureAccount::Work,
             CaptureAccount::Work => CaptureAccount::Personal,
         };
-    }
-
-    fn matches_preset(&self) -> bool {
-        "capture an idea".contains(&self.query.value().trim().to_lowercase())
     }
 
     fn submit(&mut self) {
@@ -192,7 +229,13 @@ impl TailoredWindow {
         let height = area
             .height
             .saturating_sub(4)
-            .min(if self.terminal.is_some() { 48 } else { 20 });
+            .min(if self.terminal.is_some() {
+                48
+            } else if self.composing {
+                20
+            } else {
+                28
+            });
         let rect = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
@@ -202,7 +245,7 @@ impl TailoredWindow {
         frame.render_widget(Clear, rect);
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .title(" Tailored Sessions · Capture an idea ")
+            .title(" Tailored Sessions ")
             .border_style(Style::default().fg(theme.accent))
             .style(Style::default().bg(theme.background).fg(theme.text))
             .padding(Padding::horizontal(1));
@@ -253,7 +296,7 @@ impl TailoredWindow {
             let hint = if terminal.send.lock_lost() {
                 "Input paused: this Session is active elsewhere. Ctrl+Y closes."
             } else {
-                "Ctrl+Y / Ctrl+Q close overlay · Session keeps running · Esc goes to agent"
+                "F2 history · Ctrl+Y close · Session keeps running · Esc goes to agent"
             };
             frame.render_widget(
                 Paragraph::new(hint).style(Style::default().fg(theme.dimmed)),
@@ -262,37 +305,8 @@ impl TailoredWindow {
             return;
         }
         if !self.composing {
-            let rows = Layout::vertical([
-                Constraint::Length(3),
-                Constraint::Length(2),
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .split(inner);
-            frame.render_widget(
-                Paragraph::new(self.query.value())
-                    .block(Block::bordered().title(" Find a preset ")),
-                rows[0],
-            );
-            if self.matches_preset() {
-                frame.render_widget(
-                    Paragraph::new("› Capture an idea").style(Style::default().fg(theme.accent)),
-                    rows[1],
-                );
-                self.submit_rect = rows[1];
-            } else {
-                frame.render_widget(Paragraph::new("No matching presets"), rows[1]);
-            }
-            frame.render_widget(Paragraph::new("Enter choose · Esc close"), rows[3]);
-            frame.set_cursor_position((
-                rows[0].x
-                    + 1
-                    + self
-                        .query
-                        .visual_cursor()
-                        .min(rows[0].width.saturating_sub(2) as usize) as u16,
-                rows[0].y + 1,
-            ));
+            self.picker
+                .render(frame, inner, theme, self.error.as_deref());
             return;
         }
         let rows = Layout::vertical([
@@ -352,7 +366,7 @@ impl TailoredWindow {
             Paragraph::new(if self.checking.is_some() {
                 "Checking minimal Ledger profile…"
             } else {
-                "Enter capture · Shift+Enter newline · Tab controls · Esc close"
+                "Enter capture · Shift+Enter newline · Tab controls · F2 history · Esc close"
             })
             .style(style(self.focus == 3)),
             rows[5],
@@ -380,9 +394,87 @@ impl HomeView {
 
     pub(super) fn open_tailored(&mut self) {
         self.tailored_window = Some(TailoredWindow::new(self.tailored_account));
+        self.refresh_tailored_history();
+    }
+
+    pub(super) fn handle_tailored_key(&mut self, key: KeyEvent) {
+        if let Some(window) = &mut self.tailored_window {
+            let action = window.handle_key(key);
+            self.apply_tailored_action(action);
+        }
+    }
+
+    pub(super) fn handle_tailored_click(&mut self, col: u16, row: u16) {
+        if let Some(window) = &mut self.tailored_window {
+            let action = window.handle_click(col, row);
+            self.apply_tailored_action(action);
+        }
+    }
+
+    fn apply_tailored_action(&mut self, action: WindowAction) {
+        match action {
+            WindowAction::Continue => {}
+            WindowAction::Close => self.tailored_window = None,
+            WindowAction::Open(id) => {
+                let result = self.open_capture_terminal(&id);
+                if let Some(window) = &mut self.tailored_window {
+                    match result {
+                        Ok(terminal) => {
+                            window.terminal = Some(terminal);
+                            window.composing = false;
+                            window.error = None;
+                        }
+                        Err(error) => window.error = Some(format!("{error:#}")),
+                    }
+                }
+            }
+            WindowAction::Visibility { id, hidden } => {
+                let result = self
+                    .get_instance(&id)
+                    .filter(|instance| {
+                        crate::session::tailored::history::capture_account(instance).is_some()
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("Capture Session disappeared"))
+                    .and_then(|instance| {
+                        crate::session::tailored::history::set_hidden(
+                            &instance.effective_profile(),
+                            &id,
+                            hidden,
+                        )
+                    });
+                if let Some(window) = &mut self.tailored_window {
+                    window.error = result.err().map(|error| format!("{error:#}"));
+                }
+                self.refresh_tailored_history();
+            }
+        }
+    }
+
+    fn refresh_tailored_history(&mut self) -> bool {
+        let result = crate::session::tailored::history::load_hidden()
+            .map(|hidden| crate::session::tailored::history::entries(self.instances(), &hidden));
+        let Some(window) = &mut self.tailored_window else {
+            return false;
+        };
+        window.history_refreshed = Some(Instant::now());
+        match result {
+            Ok(rows) => window.picker.replace_rows(rows),
+            Err(error) => {
+                let message = format!("Cannot read capture history: {error:#}");
+                let changed = window.error.as_deref() != Some(&message);
+                window.error = Some(message);
+                changed
+            }
+        }
     }
 
     pub(super) fn tick_tailored(&mut self) -> bool {
+        let refresh = self.tailored_window.as_ref().is_some_and(|window| {
+            window
+                .history_refreshed
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(2))
+        });
+        let refreshed = refresh && self.refresh_tailored_history();
         let changed_target = self
             .tailored_window
             .as_ref()
@@ -391,8 +483,13 @@ impl HomeView {
                 !capture_target_available(self.get_instance(&terminal.session_id), &terminal.title)
             });
         if changed_target {
-            self.tailored_window = None;
-            self.flash_status("Capture Session changed or stopped; continue from the Session list");
+            if let Some(window) = &mut self.tailored_window {
+                window.terminal = None;
+                window.composing = false;
+                window.error =
+                    Some("Capture Session changed or stopped; select it again from history".into());
+                window.history_refreshed = None;
+            }
             return true;
         }
         let result = self
@@ -401,7 +498,7 @@ impl HomeView {
             .and_then(|window| window.checking.as_ref())
             .map(|rx| rx.try_recv());
         let Some(result) = result else {
-            return false;
+            return refreshed;
         };
         let request = match result {
             Ok(Ok(request)) => request,
@@ -412,7 +509,7 @@ impl HomeView {
                 }
                 return true;
             }
-            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Empty) => return refreshed,
             Err(mpsc::TryRecvError::Disconnected) => {
                 if let Some(window) = &mut self.tailored_window {
                     window.checking = None;
@@ -430,7 +527,10 @@ impl HomeView {
         if let Some(window) = &mut self.tailored_window {
             window.checking = None;
             match result {
-                Ok(terminal) => window.terminal = Some(terminal),
+                Ok(terminal) => {
+                    window.terminal = Some(terminal);
+                    window.draft_committed = true;
+                }
                 Err(error) => window.error = Some(format!("{error:#}")),
             }
         }
@@ -461,11 +561,21 @@ impl HomeView {
             fork_seed: None,
             structured: false,
         })?;
-        self.try_mutate_instance_writeback_on_err(&id, |instance| {
+        self.open_capture_terminal(&id)
+    }
+
+    fn open_capture_terminal(&mut self, id: &str) -> anyhow::Result<CaptureTerminal> {
+        anyhow::ensure!(
+            self.get_instance(id).is_some_and(|instance| {
+                crate::session::tailored::history::capture_account(instance).is_some()
+            }),
+            "This is not a capture Session"
+        );
+        self.try_mutate_instance_writeback_on_err(id, |instance| {
             instance.ensure_pane_ready().map_err(Into::into)
         })?;
         let instance = self
-            .get_instance(&id)
+            .get_instance(id)
             .ok_or_else(|| anyhow::anyhow!("Capture Session disappeared"))?;
         let name = instance.tmux_session()?.name().to_string();
         let title = instance.title.clone();
@@ -476,7 +586,7 @@ impl HomeView {
         capture.set_capture_lines(40);
         let send = live_send::LiveSendWorker::spawn(name, Some(capture.waker()));
         Ok(CaptureTerminal {
-            session_id: id,
+            session_id: id.to_owned(),
             title,
             resize_retry_at: None,
             send,
@@ -512,7 +622,8 @@ mod tests {
         window.handle_paste("shopping");
         window.handle_key(key(KeyCode::Enter));
         assert!(!window.composing);
-        window.query = tui_input::Input::new("idea".into());
+        let mut window = TailoredWindow::new(CaptureAccount::Personal);
+        window.handle_paste("idea");
         window.handle_key(key(KeyCode::Enter));
         assert!(window.composing);
         window.handle_key(key(KeyCode::Enter));
@@ -524,6 +635,9 @@ mod tests {
         window.handle_key(key(KeyCode::Tab));
         window.handle_key(key(KeyCode::Char(' ')));
         assert!(window.immediately);
-        assert!(window.handle_key(key(KeyCode::Esc)));
+        assert!(matches!(
+            window.handle_key(key(KeyCode::Esc)),
+            WindowAction::Close
+        ));
     }
 }

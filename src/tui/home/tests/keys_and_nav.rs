@@ -32,6 +32,50 @@ fn tailored_shortcut_and_modal_input_preserve_the_underlying_selection() {
 }
 
 #[test]
+#[serial]
+fn tailored_history_hide_is_persistent_without_touching_session_lifecycle() {
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instances().next().unwrap().id.clone();
+    let instance = env.view.instances.get_mut(&id).unwrap();
+    instance.tool = "pi".into();
+    instance.scratch = true;
+    instance.command = "ledger run pi --profile aoe-capture-personal --".into();
+    let original = serde_json::to_value(&*instance).unwrap();
+    let shortcut = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
+    env.view.handle_key(shortcut, None);
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), None);
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE), None);
+    assert!(
+        crate::session::tailored::history::entry(
+            env.view.get_instance(&id).unwrap(),
+            &crate::session::tailored::history::load_hidden().unwrap()
+        )
+        .unwrap()
+        .hidden
+    );
+    env.view.handle_key(shortcut, None);
+    env.view.handle_key(shortcut, None);
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE), None);
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE), None);
+    assert!(
+        !crate::session::tailored::history::entry(
+            env.view.get_instance(&id).unwrap(),
+            &crate::session::tailored::history::load_hidden().unwrap()
+        )
+        .unwrap()
+        .hidden
+    );
+    assert_eq!(
+        serde_json::to_value(env.view.get_instance(&id).unwrap()).unwrap(),
+        original
+    );
+}
+
+#[test]
 fn duplicate_session_ids_are_excluded_from_home_map() {
     let mut first = Instance::new("first", "/tmp/first");
     first.id = "duplicate-id".to_string();

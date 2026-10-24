@@ -2540,6 +2540,7 @@ function AppContent({
             onAccountChange={setCaptureAccount}
             profile={serverAbout?.profile}
             bootId={serverAbout?.create_boot_id}
+            readOnly={!!serverAbout?.read_only}
             onCreated={injectSession}
             onClose={() => setShowTailored(false)}
           />

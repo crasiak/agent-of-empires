@@ -17,6 +17,7 @@ import type {
   DockerStatusResponse,
   CreateProgress,
   CreateSessionRequest,
+  TailoredHistoryEntry,
   ImportableSession,
   SettingsFieldDescriptor,
 } from "./types";
@@ -114,6 +115,14 @@ export interface SessionsEnvelope {
 
 export function fetchSessions(): Promise<SessionsEnvelope | null> {
   return fetchJson<SessionsEnvelope>("/api/sessions");
+}
+
+export function fetchTailoredHistory(signal?: AbortSignal): Promise<{ entries: TailoredHistoryEntry[] } | null> {
+  return fetchJson("/api/tailored-sessions", { signal });
+}
+
+export function setTailoredHistoryHidden(id: string, hidden: boolean): Promise<{ ok: boolean; message?: string }> {
+  return okWithMessage(`/api/sessions/${encodeURIComponent(id)}/tailored-history`, jsonInit("PATCH", { hidden }));
 }
 
 export interface ConversationSearchHit {

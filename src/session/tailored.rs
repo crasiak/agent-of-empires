@@ -1,5 +1,7 @@
 //! Purpose-scoped launches. Ledger owns the account and loaded resource surface.
 
+pub mod history;
+
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 

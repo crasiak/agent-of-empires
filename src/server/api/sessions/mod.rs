@@ -41,6 +41,7 @@ mod model;
 mod rename;
 mod search;
 mod send;
+mod tailored;
 mod update;
 mod usage;
 
@@ -55,6 +56,7 @@ use model::*;
 pub use rename::*;
 pub use search::*;
 pub use send::*;
+pub use tailored::*;
 pub use update::*;
 pub use usage::*;
 

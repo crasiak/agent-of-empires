@@ -1194,8 +1194,8 @@ impl HomeView {
     }
 
     pub fn handle_dialog_click(&mut self, col: u16, row: u16) -> bool {
-        if let Some(window) = &mut self.tailored_window {
-            window.handle_click(col, row);
+        if self.tailored_window.is_some() {
+            self.handle_tailored_click(col, row);
             return true;
         }
         if self.afk_dialog.is_some()
@@ -1762,10 +1762,8 @@ impl HomeView {
         // coords, so once the user does anything else the cells underneath can change and
         // it would point at unrelated content. Covers the live-send branch below too.
         self.clear_preview_selection();
-        if let Some(window) = &mut self.tailored_window {
-            if window.handle_key(key) {
-                self.tailored_window = None;
-            }
+        if self.tailored_window.is_some() {
+            self.handle_tailored_key(key);
             return None;
         }
         if super::bindings::is_tailored_shortcut(&key) && !self.has_non_live_send_overlay() {

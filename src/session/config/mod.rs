@@ -986,6 +986,10 @@ pub struct AppStateConfig {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub repo_appearances: crate::session::repo_appearance::RepoAppearances,
 
+    /// View-only capture-history visibility shared by the TUI and web, keyed by profile.
+    #[serde(default)]
+    pub tailored_hidden_sessions: crate::session::tailored::history::HiddenSessions,
+
     /// Opaque web-owned preferences, excluding shared repository appearances.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub web_ui_state: std::collections::BTreeMap<String, String>,
