@@ -113,7 +113,7 @@ fn highlight_rebuild_restores_shifted_group_and_attention_skips_filtered_waiting
 
 #[test]
 #[serial]
-fn highlight_manual_groups_do_not_borrow_matches_from_other_profiles() {
+fn highlight_manual_groups_unify_headers_but_only_show_matching_sessions() {
     let (temp, guard) = test_home();
     let mut red = Instance::new("red", "/a");
     red.group_path = "work".into();
@@ -136,7 +136,16 @@ fn highlight_manual_groups_do_not_borrow_matches_from_other_profiles() {
             _ => None,
         })
         .collect();
-    assert_eq!(groups, [("work", Some("one"))]);
+    assert_eq!(groups, [("work", None)]);
+    let titles: Vec<_> = v
+        .flat_items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Session { id, .. } => Some(v.get_instance(id).unwrap().title.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(titles, ["red"]);
     drop(v);
     drop(guard);
     drop(temp);

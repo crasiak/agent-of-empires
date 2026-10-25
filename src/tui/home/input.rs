@@ -1153,6 +1153,9 @@ impl HomeView {
         let Some(group_path) = self.selected_group.clone() else {
             return;
         };
+        if self.require_manual_group_profile() {
+            return;
+        }
         let count = self.active_sessions_in_selected_group().len();
         if count == 0 {
             return;
@@ -4395,14 +4398,22 @@ impl HomeView {
         ))
     }
 
+    pub(super) fn require_manual_group_profile(&mut self) -> bool {
+        if !self.unified_manual_groups() {
+            return false;
+        }
+        self.info_dialog = Some(InfoDialog::new(
+            "Select a Profile",
+            "Filter to one profile before modifying or reordering Manual groups. Session actions still use each session's own profile.",
+        ));
+        true
+    }
+
     fn toggle_group_collapsed(&mut self, path: &str) {
         self.toggle_group_collapsed_at(self.cursor, path);
     }
 
-    /// `row` is the `flat_items` index of the header being toggled. In the
-    /// all-profiles view the same group path can exist in several profiles,
-    /// so the owning GroupTree comes from that row, not from wherever the
-    /// cursor sits (a group click toggles without moving the cursor).
+    /// A group click toggles the clicked row without moving the cursor.
     fn toggle_group_collapsed_at(&mut self, row: usize, path: &str) {
         // The synthetic Archived section is not in any GroupTree; its collapsed state
         // lives on HomeView. Route here before either branch mutates a nonexistent group.
@@ -4434,7 +4445,34 @@ impl HomeView {
             self.save_org_group_collapsed();
             return;
         }
-        // Route to the correct profile's GroupTree
+        if self.unified_manual_groups() {
+            let Some(Item::Group { collapsed, .. }) = self.flat_items.get(row) else {
+                return;
+            };
+            let collapsing = !collapsed;
+            let hides_selection = collapsing
+                && self
+                    .selected_session
+                    .as_deref()
+                    .and_then(|id| self.get_instance(id))
+                    .is_some_and(|inst| {
+                        inst.group_path == path || inst.group_path.starts_with(&format!("{path}/"))
+                    });
+            self.unified_group_collapsed
+                .insert(path.to_string(), collapsing);
+            self.rebuild_flat_items_keeping_cursor();
+            if hides_selection {
+                if let Some(at) = self
+                    .flat_items
+                    .iter()
+                    .position(|item| matches!(item, Item::Group { path: p, .. } if p == path))
+                {
+                    self.cursor = at;
+                    self.update_selected();
+                }
+            }
+            return;
+        }
         let profile = self.profile_for_cursor(row);
         if let Some(profile) = profile {
             if let Some(tree) = self.group_trees.get_mut(&profile) {
@@ -5366,12 +5404,14 @@ impl HomeView {
                 }
             }
             self.rename_dialog = Some(dialog);
-        } else if let Some(group_path) = &self.selected_group {
+        } else if let Some(group_path) = self.selected_group.clone() {
+            if self.require_manual_group_profile() {
+                return;
+            }
             if let Some((title, hint)) = self.automatic_group_hint() {
                 self.info_dialog = Some(InfoDialog::new(&title, &hint));
                 return;
             }
-            let group_path = group_path.clone();
             let current_profile = self
                 .selected_group_profile
                 .clone()
@@ -5555,21 +5595,21 @@ impl HomeView {
                     &profile,
                 ));
             }
-        } else if let Some(group_path) = &self.selected_group {
+        } else if let Some(group_path) = self.selected_group.clone() {
+            if self.require_manual_group_profile() {
+                return;
+            }
             if let Some((title, hint)) = self.automatic_group_hint() {
                 self.info_dialog = Some(InfoDialog::new(&title, &hint));
                 return;
             }
-            // Scope the count to the selected group's profile: two profiles can share a
-            // group path, and counting by path alone would pop the "delete N sessions"
-            // dialog for an empty group whose same-named twin still has rows.
             let owning_profile = self.selected_group_profile.clone();
             let prefix = format!("{}/", group_path);
             let session_count = self
                 .instances
                 .values()
                 .filter(|i| {
-                    (i.group_path == *group_path || i.group_path.starts_with(&prefix))
+                    (i.group_path == group_path || i.group_path.starts_with(&prefix))
                         && owning_profile
                             .as_ref()
                             .is_none_or(|p| &i.source_profile == p)
@@ -5578,12 +5618,12 @@ impl HomeView {
 
             if session_count > 0 {
                 let has_managed_worktrees = self.group_has_managed_worktrees(
-                    group_path,
+                    &group_path,
                     &prefix,
                     owning_profile.as_deref(),
                 );
                 let has_containers =
-                    self.group_has_containers(group_path, &prefix, owning_profile.as_deref());
+                    self.group_has_containers(&group_path, &prefix, owning_profile.as_deref());
                 self.group_delete_options_dialog = Some(GroupDeleteOptionsDialog::new(
                     group_path.clone(),
                     session_count,

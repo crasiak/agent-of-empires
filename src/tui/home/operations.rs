@@ -666,6 +666,9 @@ impl HomeView {
         &mut self,
         options: &GroupDeleteOptions,
     ) -> anyhow::Result<()> {
+        if self.require_manual_group_profile() {
+            return Ok(());
+        }
         if options.action == GroupDeleteAction::DeleteSessions {
             return self.delete_group_with_sessions(options);
         }
@@ -2277,6 +2280,9 @@ impl HomeView {
     /// Archive every active session under the selected group: persist runs inline, then tmux
     /// teardown runs off-thread. Confirmation upstream. See #1868.
     pub(super) fn archive_selected_group(&mut self) -> anyhow::Result<()> {
+        if self.require_manual_group_profile() {
+            return Ok(());
+        }
         let ids = self.active_sessions_in_selected_group();
         if ids.is_empty() {
             return Ok(());

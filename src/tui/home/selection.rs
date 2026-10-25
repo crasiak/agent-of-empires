@@ -29,22 +29,18 @@ impl HomeView {
         self.rebuild_flat_items();
         let restored = match (&selected_session, &selected_group) {
             (Some(sid), _) => self.session_row(sid),
-            (None, Some(gpath)) => {
-                // Two profiles can hold the same group path in the all-profiles list, and
-                // landing on the wrong one leaves `selected_group_profile` pointing at the
-                // other profile, which the next action would act on.
-                self.flat_items
-                    .iter()
-                    .position(|item| {
-                        matches!(item, Item::Group { path, profile, .. }
+            (None, Some(gpath)) => self
+                .flat_items
+                .iter()
+                .position(|item| {
+                    matches!(item, Item::Group { path, profile, .. }
                             if path == gpath && *profile == selected_profile)
-                    })
-                    .or_else(|| {
-                        self.flat_items.iter().position(
-                            |item| matches!(item, Item::Group { path, .. } if path == gpath),
-                        )
-                    })
-            }
+                })
+                .or_else(|| {
+                    self.flat_items
+                        .iter()
+                        .position(|item| matches!(item, Item::Group { path, .. } if path == gpath))
+                }),
             (None, None) => None,
         };
         let hidden_header = restored
@@ -117,6 +113,16 @@ impl HomeView {
                 }
                 GroupByMode::Org => {
                     self.org_group_collapsed.insert(gpath, false);
+                }
+                GroupByMode::Manual if self.unified_manual_groups() => {
+                    let mut path = gpath.as_str();
+                    loop {
+                        self.unified_group_collapsed.insert(path.to_string(), false);
+                        match path.rsplit_once('/') {
+                            Some((parent, _)) => path = parent,
+                            None => break,
+                        }
+                    }
                 }
                 GroupByMode::Manual => {
                     if let Some(tree) = self.group_trees.get_mut(&target_profile) {

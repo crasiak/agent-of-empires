@@ -527,7 +527,14 @@ environment = ["GH_TOKEN=$AOE_GH_TOKEN"]
 
 ## Profiles
 
-Profiles are separate workspaces with their own sessions, groups, and overrides of profile-overridable settings.
+Profiles isolate their sessions, stored groups, and profile-overridable settings.
+In the TUI's all-profiles view, Manual grouping shows one heading per group path,
+with sessions from any profile beneath it. When multiple profiles are loaded,
+collapse is local to that TUI view and does not change their stored groups.
+Filter to one profile before
+renaming, deleting, archiving, or manually reordering groups and their rows.
+Individual session actions still use the session's own profile. Attention sort
+remains a flat session list in Manual grouping.
 
 ```bash
 aoe                        # "default" profile
