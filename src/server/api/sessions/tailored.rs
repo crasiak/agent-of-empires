@@ -94,7 +94,7 @@ pub async fn update_tailored_visibility(
     let Some(instance) = find_instance(&state, &id).await else {
         return session_not_found();
     };
-    if history::capture_account(&instance).is_none() {
+    if history::tailored_account(&instance).is_none() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "not_tailored",

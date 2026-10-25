@@ -43,7 +43,18 @@ pub fn capture_account(instance: &Instance) -> Option<CaptureAccount> {
         })
 }
 
+pub fn tailored_account(instance: &Instance) -> Option<CaptureAccount> {
+    capture_account(instance).or_else(|| super::document::account(instance))
+}
+
 fn input_preview(instance: &Instance) -> String {
+    if super::document::account(instance).is_some() {
+        return super::document::preview(instance)
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(160)
+            .collect();
+    }
     let raw = shell_words::split(&instance.extra_args)
         .ok()
         .and_then(|args| {
@@ -67,7 +78,7 @@ pub fn entry(instance: &Instance, hidden: &HiddenSessions) -> Option<HistoryEntr
     if instance.is_trashed() || instance.is_archived() {
         return None;
     }
-    let account = capture_account(instance)?;
+    let account = tailored_account(instance)?;
     let profile = instance.effective_profile();
     Some(HistoryEntry {
         id: instance.id.clone(),
@@ -76,7 +87,11 @@ pub fn entry(instance: &Instance, hidden: &HiddenSessions) -> Option<HistoryEntr
             .get(&profile)
             .is_some_and(|ids| ids.contains(&instance.id)),
         profile,
-        title: instance.title.clone(),
+        title: if super::document::account(instance).is_some() {
+            format!("Document chat · {}", instance.title)
+        } else {
+            instance.title.clone()
+        },
         account,
         input_preview: input_preview(instance),
         status: instance.status.wire_str().into(),
@@ -136,6 +151,7 @@ mod tests {
             account,
             idea: "A Unicode 🌱 idea\nwith <idea> markers and \u{202e}control".into(),
             immediately: false,
+            document: None,
         }
         .launch()
         .unwrap();

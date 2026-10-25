@@ -7,11 +7,12 @@ interface Props {
   searchRef: RefObject<HTMLInputElement | null>;
   readOnly: boolean;
   onNew: () => void;
+  onDocument: () => void;
   onResearch: (draft?: ResearchDraft) => void;
   onOpen: (session: SessionResponse) => void;
 }
 
-export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen, onResearch }: Props) {
+export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen, onResearch, onDocument }: Props) {
   const [query, setQuery] = useState("");
   const [hidden, setHidden] = useState(false);
   const [entries, setEntries] = useState<TailoredHistoryEntry[]>([]);
@@ -97,6 +98,7 @@ export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen, onRes
           if (event.key === "Enter" && !readOnly) {
             event.preventDefault();
             if (matchesPreset) onNew();
+            else if (!hidden && "document chat".includes(normalized)) onDocument();
             else if (!hidden && "tailored research".includes(normalized)) onResearch();
             else if (visible[0]?.research) onResearch(visible[0].research);
             else if (visible[0]?.session) onOpen(visible[0].session);
@@ -115,6 +117,19 @@ export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen, onRes
           <span className="font-medium">Capture an idea</span>
           <span className="mt-1 block text-xs text-text-secondary">
             Quick capture with inferred ticket, Atlas, and KB destinations.
+          </span>
+        </button>
+      )}
+      {!hidden && "document chat".includes(normalized) && (
+        <button
+          type="button"
+          disabled={readOnly}
+          onClick={onDocument}
+          className="w-full rounded-md border border-surface-700 px-3 py-2 text-left text-sm text-text-primary hover:bg-surface-800 disabled:opacity-50"
+        >
+          Document chat
+          <span className="mt-1 block text-xs text-text-secondary">
+            Public Markdown/PDF link, direct tool-free Pi conversation.
           </span>
         </button>
       )}

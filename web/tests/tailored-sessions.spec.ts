@@ -2,6 +2,44 @@ import { test, expect, pressShortcut, waitForResponseBody, publishedRequests } f
 import { mockTerminalApis } from "./helpers/terminal-mocks";
 import { sessionResponse } from "./helpers/sessions";
 
+test("document form preserves long URL through resize, owns focus and requires explicit Start", async ({ page }) => {
+  const terminal = await mockTerminalApis(page);
+  await page.route("**/api/tailored-sessions", (route) => route.fulfill({ json: { entries: [] } }));
+  let starts = 0;
+  await page.route("**/api/sessions", async (route) => {
+    if (route.request().method() === "POST") {
+      starts++;
+      await route.fulfill({ status: 400, json: { error: { message: "Direct link required" } } });
+    } else await route.fulfill({ json: { sessions: [sessionResponse({ id: "pinch-test" })], workspace_ordering: [] } });
+  });
+  await page.goto("/session/pinch-test");
+  await terminal.waitForLiveReady();
+  const original = page.locator('[data-term="agent"] textarea').first();
+  await original.focus();
+  await pressShortcut(page, "Control+y");
+  const search = page.getByLabel("Find a tailored preset");
+  await search.fill("document");
+  await search.press("Enter");
+  const url = page.getByLabel("Public document URL");
+  await expect(url).toBeFocused();
+  const exact = `https://example.org/${"unbroken".repeat(150)}.md`;
+  await url.fill(exact);
+  await page.setViewportSize({ width: 520, height: 720 });
+  await expect(url).toHaveValue(exact);
+  expect(await url.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await url.press("Tab");
+  await expect(page.getByLabel("Opening question (optional)")).toBeFocused();
+  expect(starts).toBe(0);
+  await page.getByRole("button", { name: "Start", exact: true }).focus();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: "Back to history · F2" })).toBeFocused();
+  await url.press("F2");
+  await expect(search).toBeFocused();
+  await search.press("Escape");
+  await expect(original).toBeFocused();
+  expect(starts).toBe(0);
+});
+
 test("capture overlays sidebar and Session, owns input, and restores the original Session", async ({ page }) => {
   const inputs: { url: string; text: string }[] = [];
   const terminal = await mockTerminalApis(page, {

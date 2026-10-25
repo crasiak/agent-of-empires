@@ -3,6 +3,22 @@
   "description": "Surface/flow coverage matrix for the agent-of-empires web dashboard. Every component file under web/src/components/** must appear in at least one entry's `components` list (covered, deferred, or out-of-scope), or in coverage-matrix.exempt.json. CI validates this on every PR via tests/validate-coverage-matrix.mjs.",
   "surfaces": [
     {
+      "id": "sessions.tailored-document",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": ["src/components/__tests__/TailoredSessionsOverlay.test.tsx"],
+      "components": ["web/src/components/TailoredSessionsOverlay.tsx", "web/src/components/TailoredHistoryPanel.tsx"],
+      "notes": "Separate public-document preset, account and exact URL/question payload, explicit Start, shared keyed-create registration, editable load failures and read-only gating. Rust tests cover public-only fetching, extraction bounds and first-only attachment. No paid/live qualification implied."
+    },
+    {
+      "id": "sessions.tailored-document.keyboard",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/tailored-sessions.spec.ts"],
+      "components": ["web/src/components/TailoredSessionsOverlay.tsx", "web/src/components/TailoredHistoryPanel.tsx"],
+      "notes": "Keyboard-only document selection, URL focus, long unbroken URL retention on resize without horizontal overflow, form focus trap and F2/Escape restoration without creating a Session."
+    },
+    {
       "id": "sessions.tailored-capture.browser",
       "kind": "mocked-playwright",
       "risk": "high",

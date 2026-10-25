@@ -10,6 +10,7 @@ pub(super) enum HistoryAction {
     None,
     New,
     Research,
+    Document,
     Open(String),
     Visibility { id: String, hidden: bool },
 }
@@ -18,6 +19,7 @@ pub(super) enum HistoryAction {
 enum Item {
     New,
     Research,
+    Document,
     Session(HistoryEntry),
 }
 
@@ -40,6 +42,9 @@ impl HistoryPicker {
         }
         if !self.hidden && "tailored research".contains(&query) {
             items.push(Item::Research);
+        }
+        if !self.hidden && "document chat".contains(&query) {
+            items.push(Item::Document);
         }
         items.extend(
             self.rows
@@ -101,6 +106,7 @@ impl HistoryPicker {
                 return match items.get(self.selected) {
                     Some(Item::New) => HistoryAction::New,
                     Some(Item::Research) => HistoryAction::Research,
+                    Some(Item::Document) => HistoryAction::Document,
                     Some(Item::Session(entry)) => HistoryAction::Open(entry.id.clone()),
                     None => HistoryAction::None,
                 }
@@ -186,6 +192,11 @@ impl HistoryPicker {
                 Style::default().fg(theme.text)
             };
             let (title, detail, action) = match item {
+                Item::Document => (
+                    "+ Document chat".into(),
+                    "Public Markdown/PDF link, direct tool-free conversation".into(),
+                    HistoryAction::Document,
+                ),
                 Item::Research => (
                     "+ Tailored research".into(),
                     "Develop prompt, choose ORX/EVO, review then explicit Run".into(),
@@ -299,6 +310,7 @@ mod tests {
         };
         let mut picker = HistoryPicker::default();
         picker.replace_rows(vec![entry.clone()]);
+        picker.handle_key(key(KeyCode::Down));
         picker.handle_key(key(KeyCode::Down));
         picker.handle_key(key(KeyCode::Down));
         assert_eq!(

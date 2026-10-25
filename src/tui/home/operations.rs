@@ -252,6 +252,15 @@ impl HomeView {
             &existing_branches,
             &target_profile,
         )?;
+        self.accept_built_session(build_result, target_profile, structured)
+    }
+
+    pub(super) fn accept_built_session(
+        &mut self,
+        build_result: builder::BuildResult,
+        target_profile: String,
+        structured: bool,
+    ) -> anyhow::Result<String> {
         let mut instance = build_result.instance;
         instance.source_profile = target_profile.clone();
         if structured {

@@ -8,6 +8,7 @@ use super::session_service::SessionService;
 
 /// Already-decoded, already-validated inputs the create core needs.
 pub(crate) struct StructuredSessionSpec {
+    pub document: Option<crate::session::tailored::document::DocumentRequest>,
     pub title: Option<String>,
     pub path: String,
     pub group: String,
@@ -99,6 +100,7 @@ pub(crate) async fn spawn_structured_session(
         use crate::session::Storage;
 
         let StructuredSessionSpec {
+            document,
             title,
             path,
             group,
@@ -205,7 +207,11 @@ pub(crate) async fn spawn_structured_session(
             fork_seed,
         };
 
-        let build_result = builder::build_instance(params, &title_refs, &branch_refs, &profile)?;
+        let build_result = if let Some(request) = document {
+            crate::session::tailored::document::build(params, &title_refs, &branch_refs, &profile, &request)?
+        } else {
+            builder::build_instance(params, &title_refs, &branch_refs, &profile)?
+        };
         let mut instance = build_result.instance;
         instance.source_profile = profile.clone();
         instance.created_by_plugin = created_by_plugin;
@@ -351,44 +357,15 @@ pub(crate) async fn spawn_structured_session(
             progress.set_stage(crate::server::create_progress::CreateStage::Starting);
         }
 
-        // Anything that fails between here and the final `Ok(..)` would otherwise orphan
-        // the scratch directory `build_instance` already provisioned (Storage::new,
-        // storage.update, instance.start). Wrap the tail in an IIFE-equivalent closure so
-        // we can run cleanup on Err once, regardless of which step tripped.
-        let mut persist_and_start = || -> anyhow::Result<()> {
-            let storage = Storage::new(&profile, file_watch_for_create.clone())?;
-            let to_persist = instance.clone();
-            storage.update(|all, _groups| {
-                all.push(to_persist);
+        persist_and_start(
+            &mut instance,
+            Storage::new(&profile, file_watch_for_create.clone()),
+            |storage, instance| storage.update(|all, _| { all.push(instance.clone()); Ok(()) }),
+            |instance| {
+                if !instance.is_structured() { instance.start()?; }
                 Ok(())
-            })?;
-
-            // Acp-mode sessions are not backed by tmux; the structured view supervisor
-            // spawns the ACP agent on demand.
-            let skip_tmux_start = instance.is_structured();
-            if !skip_tmux_start {
-                instance.start()?;
-            }
-            Ok(())
-        };
-
-        if let Err(e) = persist_and_start() {
-            // Guarded the same way as the deletion path.
-            if instance.scratch {
-                let scratch_path = std::path::PathBuf::from(&instance.project_path);
-                if crate::session::scratch::is_scratch_path(&scratch_path) {
-                    if let Err(rm_err) = std::fs::remove_dir_all(&scratch_path) {
-                        tracing::warn!(
-                            target: "http.api.sessions",
-                            "Failed to clean up orphan scratch dir {} after create failure: {}",
-                            scratch_path.display(),
-                            rm_err
-                        );
-                    }
-                }
-            }
-            return Err(e);
-        }
+            },
+        )?;
 
         crate::tips::record_session_creations(1);
         Ok::<(Instance, Vec<String>, Option<String>), anyhow::Error>((
@@ -572,8 +549,77 @@ pub(crate) async fn spawn_structured_session(
                 warnings,
             })
         }
-        Ok(Err(e)) => Err(e),
+        Ok(Err(e)) => {
+            publish_retained_document(service, &e).await;
+            Err(e)
+        }
         Err(e) => Err(anyhow::Error::new(SessionBuildPanicked(e.to_string()))),
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Document create/start not confirmed: {source}. Check the original Session in history; do not create another copy")]
+struct DocumentCreateUncertain {
+    owner: Option<Box<Instance>>,
+    #[source]
+    source: anyhow::Error,
+}
+
+fn cleanup_unowned_scratch(instance: &Instance) {
+    let path = std::path::Path::new(&instance.project_path);
+    if instance.scratch && crate::session::scratch::is_scratch_path(path) {
+        if let Err(error) = std::fs::remove_dir_all(path) {
+            tracing::warn!(%error, path = %path.display(), "Failed to clean unowned scratch directory");
+        }
+    }
+}
+
+fn persist_and_start(
+    instance: &mut Instance,
+    storage: anyhow::Result<crate::session::Storage>,
+    persist: impl FnOnce(&crate::session::Storage, &Instance) -> anyhow::Result<()>,
+    start: impl FnOnce(&mut Instance) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let storage = match storage {
+        Ok(storage) => storage,
+        Err(error) => {
+            cleanup_unowned_scratch(instance);
+            return Err(error);
+        }
+    };
+    let document = crate::session::tailored::document::account(instance).is_some();
+    let mut committed = false;
+    let result = (|| {
+        persist(&storage, instance)?;
+        committed = true;
+        start(instance)
+    })();
+    if let Err(error) = result {
+        if document {
+            // Persistence was attempted. Neither a lost acknowledgement nor a failed start
+            // proves that the frozen source and first-turn claim are unowned.
+            let owner = match storage.load_instances_readonly() {
+                Ok(rows) => rows.into_iter().find(|row| row.id == instance.id),
+                Err(_) => committed.then(|| instance.clone()),
+            };
+            return Err(DocumentCreateUncertain {
+                owner: owner.map(Box::new),
+                source: error,
+            }
+            .into());
+        }
+        cleanup_unowned_scratch(instance);
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn publish_retained_document(service: &SessionService, error: &anyhow::Error) {
+    if let Some(owner) = error
+        .downcast_ref::<DocumentCreateUncertain>()
+        .and_then(|error| error.owner.as_deref())
+    {
+        publish_created_instance(service, owner.clone()).await;
     }
 }
 
@@ -596,6 +642,120 @@ async fn publish_created_instance(service: &SessionService, instance: Instance) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[serial_test::serial]
+    fn document_create_cleanup_requires_proven_unowned_preparation() {
+        use super::*;
+        let _home = crate::session::test_support::isolate_app_dir();
+        for persistence_attempted in [false, true] {
+            let mut instance = Instance::new("Document", "");
+            let path = crate::session::scratch::provision_scratch_dir(&instance.id).unwrap();
+            instance.project_path = path.to_str().unwrap().into();
+            instance.scratch = true;
+            instance.tool = "pi".into();
+            instance.command = "ledger run pi --profile aoe-document-work --".into();
+            let storage = if persistence_attempted {
+                crate::session::Storage::new_unwatched("test")
+            } else {
+                Err(anyhow::anyhow!("injected storage open failure"))
+            };
+            let error = persist_and_start(
+                &mut instance,
+                storage,
+                |_, _| anyhow::bail!("injected unknown persistence failure"),
+                |_| panic!("failed persistence must never start"),
+            )
+            .unwrap_err();
+            assert_eq!(path.exists(), persistence_attempted);
+            assert_eq!(error.is::<DocumentCreateUncertain>(), persistence_attempted);
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn document_create_uncertainty_retains_snapshot_claim_and_keyed_original() {
+        use super::*;
+        use axum::{
+            extract::{Query, State},
+            response::IntoResponse,
+            Json,
+        };
+        let _home = crate::session::test_support::isolate_app_dir();
+        for ambiguous_persist in [false, true] {
+            let mut instance = Instance::new("Document", "");
+            let scratch = crate::session::scratch::provision_scratch_dir(&instance.id).unwrap();
+            instance.project_path = scratch.to_str().unwrap().into();
+            instance.tool = "pi".into();
+            instance.scratch = true;
+            instance.command = "ledger run pi --profile aoe-document-work --".into();
+            instance.idempotency_key = Some(format!("document-uncertain-{ambiguous_persist}"));
+            std::fs::write(scratch.join("source.txt"), "frozen").unwrap();
+            std::fs::write(scratch.join("initial-turn-claimed"), "claimed").unwrap();
+            let storage = crate::session::Storage::new_unwatched("test").unwrap();
+            let mut starts = 0;
+            let error = persist_and_start(
+                &mut instance,
+                crate::session::Storage::new_unwatched("test"),
+                |storage, instance| {
+                    storage.update(|rows, _| {
+                        rows.push(instance.clone());
+                        Ok(())
+                    })?;
+                    if ambiguous_persist {
+                        anyhow::bail!("injected lost persistence acknowledgement");
+                    }
+                    Ok(())
+                },
+                |_| {
+                    starts += 1;
+                    anyhow::bail!("injected post-commit start failure")
+                },
+            )
+            .unwrap_err();
+            assert_eq!(starts, usize::from(!ambiguous_persist));
+            assert_eq!(
+                std::fs::read_to_string(scratch.join("source.txt")).unwrap(),
+                "frozen"
+            );
+            assert_eq!(
+                std::fs::read_to_string(scratch.join("initial-turn-claimed")).unwrap(),
+                "claimed"
+            );
+            assert!(storage
+                .load()
+                .unwrap()
+                .iter()
+                .any(|row| row.id == instance.id));
+            let state = crate::server::test_support::build_test_app_state(Vec::new());
+            publish_retained_document(&state.session_service, &error).await;
+            let body = serde_json::from_value(serde_json::json!({
+                "path":"", "tool":"pi", "scratch":true,
+                "idempotency_key":instance.idempotency_key,
+                "command_override":"invalid retry must never reach validation"
+            }))
+            .unwrap();
+            let response = crate::server::api::sessions::create_session(
+                State(state.clone()),
+                Query(crate::server::api::sessions::CreateSessionQuery { wait: None }),
+                Ok(Json(body)),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body["id"], instance.id);
+            assert_eq!(
+                storage.load().unwrap().len(),
+                if ambiguous_persist { 2 } else { 1 }
+            );
+        }
+    }
+
     #[tokio::test]
     async fn the_create_bumps_the_mutation_epoch_under_the_instances_lock() {
         use axum::extract::{Query, State};

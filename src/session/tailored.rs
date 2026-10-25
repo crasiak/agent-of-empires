@@ -1,5 +1,6 @@
 //! Purpose-scoped launches. Ledger owns the account and loaded resource surface.
 
+pub mod document;
 pub mod history;
 pub mod research;
 
@@ -28,9 +29,12 @@ impl CaptureAccount {
 pub struct TailoredRequest {
     pub preset: String,
     pub account: CaptureAccount,
+    #[serde(default)]
     pub idea: String,
     #[serde(default)]
     pub immediately: bool,
+    #[serde(default)]
+    pub document: Option<document::DocumentRequest>,
 }
 
 pub struct TailoredLaunch {
@@ -40,6 +44,25 @@ pub struct TailoredLaunch {
 
 impl TailoredRequest {
     pub fn launch(&self) -> Result<TailoredLaunch> {
+        if self.preset == "document-chat" {
+            self.document
+                .as_ref()
+                .context("Document URL is required")?
+                .validate()?;
+            if !self.idea.is_empty() || self.immediately {
+                bail!("Document chat cannot enable capture actions");
+            }
+            return Ok(TailoredLaunch {
+                command: format!(
+                    "ledger run pi --profile {} --",
+                    document::profile(self.account)
+                ),
+                extra_args: document::restrictive_args(),
+            });
+        }
+        if self.document.is_some() {
+            bail!("Document context requires the document-chat preset");
+        }
         if self.preset != "capture-idea" {
             bail!("Unknown tailored preset: {}", self.preset);
         }
@@ -70,6 +93,9 @@ impl TailoredRequest {
 
     /// Inspect, never reconcile or rewrite, the dedicated profile before creating a Session.
     pub fn verify_profile(&self) -> Result<()> {
+        if self.preset == "document-chat" {
+            return document::verify_profile(self.account);
+        }
         let profile = self.account.ledger_profile();
         let output = crate::process::run_with_bounded_stdout(
             std::process::Command::new("ledger").args([
@@ -150,6 +176,7 @@ mod tests {
                     account,
                     idea: "a 'quoted' idea; $(touch /tmp/nope)\nnext line".into(),
                     immediately,
+                    document: None,
                 };
                 let launch = request.launch().unwrap();
                 assert_eq!(
@@ -182,7 +209,8 @@ mod tests {
                 preset: preset.into(),
                 idea: idea.into(),
                 account: CaptureAccount::Personal,
-                immediately: false
+                immediately: false,
+                document: None,
             }
             .launch()
             .is_err());

@@ -1,3 +1,4 @@
+mod document;
 mod history;
 mod research;
 
@@ -17,6 +18,9 @@ use crate::tui::styles::Theme;
 pub(in crate::tui) struct TailoredWindow {
     picker: HistoryPicker,
     research: Option<research::ResearchWindow>,
+    document: Option<document::DocumentWindow>,
+    starting_document: Option<document::StartWorker>,
+    profile: String,
     history_refreshed: Option<Instant>,
     draft_committed: bool,
     composing: bool,
@@ -61,6 +65,9 @@ impl TailoredWindow {
         Self {
             picker: HistoryPicker::default(),
             research: None,
+            document: None,
+            starting_document: None,
+            profile: String::new(),
             history_refreshed: None,
             draft_committed: false,
             composing: false,
@@ -78,6 +85,9 @@ impl TailoredWindow {
     }
 
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> WindowAction {
+        if self.document.as_ref().is_some_and(|d| d.busy()) {
+            return WindowAction::Continue;
+        }
         if super::bindings::is_tailored_shortcut(&key)
             || (key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q'))
         {
@@ -90,10 +100,18 @@ impl TailoredWindow {
         if key.code == KeyCode::F(2) && self.checking.is_none() {
             self.terminal = None;
             self.research = None;
+            self.document = None;
             self.composing = false;
             self.picker.recent();
             self.history_refreshed = None;
             self.error = None;
+            return WindowAction::Continue;
+        }
+        if let Some(document) = &mut self.document {
+            if key.code == KeyCode::Esc {
+                return WindowAction::Close;
+            }
+            document.key(key, &self.profile);
             return WindowAction::Continue;
         }
         if let Some(research) = &mut self.research {
@@ -153,6 +171,10 @@ impl TailoredWindow {
     fn picker_action(&mut self, action: HistoryAction) -> WindowAction {
         match action {
             HistoryAction::None => WindowAction::Continue,
+            HistoryAction::Document => {
+                self.document = Some(document::DocumentWindow::new(self.account));
+                WindowAction::Continue
+            }
             HistoryAction::Research => {
                 self.research = Some(research::ResearchWindow::new(self.account, None));
                 WindowAction::Continue
@@ -174,6 +196,10 @@ impl TailoredWindow {
     }
 
     pub(super) fn handle_paste(&mut self, text: &str) {
+        if let Some(document) = &mut self.document {
+            document.paste(text);
+            return;
+        }
         if let Some(research) = &mut self.research {
             research.paste(text);
             return;
@@ -194,6 +220,10 @@ impl TailoredWindow {
     }
 
     pub(super) fn handle_click(&mut self, col: u16, row: u16) -> WindowAction {
+        if let Some(document) = &mut self.document {
+            document.click(col, row, &self.profile);
+            return WindowAction::Continue;
+        }
         if self.checking.is_some() || self.terminal.is_some() || self.research.is_some() {
             return WindowAction::Continue;
         }
@@ -229,6 +259,7 @@ impl TailoredWindow {
             account: self.account,
             idea: self.idea.lines().join("\n"),
             immediately: self.immediately,
+            document: None,
         };
         if let Err(error) = request.launch() {
             self.error = Some(error.to_string());
@@ -257,7 +288,7 @@ impl TailoredWindow {
         let height = area.height.saturating_sub(4).min(
             if self.terminal.is_some() || self.research.is_some() {
                 48
-            } else if self.composing {
+            } else if self.composing || self.document.is_some() {
                 20
             } else {
                 28
@@ -281,6 +312,10 @@ impl TailoredWindow {
         self.account_rect = Rect::default();
         self.immediately_rect = Rect::default();
         self.submit_rect = Rect::default();
+        if let Some(document) = &mut self.document {
+            document.render(frame, inner, theme);
+            return;
+        }
         if let Some(research) = &mut self.research {
             research.render(frame, inner, theme);
             return;
@@ -424,7 +459,9 @@ impl HomeView {
     }
 
     pub(super) fn open_tailored(&mut self) {
-        self.tailored_window = Some(TailoredWindow::new(self.tailored_account));
+        let mut window = TailoredWindow::new(self.tailored_account);
+        window.profile = self.config_profile();
+        self.tailored_window = Some(window);
         self.refresh_tailored_history();
     }
 
@@ -458,6 +495,16 @@ impl HomeView {
                     }
                     return;
                 }
+                if self.get_instance(&id).is_some_and(|instance| {
+                    crate::session::tailored::document::account(instance).is_some()
+                }) {
+                    if let Err(error) = self.start_document_terminal(&id) {
+                        if let Some(window) = &mut self.tailored_window {
+                            window.error = Some(format!("{error:#}"));
+                        }
+                    }
+                    return;
+                }
                 let result = self.open_capture_terminal(&id);
                 if let Some(window) = &mut self.tailored_window {
                     match result {
@@ -487,7 +534,7 @@ impl HomeView {
                 let result = self
                     .get_instance(&id)
                     .filter(|instance| {
-                        crate::session::tailored::history::capture_account(instance).is_some()
+                        crate::session::tailored::history::tailored_account(instance).is_some()
                     })
                     .ok_or_else(|| anyhow::anyhow!("Capture Session disappeared"))
                     .and_then(|instance| {
@@ -534,12 +581,66 @@ impl HomeView {
                 .is_none_or(|last| last.elapsed() >= Duration::from_secs(2))
         });
         let refreshed = refresh && self.refresh_tailored_history();
+        let started = self
+            .tailored_window
+            .as_ref()
+            .and_then(|window| window.starting_document.as_ref())
+            .and_then(|worker| worker.take_result());
+        if let Some((id, outcome)) = started {
+            let result = self
+                .reload()
+                .and_then(|()| outcome.map_err(anyhow::Error::msg))
+                .and_then(|()| self.ready_capture_terminal(&id));
+            if let Some(window) = &mut self.tailored_window {
+                window.starting_document = None;
+                window.history_refreshed = None;
+                match result {
+                    Ok(terminal) => { window.terminal = Some(terminal); window.error = None; }
+                    Err(error) => window.error = Some(format!("Document start not confirmed: {error:#}. Inspect this Session in history; do not create another copy.")),
+                }
+            }
+            return true;
+        }
         if let Some(research) = self
             .tailored_window
             .as_mut()
             .and_then(|w| w.research.as_mut())
         {
             return research.tick() || refreshed;
+        }
+        let document_result = self
+            .tailored_window
+            .as_mut()
+            .and_then(|w| w.document.as_mut())
+            .and_then(|d| d.take_result());
+        if let Some(result) = document_result {
+            let previous = self.selected_session.clone();
+            let prepared = result.is_ok();
+            let result = result.map_err(anyhow::Error::msg).and_then(|prepared| {
+                let (built, profile) = prepared.accept();
+                let id = self.accept_built_session(built, profile, false)?;
+                self.start_document_terminal(&id)
+            });
+            if let Some(id) = previous {
+                self.select_and_reveal_session(&id);
+            }
+            if let Some(window) = &mut self.tailored_window {
+                if prepared {
+                    window.document = None;
+                    window.history_refreshed = None;
+                }
+                match result {
+                    Ok(()) => {}
+                    Err(error) => {
+                        if let Some(document) = &mut window.document {
+                            document.error(format!("{error:#}"));
+                        } else {
+                            window.error = Some(format!("Document create/start not confirmed: {error:#}. Check this Session in history; do not start another copy."));
+                        }
+                    }
+                }
+            }
+            return true;
         }
         let changed_target = self
             .tailored_window
@@ -630,19 +731,53 @@ impl HomeView {
         self.open_capture_terminal(&id)
     }
 
+    fn start_document_terminal(&mut self, id: &str) -> anyhow::Result<()> {
+        let instance = self
+            .get_instance(id)
+            .filter(|instance| crate::session::tailored::document::account(instance).is_some())
+            .ok_or_else(|| anyhow::anyhow!("Document Session disappeared"))?
+            .clone();
+        let window = self
+            .tailored_window
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Document window closed"))?;
+        anyhow::ensure!(
+            window.starting_document.is_none(),
+            "A document start is already in progress"
+        );
+        window.terminal = None;
+        window.composing = false;
+        window.error = Some(
+            "Starting document conversation; launch-time Ledger verification is running…".into(),
+        );
+        window.starting_document = Some(document::StartWorker::spawn(instance));
+        Ok(())
+    }
+
     fn open_capture_terminal(&mut self, id: &str) -> anyhow::Result<CaptureTerminal> {
         anyhow::ensure!(
             self.get_instance(id).is_some_and(|instance| {
-                crate::session::tailored::history::capture_account(instance).is_some()
+                crate::session::tailored::history::tailored_account(instance).is_some()
             }),
             "This is not a capture Session"
+        );
+        anyhow::ensure!(
+            self.get_instance(id).is_none_or(|instance| {
+                crate::session::tailored::document::account(instance).is_none()
+            }),
+            "Document launch requires its background start worker"
         );
         self.try_mutate_instance_writeback_on_err(id, |instance| {
             instance.ensure_pane_ready().map_err(Into::into)
         })?;
+        self.ready_capture_terminal(id)
+    }
+
+    fn ready_capture_terminal(&self, id: &str) -> anyhow::Result<CaptureTerminal> {
         let instance = self
             .get_instance(id)
             .ok_or_else(|| anyhow::anyhow!("Capture Session disappeared"))?;
+        instance.ensure_startable()?;
         let name = instance.tmux_session()?.name().to_string();
         let title = instance.title.clone();
         let capture = live_send::LiveCaptureWorker::spawn(self.preview_wake.clone());
@@ -747,6 +882,154 @@ mod tests {
             window.handle_paste(&fresh);
             assert!(assert_visible(&window, 33, 7, "TAIL") > 1);
             assert_eq!(window.idea.lines(), &[fresh]);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn document_initial_start_and_history_reopen_qualify_off_the_tick_thread() {
+        use crate::session::tailored::document::native::test_support::HoldQualification;
+        use crate::session::{builder::BuildResult, Instance, Storage};
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+        let _tmux = crate::session::test_support::install_login_shell_path_command(
+            root.path(),
+            "tmux",
+            "#!/bin/sh\nexit 1\n",
+        );
+        let _ledger = crate::session::test_support::install_login_shell_path_command(
+            root.path(),
+            "ledger",
+            "#!/bin/sh\nexit 99\n",
+        );
+        for reopen in [false, true] {
+            let scratch = root.path().join(if reopen { "reopen" } else { "initial" });
+            std::fs::create_dir(&scratch).unwrap();
+            let mut instance = Instance::new("Document", scratch.to_str().unwrap());
+            instance.source_profile = "test".into();
+            instance.tool = "pi".into();
+            instance.scratch = true;
+            instance.command = "ledger run pi --profile aoe-document-work --".into();
+            instance.extra_args = crate::session::tailored::document::restrictive_args();
+            let id = instance.id.clone();
+            let storage = Storage::new_unwatched("test").unwrap();
+            storage
+                .update(|rows, _| {
+                    *rows = if reopen {
+                        vec![instance.clone()]
+                    } else {
+                        vec![]
+                    };
+                    Ok(())
+                })
+                .unwrap();
+            let mut view = HomeView::new_for_test(
+                Some("test".into()),
+                crate::tmux::AvailableTools::with_tools(&["pi"]),
+                crate::file_watch::FileWatchService::noop(),
+            )
+            .unwrap();
+            view.open_tailored();
+            let mut gate = HoldQualification::new(&scratch);
+            if reopen {
+                view.apply_tailored_action(WindowAction::Open(id.clone()));
+            } else {
+                view.tailored_window.as_mut().unwrap().document =
+                    Some(document::DocumentWindow::prepared_for_test(
+                        BuildResult {
+                            instance,
+                            created_worktree: None,
+                            created_workspace_worktrees: vec![],
+                            warnings: vec![],
+                        },
+                        "test".into(),
+                    ));
+                assert!(view.tick_tailored());
+            }
+            let worker = gate
+                .arrived
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "qualification gate {error:?}; worker result: {:?}",
+                        view.tailored_window
+                            .as_ref()
+                            .unwrap()
+                            .starting_document
+                            .as_ref()
+                            .unwrap()
+                            .take_result()
+                    )
+                });
+            assert_ne!(worker, std::thread::current().id());
+            assert!(view
+                .tailored_window
+                .as_ref()
+                .unwrap()
+                .starting_document
+                .is_some());
+            view.tick_tailored();
+            assert!(
+                view.tailored_window
+                    .as_ref()
+                    .unwrap()
+                    .starting_document
+                    .as_ref()
+                    .unwrap()
+                    .take_result()
+                    .is_none(),
+                "tick returned without waiting for qualification"
+            );
+            view.handle_tailored_key(key(KeyCode::Char('x')));
+            let rendered = {
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        view.tailored_window.as_mut().unwrap().render(
+                            frame,
+                            frame.area(),
+                            &Theme::default(),
+                        )
+                    })
+                    .unwrap();
+                terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect::<String>()
+            };
+            assert!(
+                rendered.contains('x'),
+                "history search input continues while qualification waits"
+            );
+            gate.release();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while view
+                .tailored_window
+                .as_ref()
+                .unwrap()
+                .starting_document
+                .is_some()
+            {
+                view.tick_tailored();
+                assert!(
+                    Instant::now() < deadline,
+                    "start worker must finish after release"
+                );
+                std::thread::yield_now();
+            }
+            assert!(view
+                .tailored_window
+                .as_ref()
+                .unwrap()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("not confirmed"));
+            assert!(storage.load().unwrap().iter().any(|row| row.id == id));
         }
     }
 

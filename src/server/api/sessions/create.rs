@@ -1048,6 +1048,7 @@ pub async fn create_session(
         }
     }
 
+    let mut document = None;
     if let Some(request) = body.tailored.take() {
         let launch = match tailored_launch(&body, &request, state.cityhall_mode) {
             Ok(launch) => launch,
@@ -1059,6 +1060,7 @@ pub async fn create_session(
                 )
             }
         };
+        document = request.document.clone();
         match tokio::task::spawn_blocking(move || request.verify_profile()).await {
             Ok(Ok(())) => {}
             result => {
@@ -1087,6 +1089,7 @@ pub async fn create_session(
         .map(|key| state.create_progress.register(key));
 
     let spec = crate::server::session_spawn::StructuredSessionSpec {
+        document,
         title: body.title,
         path: body.path,
         group: body.group,

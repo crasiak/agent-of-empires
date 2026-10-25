@@ -8,7 +8,7 @@ import {
   retryBody,
   type PendingCreate,
 } from "../lib/pendingCreates";
-import type { ResearchDraft, SessionResponse } from "../lib/types";
+import type { CreateSessionRequest, ResearchDraft, SessionResponse } from "../lib/types";
 import { ResearchForm } from "./ResearchForm";
 import { TerminalView } from "./TerminalView";
 import { TailoredHistoryPanel } from "./TailoredHistoryPanel";
@@ -37,6 +37,9 @@ export function TailoredSessionsOverlay({
 }: Props) {
   const [research, setResearch] = useState<ResearchDraft | "new" | null>(null);
   const [composing, setComposing] = useState(false);
+  const [documentChat, setDocumentChat] = useState(false);
+  const [url, setUrl] = useState("");
+  const [question, setQuestion] = useState("");
   const [idea, setIdea] = useState("");
   const [immediately, setImmediately] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -59,13 +62,16 @@ export function TailoredSessionsOverlay({
     });
     search.current?.focus();
   };
-  const startNew = () => {
+  const startNew = (document = false) => {
     if (readOnly) return;
     if (draftCommitted.current) {
       setIdea("");
+      setUrl("");
+      setQuestion("");
       setImmediately(false);
       draftCommitted.current = false;
     }
+    setDocumentChat(document);
     setError(null);
     setComposing(true);
   };
@@ -73,6 +79,7 @@ export function TailoredSessionsOverlay({
   useEffect(() => {
     mounted.current = true;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousAgentInput = !!previousFocus?.closest('[data-term="agent"]');
     const root = document.getElementById("root");
     const wasInert = root?.inert ?? false;
     if (root) root.inert = true;
@@ -82,26 +89,30 @@ export function TailoredSessionsOverlay({
       if (root) root.inert = wasInert;
       if (pending.current) releasePendingCreate(pending.current.body.idempotency_key);
       if (previousFocus?.isConnected) previousFocus.focus();
+      else if (previousAgentInput) root?.querySelector<HTMLElement>('[data-term="agent"] textarea')?.focus();
     };
   }, []);
 
   const capture = async (event: FormEvent) => {
     event.preventDefault();
-    if (readOnly || inFlight.current || (!pending.current && !idea.trim())) return;
+    if (readOnly || inFlight.current || (!pending.current && !(documentChat ? url : idea).trim())) return;
     inFlight.current = true;
     setBusy(true);
     setError(null);
     const retry = pending.current !== null;
+    const tailored: CreateSessionRequest["tailored"] = documentChat
+      ? { preset: "document-chat", account, document: { url, opening_question: question } }
+      : { preset: "capture-idea", account, idea, immediately };
     const attempt = pending.current ?? {
       body: {
         path: "",
         tool: "pi",
         scratch: true,
         view: "terminal" as const,
-        title: "Capture an idea",
+        title: documentChat ? "Document chat" : "Capture an idea",
         group: "Tailored",
         profile,
-        tailored: { preset: "capture-idea" as const, account, idea, immediately },
+        tailored,
         idempotency_key: crypto.randomUUID(),
       },
       tool: "pi",
@@ -174,7 +185,9 @@ export function TailoredSessionsOverlay({
       >
         <header className="flex items-center justify-between border-b border-surface-700 px-4 py-3">
           <h2 className="text-sm font-semibold text-text-primary">
-            {session ? session.title : `Tailored Sessions${composing ? " · Capture an idea" : ""}`}
+            {session
+              ? session.title
+              : `Tailored Sessions${composing ? (documentChat ? " · Document chat" : " · Capture an idea") : ""}`}
           </h2>
           <div className="flex items-center gap-2">
             {(session || composing || research) && (
@@ -217,7 +230,8 @@ export function TailoredSessionsOverlay({
           <TailoredHistoryPanel
             searchRef={search}
             readOnly={readOnly}
-            onNew={startNew}
+            onNew={() => startNew()}
+            onDocument={() => startNew(true)}
             onResearch={(draft) => {
               if (!readOnly || draft) setResearch(draft ?? "new");
             }}
@@ -235,7 +249,7 @@ export function TailoredSessionsOverlay({
               <label className="flex items-center gap-2 text-sm text-text-secondary">
                 Account
                 <select
-                  aria-label="Capture account"
+                  aria-label={documentChat ? "Document account" : "Capture account"}
                   value={account}
                   disabled={busy || uncertain}
                   onChange={(event) => onAccountChange(event.target.value as CaptureAccount)}
@@ -245,41 +259,75 @@ export function TailoredSessionsOverlay({
                   <option value="work">Work</option>
                 </select>
               </label>
-              <label className="flex items-center gap-2 text-sm text-text-primary">
-                <input
-                  type="checkbox"
-                  checked={immediately}
-                  disabled={busy || uncertain}
-                  onChange={(event) => setImmediately(event.target.checked)}
-                />
-                Immediately
-              </label>
+              {!documentChat && (
+                <label className="flex items-center gap-2 text-sm text-text-primary">
+                  <input
+                    type="checkbox"
+                    checked={immediately}
+                    disabled={busy || uncertain}
+                    onChange={(event) => setImmediately(event.target.checked)}
+                  />
+                  Immediately
+                </label>
+              )}
             </div>
             <p className="text-xs text-text-secondary">
-              {immediately
-                ? "Apply inferred ticket, Atlas, and KB changes without a review step."
-                : "Save the idea, then review inferred destinations before writing."}
+              {documentChat
+                ? "Public direct Markdown/PDF only. Source is downloaded and extracted before a tool-free conversation starts. No credentials, redirects or OCR. 10 MiB raw / 256 KiB text; oversize documents are refused."
+                : immediately
+                  ? "Apply inferred ticket, Atlas, and KB changes without a review step."
+                  : "Save the idea, then review inferred destinations before writing."}
             </p>
-            <div className="text-sm text-text-secondary">
-              <label htmlFor="tailored-idea">Idea</label>
-              <textarea
-                id="tailored-idea"
-                ref={focusIdea}
-                value={idea}
-                disabled={busy || uncertain}
-                maxLength={16384}
-                onChange={(event) => setIdea(event.target.value)}
-                rows={6}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    event.currentTarget.form?.requestSubmit();
-                  }
-                }}
-                placeholder="What's the idea?"
-                className="mt-1 w-full resize-y rounded-md border border-surface-700 bg-surface-950 p-3 text-sm text-text-primary"
-              />
-            </div>
+            {documentChat ? (
+              <>
+                <label className="block text-sm text-text-secondary" htmlFor="document-url">
+                  Public document URL
+                </label>
+                <textarea
+                  id="document-url"
+                  ref={focusIdea}
+                  value={url}
+                  disabled={busy || uncertain}
+                  maxLength={8192}
+                  rows={3}
+                  onChange={(event) => setUrl(event.target.value)}
+                  className="w-full resize-y whitespace-pre-wrap rounded-md border border-surface-700 bg-surface-950 p-3 text-sm text-text-primary [overflow-wrap:anywhere]"
+                />
+                <label className="block text-sm text-text-secondary" htmlFor="document-question">
+                  Opening question (optional)
+                </label>
+                <textarea
+                  id="document-question"
+                  value={question}
+                  disabled={busy || uncertain}
+                  maxLength={4096}
+                  rows={3}
+                  onChange={(event) => setQuestion(event.target.value)}
+                  className="w-full resize-y whitespace-pre-wrap rounded-md border border-surface-700 bg-surface-950 p-3 text-sm text-text-primary [overflow-wrap:anywhere]"
+                />
+              </>
+            ) : (
+              <div className="text-sm text-text-secondary">
+                <label htmlFor="tailored-idea">Idea</label>
+                <textarea
+                  id="tailored-idea"
+                  ref={focusIdea}
+                  value={idea}
+                  disabled={busy || uncertain}
+                  maxLength={16384}
+                  onChange={(event) => setIdea(event.target.value)}
+                  rows={6}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      event.currentTarget.form?.requestSubmit();
+                    }
+                  }}
+                  placeholder="What's the idea?"
+                  className="mt-1 w-full resize-y rounded-md border border-surface-700 bg-surface-950 p-3 text-sm text-text-primary"
+                />
+              </div>
+            )}
             {error && (
               <p role="alert" className="text-sm text-status-error">
                 {error}
@@ -287,18 +335,26 @@ export function TailoredSessionsOverlay({
             )}
             {uncertain && (
               <p className="text-xs text-text-secondary">
-                The outcome is not confirmed. Retry uses the same capture key. If you close, pending capture
+                The outcome is not confirmed. Retry uses the same create key. If you close, pending creation
                 reconciliation continues in the background; check the Session list before launching again.
               </p>
             )}
             <div className="flex items-center justify-between gap-3">
-              <span className="text-xs text-text-secondary">Enter capture · Shift+Enter newline</span>
+              <span className="text-xs text-text-secondary">
+                {documentChat ? "Select Start to load the source and begin" : "Enter capture · Shift+Enter newline"}
+              </span>
               <button
                 type="submit"
-                disabled={readOnly || busy || !idea.trim() || blocked}
+                disabled={readOnly || busy || !(documentChat ? url : idea).trim() || blocked}
                 className="h-9 rounded-md border border-surface-600 bg-surface-800 px-4 text-sm font-medium text-text-primary hover:bg-surface-700 disabled:opacity-50"
               >
-                {busy ? "Checking and launching…" : uncertain ? "Retry same capture" : "Capture idea"}
+                {busy
+                  ? "Checking and launching…"
+                  : uncertain
+                    ? "Retry same capture"
+                    : documentChat
+                      ? "Start"
+                      : "Capture idea"}
               </button>
             </div>
           </form>

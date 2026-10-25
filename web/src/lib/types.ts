@@ -393,7 +393,9 @@ export interface TailoredHistoryEntry {
 }
 
 export interface CreateSessionRequest {
-  tailored?: { preset: "capture-idea"; account: "personal" | "work"; idea: string; immediately: boolean };
+  tailored?:
+    | { preset: "capture-idea"; account: "personal" | "work"; idea: string; immediately: boolean }
+    | { preset: "document-chat"; account: "personal" | "work"; document: { url: string; opening_question: string } };
   title?: string;
   path: string;
   tool: string;

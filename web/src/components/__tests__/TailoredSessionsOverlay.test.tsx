@@ -76,6 +76,52 @@ function savedCapture(): TailoredHistoryEntry {
 }
 
 describe("Tailored Sessions", () => {
+  it("loads a document only after explicit Start and preserves account, URL and opening question", async () => {
+    vi.mocked(createSession).mockResolvedValue({
+      ok: true,
+      session: makeSession({ id: "document", title: "Document chat" }),
+    });
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: /Document chat/ }));
+    const url = `https://example.org/${"long".repeat(100)}.md?chapter=2`;
+    const question = "Explain 'quotes' and 🌱\nwithout actions";
+    fireEvent.change(screen.getByLabelText("Public document URL"), { target: { value: url } });
+    fireEvent.change(screen.getByLabelText("Opening question (optional)"), { target: { value: question } });
+    fireEvent.change(screen.getByLabelText("Document account"), { target: { value: "work" } });
+    fireEvent.keyDown(screen.getByLabelText("Public document URL"), { key: "Enter" });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(screen.queryByRole("checkbox", { name: "Immediately" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Start", exact: true }));
+    await screen.findByLabelText("Capture terminal");
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scratch: true,
+        view: "terminal",
+        tool: "pi",
+        path: "",
+        tailored: { preset: "document-chat", account: "work", document: { url, opening_question: question } },
+      }),
+    );
+    expect(registerPendingCreate).toHaveBeenCalled();
+  });
+
+  it("keeps document load failures editable and gates the preset in read-only mode", async () => {
+    vi.mocked(createSession).mockResolvedValue({ ok: false, error: "Document host is not public" });
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: /Document chat/ }));
+    fireEvent.change(screen.getByLabelText("Public document URL"), { target: { value: "http://localhost/a.md" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start", exact: true }));
+    await screen.findByText("Document host is not public");
+    expect(screen.queryByLabelText("Capture terminal")).toBeNull();
+    expect((screen.getByLabelText("Public document URL") as HTMLTextAreaElement).disabled).toBe(false);
+    cleanup();
+    render(<Harness readOnly />);
+    const preset = screen.getByRole("button", { name: /Document chat/ });
+    expect((preset as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(preset);
+    expect(screen.queryByLabelText("Public document URL")).toBeNull();
+  });
+
   it("opens a saved conversation and returns to history without creating or navigating", async () => {
     vi.mocked(fetchTailoredHistory).mockResolvedValue({ entries: [savedCapture()] });
     render(<Harness />);

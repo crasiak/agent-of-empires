@@ -136,6 +136,73 @@ running; check the Session list before starting another capture. A changed or
 shelved TUI capture target returns to history rather than forwarding input to a
 stale tmux session.
 
+## Discuss a public document
+
+Choose **Document chat**, select Personal or Work, paste a public direct Markdown
+or PDF URL, optionally enter an opening question, then select **Start**. This is a
+direct Pi conversation, not the research development/review flow. The TUI form
+uses Tab to move between URL, question, account and Start; Enter on Start confirms.
+Both text fields soft-wrap without changing the retained bytes.
+
+AoE downloads and extracts the source before starting any model turn. Only public
+HTTP(S) direct links are supported. Redirects, encoded responses, credentials,
+credential-like query parameters, HTML/login pages, OCR and private sources are
+refused. Supply the final uncompressed link. Loading has a 30-second deadline,
+a 10 MiB download limit and a 256 KiB UTF-8 text limit. Oversize, empty, scanned,
+encrypted or unextractable documents fail visibly without truncation. PDF
+extraction requires local `pdftotext` on PATH; no remote extraction is used.
+
+Provision dedicated `aoe-document-personal` and `aoe-document-work` Ledger profiles.
+Each requires a direct `pi-home` binding, an immutable pinned Pi core, model-only
+resources and explicit `launch.share: [conversation]`. No capture, daily, skill,
+package, extension or MCP resource fallback is allowed. AoE reads the selected
+profile's lock and `ledger launch describe` metadata and refuses stale/unqualified
+runtimes without applying or materializing anything. Ledger owns account selection,
+model settings, protected native history and runtime verification.
+
+This requires a Ledger version whose read-only direct Pi description returns the
+verified pinned Node/Pi execution prefix and protected runtime metadata, plus a Pi
+build supporting the restrictive launch flags and native transcript selectors.
+A Ledger version that rejects direct Pi descriptions or describes ambient `pi`
+is not supported. Source-contract fixtures do not qualify an installed producer;
+activation remains blocked until that Ledger producer contract is implemented and
+independently qualified with the provisioned profiles. AoE never substitutes a
+bare Pi executable or a different launcher. Capability help runs with a private
+temporary HOME and Pi directory, not the selected account's runtime settings/auth.
+
+Document chat disables tools, MCP, ambient extensions, context files, skills and
+prompt templates. Only AoE's fixed host-owned Pi identity extension is explicitly
+loaded, for ordinary conversation identity/status/usage reporting. Document content
+cannot select extensions or change the account or system policy. These launch
+restrictions are not an OS sandbox.
+
+The private managed scratch directory retains the bounded original, exact extracted
+`source.txt` and `provenance.json` with retrieval time, sanitized URL, media/extractor
+identity, sizes and separate raw/text SHA-256 hashes. Query values and fragments
+are not retained in provenance or history. Normal scratch purge removes this source
+snapshot; the Agent conversation remains in Ledger's native Pi history independently.
+Migration v052 advances the app schema without rewriting Session rows. This is a
+semantic safety fence: older clients cannot safely reopen document rows even
+though their fields still deserialize. Stop all old AoE clients and daemons before
+upgrading. Schema-51 and older builds refuse a store stamped 52; this does not
+protect against an old process left running. Do not lower the schema cursor or
+force a downgrade to reopen these conversations.
+
+The first native launch attaches the frozen text once using Pi's full UTF-8 `@file`
+reader. Normal resume uses the exact native transcript, without fetching, extracting,
+reattaching or automatically starting another turn. If the initial launch was claimed
+but its native history cannot be qualified, AoE refuses automatic replay. Inspect the
+existing Session rather than creating a second copy. Closing, reopening, Hide and
+Restore use the ordinary Tailored history and terminal lifecycle. The Web dashboard
+uses the same keyed pending-create reconciliation as capture and does not equate an
+unconfirmed create with a loaded source or a started model. Once persistence is
+attempted, an uncertain failure retains the source snapshot and initial-turn claim;
+a keyed retry resolves a known original Session rather than launching another one.
+If ownership cannot be confirmed, inspect history before creating anything new.
+The TUI prepares and requalifies cold native launches in background workers, both
+on initial Start and when reopening from history. Closing an accepted start does
+not cancel it or authorize replay.
+
 ## Develop a research prompt
 
 Choose **Tailored research** for **quick prompt → developed prompt → recommended
