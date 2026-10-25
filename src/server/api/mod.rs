@@ -52,14 +52,14 @@ pub use sessions::{
     attach_session_project, create_session, create_session_progress, delete_session,
     delete_workspace, ensure_container_terminal, ensure_session, ensure_terminal,
     force_smart_rename, get_recent_projects, kill_terminal, list_sessions, list_tailored_sessions,
-    paste_image, preview_volume_ignores_globs, read_output, rename_session, restore_session,
-    search_sessions, send_message, serve_session_artifact, session_diff_file,
-    session_diff_file_raw, session_diff_files, session_file, session_file_raw, session_ledger_run,
-    session_usage, set_worktree_name, start_session, stop_session, summarize_session,
-    trash_session, update_session_archive, update_session_color, update_session_diff_base,
-    update_session_group, update_session_notifications, update_session_pin, update_session_snooze,
-    update_session_unread, update_tailored_visibility, update_workspace_ordering, OutputQuery,
-    SendMessageRequest,
+    paste_image, preview_volume_ignores_globs, read_output, rename_session, research_get,
+    research_operation, research_output, research_reply, restore_session, search_sessions,
+    send_message, serve_session_artifact, session_diff_file, session_diff_file_raw,
+    session_diff_files, session_file, session_file_raw, session_ledger_run, session_usage,
+    set_worktree_name, start_session, stop_session, summarize_session, trash_session,
+    update_session_archive, update_session_color, update_session_diff_base, update_session_group,
+    update_session_notifications, update_session_pin, update_session_snooze, update_session_unread,
+    update_tailored_visibility, update_workspace_ordering, OutputQuery, SendMessageRequest,
 };
 pub use skills::{
     adopt_skill, create_skill, delete_skill, edit_skill, list_skills, read_skill, sync_skills,
@@ -559,5 +559,3 @@ mod tests {
         }
     }
 }
-
-pub use sessions::{research_get, research_operation, research_output, research_reply};

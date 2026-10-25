@@ -509,7 +509,7 @@ mod tests {
             } else {
                 assert_eq!(result.unwrap().turn_id.as_deref(), Some("turn_1"));
             }
-            let requests = received.lock().unwrap();
+            let requests = received.lock().unwrap().clone();
             assert_eq!(requests.len(), 3);
             assert_eq!(requests[0].1["githubSyncEnabled"], false);
             assert_eq!(
