@@ -27,6 +27,9 @@ test("document form preserves long URL through resize, owns focus and requires e
   await page.setViewportSize({ width: 520, height: 720 });
   await expect(url).toHaveValue(exact);
   expect(await url.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  const screenshot = test.info().outputPath("document-conversation-form.png");
+  await page.getByRole("dialog", { name: "Tailored Sessions", exact: true }).screenshot({ path: screenshot });
+  await test.info().attach("Document conversation form", { path: screenshot, contentType: "image/png" });
   await url.press("Tab");
   await expect(page.getByLabel("Opening question (optional)")).toBeFocused();
   expect(starts).toBe(0);
