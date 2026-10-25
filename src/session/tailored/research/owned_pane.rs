@@ -30,12 +30,15 @@ fn run(cmd: &mut Command) -> Result<String> {
         .into())
 }
 pub(super) fn create(id: &str, cwd: &str, command: &str) -> Result<OwnedPane> {
+    create_with_shell(id, cwd, command, "/bin/sh")
+}
+fn create_with_shell(id: &str, cwd: &str, command: &str, shell: &str) -> Result<OwnedPane> {
     let name = session_name(id);
     let startup = tempfile::tempdir()?;
     let ready = startup.path().join("ready");
-    // Keep one non-execing supervisor as the incarnation anchor across launcher execs.
+    // Keep a stable supervisor; preserve stdin before dash backgrounds the child.
     let script = format!(
-        "printf '%s' \"$$\" > {}; ( {command} ) <&0 & wait",
+        "exec 3<&0; printf '%s' \"$$\" > {}; ( {command} ) <&3 3<&- & wait",
         shell_words::quote(ready.to_str().context("Non-UTF8 startup path")?)
     );
     // new-session is exclusive unless -A is passed. Never resolve or adopt an existing name.
@@ -49,7 +52,7 @@ pub(super) fn create(id: &str, cwd: &str, command: &str) -> Result<OwnedPane> {
         &name,
         "-c",
         cwd,
-        "/bin/sh",
+        shell,
         "-c",
         &script,
     ]))?;
@@ -153,6 +156,45 @@ impl OwnedPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[serial_test::serial]
+    fn supervisor_preserves_terminal_input_across_posix_background_rules() {
+        crate::tmux::test_helpers::require_tmux!();
+        let dir = tempfile::tempdir().unwrap();
+        let socket = format!("research-stdin-{}", uuid::Uuid::new_v4());
+        let _env =
+            crate::session::test_support::EnvGuard::set(&[("AOE_TMUX_SOCKET", socket.as_str())]);
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = crate::tmux::tmux_command().arg("kill-server").output();
+            }
+        }
+        let _cleanup = Cleanup;
+        for shell in ["/bin/sh", "/bin/dash"] {
+            if !std::path::Path::new(shell).exists() {
+                continue;
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            let pane = create_with_shell(&id, dir.path().to_str().unwrap(), "exec /bin/cat", shell)
+                .unwrap_or_else(|error| panic!("{shell}: {error:#}"));
+            pane.reply("literal input survives background startup")
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if pane
+                    .output()
+                    .unwrap()
+                    .contains("literal input survives background startup")
+                {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "{shell} lost input");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn exclusive_creation_and_generation_checks_refuse_collisions_respawns_and_replacements() {
