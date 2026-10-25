@@ -3,6 +3,7 @@
 Press **Ctrl+Y** in the TUI or Web dashboard to open the Tailored Sessions picker,
 including while a Session owns keyboard input. Choose **Capture an idea**, select
 Personal or Work, and enter the idea. Enter captures; Shift+Enter inserts a newline.
+Long text and unbroken URLs soft-wrap in the TUI without adding saved newlines.
 
 **Immediately** is unchecked by default. The capture skill saves the original idea
 and proposes project-ticket, Atlas, or KB destinations before making destination

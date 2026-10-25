@@ -8,7 +8,7 @@ use history::{HistoryAction, HistoryPicker};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{prelude::*, widgets::*};
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{TextArea, WrapMode};
 
 use super::{live_send, HomeView};
 use crate::session::tailored::{CaptureAccount, TailoredRequest};
@@ -50,6 +50,12 @@ struct CaptureTerminal {
     size: (u16, u16),
 }
 
+fn idea_textarea() -> TextArea<'static> {
+    let mut textarea = TextArea::default();
+    textarea.set_wrap_mode(WrapMode::WordOrGlyph);
+    textarea
+}
+
 impl TailoredWindow {
     fn new(account: CaptureAccount) -> Self {
         Self {
@@ -58,7 +64,7 @@ impl TailoredWindow {
             history_refreshed: None,
             draft_committed: false,
             composing: false,
-            idea: TextArea::default(),
+            idea: idea_textarea(),
             account,
             immediately: false,
             focus: 0,
@@ -153,7 +159,7 @@ impl TailoredWindow {
             }
             HistoryAction::New => {
                 if self.draft_committed {
-                    self.idea = TextArea::default();
+                    self.idea = idea_textarea();
                     self.immediately = false;
                     self.draft_committed = false;
                 }
@@ -663,6 +669,85 @@ mod tests {
     use super::*;
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn idea_input_wraps_without_changing_text_and_keeps_new_typing_visible() {
+        use ratatui::backend::TestBackend;
+
+        fn assert_visible(window: &TailoredWindow, width: u16, height: u16, tail: &str) -> usize {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| frame.render_widget(&window.idea, frame.area()))
+                .unwrap();
+            let cells = terminal.backend().buffer().content();
+            let visible: String = cells
+                .iter()
+                .flat_map(|cell| cell.symbol().chars())
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
+            assert!(
+                visible.ends_with(tail),
+                "latest input disappeared at {width}x{height}"
+            );
+            assert_eq!(
+                cells
+                    .iter()
+                    .filter(|cell| cell.modifier.contains(Modifier::REVERSED))
+                    .count(),
+                1,
+                "editing cursor disappeared at {width}x{height}"
+            );
+            cells
+                .chunks(width as usize)
+                .filter(|row| row.iter().any(|cell| !cell.symbol().trim().is_empty()))
+                .count()
+        }
+
+        // Cross the old horizontal viewport's u16 range without submitting.
+        for text in [
+            format!("https://example.org/{} TAIL", "x".repeat(70_000)),
+            format!("{} TAIL", "é界🌱e\u{301} words ".repeat(150)),
+            format!("{} TAIL", "A thought with words ".repeat(100)),
+        ] {
+            let mut window = TailoredWindow::new(CaptureAccount::Personal);
+            window.composing = true;
+            window.handle_paste(&text);
+            let mut expected = text;
+            for (index, (width, height)) in [(72, 8), (19, 6), (95, 10)].into_iter().enumerate() {
+                window.handle_key(key(KeyCode::Char('!')));
+                expected.push('!');
+                let displayed_rows = assert_visible(
+                    &window,
+                    width,
+                    height,
+                    &format!("TAIL{}", "!".repeat(index + 1)),
+                );
+                // Reflow may anchor the cursor row at the top after a wider resize.
+                if index == 0 {
+                    assert!(
+                        displayed_rows > 1,
+                        "long input still occupies one horizontal row"
+                    );
+                }
+                assert_eq!(window.idea.lines(), std::slice::from_ref(&expected));
+            }
+            window.handle_key(key(KeyCode::Backspace));
+            expected.pop();
+            assert_visible(&window, 33, 7, "TAIL!!");
+            assert_eq!(window.idea.lines(), std::slice::from_ref(&expected));
+            window.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+            window.handle_key(key(KeyCode::Char('n')));
+            assert_eq!(window.idea.lines(), &[expected, "n".into()]);
+            assert!(window.checking.is_none());
+
+            window.draft_committed = true;
+            window.picker_action(HistoryAction::New);
+            let fresh = format!("{} TAIL", "Fresh capture ".repeat(50));
+            window.handle_paste(&fresh);
+            assert!(assert_visible(&window, 33, 7, "TAIL") > 1);
+            assert_eq!(window.idea.lines(), &[fresh]);
+        }
     }
 
     #[test]
