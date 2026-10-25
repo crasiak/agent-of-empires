@@ -8,7 +8,8 @@ import {
   retryBody,
   type PendingCreate,
 } from "../lib/pendingCreates";
-import type { SessionResponse } from "../lib/types";
+import type { ResearchDraft, SessionResponse } from "../lib/types";
+import { ResearchForm } from "./ResearchForm";
 import { TerminalView } from "./TerminalView";
 import { TailoredHistoryPanel } from "./TailoredHistoryPanel";
 import { setPendingTerminalFocus } from "../lib/terminalFocus";
@@ -34,6 +35,7 @@ export function TailoredSessionsOverlay({
   onCreated,
   onClose,
 }: Props) {
+  const [research, setResearch] = useState<ResearchDraft | "new" | null>(null);
   const [composing, setComposing] = useState(false);
   const [idea, setIdea] = useState("");
   const [immediately, setImmediately] = useState(false);
@@ -52,6 +54,7 @@ export function TailoredSessionsOverlay({
   const showHistory = () => {
     flushSync(() => {
       setSession(null);
+      setResearch(null);
       setComposing(false);
     });
     search.current?.focus();
@@ -174,7 +177,7 @@ export function TailoredSessionsOverlay({
             {session ? session.title : `Tailored Sessions${composing ? " · Capture an idea" : ""}`}
           </h2>
           <div className="flex items-center gap-2">
-            {(session || composing) && (
+            {(session || composing || research) && (
               <button
                 type="button"
                 disabled={busy || uncertain}
@@ -203,11 +206,21 @@ export function TailoredSessionsOverlay({
               F2 returns to history. Closing leaves the Session running. Escape goes to the agent.
             </p>
           </>
+        ) : research ? (
+          <ResearchForm
+            key={research === "new" ? "new" : research.id}
+            account={account}
+            readOnly={readOnly}
+            initial={research === "new" ? undefined : research}
+          />
         ) : !composing ? (
           <TailoredHistoryPanel
             searchRef={search}
             readOnly={readOnly}
             onNew={startNew}
+            onResearch={(draft) => {
+              if (!readOnly || draft) setResearch(draft ?? "new");
+            }}
             onOpen={(existing) => {
               if (readOnly) return;
               setError(null);

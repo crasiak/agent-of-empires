@@ -134,3 +134,82 @@ can be retried under the same key. Closing during creation leaves reconciliation
 running; check the Session list before starting another capture. A changed or
 shelved TUI capture target returns to history rather than forwarding input to a
 stale tmux session.
+
+## Develop a research prompt
+
+Choose **Tailored research** for **quick prompt → developed prompt → recommended
+ORX/EVO → choose/override → review/edit → Run**. The original quick prompt is
+retained separately. Saving, editing, choosing a backend and developing do not
+start a research backend. Development makes a bounded model-only Pi request from
+an isolated directory, without tools, extensions, MCP, context files, skills,
+prompt templates or a saved Pi session. Errors remain visible in the draft.
+
+Supply context and explicit source scopes yourself. There are no connectors or
+integration crawls. Personal categories are Grafana, OpenTelemetry and Zulip;
+Work is Slack. These additions do not reclassify separately scoped Work observability
+instances such as Polaris. Use Supplied for explicitly provided account-appropriate
+context outside these category choices; it is not permission to crawl. Category membership is not evidence of connectivity, tenant access
+or permission to disclose private context to public search. Review disclosure
+limits separately. Changing account, sources or supplied context requires fresh
+development; any edit invalidates the UI's review acknowledgement.
+
+Development requires the dedicated model-only, direct Ledger Pi profiles
+`aoe-research-personal` and `aoe-research-work`. Neither can fall back to a daily
+or capture profile. AoE verifies the lock's profile, harness, `pi-home` account
+class, direct launcher and model-only resources. Ledger verifies the selected
+account and active generation at launch; the common `pi-home` class alone cannot
+prove which account is selected.
+
+Choose the backend explicitly, review the developed text, existing absolute
+workspace, permitted scope, consequential unknowns and execution effects, then
+acknowledge the review and select **Run reviewed revision**. In the TUI, Tab and
+Shift+Tab move between fields, F6 switches account, F7 chooses/overrides backend,
+F8 acknowledges review, Ctrl+S saves, Ctrl+D develops and **Ctrl+R runs**. Run freezes
+the saved revision; another client's stale revision cannot dispatch.
+
+Run may start a managed backend. Installed Ledger launchers must support the
+`aoe-orx-launcher-v1` / `aoe-evo-launcher-v1` capability contracts; legacy launchers
+are refused without invocation. Personal routes are `research` / `evo` with
+`claude-max` and the direct launcher. Work routes are `research-work` / `evo-work`
+with `claude-bedrock-aperture` and the isolated Headroom launcher. Missing profiles,
+mismatched locks or unavailable launchers are visible errors, never account
+fallbacks. AoE does not provision or apply those external profiles/helpers.
+
+- **ORX:** AoE starts its own loopback-only server in a new account/run-isolated
+  state directory, with no browser or eager agent startup. Run also authorizes
+  project registration and ORX's project-starter model warmup. It creates a chat
+  and submits the frozen prompt once using the `sonnet` model alias and
+  `bypassPermissions`. ORX research workers can execute commands. The receipt
+  retains the profile, server PID/address, project, chat and turn identity. Open
+  that dashboard on the AoE host and select the recorded project/chat. ORX is not
+  a Claude/Pi Session: do not use AoE's agent resume/fork controls for it.
+- **EVO:** Run invokes **discover and baseline only** in an owned tmux pane with
+  a fixed native session UUID. This explores the repository, initializes `.evo`,
+  constructs a baseline worktree and runs the first experiment. The reviewed
+  scope and evaluation criteria are required. No optimize, ship, merge or push is
+  authorized. These backend instructions are not an OS experiment sandbox.
+  Optimization requires subsequent explicit review and is not implemented in this
+  interface. Its budget means per-branch serial experiment depth, not dollars.
+  Reopen the research entry to read output and send literal discovery answers
+  explicitly. The TUI uses F11 for output and F9 to send the answer field. Known
+  optimize/shipping invocations are refused. A missing pane is never recreated.
+
+Research history includes saved drafts and launch/return identities, not fake
+running Pi Sessions. Hide/Restore changes only visibility. Migration v051 adds
+`research.json`; reviewed prompts and startup logs live under the private app
+state directory. Closing a form does not cancel a committed operation. Reopen
+from history or refresh that exact request (TUI F10) to inspect its state.
+
+**Submitted means handed off, not completed.** An interrupted Running or uncertain
+outcome may already have started work. AoE records intent before startup/POST,
+disables HTTP retries, and never automatically retries an ambiguous submission
+as a new run. Inspect retained identity/output/logs before considering a new,
+separately reviewed request. Capture's keyed-create reconciliation is unchanged
+and is not used as a substitute for this research dispatch boundary.
+
+If development was interrupted, **Abandon interrupted development** (TUI F12)
+retains the original and context and returns to an editable draft. This is an
+explicit abandonment, not automatic model retry. Late results from the abandoned
+revision are ignored. Run/uncertain requests cannot use this recovery action.
+The exact frozen prompt is limited to 65,536 UTF-8 bytes before Run commits;
+oversize reviews remain editable and are never silently truncated.

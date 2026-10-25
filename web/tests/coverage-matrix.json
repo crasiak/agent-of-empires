@@ -28,6 +28,29 @@
       "notes": "Capture request/policy, keyed retries, pending dismissal, history reopen without creation, persistent reversible view-only hide, failed-write preservation, read-only guards, and stale polling response suppression. Browser focus and route coverage is tracked separately."
     },
     {
+      "id": "sessions.tailored-research",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": [
+        "src/components/__tests__/ResearchForm.test.tsx",
+        "src/components/__tests__/TailoredSessionsOverlay.test.tsx"
+      ],
+      "components": [
+        "web/src/components/ResearchForm.tsx",
+        "web/src/components/TailoredSessionsOverlay.tsx",
+        "web/src/components/TailoredHistoryPanel.tsx"
+      ],
+      "notes": "Native research draft/develop/review/run, exact saved revision handoff, explicit backend override, scoped context preservation, uncertain-outcome no-resubmit, research history reopen/hide/restore, read-only and owned discovery replies. Rust tests cover frozen intent, concurrency, account qualification, bounded process fixtures and ORX HTTP schemas."
+    },
+    {
+      "id": "sessions.tailored-research.keyboard",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/tailored-sessions.spec.ts"],
+      "components": ["web/src/components/ResearchForm.tsx", "web/src/components/TailoredSessionsOverlay.tsx"],
+      "notes": "Keyboard-only research preset selection, native form focus, focus trap, F2 history and Escape return to underlying session without execution."
+    },
+    {
       "id": "settings.dialog-escape",
       "kind": "mocked-playwright",
       "risk": "high",

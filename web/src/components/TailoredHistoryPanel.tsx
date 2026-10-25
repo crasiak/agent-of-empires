@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { flushSync } from "react-dom";
-import { fetchTailoredHistory, setTailoredHistoryHidden } from "../lib/api";
-import type { SessionResponse, TailoredHistoryEntry } from "../lib/types";
+import { fetchTailoredHistory, setTailoredHistoryHidden, researchOperation } from "../lib/api";
+import type { ResearchDraft, SessionResponse, TailoredHistoryEntry } from "../lib/types";
 
 interface Props {
   searchRef: RefObject<HTMLInputElement | null>;
   readOnly: boolean;
   onNew: () => void;
+  onResearch: (draft?: ResearchDraft) => void;
   onOpen: (session: SessionResponse) => void;
 }
 
-export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen }: Props) {
+export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen, onResearch }: Props) {
   const [query, setQuery] = useState("");
   const [hidden, setHidden] = useState(false);
   const [entries, setEntries] = useState<TailoredHistoryEntry[]>([]);
@@ -50,7 +51,12 @@ export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen }: Pro
     setError(null);
     ++requestSeq.current;
     const previouslyFocused = document.activeElement;
-    const result = await setTailoredHistoryHidden(entry.id, !entry.hidden);
+    const researchResult = entry.research
+      ? await researchOperation({ operation: "visibility", id: entry.id, hidden: !entry.hidden })
+      : null;
+    const result = entry.research
+      ? { ok: !!researchResult?.draft, message: researchResult?.error }
+      : await setTailoredHistoryHidden(entry.id, !entry.hidden);
     if (!mounted.current) return;
     ++requestSeq.current;
     pending.current = false;
@@ -91,7 +97,9 @@ export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen }: Pro
           if (event.key === "Enter" && !readOnly) {
             event.preventDefault();
             if (matchesPreset) onNew();
-            else if (visible[0]) onOpen(visible[0].session);
+            else if (!hidden && "tailored research".includes(normalized)) onResearch();
+            else if (visible[0]?.research) onResearch(visible[0].research);
+            else if (visible[0]?.session) onOpen(visible[0].session);
           }
         }}
         placeholder="Find a preset or previous capture…"
@@ -107,6 +115,19 @@ export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen }: Pro
           <span className="font-medium">Capture an idea</span>
           <span className="mt-1 block text-xs text-text-secondary">
             Quick capture with inferred ticket, Atlas, and KB destinations.
+          </span>
+        </button>
+      )}
+      {!hidden && "tailored research".includes(normalized) && (
+        <button
+          type="button"
+          disabled={readOnly}
+          onClick={() => onResearch()}
+          className="w-full rounded-md border border-surface-700 px-3 py-2 text-left text-sm text-text-primary hover:bg-surface-800 disabled:opacity-50"
+        >
+          Tailored research
+          <span className="mt-1 block text-xs text-text-secondary">
+            Develop a prompt, choose ORX/EVO, review and explicitly Run.
           </span>
         </button>
       )}
@@ -156,7 +177,7 @@ export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen }: Pro
             <button
               type="button"
               disabled={readOnly}
-              onClick={() => onOpen(entry.session)}
+              onClick={() => (entry.research ? onResearch(entry.research) : entry.session && onOpen(entry.session))}
               aria-label={`Open ${entry.title}`}
               className="min-w-0 flex-1 rounded-md px-2 py-1 text-left hover:bg-surface-800 disabled:opacity-50"
             >

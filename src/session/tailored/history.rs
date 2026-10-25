@@ -20,6 +20,7 @@ pub struct HistoryEntry {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub hidden: bool,
+    pub research: bool,
 }
 
 pub fn capture_account(instance: &Instance) -> Option<CaptureAccount> {
@@ -70,6 +71,7 @@ pub fn entry(instance: &Instance, hidden: &HiddenSessions) -> Option<HistoryEntr
     let profile = instance.effective_profile();
     Some(HistoryEntry {
         id: instance.id.clone(),
+        research: false,
         hidden: hidden
             .get(&profile)
             .is_some_and(|ids| ids.contains(&instance.id)),

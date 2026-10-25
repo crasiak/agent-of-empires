@@ -60,6 +60,7 @@ mod v047_afk_batches;
 mod v048_afk_usage_guards;
 mod v049_afk_return_review;
 mod v050_tailored_history;
+mod v051_research_requests;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -106,7 +107,7 @@ use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 50;
+const CURRENT_VERSION: u32 = 51;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -279,6 +280,7 @@ const MIGRATIONS: &[Migration] = &[
         v049_afk_return_review::run,
     ),
     (50, "tailored_history", v050_tailored_history::run),
+    (51, "research_requests", v051_research_requests::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install

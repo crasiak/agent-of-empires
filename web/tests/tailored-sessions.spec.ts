@@ -144,3 +144,31 @@ test("read-only clients cannot open Tailored Sessions", async ({ page }) => {
   await pressShortcut(page, "Control+y");
   await expect(page.getByRole("dialog", { name: /Tailored Sessions/ })).toHaveCount(0);
 });
+
+test("research owns keyboard focus and returns to history without dispatch", async ({ page }) => {
+  await mockTerminalApis(page);
+  await page.route("**/api/tailored-sessions", (route) => route.fulfill({ json: { entries: [] } }));
+  await page.goto("/session/pinch-test");
+  const underlying = page.locator('[data-term="agent"] textarea').first();
+  await underlying.focus();
+  await pressShortcut(page, "Control+y");
+  const dialog = page.getByRole("dialog", { name: "Tailored Sessions", exact: true });
+  await dialog.getByLabel("Find a tailored preset").fill("research");
+  await page.keyboard.press("Enter");
+  await expect(dialog.getByLabel("Original quick prompt")).toBeFocused();
+  await dialog.getByLabel("Original quick prompt").fill("Compare supplied papers");
+  await expect(dialog.getByRole("button", { name: "Develop prompt" })).toBeInViewport();
+  const screenshot = test.info().outputPath("research-prompt-form.png");
+  await dialog.screenshot({ path: screenshot });
+  await test.info().attach("Research prompt form", { path: screenshot, contentType: "image/png" });
+  await expect(dialog.getByRole("button", { name: "Refresh existing request" })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Develop prompt" }).focus();
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("button", { name: "Back to history · F2" })).toBeFocused();
+  await page.keyboard.press("F2");
+  await expect(dialog.getByLabel("Find a tailored preset")).toBeFocused();
+  expect(await publishedRequests(page, "/api/research", "POST")).toEqual([]);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(underlying).toBeFocused();
+});

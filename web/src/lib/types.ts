@@ -388,7 +388,8 @@ export interface TailoredHistoryEntry {
   status: string;
   created_at: string;
   hidden: boolean;
-  session: SessionResponse;
+  session?: SessionResponse;
+  research?: ResearchDraft;
 }
 
 export interface CreateSessionRequest {
@@ -552,4 +553,49 @@ export interface SettingsFieldDescriptor {
   default?: unknown;
   /** Plugin field that can also be set per registered project. */
   per_project?: boolean;
+}
+
+export type ResearchBackend = "orx" | "evo";
+export interface ResearchInputs {
+  account: "personal" | "work";
+  context: string;
+  sources: { category: "grafana" | "otel" | "zulip" | "slack" | "supplied" | "public"; scope: string }[];
+  developed_prompt: string;
+  backend: ResearchBackend | null;
+  workspace: string;
+  permitted_scope: string;
+  evaluation: string;
+  unknowns_resolution: string;
+  public_disclosure: string;
+  consequences_reviewed: boolean;
+}
+export interface ResearchDraft {
+  id: string;
+  original_prompt: string;
+  inputs: ResearchInputs;
+  revision: number;
+  state: "draft" | "developing" | "review" | "running" | "submitted" | "uncertain" | "failed";
+  recommendation?: ResearchBackend | null;
+  reason: string;
+  unknowns: string[];
+  created_at: string;
+  hidden: boolean;
+  error?: string | null;
+  frozen_prompt?: string | null;
+  receipt?: {
+    profile: string;
+    process_id: number;
+    backend_id: string;
+    return_path: string;
+    project_id?: string | null;
+    turn_id?: string | null;
+  } | null;
+}
+export interface ResearchOperation {
+  operation: "create" | "edit" | "develop" | "run" | "visibility" | "recover-development";
+  id: string;
+  revision?: number;
+  original_prompt?: string;
+  inputs?: ResearchInputs;
+  hidden?: boolean;
 }

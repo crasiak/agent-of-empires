@@ -1,4 +1,5 @@
 mod history;
+mod research;
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -15,6 +16,7 @@ use crate::tui::styles::Theme;
 
 pub(in crate::tui) struct TailoredWindow {
     picker: HistoryPicker,
+    research: Option<research::ResearchWindow>,
     history_refreshed: Option<Instant>,
     draft_committed: bool,
     composing: bool,
@@ -52,6 +54,7 @@ impl TailoredWindow {
     fn new(account: CaptureAccount) -> Self {
         Self {
             picker: HistoryPicker::default(),
+            research: None,
             history_refreshed: None,
             draft_committed: false,
             composing: false,
@@ -80,10 +83,18 @@ impl TailoredWindow {
         }
         if key.code == KeyCode::F(2) && self.checking.is_none() {
             self.terminal = None;
+            self.research = None;
             self.composing = false;
             self.picker.recent();
             self.history_refreshed = None;
             self.error = None;
+            return WindowAction::Continue;
+        }
+        if let Some(research) = &mut self.research {
+            if key.code == KeyCode::Esc {
+                return WindowAction::Close;
+            }
+            research.key(key);
             return WindowAction::Continue;
         }
         if let Some(terminal) = &self.terminal {
@@ -136,6 +147,10 @@ impl TailoredWindow {
     fn picker_action(&mut self, action: HistoryAction) -> WindowAction {
         match action {
             HistoryAction::None => WindowAction::Continue,
+            HistoryAction::Research => {
+                self.research = Some(research::ResearchWindow::new(self.account, None));
+                WindowAction::Continue
+            }
             HistoryAction::New => {
                 if self.draft_committed {
                     self.idea = TextArea::default();
@@ -153,6 +168,10 @@ impl TailoredWindow {
     }
 
     pub(super) fn handle_paste(&mut self, text: &str) {
+        if let Some(research) = &mut self.research {
+            research.paste(text);
+            return;
+        }
         if let Some(terminal) = &self.terminal {
             if !terminal.send.lock_lost() {
                 terminal
@@ -169,7 +188,7 @@ impl TailoredWindow {
     }
 
     pub(super) fn handle_click(&mut self, col: u16, row: u16) -> WindowAction {
-        if self.checking.is_some() || self.terminal.is_some() {
+        if self.checking.is_some() || self.terminal.is_some() || self.research.is_some() {
             return WindowAction::Continue;
         }
         if !self.composing {
@@ -222,20 +241,22 @@ impl TailoredWindow {
     }
 
     pub(super) fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let width = area
-            .width
-            .saturating_sub(4)
-            .min(if self.terminal.is_some() { 140 } else { 84 });
-        let height = area
-            .height
-            .saturating_sub(4)
-            .min(if self.terminal.is_some() {
+        let width = area.width.saturating_sub(4).min(
+            if self.terminal.is_some() || self.research.is_some() {
+                140
+            } else {
+                84
+            },
+        );
+        let height = area.height.saturating_sub(4).min(
+            if self.terminal.is_some() || self.research.is_some() {
                 48
             } else if self.composing {
                 20
             } else {
                 28
-            });
+            },
+        );
         let rect = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
@@ -254,6 +275,10 @@ impl TailoredWindow {
         self.account_rect = Rect::default();
         self.immediately_rect = Rect::default();
         self.submit_rect = Rect::default();
+        if let Some(research) = &mut self.research {
+            research.render(frame, inner, theme);
+            return;
+        }
         if let Some(terminal) = &mut self.terminal {
             let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
             let output = rows[0];
@@ -416,6 +441,17 @@ impl HomeView {
             WindowAction::Continue => {}
             WindowAction::Close => self.tailored_window = None,
             WindowAction::Open(id) => {
+                if let Ok(draft) = crate::session::tailored::research::Store::open()
+                    .and_then(|store| store.get(&id))
+                {
+                    if let Some(window) = &mut self.tailored_window {
+                        window.research = Some(research::ResearchWindow::new(
+                            draft.inputs.account,
+                            Some(draft),
+                        ));
+                    }
+                    return;
+                }
                 let result = self.open_capture_terminal(&id);
                 if let Some(window) = &mut self.tailored_window {
                     match result {
@@ -429,6 +465,19 @@ impl HomeView {
                 }
             }
             WindowAction::Visibility { id, hidden } => {
+                if let Ok(store) = crate::session::tailored::research::Store::open() {
+                    if store.get(&id).is_ok() {
+                        let result = store.change(&id, |d| {
+                            d.hidden = hidden;
+                            Ok(())
+                        });
+                        if let Some(window) = &mut self.tailored_window {
+                            window.error = result.err().map(|e| e.to_string());
+                        }
+                        self.refresh_tailored_history();
+                        return;
+                    }
+                }
                 let result = self
                     .get_instance(&id)
                     .filter(|instance| {
@@ -451,8 +500,12 @@ impl HomeView {
     }
 
     fn refresh_tailored_history(&mut self) -> bool {
-        let result = crate::session::tailored::history::load_hidden()
-            .map(|hidden| crate::session::tailored::history::entries(self.instances(), &hidden));
+        let result = crate::session::tailored::history::load_hidden().and_then(|hidden| {
+            let mut rows = crate::session::tailored::history::entries(self.instances(), &hidden);
+            rows.extend(crate::session::tailored::research::Store::open()?.history()?);
+            rows.sort_by(crate::session::tailored::history::compare);
+            Ok(rows)
+        });
         let Some(window) = &mut self.tailored_window else {
             return false;
         };
@@ -475,6 +528,13 @@ impl HomeView {
                 .is_none_or(|last| last.elapsed() >= Duration::from_secs(2))
         });
         let refreshed = refresh && self.refresh_tailored_history();
+        if let Some(research) = self
+            .tailored_window
+            .as_mut()
+            .and_then(|w| w.research.as_mut())
+        {
+            return research.tick() || refreshed;
+        }
         let changed_target = self
             .tailored_window
             .as_ref()

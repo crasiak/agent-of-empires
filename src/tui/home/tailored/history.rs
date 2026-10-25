@@ -9,6 +9,7 @@ use crate::tui::styles::Theme;
 pub(super) enum HistoryAction {
     None,
     New,
+    Research,
     Open(String),
     Visibility { id: String, hidden: bool },
 }
@@ -16,6 +17,7 @@ pub(super) enum HistoryAction {
 #[derive(Clone)]
 enum Item {
     New,
+    Research,
     Session(HistoryEntry),
 }
 
@@ -35,6 +37,9 @@ impl HistoryPicker {
         let mut items = Vec::new();
         if !self.hidden && "capture an idea".contains(&query) {
             items.push(Item::New);
+        }
+        if !self.hidden && "tailored research".contains(&query) {
+            items.push(Item::Research);
         }
         items.extend(
             self.rows
@@ -95,6 +100,7 @@ impl HistoryPicker {
             KeyCode::Enter => {
                 return match items.get(self.selected) {
                     Some(Item::New) => HistoryAction::New,
+                    Some(Item::Research) => HistoryAction::Research,
                     Some(Item::Session(entry)) => HistoryAction::Open(entry.id.clone()),
                     None => HistoryAction::None,
                 }
@@ -180,6 +186,11 @@ impl HistoryPicker {
                 Style::default().fg(theme.text)
             };
             let (title, detail, action) = match item {
+                Item::Research => (
+                    "+ Tailored research".into(),
+                    "Develop prompt, choose ORX/EVO, review then explicit Run".into(),
+                    HistoryAction::Research,
+                ),
                 Item::New => (
                     "+ Capture an idea".into(),
                     "New Session with its own minimal Ledger profile".into(),
@@ -284,9 +295,11 @@ mod tests {
             status: "idle".into(),
             created_at: chrono::Utc::now(),
             hidden: false,
+            research: false,
         };
         let mut picker = HistoryPicker::default();
         picker.replace_rows(vec![entry.clone()]);
+        picker.handle_key(key(KeyCode::Down));
         picker.handle_key(key(KeyCode::Down));
         assert_eq!(
             picker.handle_key(key(KeyCode::Enter)),

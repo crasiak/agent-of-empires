@@ -3,13 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { TailoredSessionsOverlay, type CaptureAccount } from "../TailoredSessionsOverlay";
-import { createSession, fetchTailoredHistory, setTailoredHistoryHidden } from "../../lib/api";
+import { createSession, fetchTailoredHistory, setTailoredHistoryHidden, researchOperation } from "../../lib/api";
 import type { TailoredHistoryEntry } from "../../lib/types";
 import { registerPendingCreate, releasePendingCreate, resolvePendingCreate } from "../../lib/pendingCreates";
 import { makeSession } from "./fixtures";
 
 vi.mock("../../lib/api", () => ({
   createSession: vi.fn(),
+  researchOperation: vi.fn(),
+  getResearch: vi.fn(),
+  getResearchOutput: vi.fn(),
+  replyResearch: vi.fn(),
   fetchTailoredHistory: vi.fn(),
   setTailoredHistoryHidden: vi.fn(),
 }));
@@ -282,4 +286,55 @@ describe("Tailored Sessions", () => {
       vi.mocked(createSession).mock.calls[1]![0].idempotency_key,
     );
   });
+});
+
+it("research history reopens the native draft and hide never creates or stops a Session", async () => {
+  const research = {
+    id: "research-1",
+    original_prompt: "Supplied literature question",
+    revision: 0,
+    state: "draft" as const,
+    hidden: false,
+    created_at: "2026-10-25T12:00:00Z",
+    reason: "",
+    unknowns: [],
+    inputs: {
+      account: "personal" as const,
+      context: "",
+      sources: [],
+      developed_prompt: "",
+      backend: null,
+      workspace: "",
+      permitted_scope: "",
+      evaluation: "",
+      unknowns_resolution: "",
+      public_disclosure: "No private context",
+      consequences_reviewed: false,
+    },
+  };
+  vi.mocked(fetchTailoredHistory).mockResolvedValue({
+    entries: [
+      {
+        id: research.id,
+        title: "Research draft",
+        profile: "research",
+        account: "personal",
+        input_preview: research.original_prompt,
+        status: "draft",
+        created_at: research.created_at,
+        hidden: false,
+        research,
+      },
+    ],
+  });
+  vi.mocked(researchOperation).mockResolvedValue({ draft: { ...research, hidden: true } });
+  render(<Harness />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open Research draft" }));
+  expect((screen.getByLabelText("Original quick prompt") as HTMLTextAreaElement).value).toBe(research.original_prompt);
+  fireEvent.click(screen.getByRole("button", { name: "Back to history · F2" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Hide Research draft from history" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Open Research draft" })).toBeNull());
+  expect(researchOperation).toHaveBeenCalledWith({ operation: "visibility", id: research.id, hidden: true });
+  expect(setTailoredHistoryHidden).not.toHaveBeenCalled();
+  expect(createSession).not.toHaveBeenCalled();
 });

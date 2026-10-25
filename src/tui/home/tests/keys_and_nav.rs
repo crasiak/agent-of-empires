@@ -46,6 +46,8 @@ fn tailored_history_hide_is_persistent_without_touching_session_lifecycle() {
     env.view
         .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), None);
     env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), None);
+    env.view
         .handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE), None);
     assert!(
         crate::session::tailored::history::entry(

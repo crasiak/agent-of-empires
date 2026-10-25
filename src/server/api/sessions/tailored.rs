@@ -7,7 +7,10 @@ use crate::session::tailored::history;
 struct HistorySession {
     #[serde(flatten)]
     entry: history::HistoryEntry,
-    session: SessionResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<SessionResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    research: Option<crate::session::tailored::research::Draft>,
 }
 
 pub async fn list_tailored_sessions(
@@ -33,10 +36,36 @@ pub async fn list_tailored_sessions(
         .filter_map(|instance| {
             history::entry(instance, &hidden).map(|entry| HistorySession {
                 entry,
-                session: SessionResponse::from_instance(instance, fullscreen),
+                session: Some(SessionResponse::from_instance(instance, fullscreen)),
+                research: None,
             })
         })
         .collect();
+    drop(instances);
+    match tokio::task::spawn_blocking(|| -> anyhow::Result<_> {
+        let store = crate::session::tailored::research::Store::open()?;
+        store.list()
+    })
+    .await
+    {
+        Ok(Ok(drafts)) => {
+            for draft in drafts {
+                let entry = draft.history();
+                entries.push(HistorySession {
+                    entry,
+                    session: None,
+                    research: Some(draft),
+                });
+            }
+        }
+        _ => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "research_history_unavailable",
+                "Cannot read research history",
+            )
+        }
+    }
     entries.sort_by(|a, b| history::compare(&a.entry, &b.entry));
     Json(serde_json::json!({"entries": entries})).into_response()
 }

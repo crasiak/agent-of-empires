@@ -559,3 +559,5 @@ mod tests {
         }
     }
 }
+
+pub use sessions::{research_get, research_operation, research_output, research_reply};

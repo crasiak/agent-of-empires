@@ -1342,3 +1342,25 @@ describe("profile settings write guard", () => {
     expect(lastCall().url).toBe("/api/profiles/work/settings");
   });
 });
+
+it("research operations preserve revision and never retry ambiguous submissions", async () => {
+  offline();
+  const body = { operation: "run" as const, id: "research-id", revision: 7 };
+  expect(await api.researchOperation(body)).toMatchObject({ uncertain: true });
+  expect(fetchSpy).toHaveBeenCalledTimes(1);
+  expect(bodyOf(lastCall().init)).toEqual(body);
+  fetchSpy.mockResolvedValueOnce(json({ message: "Revision changed" }, 409));
+  expect(await api.researchOperation(body)).toMatchObject({ error: "Revision changed", uncertain: false });
+  fetchSpy.mockResolvedValueOnce(json({ draft: { id: "research-id" } }));
+  expect(await api.researchOperation({ operation: "recover-development", id: "research-id", revision: 3 })).toEqual({
+    draft: { id: "research-id" },
+  });
+  fetchSpy.mockResolvedValueOnce(json({ draft: { id: "a/b" } }));
+  await api.getResearch("a/b");
+  expect(lastCall().url).toBe("/api/research/a%2Fb");
+  fetchSpy.mockResolvedValueOnce(json({ output: "Literal output" }));
+  expect(await api.getResearchOutput("a/b")).toEqual({ output: "Literal output" });
+  fetchSpy.mockResolvedValueOnce(json({ ok: true }));
+  expect(await api.replyResearch("a/b", "target; $(literal)")).toEqual({ ok: true });
+  expect(bodyOf(lastCall().init)).toEqual({ answer: "target; $(literal)" });
+});
