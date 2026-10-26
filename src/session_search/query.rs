@@ -9,6 +9,7 @@ use serde::Deserialize;
 const CONTRACT: &str = "session-search-query-v1";
 const LIMIT: &str = "50";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     All,
     /// Sessions in this repo.
