@@ -15,7 +15,7 @@ function aoe(env: NodeJS.ProcessEnv, args: string[]) {
   }
 }
 
-test("press-and-hold drag reorders and round-trips PUT /api/workspace-ordering", async ({ page, spawnServe }) => {
+test("mouse drag reorders and round-trips PUT /api/workspace-ordering", async ({ page, spawnServe }) => {
   // #1220. Sessions without a branch have workspace id `<project_path>::__session__::<id>`.
   const serve = await spawnServe({ seedFn: seedSessionsInRepo({ titles: ["alpha", "beta", "gamma"] }) });
   const seeded = await listSessions(serve.baseUrl);
@@ -40,16 +40,24 @@ test("press-and-hold drag reorders and round-trips PUT /api/workspace-ordering",
 
   const wrappers = page.locator("[aria-roledescription='Press and hold to reorder']");
   await expect(wrappers).toHaveCount(3);
-  const sourceBox = await wrappers.nth(2).boundingBox();
+  const source = wrappers.filter({ hasText: initial[2]! });
+  await expect(source).toHaveCount(1);
+  const sourceBox = await source.boundingBox();
   const targetBox = await wrappers.nth(0).boundingBox();
   if (!sourceBox || !targetBox) throw new Error("row boxes missing");
-  // Hold past dnd-kit's 150ms activation delay without moving more than 8px.
-  await page.mouse.move(sourceBox.x + sourceBox.width - 4, sourceBox.y + sourceBox.height / 2);
+  const startX = sourceBox.x + sourceBox.width / 2;
+  const startY = sourceBox.y + sourceBox.height / 2;
+  await page.mouse.move(startX, startY);
   await page.mouse.down();
-  await page.waitForTimeout(250);
-  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 12 });
-  expect((await wrappers.nth(2).getAttribute("class")) ?? "").toContain("ring-2");
-  await page.mouse.up();
+  try {
+    // Mouse activation requires movement past 8px; the hold delay is touch-only.
+    await page.mouse.move(startX - 12, startY, { steps: 2 });
+    await expect(source).toHaveClass(/\bring-2\b/);
+    await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 12 });
+    await expect(source).toHaveClass(/\bring-2\b/);
+  } finally {
+    await page.mouse.up();
+  }
 
   await expect
     .poll(() => readVisibleSessionTitles(page), { timeout: 4_000 })

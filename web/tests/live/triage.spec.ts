@@ -32,6 +32,8 @@ test("pin → unpin survives reload; snooze presets, a 1h pick, and unsnooze rou
   page,
   spawnServe,
 }) => {
+  // Keep the open menu overlapping the row, as in the CI failure.
+  await page.setViewportSize({ width: 1280, height: 480 });
   const title = "pin-target";
   const { serve, sessionId, row } = await openWithSession(
     page,
@@ -42,8 +44,8 @@ test("pin → unpin survives reload; snooze presets, a 1h pick, and unsnooze rou
   expect(await patchVia(page, sessionId, "pin", () => menuItem(page, "pin").click())).toEqual({ pinned: true });
   await expect(row.locator("[aria-label='Pinned']")).toBeVisible({ timeout: 5_000 });
 
-  // Archiving or snoozing a pinned session clears the pin server-side, so the menu offers both.
-  await row.click({ button: "right" });
+  // Pin toggles in place, so inspect the menu that remains open.
+  await expect(page.getByTestId("sidebar-context-menu")).toBeVisible();
   await expect(menuItem(page, "pin")).toHaveAttribute("aria-pressed", "true");
   await expect(menuItem(page, "archive")).toHaveCount(1);
   await expect(menuItem(page, "snooze")).toHaveCount(1);
@@ -55,8 +57,9 @@ test("pin → unpin survives reload; snooze presets, a 1h pick, and unsnooze rou
   expect(await patchVia(page, sessionId, "pin", () => menuItem(page, "pin").click())).toEqual({ pinned: false });
   await expect.poll(field(serve, "pinned_at"), { timeout: 5_000 }).toBeNull();
 
-  // Snooze: the TUI preset list, a 1h pick, and an unsnooze round trip.
-  await row.click({ button: "right" });
+  // Unpin also keeps the menu open; snooze closes it to open its modal.
+  await expect(page.getByTestId("sidebar-context-menu")).toBeVisible();
+  await expect(menuItem(page, "pin")).toHaveAttribute("aria-pressed", "false");
   await menuItem(page, "snooze").click();
   const modal = page.locator("[data-testid='snooze-modal']");
   await expect(modal).toBeVisible();
