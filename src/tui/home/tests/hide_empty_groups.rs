@@ -55,7 +55,11 @@ fn empty_groups_follow_settings_without_removing_stored_groups() {
             assert_eq!(groups.contains(&("trash-only", 0)), !hide);
             assert!(groups.contains(&("parent", 1)));
             assert!(groups.contains(&("parent/child", 1)));
-            assert_eq!(groups.contains(&("parent", 0)), active.is_none() && !hide);
+            assert_eq!(
+                groups.iter().filter(|(path, _)| *path == "parent").count(),
+                1
+            );
+            assert!(!groups.contains(&("parent", 0)));
             assert!(view
                 .flat_items
                 .iter()

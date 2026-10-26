@@ -425,6 +425,7 @@ fn a_parent_header_counts_its_subgroups() {
 #[serial]
 fn unified_group_counts_hidden_sessions_across_profiles() {
     let (_temp, _guard) = test_home();
+    crate::session::update_config(|config| config.session.hide_empty_groups = false).unwrap();
     seed_profile(
         "alpha",
         &[
@@ -450,7 +451,6 @@ fn unified_group_counts_hidden_sessions_across_profiles() {
         ],
     );
     let mut view = test_view(None);
-    view.hide_empty_groups = false;
     view.group_by = GroupByMode::Manual;
     view.rebuild_flat_items();
     view.update_selected();

@@ -637,6 +637,7 @@ fn test_save_preserves_per_profile_collapsed_state() {
 #[serial]
 fn test_group_delete_scoped_to_owning_profile() {
     let (_temp, _guard) = test_home();
+    crate::session::update_config(|config| config.session.hide_empty_groups = false).unwrap();
     seed_profile("alpha", &[instance_in("A1", "/tmp/a", "work")]);
     seed_profile("beta", &[instance_in("B1", "/tmp/b", "work")]);
     Storage::new_unwatched("gamma")
@@ -651,8 +652,6 @@ fn test_group_delete_scoped_to_owning_profile() {
     view.flat_items = view.build_flat_items();
     view.update_selected();
 
-    view.hide_empty_groups = false;
-    view.flat_items = view.build_flat_items();
     let select_work = |view: &mut HomeView, profile: &str| {
         view.switch_profile(Some(profile.to_string())).unwrap();
         let work_indices: Vec<usize> = view
