@@ -123,6 +123,7 @@ pub struct Supervisor {
     socket: PathBuf,
     log_dir: PathBuf,
     backoff_base: Duration,
+    reprobe: Duration,
     failures: VecDeque<Instant>,
     #[cfg(test)]
     idle_hook: Option<tokio::sync::mpsc::UnboundedSender<()>>,
@@ -135,6 +136,7 @@ impl Supervisor {
             socket,
             log_dir,
             backoff_base: Duration::from_secs(1),
+            reprobe: IDLE_REPROBE,
             failures: VecDeque::new(),
             #[cfg(test)]
             idle_hook: None,
@@ -148,28 +150,18 @@ impl Supervisor {
     }
 
     #[cfg(test)]
+    fn with_reprobe(mut self, reprobe: Duration) -> Self {
+        self.reprobe = reprobe;
+        self
+    }
+
+    #[cfg(test)]
     fn with_idle_hook(mut self, hook: tokio::sync::mpsc::UnboundedSender<()>) -> Self {
         self.idle_hook = Some(hook);
         self
     }
 
     pub async fn run(mut self, shutdown: CancellationToken) {
-        // A service that already answers belongs to someone else: manage neither process.
-        if probe_async(&self.socket).await {
-            #[cfg(test)]
-            if let Some(hook) = &self.idle_hook {
-                let _ = hook.send(());
-            }
-            loop {
-                tokio::select! {
-                    _ = shutdown.cancelled() => return,
-                    _ = tokio::time::sleep(IDLE_REPROBE) => {}
-                }
-                if !probe_async(&self.socket).await {
-                    break;
-                }
-            }
-        }
         if let Err(err) = std::fs::create_dir_all(&self.log_dir) {
             set_last_error(format!(
                 "session-search logs at {}: {err}",
@@ -177,33 +169,79 @@ impl Supervisor {
             ));
             return;
         }
+        while self.idle_while_foreign(&shutdown).await {
+            if !self.manage(&shutdown).await {
+                return;
+            }
+        }
+    }
 
+    /// A service that already answers belongs to someone else: manage neither
+    /// process. Leaves after two consecutive misses so one slow probe cannot
+    /// trigger a takeover. False on shutdown.
+    async fn idle_while_foreign(&self, shutdown: &CancellationToken) -> bool {
+        let mut answered = false;
+        let mut misses = 0;
+        loop {
+            if probe_async(&self.socket).await {
+                misses = 0;
+                if !answered {
+                    answered = true;
+                    #[cfg(test)]
+                    if let Some(hook) = &self.idle_hook {
+                        let _ = hook.send(());
+                    }
+                }
+            } else {
+                misses += 1;
+                if !answered || misses >= 2 {
+                    return true;
+                }
+            }
+            tokio::select! {
+                _ = shutdown.cancelled() => return false,
+                _ = tokio::time::sleep(self.reprobe) => {}
+            }
+        }
+    }
+
+    /// Runs our own `serve` and `sync`. True when a foreign service answered
+    /// before a (re)start, so the caller goes back to idling.
+    async fn manage(&mut self, shutdown: &CancellationToken) -> bool {
+        enum End {
+            Shutdown,
+            GaveUp,
+            Foreign,
+        }
         let mut serve: Option<Child> = None;
         let mut sync: Option<Child> = None;
-        let gave_up = loop {
+        let end = loop {
             if serve.is_none() {
-                match self.start_serve(&shutdown).await {
+                if probe_async(&self.socket).await {
+                    break End::Foreign;
+                }
+                match self.start_serve(shutdown).await {
                     Ok(Some(child)) => serve = Some(child),
-                    Ok(None) => break false,
-                    Err(failure) => match self.backoff(failure, &shutdown).await {
+                    Ok(None) => break End::Shutdown,
+                    Err(failure) => match self.backoff(failure, shutdown).await {
                         Some(true) => continue,
-                        Some(false) => break true,
-                        None => break false,
+                        Some(false) => break End::GaveUp,
+                        None => break End::Shutdown,
                     },
                 }
             }
             if sync.is_none() {
                 match self.start(Role::Sync) {
                     Ok(child) => sync = Some(child),
-                    Err(failure) => match self.backoff(failure, &shutdown).await {
+                    Err(failure) => match self.backoff(failure, shutdown).await {
                         Some(true) => continue,
-                        Some(false) => break true,
-                        None => break false,
+                        Some(false) => break End::GaveUp,
+                        None => break End::Shutdown,
                     },
                 }
             }
             let failure = tokio::select! {
-                _ = shutdown.cancelled() => break false,
+                _ = shutdown.cancelled() => break End::Shutdown,
                 status = wait(&mut serve) => {
                     serve = None;
                     self.exit_failure(Role::Serve, status)
@@ -213,18 +251,19 @@ impl Supervisor {
                     self.exit_failure(Role::Sync, status)
                 }
             };
-            match self.backoff(failure, &shutdown).await {
+            match self.backoff(failure, shutdown).await {
                 Some(true) => {}
-                Some(false) => break true,
-                None => break false,
+                Some(false) => break End::GaveUp,
+                None => break End::Shutdown,
             }
         };
-        if gave_up {
+        if matches!(end, End::GaveUp) {
             shutdown.cancelled().await;
         }
         for child in [serve, sync].into_iter().flatten() {
             stop(child).await;
         }
+        matches!(end, End::Foreign)
     }
 
     /// `Ok(None)` means shutdown arrived first.
@@ -361,6 +400,8 @@ async fn stop(mut child: Child) {
 mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -446,6 +487,57 @@ mod tests {
         shutdown.cancel();
         task.await.unwrap();
         server.abort();
+    }
+
+    /// Answers connection `n` with `statuses[n]`, repeating the last one.
+    fn serve_statuses(
+        socket: &Path,
+        statuses: &'static [&'static str],
+    ) -> (tokio::task::JoinHandle<()>, Arc<AtomicUsize>) {
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                let status = statuses[n.min(statuses.len() - 1)];
+                let mut buf = [0u8; 256];
+                let _ = stream.read(&mut buf).await;
+                let reply = format!("HTTP/1.0 {status}\r\n\r\n{{}}");
+                let _ = stream.write_all(reply.as_bytes()).await;
+            }
+        });
+        (server, seen)
+    }
+
+    #[tokio::test]
+    async fn a_foreign_service_that_blips_is_never_taken_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("sock");
+        // One slow probe, then a gap of two whose next probe answers again.
+        let (server, seen) = serve_statuses(
+            &socket,
+            &[
+                "200 OK", "503 Busy", "200 OK", "503 Busy", "503 Busy", "200 OK",
+            ],
+        );
+        let bin = fake_bin(dir.path(), "exit 0");
+        let supervisor = Supervisor::new(bin, socket, dir.path().join("logs"))
+            .with_backoff_base(Duration::from_millis(1))
+            .with_reprobe(Duration::from_millis(1));
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let task = tokio::spawn(supervisor.run(shutdown.clone()));
+
+        let runs_file = dir.path().join("runs");
+        wait_until("probes past the gap or a takeover", || {
+            seen.load(Ordering::SeqCst) >= 10 || runs_file.exists()
+        })
+        .await;
+        shutdown.cancel();
+        task.await.unwrap();
+        server.abort();
+        assert_eq!(runs(dir.path(), "serve"), 0, "started a second serve");
+        assert_eq!(runs(dir.path(), "sync"), 0, "started a second sync");
     }
 
     #[tokio::test]
