@@ -19,7 +19,8 @@ impl HomeView {
     pub fn tick_dialog(&mut self) -> bool {
         use crate::session::config::repo_config::HookProgress;
 
-        let mut changed = self.afk_dialog.as_mut().is_some_and(|dialog| dialog.tick());
+        let mut changed = self.tick_tailored();
+        changed |= self.afk_dialog.as_mut().is_some_and(|dialog| dialog.tick());
         changed |= self
             .afk_overview_dialog
             .as_mut()
@@ -92,7 +93,8 @@ impl HomeView {
     /// mode (to switch the live target), and the preview-only fast path is
     /// exactly what live-send wants, so both gate on this instead.
     pub(in crate::tui) fn has_non_live_send_overlay(&self) -> bool {
-        self.show_help
+        self.tailored_window.is_some()
+            || self.show_help
             || self.search_active
             || self.new_dialog.is_some()
             || self.confirm_dialog.is_some()
@@ -137,7 +139,8 @@ impl HomeView {
     /// True when live-send owns the keyboard, so app-level bindings like
     /// Ctrl+C defer to it instead of quitting.
     pub(in crate::tui) fn is_live_send_capturing(&self) -> bool {
-        self.live_send.is_some() && !self.has_non_live_send_overlay()
+        self.tailored_window.is_some()
+            || (self.live_send.is_some() && !self.has_non_live_send_overlay())
     }
 
     pub(in crate::tui) fn flash_ctrl_c_hint(&mut self) {
@@ -240,6 +243,7 @@ impl HomeView {
     /// bursts are limited to no dialog or the paste-routed surfaces.
     pub fn wants_paste_burst(&self) -> bool {
         !self.has_dialog()
+            || self.tailored_window.is_some()
             || self.live_send.is_some()
             || self.rename_dialog.is_some()
             || self.send_message_dialog.is_some()

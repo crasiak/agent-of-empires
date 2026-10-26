@@ -1318,9 +1318,7 @@ fn project_attention_archive_selected_group_removes_empty_main_header() {
     );
 }
 
-/// A registered (pinned) project with no sessions surfaces as an empty header in project
-/// view, mirroring the WebUI where an empty project is a registry entry decoupled from
-/// sessions (#2047).
+/// Empty pinned projects follow the visibility setting without losing their registration.
 #[test]
 #[serial]
 fn pinned_project_without_sessions_shows_empty_header() {
@@ -1340,6 +1338,14 @@ fn pinned_project_without_sessions_shows_empty_header() {
 
     env.view.group_by = GroupByMode::Project;
     env.view.refresh_registered_projects();
+    assert!(env.view.hide_empty_groups);
+    env.view.flat_items = env.view.build_flat_items();
+    assert!(!env
+        .view
+        .flat_items
+        .iter()
+        .any(|item| matches!(item, Item::Group { name, .. } if name == "gamma")));
+    env.view.hide_empty_groups = false;
     env.view.flat_items = env.view.build_flat_items();
 
     let group_names: Vec<String> = env
@@ -1536,6 +1542,7 @@ fn scratch_label_pin_gate_keys_on_backing_repo_not_label() {
             crate::file_watch::FileWatchService::noop(),
         )
         .unwrap();
+        view.hide_empty_groups = false;
         view.group_by = GroupByMode::Project;
         view.flat_items = view.build_flat_items();
 
@@ -1813,6 +1820,7 @@ fn stale_registry_entry_with_mismatched_archived_path_stays_pinned_and_unpinnabl
     )
     .unwrap();
 
+    view.hide_empty_groups = false;
     view.group_by = GroupByMode::Project;
     view.refresh_registered_projects();
     view.flat_items = view.build_flat_items();
@@ -1864,8 +1872,7 @@ fn stale_registry_entry_with_mismatched_archived_path_stays_pinned_and_unpinnabl
     );
 }
 
-/// The pin persists a project across its last session leaving the view, which is the
-/// user-visible promise of #2047.
+/// With empty groups shown, a pinned project survives losing its last session.
 #[test]
 #[serial]
 fn pinned_project_survives_losing_last_session() {
@@ -1886,8 +1893,7 @@ fn pinned_project_survives_losing_last_session() {
     env.view.toggle_project_pin_at_cursor();
     assert!(env.view.is_project_label_pinned("alpha"));
 
-    // Drop every alpha session, then rebuild as a reload would. The registry
-    // entry keeps the header alive even with zero members.
+    env.view.hide_empty_groups = false;
     env.view
         .instances
         .retain(|_, i| crate::tui::home::project_group_key(i) != "alpha");
@@ -2029,6 +2035,7 @@ fn all_profiles_view_includes_profile_scoped_pins() {
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view =
         HomeView::new_for_test(None, tools, crate::file_watch::FileWatchService::noop()).unwrap();
+    view.hide_empty_groups = false;
     view.group_by = GroupByMode::Project;
     view.flat_items = view.build_flat_items();
 
@@ -2087,6 +2094,7 @@ fn unpin_profile_scoped_pin_from_all_profiles_clears_header() {
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view =
         HomeView::new_for_test(None, tools, crate::file_watch::FileWatchService::noop()).unwrap();
+    view.hide_empty_groups = false;
     view.group_by = GroupByMode::Project;
     view.flat_items = view.build_flat_items();
 
@@ -2137,7 +2145,8 @@ fn unpin_clears_both_global_and_profile_entries_for_a_path() {
     use crate::session::projects::{self, Project, ProjectScope};
 
     let mut env = create_test_env_empty();
-    // Same path pinned globally and profile-scoped (override allows the shadow).
+    env.view.hide_empty_groups = false;
+    // The profile pin shadows the global one.
     projects::add(
         "test",
         ProjectScope::Global,

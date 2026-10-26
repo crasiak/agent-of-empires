@@ -28,6 +28,7 @@ mod selection;
 mod send;
 mod status;
 mod store_move;
+mod tailored;
 #[cfg(test)]
 mod tests;
 mod user_action;
@@ -183,6 +184,8 @@ pub struct HomeView {
     pub(super) show_help: bool,
     pub(super) help_scroll: u16,
     pub(super) new_dialog: Option<NewSessionDialog>,
+    pub(super) tailored_window: Option<tailored::TailoredWindow>,
+    pub(super) tailored_account: crate::session::tailored::CaptureAccount,
     pub(super) confirm_dialog: Option<ConfirmDialog>,
     pub(super) unified_delete_dialog: Option<UnifiedDeleteDialog>,
     pub(super) group_delete_options_dialog: Option<GroupDeleteOptionsDialog>,
@@ -443,6 +446,7 @@ pub struct HomeView {
 
     /// Stopped sessions inside groups are left out of the sidebar, for this run only.
     pub(super) hide_stopped_in_groups: bool,
+    pub(super) hide_empty_groups: bool,
     /// While stopped sessions are hidden, each group header's full count, keyed by path and
     /// profile, so the header can show `visible/total`.
     pub(super) group_totals: HashMap<(String, Option<String>), usize>,

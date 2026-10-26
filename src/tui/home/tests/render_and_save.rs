@@ -654,6 +654,8 @@ fn test_group_delete_scoped_to_owning_profile() {
     view.flat_items = view.build_flat_items();
     view.update_selected();
 
+    view.hide_empty_groups = false;
+    view.flat_items = view.build_flat_items();
     let select_work = |view: &mut HomeView, profile: &str| {
         let work_indices: Vec<usize> = view
             .flat_items

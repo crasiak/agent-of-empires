@@ -1194,6 +1194,10 @@ impl HomeView {
     }
 
     pub fn handle_dialog_click(&mut self, col: u16, row: u16) -> bool {
+        if self.tailored_window.is_some() {
+            self.handle_tailored_click(col, row);
+            return true;
+        }
         if self.afk_dialog.is_some()
             || self.afk_overview_dialog.is_some()
             || self.afk_batch_dialog.is_some()
@@ -1758,6 +1762,14 @@ impl HomeView {
         // coords, so once the user does anything else the cells underneath can change and
         // it would point at unrelated content. Covers the live-send branch below too.
         self.clear_preview_selection();
+        if self.tailored_window.is_some() {
+            self.handle_tailored_key(key);
+            return None;
+        }
+        if super::bindings::is_tailored_shortcut(&key) && !self.has_non_live_send_overlay() {
+            self.open_tailored();
+            return None;
+        }
 
         // Live-send capture normally wins over every other key handler: the home view is
         // a thin relay to the target pane, so dialog hotkeys, search and navigation
@@ -2833,6 +2845,7 @@ impl HomeView {
                 self.update_selected();
             }
             ActionId::NewSession => self.open_new_session_dialog(),
+            ActionId::TailoredSessions => self.open_tailored(),
             ActionId::NewFromSelection => self.open_new_from_selection(),
             ActionId::NewFromProject => self.open_project_session_picker(),
             ActionId::AttachTerminal => return self.attach_terminal_for_selected(),
@@ -4616,6 +4629,9 @@ impl HomeView {
     }
 
     pub fn handle_scroll_up(&mut self, col: u16, row: u16) -> bool {
+        if self.tailored_window.is_some() {
+            return true;
+        }
         const STEP: u16 = 3;
         // Settings is a full-screen takeover with its own scrollable fields panel, so the
         // wheel drives it wherever the now-hidden list/preview rects were. Checked before
@@ -5969,6 +5985,9 @@ impl HomeView {
 
     /// Route a mouse-wheel-down at (col, row); see handle_scroll_up.
     pub fn handle_scroll_down(&mut self, col: u16, row: u16) -> bool {
+        if self.tailored_window.is_some() {
+            return true;
+        }
         const STEP: u16 = 3;
         // Settings takeover owns the wheel; see handle_scroll_up.
         if let Some(view) = &mut self.settings_view {
@@ -6038,6 +6057,10 @@ impl HomeView {
     /// dialogs come next so multi-line dictation lands where the user is typing. The
     /// settings view is last: its paste handler strips newlines.
     pub fn handle_paste(&mut self, text: &str) {
+        if let Some(window) = &mut self.tailored_window {
+            window.handle_paste(text);
+            return;
+        }
         // Right-click pastes also invalidate preview selection coordinates.
         self.clear_preview_selection();
         if self.afk_batch_dialog.is_some() {

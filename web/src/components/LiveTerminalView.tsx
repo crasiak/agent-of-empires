@@ -159,18 +159,18 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
 
   const focusSelf = useCallback(() => {
     const ta = inputRef.current;
-    if (ta) {
+    if (active && ta) {
       ta.focus();
       return true;
     }
     return false;
-  }, []);
+  }, [active]);
 
   // A refused ensure re-runs once the session is unarchived or restored.
   const shelved = !!session.archived_at || !!session.trashed_at;
   useEffect(() => {
     if (lastEnsuredSessionIdRef.current === session.id) {
-      if (consumePendingTerminalFocus(focusTarget)) focusSelf();
+      if (active && consumePendingTerminalFocus(focusTarget)) focusSelf();
       return;
     }
     const controller = new AbortController();
@@ -191,25 +191,25 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
       }
     });
     return () => controller.abort();
-  }, [session.id, shelved, focusSelf, surface, focusTarget, terminalIndex]);
+  }, [session.id, shelved, focusSelf, surface, focusTarget, terminalIndex, active]);
 
   // Drain a pending focus latch once the pane is mounted.
   useEffect(() => {
     // eslint-disable-next-line react-you-might-not-need-an-effect/no-event-handler
-    if (ensureState !== "ready") return;
+    if (!active || ensureState !== "ready") return;
     if (consumePendingTerminalFocus(focusTarget)) focusSelf();
-  }, [ensureState, focusSelf, focusTarget]);
+  }, [ensureState, focusSelf, focusTarget, active]);
 
   // Cmd+` shortcut focuses this terminal when it is the dispatched target.
   useEffect(() => {
     const onFocusEvent = (e: Event) => {
       const detail = (e as CustomEvent<FocusTerminalDetail>).detail;
-      if (detail?.target !== focusTarget) return;
+      if (!active || detail?.target !== focusTarget) return;
       if (!focusSelf()) setPendingTerminalFocus(focusTarget);
     };
     window.addEventListener(FOCUS_TERMINAL_EVENT, onFocusEvent);
     return () => window.removeEventListener(FOCUS_TERMINAL_EVENT, onFocusEvent);
-  }, [focusSelf, focusTarget]);
+  }, [focusSelf, focusTarget, active]);
 
   const retryEnsure = useCallback(() => {
     setEnsureState((prev) => {

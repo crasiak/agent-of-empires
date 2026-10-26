@@ -20,6 +20,7 @@ pub mod logging;
 pub mod migrations;
 pub mod plugin;
 pub mod process;
+mod public_network;
 pub mod server;
 pub mod session;
 pub mod sound;

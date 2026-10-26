@@ -10,6 +10,9 @@ use serde::Serialize;
 
 use super::push::StatusChange;
 use super::AppState;
+use crate::public_network::{
+    build_pinned_client, is_forbidden_target, resolve_vetted_addrs, strip_ipv6_brackets,
+};
 use crate::session::Status;
 
 /// Debounce window before firing.
@@ -19,12 +22,6 @@ const DEBOUNCE_MS: u64 = 500;
 /// `SEND_CONCURRENCY` so a session with a slow/dead callback endpoint can't
 /// let outstanding requests grow unbounded.
 const DISPATCH_CONCURRENCY: usize = 8;
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Bounds hostname resolution.
-const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 static NEXT_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -72,75 +69,6 @@ fn claim_debounce(session_id: &str, generation: u64) -> bool {
     }
 }
 
-/// `Url::host_str()` returns an IPv6 literal bracketed (`"[::1]"`, matching the URL's own
-/// syntax); `IpAddr::from_str` rejects the brackets, so strip them before parsing.
-fn strip_ipv6_brackets(host: &str) -> &str {
-    host.strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(host)
-}
-
-/// Carrier-grade NAT (RFC 6598).
-fn is_cgnat_v4(v4: std::net::Ipv4Addr) -> bool {
-    let o = v4.octets();
-    o[0] == 100 && (64..128).contains(&o[1])
-}
-
-/// Pull an embedded IPv4 address out of the v6 forms that carry one, so it can be judged by
-/// the IPv4 rules instead of sliding past them.
-fn embedded_v4(ip: IpAddr) -> Option<std::net::Ipv4Addr> {
-    if let IpAddr::V4(v4) = ip.to_canonical() {
-        return Some(v4);
-    }
-    let IpAddr::V6(v6) = ip else { return None };
-    let seg = v6.segments();
-    let last_two_as_v4 = || {
-        let [a, b] = [seg[6], seg[7]];
-        std::net::Ipv4Addr::new(
-            (a >> 8) as u8,
-            (a & 0xff) as u8,
-            (b >> 8) as u8,
-            (b & 0xff) as u8,
-        )
-    };
-    // NAT64 well-known prefix 64:ff9b::/96.
-    if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2..6].iter().all(|s| *s == 0) {
-        return Some(last_two_as_v4());
-    }
-    // IPv4-compatible ::a.b.c.d (excluding :: and ::1, handled as v6 already).
-    if seg[..6].iter().all(|s| *s == 0) && (seg[6] != 0 || seg[7] > 1) {
-        return Some(last_two_as_v4());
-    }
-    None
-}
-
-fn is_forbidden_v4(v4: std::net::Ipv4Addr) -> bool {
-    v4.is_loopback()
-        || v4.is_private()
-        || v4.is_link_local()
-        || v4.is_unspecified()
-        || v4.is_multicast()
-        || is_cgnat_v4(v4)
-}
-
-/// Whether an IP is inside a range a callback must never reach.
-fn is_forbidden_target(ip: IpAddr) -> bool {
-    // Judge any embedded IPv4 by the IPv4 rules first.
-    if let Some(v4) = embedded_v4(ip) {
-        return is_forbidden_v4(v4);
-    }
-    match ip {
-        IpAddr::V4(v4) => is_forbidden_v4(v4),
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local()
-                || v6.is_multicast()
-        }
-    }
-}
-
 /// Create-time validation.
 pub fn validate_callback_url(raw: &str) -> Result<(), String> {
     let url =
@@ -159,39 +87,6 @@ pub fn validate_callback_url(raw: &str) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// Pre-dispatch guard.
-async fn resolve_vetted_addrs(url: &reqwest::Url) -> Option<Vec<std::net::SocketAddr>> {
-    let host = strip_ipv6_brackets(url.host_str()?);
-    let port = url.port_or_known_default().unwrap_or(80);
-    // Bounded by RESOLVE_TIMEOUT.
-    let addrs: Vec<std::net::SocketAddr> =
-        tokio::time::timeout(RESOLVE_TIMEOUT, tokio::net::lookup_host((host, port)))
-            .await
-            .ok()?
-            .ok()?
-            .collect();
-    if addrs.is_empty() || addrs.iter().any(|a| is_forbidden_target(a.ip())) {
-        return None;
-    }
-    Some(addrs)
-}
-
-/// Build the outbound client for one callback dispatch, with DNS pinned to the
-/// already-vetted addresses so the connect cannot land anywhere `resolve_vetted_addrs` did
-/// not approve.
-fn build_pinned_client(
-    host: &str,
-    addrs: &[std::net::SocketAddr],
-) -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .no_proxy()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(TOTAL_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve_to_addrs(host, addrs)
-        .build()
 }
 
 fn is_fire_worthy(status: Status) -> bool {
@@ -328,6 +223,12 @@ mod tests {
             "http://10.0.0.5/hook",                    // private
             "http://192.168.1.1/hook",                 // private
             "http://0.0.0.0/hook",                     // unspecified
+            "http://198.51.100.1/hook",
+            "http://203.0.113.1/hook",
+            "http://192.88.99.1/hook",
+            "http://[2001:db8::1]/hook",
+            "http://[3fff::1]/hook",
+            "http://[::ffff:203.0.113.1]/hook",
             // IPv4-mapped IPv6 forms.
             "http://[::ffff:127.0.0.1]/hook",
             "http://[::ffff:169.254.169.254]/latest/meta-data",
@@ -349,9 +250,9 @@ mod tests {
 
         let cases = [
             "https://dispatcher.example.com/hook",
-            "http://203.0.113.5/hook",
+            "http://1.1.1.1/hook",
             // A mapped *public* address stays allowed.
-            "http://[::ffff:203.0.113.5]/hook",
+            "http://[::ffff:1.1.1.1]/hook",
             // 100.64.0.0/10 is CGNAT, but 100.63/100.128 are ordinary public space.
             "http://100.63.255.255/hook",
             "http://100.128.0.1/hook",
@@ -370,7 +271,7 @@ mod tests {
         let localhost = reqwest::Url::parse("http://localhost/hook").unwrap();
         assert!(resolve_vetted_addrs(&localhost).await.is_none());
 
-        let url = reqwest::Url::parse("http://203.0.113.5:8080/hook").unwrap();
+        let url = reqwest::Url::parse("http://1.1.1.1:8080/hook").unwrap();
         let addrs = resolve_vetted_addrs(&url)
             .await
             .expect("a public literal address must vet clean");

@@ -239,6 +239,7 @@ fn highlight_empty_projects_archived_trash_and_synthetic_identity() {
     );
     let v = &mut env.view;
     v.group_by = GroupByMode::Project;
+    v.hide_empty_groups = false;
     v.registered_projects = vec![crate::session::Project::new(
         "Pinned",
         "/empty",

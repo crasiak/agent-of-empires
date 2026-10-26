@@ -3,6 +3,70 @@
   "description": "Surface/flow coverage matrix for the agent-of-empires web dashboard. Every component file under web/src/components/** must appear in at least one entry's `components` list (covered, deferred, or out-of-scope), or in coverage-matrix.exempt.json. CI validates this on every PR via tests/validate-coverage-matrix.mjs.",
   "surfaces": [
     {
+      "id": "sessions.tailored-document",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": ["src/components/__tests__/TailoredSessionsOverlay.test.tsx"],
+      "components": ["web/src/components/TailoredSessionsOverlay.tsx", "web/src/components/TailoredHistoryPanel.tsx"],
+      "notes": "Separate public-document preset, account and exact URL/question payload, explicit Start, shared keyed-create registration, editable load failures and read-only gating. Rust tests cover public-only fetching, extraction bounds and first-only attachment. No paid/live qualification implied."
+    },
+    {
+      "id": "sessions.tailored-document.keyboard",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/tailored-sessions.spec.ts"],
+      "components": ["web/src/components/TailoredSessionsOverlay.tsx", "web/src/components/TailoredHistoryPanel.tsx"],
+      "notes": "Keyboard-only document selection, URL focus, long unbroken URL retention on resize without horizontal overflow, form focus trap and F2/Escape restoration without creating a Session."
+    },
+    {
+      "id": "sessions.tailored-capture.browser",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/tailored-sessions.spec.ts"],
+      "components": [
+        "web/src/components/TailoredSessionsOverlay.tsx",
+        "web/src/components/TailoredHistoryPanel.tsx",
+        "web/src/components/LiveTerminalView.tsx",
+        "web/src/App.tsx"
+      ],
+      "notes": "Global shortcut, full-shell portal/focus isolation, creation and existing-capture reopen without route changes, F2 history return, shared hide/restore across reloads with no stop/trash/create request, and read-only gating."
+    },
+    {
+      "id": "sessions.tailored-capture",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": ["src/components/__tests__/TailoredSessionsOverlay.test.tsx", "src/hooks/useKeyboardShortcuts.test.ts"],
+      "components": [
+        "web/src/components/TailoredSessionsOverlay.tsx",
+        "web/src/components/TailoredHistoryPanel.tsx",
+        "web/src/App.tsx"
+      ],
+      "notes": "Capture request/policy, keyed retries, pending dismissal, history reopen without creation, persistent reversible view-only hide, failed-write preservation, read-only guards, and stale polling response suppression. Browser focus and route coverage is tracked separately."
+    },
+    {
+      "id": "sessions.tailored-research",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": [
+        "src/components/__tests__/ResearchForm.test.tsx",
+        "src/components/__tests__/TailoredSessionsOverlay.test.tsx"
+      ],
+      "components": [
+        "web/src/components/ResearchForm.tsx",
+        "web/src/components/TailoredSessionsOverlay.tsx",
+        "web/src/components/TailoredHistoryPanel.tsx"
+      ],
+      "notes": "Native research draft/develop/review/run, exact saved revision handoff, explicit backend override, scoped context preservation, uncertain-outcome no-resubmit, research history reopen/hide/restore, read-only and owned discovery replies. Rust tests cover frozen intent, concurrency, account qualification, bounded process fixtures and ORX HTTP schemas."
+    },
+    {
+      "id": "sessions.tailored-research.keyboard",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/tailored-sessions.spec.ts"],
+      "components": ["web/src/components/ResearchForm.tsx", "web/src/components/TailoredSessionsOverlay.tsx"],
+      "notes": "Keyboard-only research preset selection, native form focus, focus trap, F2 history and Escape return to underlying session without execution."
+    },
+    {
       "id": "settings.dialog-escape",
       "kind": "mocked-playwright",
       "risk": "high",
@@ -4434,8 +4498,20 @@
       "id": "triage.empty-group-hide",
       "kind": "vitest",
       "risk": "medium",
-      "specs": ["src/lib/__tests__/sidebarSort.test.ts", "tests/live/triage.spec.ts"],
-      "components": ["web/src/lib/sidebarSort.ts", "web/src/components/WorkspaceSidebar.tsx"]
+      "specs": [
+        "src/lib/__tests__/sidebarSort.test.ts",
+        "src/lib/__tests__/hideEmptyGroups.test.ts",
+        "src/components/__tests__/WorkspaceSidebarFilter.test.tsx",
+        "src/components/__tests__/SettingsView.session.test.tsx",
+        "tests/live/triage.spec.ts"
+      ],
+      "components": [
+        "web/src/lib/sidebarSort.ts",
+        "web/src/lib/hideEmptyGroups.ts",
+        "web/src/App.tsx",
+        "web/src/components/WorkspaceSidebar.tsx"
+      ],
+      "notes": "Empty headers are hidden by default on repo, nested, and org axes; the global settings toggle restores them without removing registrations. Archives and trash remain reachable."
     },
     {
       "id": "sidebar.edit-workdir-name",
