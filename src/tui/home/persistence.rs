@@ -131,6 +131,9 @@ impl HomeView {
                         .map(|i| i.source_profile.clone());
                 }
                 crate::session::Item::Group { profile, path, .. } => {
+                    if self.unified_manual_groups() {
+                        return None;
+                    }
                     if let Some(p) = profile {
                         return Some(p.clone());
                     }

@@ -992,6 +992,10 @@ pub struct AppStateConfig {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub repo_appearances: crate::session::repo_appearance::RepoAppearances,
 
+    /// View-only capture-history visibility shared by the TUI and web, keyed by profile.
+    #[serde(default)]
+    pub tailored_hidden_sessions: crate::session::tailored::history::HiddenSessions,
+
     /// Opaque web-owned preferences, excluding shared repository appearances.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub web_ui_state: std::collections::BTreeMap<String, String>,
@@ -1076,6 +1080,11 @@ pub struct SessionConfig {
     #[serde(default)]
     #[setting(label = "Show system health strip", widget = "toggle")]
     pub show_diagnostics_pane: bool,
+
+    /// Hide group headers with no visible sessions. Groups and saved projects are kept.
+    #[serde(default = "default_true")]
+    #[setting(label = "Hide empty groups", widget = "toggle", global_only)]
+    pub hide_empty_groups: bool,
 
     /// Record agent context resets, prompts, and turns per session in a local
     /// usage log (`usage.db` in the app directory). Claude and Pi always
@@ -2037,6 +2046,7 @@ impl Default for SessionConfig {
             yolo_mode_default: false,
             pre_trust_agent_folders: false,
             show_diagnostics_pane: false,
+            hide_empty_groups: true,
             usage_tracking: true,
             show_usage_overlay: true,
             show_ledger_overlay: true,
@@ -4884,6 +4894,23 @@ mod tests {
                 "{name} missing from schema"
             );
         }
+    }
+
+    #[test]
+    fn empty_group_visibility_defaults_and_round_trips() {
+        for input in ["", "[session]", "[session]\nhide_empty_groups = true"] {
+            let config: Config = toml::from_str(input).unwrap();
+            assert!(config.session.hide_empty_groups);
+        }
+        let config: Config = toml::from_str("[session]\nhide_empty_groups = false").unwrap();
+        let saved = toml::to_string(&config).unwrap();
+        let reloaded: Config = toml::from_str(&saved).unwrap();
+        assert!(!reloaded.session.hide_empty_groups);
+        let field = settings_schema::schema()
+            .into_iter()
+            .find(|field| field.section == "session" && field.field == "hide_empty_groups")
+            .expect("visibility toggle in shared settings schema");
+        assert!(!field.profile_overridable);
     }
 
     #[test]

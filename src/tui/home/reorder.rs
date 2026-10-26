@@ -56,6 +56,9 @@ impl HomeView {
             self.flash_status("Rows are arranged by hand in Manual grouping only (g)");
             return Ok(());
         }
+        if self.require_manual_group_profile() {
+            return Ok(());
+        }
         if let Some(group_path) = self.selected_group.clone() {
             self.move_group_row(&group_path, delta)?;
         } else if let Some(id) = self.selected_session.clone() {

@@ -148,11 +148,10 @@ fn verify_seal(app: &Path, m: &Manifest) -> Result<()> {
 }
 fn ready_manifest(app: &Path, m: &Manifest) -> Result<()> {
     ensure!(
-        matches!(cursor::read_cursor(app)?, cursor::USAGE | cursor::REVIEW)
+        cursor::supports_stage(cursor::read_cursor(app)?, cursor::USAGE)
             && m.phase == Phase::Complete,
-        "completed AFK usage import and global schema {} or {} required",
-        cursor::USAGE,
-        cursor::REVIEW
+        "completed AFK usage import and a supported global schema at or after {} required",
+        cursor::USAGE
     );
     verify_seal(app, m)
 }
@@ -397,7 +396,7 @@ fn save(store: &Store, m: &mut Manifest, phase: Phase) -> Result<()> {
 thread_local! { static INTERRUPT: std::cell::Cell<Option<Phase>> = const { std::cell::Cell::new(None) }; }
 
 pub(crate) fn run_at(app: &Path) -> Result<()> {
-    if cursor::read_cursor(app)? == cursor::REVIEW {
+    if cursor::supports_stage(cursor::read_cursor(app)?, cursor::REVIEW) {
         // Additive review storage does not reopen the frozen authority import.
         return ready(app);
     }

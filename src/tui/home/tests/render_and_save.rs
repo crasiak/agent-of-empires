@@ -632,14 +632,12 @@ fn test_save_preserves_per_profile_collapsed_state() {
     );
 }
 
-/// Group delete is scoped to the selected group's profile when several profiles own a
-/// same-named group: an empty one opens the simple confirm rather than the "delete N
-/// sessions" dialog driven by a populated twin, and deleting a populated one leaves the
-/// other profiles' group and members alone.
+/// Filtering scopes group deletion, including an empty group with populated twins.
 #[test]
 #[serial]
 fn test_group_delete_scoped_to_owning_profile() {
     let (_temp, _guard) = test_home();
+    crate::session::update_config(|config| config.session.hide_empty_groups = false).unwrap();
     seed_profile("alpha", &[instance_in("A1", "/tmp/a", "work")]);
     seed_profile("beta", &[instance_in("B1", "/tmp/b", "work")]);
     Storage::new_unwatched("gamma")
@@ -655,6 +653,7 @@ fn test_group_delete_scoped_to_owning_profile() {
     view.update_selected();
 
     let select_work = |view: &mut HomeView, profile: &str| {
+        view.switch_profile(Some(profile.to_string())).unwrap();
         let work_indices: Vec<usize> = view
             .flat_items
             .iter()
@@ -695,13 +694,21 @@ fn test_group_delete_scoped_to_owning_profile() {
         "alpha's 'work' group should be deleted"
     );
     assert!(
-        view.group_trees.get("beta").unwrap().group_exists("work"),
+        Storage::open_unwatched("beta")
+            .unwrap()
+            .load_with_groups()
+            .unwrap()
+            .1
+            .iter()
+            .any(|g| g.path == "work"),
         "beta's 'work' group should be untouched"
     );
     let group_of = |profile: &str| {
-        view.instances()
-            .find(|i| i.source_profile == profile)
+        Storage::open_unwatched(profile)
             .unwrap()
+            .load_with_groups()
+            .unwrap()
+            .0[0]
             .group_path
             .clone()
     };

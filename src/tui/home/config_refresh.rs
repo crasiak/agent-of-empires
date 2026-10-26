@@ -78,6 +78,10 @@ impl HomeView {
             self.repo_appearances = config.app_state.repo_appearances.clone();
             self.rebuild_flat_items_keeping_cursor();
         }
+        if self.hide_empty_groups != config.session.hide_empty_groups {
+            self.hide_empty_groups = config.session.hide_empty_groups;
+            self.rebuild_flat_items_keeping_cursor();
+        }
         self.show_activity_age = config.session.show_activity_age;
         self.set_sidebar_position(config.session.sidebar_position);
         self.show_diagnostics = config.session.show_diagnostics_pane;
