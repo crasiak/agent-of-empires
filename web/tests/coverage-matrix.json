@@ -3,6 +3,23 @@
   "description": "Surface/flow coverage matrix for the agent-of-empires web dashboard. Every component file under web/src/components/** must appear in at least one entry's `components` list (covered, deferred, or out-of-scope), or in coverage-matrix.exempt.json. CI validates this on every PR via tests/validate-coverage-matrix.mjs.",
   "surfaces": [
     {
+      "id": "sessions.skill-workshop",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": [
+        "src/components/__tests__/WorkshopForm.test.tsx",
+        "src/components/__tests__/TailoredSessionsOverlay.test.tsx",
+        "src/components/__tests__/WorkshopWorkflow.test.tsx"
+      ],
+      "components": [
+        "web/src/components/WorkshopForm.tsx",
+        "web/src/components/TailoredSessionsOverlay.tsx",
+        "web/src/components/TailoredHistoryPanel.tsx",
+        "web/src/components/WorkshopWorkflow.tsx"
+      ],
+      "notes": "Complete keyed source envelope and exact local Review/Commit; separate actual destination disclosure, current-rule/custody Land, guarded import, original config CAS, revision-bound materialization and native plan approvals. Unknown/pending are reconcile-only. Tests assert typed payloads, explicit human gates, full receipt visibility and read-only locks. Hermetic producer/Forge fixtures are not live qualification."
+    },
+    {
       "id": "sessions.tailored-document",
       "kind": "vitest",
       "risk": "high",

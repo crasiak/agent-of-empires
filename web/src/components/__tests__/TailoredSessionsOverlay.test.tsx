@@ -11,6 +11,9 @@ import { makeSession } from "./fixtures";
 vi.mock("../../lib/api", () => ({
   createSession: vi.fn(),
   researchOperation: vi.fn(),
+  workshopOperation: vi.fn(),
+  getWorkshop: vi.fn(),
+  getWorkshopDefaults: vi.fn().mockResolvedValue({ repository: null }),
   getResearch: vi.fn(),
   getResearchOutput: vi.fn(),
   replyResearch: vi.fn(),
@@ -76,6 +79,17 @@ function savedCapture(): TailoredHistoryEntry {
 }
 
 describe("Tailored Sessions", () => {
+  it("opens source Workshop without creating or replacing the underlying Session", async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: /Skill workshop/ }));
+    await screen.findByLabelText("Skill workshop");
+    expect(createSession).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Land" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve reviewed local commit" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: /Back to history/ }));
+    await screen.findByRole("button", { name: /Skill workshop/ });
+    expect(createSession).not.toHaveBeenCalled();
+  });
   it("loads a document only after explicit Start and preserves account, URL and opening question", async () => {
     vi.mocked(createSession).mockResolvedValue({
       ok: true,

@@ -25,6 +25,9 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         // literal "search" never resolves as a session id. See #2515.
         .route("/api/sessions/search", get(api::search_sessions))
         .route("/api/tailored-sessions", get(api::list_tailored_sessions))
+        .route("/api/workshop", post(api::workshop_operation))
+        .route("/api/workshop/{id}", get(api::workshop_get))
+        .route("/api/workshop-defaults", get(api::workshop_defaults))
         .route("/api/research", post(api::research_operation))
         .route("/api/research/{id}", get(api::research_get))
         .route("/api/research/{id}/output", get(api::research_output))

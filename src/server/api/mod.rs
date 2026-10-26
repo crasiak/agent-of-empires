@@ -59,7 +59,8 @@ pub use sessions::{
     set_worktree_name, start_session, stop_session, summarize_session, trash_session,
     update_session_archive, update_session_color, update_session_diff_base, update_session_group,
     update_session_notifications, update_session_pin, update_session_snooze, update_session_unread,
-    update_tailored_visibility, update_workspace_ordering, OutputQuery, SendMessageRequest,
+    update_tailored_visibility, update_workspace_ordering, workshop_defaults, workshop_get,
+    workshop_operation, OutputQuery, SendMessageRequest,
 };
 pub use skills::{
     adopt_skill, create_skill, delete_skill, edit_skill, list_skills, read_skill, sync_skills,

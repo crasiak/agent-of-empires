@@ -8,7 +8,8 @@ import {
   retryBody,
   type PendingCreate,
 } from "../lib/pendingCreates";
-import type { CreateSessionRequest, ResearchDraft, SessionResponse } from "../lib/types";
+import type { CreateSessionRequest, ResearchDraft, SessionResponse, WorkshopRequest } from "../lib/types";
+import { WorkshopForm } from "./WorkshopForm";
 import { ResearchForm } from "./ResearchForm";
 import { TerminalView } from "./TerminalView";
 import { TailoredHistoryPanel } from "./TailoredHistoryPanel";
@@ -35,6 +36,7 @@ export function TailoredSessionsOverlay({
   onCreated,
   onClose,
 }: Props) {
+  const [workshop, setWorkshop] = useState<WorkshopRequest | "new" | null>(null);
   const [research, setResearch] = useState<ResearchDraft | "new" | null>(null);
   const [composing, setComposing] = useState(false);
   const [documentChat, setDocumentChat] = useState(false);
@@ -58,6 +60,7 @@ export function TailoredSessionsOverlay({
     flushSync(() => {
       setSession(null);
       setResearch(null);
+      setWorkshop(null);
       setComposing(false);
     });
     search.current?.focus();
@@ -190,7 +193,7 @@ export function TailoredSessionsOverlay({
               : `Tailored Sessions${composing ? (documentChat ? " · Document chat" : " · Capture an idea") : ""}`}
           </h2>
           <div className="flex items-center gap-2">
-            {(session || composing || research) && (
+            {(session || composing || research || workshop) && (
               <button
                 type="button"
                 disabled={busy || uncertain}
@@ -219,6 +222,13 @@ export function TailoredSessionsOverlay({
               F2 returns to history. Closing leaves the Session running. Escape goes to the agent.
             </p>
           </>
+        ) : workshop ? (
+          <WorkshopForm
+            key={workshop === "new" ? "new-workshop" : workshop.id}
+            account={account}
+            readOnly={readOnly}
+            initial={workshop === "new" ? undefined : workshop}
+          />
         ) : research ? (
           <ResearchForm
             key={research === "new" ? "new" : research.id}
@@ -232,6 +242,9 @@ export function TailoredSessionsOverlay({
             readOnly={readOnly}
             onNew={() => startNew()}
             onDocument={() => startNew(true)}
+            onWorkshop={(request) => {
+              if (!readOnly || request) setWorkshop(request ?? "new");
+            }}
             onResearch={(draft) => {
               if (!readOnly || draft) setResearch(draft ?? "new");
             }}

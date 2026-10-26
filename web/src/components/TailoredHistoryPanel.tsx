@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { flushSync } from "react-dom";
-import { fetchTailoredHistory, setTailoredHistoryHidden, researchOperation } from "../lib/api";
-import type { ResearchDraft, SessionResponse, TailoredHistoryEntry } from "../lib/types";
+import { fetchTailoredHistory, setTailoredHistoryHidden, researchOperation, workshopOperation } from "../lib/api";
+import type { ResearchDraft, SessionResponse, TailoredHistoryEntry, WorkshopRequest } from "../lib/types";
 
 interface Props {
   searchRef: RefObject<HTMLInputElement | null>;
@@ -9,10 +9,19 @@ interface Props {
   onNew: () => void;
   onDocument: () => void;
   onResearch: (draft?: ResearchDraft) => void;
+  onWorkshop?: (request?: WorkshopRequest) => void;
   onOpen: (session: SessionResponse) => void;
 }
 
-export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen, onResearch, onDocument }: Props) {
+export function TailoredHistoryPanel({
+  searchRef,
+  readOnly,
+  onNew,
+  onOpen,
+  onResearch,
+  onDocument,
+  onWorkshop,
+}: Props) {
   const [query, setQuery] = useState("");
   const [hidden, setHidden] = useState(false);
   const [entries, setEntries] = useState<TailoredHistoryEntry[]>([]);
@@ -52,12 +61,22 @@ export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen, onRes
     setError(null);
     ++requestSeq.current;
     const previouslyFocused = document.activeElement;
+    const workshopResult = entry.workshop
+      ? await workshopOperation({
+          operation: "visibility",
+          id: entry.id,
+          revision: entry.workshop.revision,
+          hidden: !entry.hidden,
+        })
+      : null;
     const researchResult = entry.research
       ? await researchOperation({ operation: "visibility", id: entry.id, hidden: !entry.hidden })
       : null;
-    const result = entry.research
-      ? { ok: !!researchResult?.draft, message: researchResult?.error }
-      : await setTailoredHistoryHidden(entry.id, !entry.hidden);
+    const result = entry.workshop
+      ? { ok: !!workshopResult?.request, message: workshopResult?.error }
+      : entry.research
+        ? { ok: !!researchResult?.draft, message: researchResult?.error }
+        : await setTailoredHistoryHidden(entry.id, !entry.hidden);
     if (!mounted.current) return;
     ++requestSeq.current;
     pending.current = false;
@@ -100,6 +119,8 @@ export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen, onRes
             if (matchesPreset) onNew();
             else if (!hidden && "document chat".includes(normalized)) onDocument();
             else if (!hidden && "tailored research".includes(normalized)) onResearch();
+            else if (!hidden && "skill workshop".includes(normalized)) onWorkshop?.();
+            else if (visible[0]?.workshop) onWorkshop?.(visible[0].workshop);
             else if (visible[0]?.research) onResearch(visible[0].research);
             else if (visible[0]?.session) onOpen(visible[0].session);
           }
@@ -143,6 +164,20 @@ export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen, onRes
           Tailored research
           <span className="mt-1 block text-xs text-text-secondary">
             Develop a prompt, choose ORX/EVO, review and explicitly Run.
+          </span>
+        </button>
+      )}
+      {!hidden && "skill workshop".includes(normalized) && onWorkshop && (
+        <button
+          type="button"
+          disabled={readOnly}
+          onClick={() => onWorkshop()}
+          className="w-full rounded-md border border-surface-700 px-3 py-2 text-left text-sm text-text-primary hover:bg-surface-800 disabled:opacity-50"
+        >
+          Skill workshop
+          <span className="mt-1 block text-xs text-text-secondary">
+            Refine a bounded bundle, review exact source, then approve local Commit, destination Publish, Land and
+            targeted Deploy separately.
           </span>
         </button>
       )}
@@ -192,7 +227,13 @@ export function TailoredHistoryPanel({ searchRef, readOnly, onNew, onOpen, onRes
             <button
               type="button"
               disabled={readOnly}
-              onClick={() => (entry.research ? onResearch(entry.research) : entry.session && onOpen(entry.session))}
+              onClick={() =>
+                entry.workshop
+                  ? onWorkshop?.(entry.workshop)
+                  : entry.research
+                    ? onResearch(entry.research)
+                    : entry.session && onOpen(entry.session)
+              }
               aria-label={`Open ${entry.title}`}
               className="min-w-0 flex-1 rounded-md px-2 py-1 text-left hover:bg-surface-800 disabled:opacity-50"
             >
