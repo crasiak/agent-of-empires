@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod error;
+pub mod forge;
 
 pub use client::{
     GitHubAsset, GitHubClient, GitHubClientConfig, GitHubCompare, GitHubCompareCommit,
