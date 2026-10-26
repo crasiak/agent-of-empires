@@ -37,6 +37,12 @@ pub(super) fn project_group_key(inst: &Instance) -> String {
 pub(super) const NO_ORG_GROUP_LABEL: &str = "No organization";
 
 impl HomeView {
+    pub(super) fn unified_manual_groups(&self) -> bool {
+        self.group_by == GroupByMode::Manual
+            && self.active_profile.is_none()
+            && self.storages.len() > 1
+    }
+
     pub fn instances(&self) -> impl ExactSizeIterator<Item = &Instance> + '_ {
         self.instances.values()
     }
@@ -268,7 +274,12 @@ impl HomeView {
                 .next()
                 .map_or_else(Vec::new, |tree| flatten_tree(tree, &pool, self.sort_order))
         } else {
-            flatten_tree_all_profiles(&pool, &self.group_trees, self.sort_order)
+            flatten_tree_all_profiles(
+                &pool,
+                &self.group_trees,
+                self.sort_order,
+                &self.unified_group_collapsed,
+            )
         };
         if self.highlight_filters.active() {
             items.retain(|item| match item {

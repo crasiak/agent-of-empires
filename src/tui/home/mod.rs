@@ -176,6 +176,8 @@ pub struct HomeView {
     pub(super) hyperlink_cells: crate::tui::hyperlink::SharedHyperlinks,
     pub(super) vt_live_enabled: bool,
     pub(super) profile_default_attach_mode: crate::session::AttachMode,
+    /// All-profiles Manual collapse is local to this view, not a profile's group metadata.
+    pub(super) unified_group_collapsed: HashMap<String, bool>,
     pub(super) project_group_collapsed: HashMap<String, bool>,
     pub(super) org_group_collapsed: HashMap<String, bool>,
     pub(super) remote_owner_cache: std::cell::RefCell<HashMap<String, Option<(String, String)>>>,

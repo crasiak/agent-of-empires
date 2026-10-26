@@ -632,10 +632,7 @@ fn test_save_preserves_per_profile_collapsed_state() {
     );
 }
 
-/// Group delete is scoped to the selected group's profile when several profiles own a
-/// same-named group: an empty one opens the simple confirm rather than the "delete N
-/// sessions" dialog driven by a populated twin, and deleting a populated one leaves the
-/// other profiles' group and members alone.
+/// Filtering scopes group deletion, including an empty group with populated twins.
 #[test]
 #[serial]
 fn test_group_delete_scoped_to_owning_profile() {
@@ -657,6 +654,7 @@ fn test_group_delete_scoped_to_owning_profile() {
     view.hide_empty_groups = false;
     view.flat_items = view.build_flat_items();
     let select_work = |view: &mut HomeView, profile: &str| {
+        view.switch_profile(Some(profile.to_string())).unwrap();
         let work_indices: Vec<usize> = view
             .flat_items
             .iter()
@@ -697,13 +695,21 @@ fn test_group_delete_scoped_to_owning_profile() {
         "alpha's 'work' group should be deleted"
     );
     assert!(
-        view.group_trees.get("beta").unwrap().group_exists("work"),
+        Storage::open_unwatched("beta")
+            .unwrap()
+            .load_with_groups()
+            .unwrap()
+            .1
+            .iter()
+            .any(|g| g.path == "work"),
         "beta's 'work' group should be untouched"
     );
     let group_of = |profile: &str| {
-        view.instances()
-            .find(|i| i.source_profile == profile)
+        Storage::open_unwatched(profile)
             .unwrap()
+            .load_with_groups()
+            .unwrap()
+            .0[0]
             .group_path
             .clone()
     };

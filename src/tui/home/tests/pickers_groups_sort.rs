@@ -319,16 +319,13 @@ fn deleting_subgroups_moves_members_to_the_selected_destination() {
             "beta",
             &[instance_in("other-profile", "/tmp/other", group_path)],
         );
-        let mut view = test_view(None);
+        let mut view = test_view(Some("alpha"));
         view.group_by = crate::session::config::GroupByMode::Manual;
         view.flat_items = view.build_flat_items();
         view.cursor = view
             .flat_items
             .iter()
-            .position(|item| {
-                matches!(item, Item::Group { path, profile, .. }
-                if path == group_path && profile.as_deref() == Some("alpha"))
-            })
+            .position(|item| matches!(item, Item::Group { path, .. } if path == group_path))
             .expect("subgroup in alpha");
         view.update_selected();
         view.open_delete_for_selected();
@@ -2312,12 +2309,9 @@ fn test_moving_a_group_does_not_resurrect_a_peer_deleted_one() {
     assert_eq!(paths, ["beta", "alpha"], "and the move still landed");
 }
 
-/// Two profiles can hold the same group path. Restoring the cursor by path alone lands it on
-/// whichever comes first, leaving `selected_group_profile` naming the other profile, so the
-/// next move would reorder a profile the cursor is not on.
 #[test]
 #[serial]
-fn test_cursor_restore_keeps_the_group_profile() {
+fn unified_group_mutations_require_a_profile_filter() {
     let temp = TempDir::new().unwrap();
     let _guard = setup_test_home(&temp);
 
@@ -2334,28 +2328,56 @@ fn test_cursor_restore_keeps_the_group_profile() {
     .unwrap();
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
-    // Deliberately the header that is not first: a path-only restore would land on the
-    // other profile's row, which is what this pins.
-    let target = view
+    view.cursor = view
         .flat_items
         .iter()
-        .position(|i| {
-            matches!(i, Item::Group { path, profile, .. }
-            if path == "work" && profile.as_deref() == Some("first"))
-        })
-        .expect("first profile's work header");
-    assert!(target > 0, "the other profile's header comes earlier");
-    view.cursor = target;
+        .position(|i| matches!(i, Item::Group { path, .. } if path == "work"))
+        .unwrap();
+    view.update_selected();
+    assert!(view.selected_group_profile.is_none());
+    let stored = |profile| {
+        Storage::open_unwatched(profile)
+            .unwrap()
+            .load_with_groups()
+            .unwrap()
+    };
+    let before: Vec<_> = ["first", "second"]
+        .into_iter()
+        .map(|p| serde_json::to_value(stored(p)).unwrap())
+        .collect();
+
+    view.open_rename_for_selected();
+    assert!(view.rename_dialog.is_none());
+    assert!(view.info_dialog.take().is_some());
+    view.open_delete_for_selected();
+    assert!(view.group_delete_options_dialog.is_none());
+    assert!(view.confirm_dialog.is_none());
+    assert!(view.info_dialog.take().is_some());
+    view.prompt_archive_selected_group();
+    assert!(view.confirm_dialog.is_none());
+    assert!(view.info_dialog.take().is_some());
+    view.sort_order = crate::session::config::SortOrder::Custom;
+    view.move_row_at_cursor(1).unwrap();
+    assert!(view.info_dialog.take().is_some());
+    view.delete_selected_group(&crate::tui::dialogs::GroupDeleteOptions::default())
+        .unwrap();
+    assert!(view.info_dialog.take().is_some());
+    view.archive_selected_group().unwrap();
+    assert!(view.info_dialog.take().is_some());
+    for (p, before) in ["first", "second"].into_iter().zip(before) {
+        assert_eq!(serde_json::to_value(stored(p)).unwrap(), before);
+    }
+
+    view.switch_profile(Some("first".to_string())).unwrap();
+    view.cursor = view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Group { path, .. } if path == "work"))
+        .unwrap();
     view.update_selected();
     assert_eq!(view.selected_group_profile.as_deref(), Some("first"));
-
-    view.rebuild_flat_items_keeping_cursor();
-
-    assert!(
-        matches!(view.flat_items.get(view.cursor), Some(Item::Group { path, profile, .. })
-            if path == "work" && profile.as_deref() == Some("first")),
-        "cursor stayed on the first profile's header"
-    );
+    view.open_rename_for_selected();
+    assert!(view.rename_dialog.is_some());
 }
 
 /// A single-profile view leaves a header's profile unset. An empty or collapsed neighbour is
@@ -3048,12 +3070,10 @@ fn test_a_session_moves_up_into_an_implicit_parent_group() {
     );
 }
 
-/// Two profiles can hold groups with the same path. When the expansion write fails and the
-/// selection falls back to the destination's header, that has to be the header in the moving
-/// row's own profile: matching the path alone picks whichever profile is drawn first.
+/// A failed expansion after a committed move leaves selection on the destination header.
 #[test]
 #[serial]
-fn test_a_hidden_destination_falls_back_to_the_header_in_its_own_profile() {
+fn test_a_hidden_destination_falls_back_to_the_filtered_profile_header() {
     use crate::session::config::SortOrder;
 
     let (temp, guard) = test_home();
@@ -3066,22 +3086,13 @@ fn test_a_hidden_destination_falls_back_to_the_header_in_its_own_profile() {
             instance_in("b2", "/tmp/b2", "bbb"),
         ],
     );
-    let mut view = test_view(None);
+    let mut view = test_view(Some("beta"));
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.apply_sort_order(SortOrder::Custom);
     view.flat_items = view.build_flat_items();
     view.update_selected();
 
     let b1 = custom_order_id_of(&view, "b1");
-    let first_bbb = view.flat_items.iter().find_map(|i| match i {
-        Item::Group { path, profile, .. } if path == "bbb" => Some(profile.clone()),
-        _ => None,
-    });
-    assert_eq!(
-        first_bbb,
-        Some(Some("alpha".to_string())),
-        "alpha's bbb is drawn first, so matching the path alone would land there"
-    );
 
     // What a committed move of b1 into beta's bbb leaves behind when the write that would have
     // opened the folded group failed.
@@ -3123,7 +3134,61 @@ fn test_a_hidden_destination_falls_back_to_the_header_in_its_own_profile() {
 
 #[test]
 #[serial]
-fn same_named_groups_across_profiles_are_tagged_and_listed_once() {
+fn unified_nested_groups_reveal_and_collapse_without_losing_selection() {
+    let (_temp, _guard) = test_home();
+    for profile in ["alpha", "beta"] {
+        seed_profile(
+            profile,
+            &[
+                instance_in(profile, "/tmp/repo", "work/sub"),
+                instance_in("tail", "/tmp/other", "zzz"),
+            ],
+        );
+    }
+    let mut view = test_view(None);
+    view.group_by = crate::session::config::GroupByMode::Manual;
+    view.sort_order = crate::session::config::SortOrder::AZ;
+    view.unified_group_collapsed = std::collections::HashMap::from([
+        ("work".to_string(), true),
+        ("work/sub".to_string(), true),
+    ]);
+    view.rebuild_flat_items();
+    let target = view
+        .instances()
+        .find(|i| i.title == "beta")
+        .unwrap()
+        .id
+        .clone();
+    view.select_and_reveal_session(&target);
+    assert_eq!(view.selected_session.as_deref(), Some(target.as_str()));
+    assert!(matches!(&view.flat_items[view.cursor], Item::Session { id, .. } if id == &target));
+    view.list_inner_area = ratatui::layout::Rect::new(1, 1, 40, 20);
+    let header = view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { path, .. } if path == "work"))
+        .unwrap();
+    view.handle_click(5, 1 + header as u16);
+    assert_eq!(view.selected_group.as_deref(), Some("work"));
+    assert!(
+        matches!(&view.flat_items[view.cursor], Item::Group { path, collapsed: true, .. } if path == "work")
+    );
+    view.select_and_reveal_session(&target);
+    assert_eq!(view.selected_session.as_deref(), Some(target.as_str()));
+    for profile in ["alpha", "beta"] {
+        assert!(Storage::open_unwatched(profile)
+            .unwrap()
+            .load_with_groups()
+            .unwrap()
+            .1
+            .iter()
+            .all(|g| !g.collapsed));
+    }
+}
+
+#[test]
+#[serial]
+fn same_named_groups_across_profiles_share_one_heading_and_picker_entry() {
     use crate::session::{GroupTree, Item};
 
     let temp = TempDir::new().unwrap();
@@ -3164,6 +3229,34 @@ fn same_named_groups_across_profiles_are_tagged_and_listed_once() {
     assert_eq!(dialog.group_picker_items(), vec!["solo", "work"]);
     view.new_dialog = None;
 
+    let beta_work = view
+        .instances()
+        .find(|i| i.title == "beta-work")
+        .unwrap()
+        .id
+        .clone();
+    view.select_and_reveal_session(&beta_work);
+    assert_eq!(
+        view.profile_for_cursor(view.cursor).as_deref(),
+        Some("beta")
+    );
+    view.toggle_favorite_at_cursor().unwrap();
+    for profile in ["alpha", "beta"] {
+        let rows = Storage::open_unwatched(profile)
+            .unwrap()
+            .load_with_groups()
+            .unwrap()
+            .0;
+        assert!(rows.iter().all(|i| i.source_profile == profile));
+        assert_eq!(
+            rows.iter()
+                .find(|i| i.group_path == "work")
+                .unwrap()
+                .is_favorited(),
+            profile == "beta"
+        );
+    }
+
     let theme = crate::tui::styles::Theme::default();
     let labels: Vec<String> = view
         .flat_items
@@ -3177,9 +3270,12 @@ fn same_named_groups_across_profiles_are_tagged_and_listed_once() {
                 .collect::<String>()
         })
         .collect();
-    let tagged = |tag: &str| labels.iter().filter(|l| l.contains(tag)).count();
-    assert_eq!(tagged("[alpha] work (1)"), 1, "{labels:?}");
-    assert_eq!(tagged("[beta] work (1)"), 1, "{labels:?}");
+    assert_eq!(
+        labels.iter().filter(|l| l.contains("work (2)")).count(),
+        1,
+        "{labels:?}"
+    );
+    assert!(labels.iter().all(|l| !l.contains('[')), "{labels:?}");
     assert!(
         labels
             .iter()
