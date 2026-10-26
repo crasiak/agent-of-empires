@@ -3,6 +3,7 @@
 pub mod group;
 pub mod query;
 pub mod resume;
+pub mod supervisor;
 pub mod target;
 
 pub use group::{group, Row};

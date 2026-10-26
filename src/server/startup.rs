@@ -866,6 +866,10 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
     );
 
     super::systemd_reconcile::spawn(state.clone());
+    crate::session_search::supervisor::spawn_if_enabled(
+        config.session.session_search_supervise,
+        state.shutdown.clone(),
+    );
 
     // File-watch wire-up.
     init_disk_watch_subscriptions(state.clone()).await;
