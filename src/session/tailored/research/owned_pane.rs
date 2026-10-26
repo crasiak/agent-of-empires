@@ -47,7 +47,7 @@ fn create_with_shell(id: &str, cwd: &str, command: &str, shell: &str) -> Result<
         "-d",
         "-P",
         "-F",
-        "#{pane_id}\t#{pane_pid}\t#{pid}",
+        "#{pane_id}|#{pane_pid}|#{pid}",
         "-s",
         &name,
         "-c",
@@ -56,7 +56,7 @@ fn create_with_shell(id: &str, cwd: &str, command: &str, shell: &str) -> Result<
         "-c",
         &script,
     ]))?;
-    let fields: Vec<_> = identity.split('\t').collect();
+    let fields: Vec<_> = identity.split('|').collect();
     if fields.len() != 3 || !fields[0].starts_with('%') {
         bail!("tmux did not return an immutable pane identity");
     }
@@ -171,10 +171,15 @@ mod tests {
             }
         }
         let _cleanup = Cleanup;
-        for shell in ["/bin/sh", "/bin/dash"] {
+        for (locale, shell) in [
+            ("en_US.UTF-8", "/bin/sh"),
+            ("C", "/bin/sh"),
+            ("C", "/bin/dash"),
+        ] {
             if !std::path::Path::new(shell).exists() {
                 continue;
             }
+            let _locale = crate::session::test_support::EnvGuard::set(&[("LC_ALL", locale)]);
             let id = uuid::Uuid::new_v4().to_string();
             let pane = create_with_shell(&id, dir.path().to_str().unwrap(), "exec /bin/cat", shell)
                 .unwrap_or_else(|error| panic!("{shell}: {error:#}"));
@@ -201,8 +206,10 @@ mod tests {
         crate::tmux::test_helpers::require_tmux!();
         let dir = tempfile::tempdir().unwrap();
         let socket = format!("research-test-{}", uuid::Uuid::new_v4());
-        let _env =
-            crate::session::test_support::EnvGuard::set(&[("AOE_TMUX_SOCKET", socket.as_str())]);
+        let _env = crate::session::test_support::EnvGuard::set(&[
+            ("AOE_TMUX_SOCKET", socket.as_str()),
+            ("LC_ALL", "C"),
+        ]);
         struct Cleanup;
         impl Drop for Cleanup {
             fn drop(&mut self) {
