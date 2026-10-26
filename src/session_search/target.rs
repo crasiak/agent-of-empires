@@ -17,6 +17,7 @@ pub struct ResumeSpec {
     pub aoe_profile: String,
     pub store: PathBuf,
     pub title: String,
+    pub transcript_path: Option<PathBuf>,
 }
 
 pub enum Target {
@@ -56,6 +57,17 @@ fn native_resume(
         _ => return None,
     };
     let (session_id, cwd, profile) = (session_id?, s.cwd.as_deref()?, s.profile.as_deref()?);
+    // The transcript is the resumed conversation's only when the hit is that
+    // conversation, not a subagent resuming its parent.
+    let transcript_path = s
+        .transcript_path
+        .as_deref()
+        .filter(|_| s.harness_session_id.as_deref() == Some(session_id))
+        .map(PathBuf::from);
+    // Pi resumes only from its exact transcript.
+    if tool == "pi" && transcript_path.is_none() {
+        return None;
+    }
     let owned = ledger_home.join("homes").join(profile);
     let (aoe_profile, store) = profiles.iter().find_map(|p| {
         let (_, dir) = p
@@ -75,6 +87,7 @@ fn native_resume(
         aoe_profile,
         store,
         title,
+        transcript_path,
     })
 }
 
@@ -137,11 +150,33 @@ mod tests {
             _ => panic!("expected resume"),
         }
         assert!(
-            matches!(resolve(&hits[2].session, &|_| false, &profiles, home), Target::Resume(r) if r.session_id == "p-222" && r.tool == "pi")
-        );
-        assert!(
             matches!(resolve(&hits[0].session, &|_| false, &[], home), Target::CopyOnly(c) if c.contains("--resume c-111"))
         );
+        // Pi resumes only from its exact transcript.
+        match resolve(&hits[1].session, &|_| false, &profiles, home) {
+            Target::Resume(r) => {
+                assert_eq!((r.tool.as_str(), r.session_id.as_str()), ("pi", "p-222"));
+                assert_eq!(
+                    r.transcript_path.as_deref(),
+                    hits[1].session.transcript_path.as_deref().map(Path::new)
+                );
+            }
+            _ => panic!("expected resume"),
+        }
+        let mut pi = crate::session_search::query::parse(include_bytes!("testdata/query_v1.json"))
+            .unwrap()
+            .remove(1)
+            .session;
+        pi.transcript_path = None;
+        assert!(matches!(
+            resolve(&pi, &|_| false, &profiles, home),
+            Target::CopyOnly(_)
+        ));
+        // A subagent hit resumes its parent, whose transcript it does not carry.
+        assert!(matches!(
+            resolve(&hits[2].session, &|_| false, &profiles, home),
+            Target::CopyOnly(c) if c.contains("--session p-222")
+        ));
         let mut bare =
             crate::session_search::query::parse(include_bytes!("testdata/query_v1.json"))
                 .unwrap()

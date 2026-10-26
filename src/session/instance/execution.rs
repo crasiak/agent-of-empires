@@ -4065,4 +4065,73 @@ mod tests {
             .map(|(_, value)| value.as_deref());
         assert_eq!(routed, Some(resolved.to_str()));
     }
+
+    /// A session-search Pi hit resumes from its exact transcript, and the binding
+    /// it builds validates against the launch's own resolution.
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn session_search_pi_resume_launches_from_its_transcript() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::session::capture::canonicalize_or_raw(temp.path().to_str().unwrap());
+        let _app = crate::session::test_support::isolate_app_dir_at(&root);
+        let _env = crate::session::test_support::EnvGuard::unset(&[
+            "PI_CODING_AGENT_DIR",
+            "PI_CODING_AGENT_SESSION_DIR",
+        ]);
+        let _pi = crate::session::test_support::install_login_shell_path_command(
+            &root,
+            "pi",
+            "#!/bin/sh\nexit 0\n",
+        );
+        let sid = "11111111-2222-4333-8444-555555555555";
+        let agent_dir = root.join("pi-agent");
+        let transcript = agent_dir
+            .join("sessions/--project--")
+            .join(format!("2026-01-01T00-00-00-000Z_{sid}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            format!("{}\n", serde_json::json!({"type": "session", "id": sid})),
+        )
+        .unwrap();
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let profile = "session-search-pi-resume";
+        let path =
+            crate::session::config::profile_config::get_profile_config_path(profile).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "[session.agent_config_dir]\npi = {:?}\n",
+                agent_dir.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let _registry = crate::tmux::status_rules::ProfileRegistryGuard::take(profile);
+        let spec = crate::session_search::ResumeSpec {
+            tool: "pi".into(),
+            cwd: project.to_str().unwrap().into(),
+            session_id: sid.into(),
+            aoe_profile: profile.into(),
+            store: agent_dir.clone(),
+            title: "pi hit".into(),
+            transcript_path: Some(transcript.clone()),
+        };
+
+        let inst = crate::session_search::instance(&spec, &Default::default()).unwrap();
+
+        let binding = inst.resume_binding.as_ref().unwrap();
+        assert_eq!(binding.transcript_path.as_ref(), Some(&transcript));
+        assert_eq!(
+            binding.execution.as_ref().unwrap().stores,
+            vec![transcript.parent().unwrap().to_path_buf()]
+        );
+        let native = inst
+            .resolve_native_execution(inst.conversation_target())
+            .unwrap();
+        inst.validate_conversation_target(&native.binding, native.target_session_id.as_deref())
+            .unwrap();
+    }
 }
