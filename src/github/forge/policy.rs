@@ -389,25 +389,40 @@ impl<T: Transport> Forge<T> {
         );
         validate_policy(&observation.rules, &observation.classic)?;
         Ok(LandIntent {
+            version: LandExecutionVersion::V1,
             attempt: uuid::Uuid::new_v4().to_string(),
             observation,
             approval,
-            async_uuid: None,
         })
     }
-    /// Submit exactly once after persisting intent. Lost acknowledgment is never replayed.
-    /// Requires human-confirmed exclusive custody. Pre/post observations detect drift,
-    /// but cannot atomically prevent concurrent retargeting or stacking on GitHub.
-    pub fn land(&self, intent: &LandIntent) -> Outcome<LandProgress> {
-        if let Err(error) = intent.validate() {
-            return Outcome::Refused(error.to_string());
+    /// Pure admission. Persist this execution before submitting its one write.
+    pub fn begin_land(&self, intent: &LandIntent) -> Result<LandExecution> {
+        intent.validate()?;
+        let execution = LandExecution {
+            version: LandExecutionVersion::V1,
+            intent: intent.clone(),
+            state: LandExecutionState::Admitted,
+            request_uuid: None,
+            digest: String::new(),
+        };
+        execution.next(LandExecutionState::Admitted)
+    }
+    /// Submit once after durable admission. Persist every returned execution before
+    /// continuing; never replace observed evidence with an older admission.
+    /// Exclusive custody is required, not an atomic target-ref/stack CAS.
+    pub fn land(&self, execution: &LandExecution) -> LandOutcome {
+        if let Err(error) = execution.validate() {
+            return LandOutcome::Refused(error.to_string());
         }
-        if intent.async_uuid.is_some() {
-            return Outcome::Refused("Already submitted; reconcile only".into());
+        if !matches!(execution.state, LandExecutionState::Admitted) {
+            return uncertain(
+                execution.clone(),
+                "Already attempted; retain execution and reconcile only",
+            );
         }
+        let intent = &execution.intent;
         let preflight = (|| {
             let current = self.observe_policy(&intent.observation.published)?;
-            // The approval deliberately allows current base and policy, not a snapshot CAS.
             ensure!(
                 current.published.head == intent.observation.published.head,
                 "Head changed"
@@ -415,56 +430,129 @@ impl<T: Transport> Forge<T> {
             Ok(())
         })();
         if let Err(error) = preflight {
-            return Outcome::Refused(format!("{error}"));
+            return LandOutcome::Refused(format!("{error}"));
         }
-        let result = (|| {
-            let published = &intent.observation.published;
-            let response=self.request(&published.destination,Method::Put,&format!("/pulls/{}/merge-async",published.identity.number),Some(json!({"sha":published.head,"merge_method":"squash","merge_action":"direct_merge","bypass_rules":false})))?;
-            ensure!(
-                matches!(response.status, 200 | 202) && !response.next_page,
-                "Merge not confirmed ({}); inspect only",
-                response.status
-            );
-            self.settle_async(intent, decode_async(&response.body)?)
-        })();
-        match result {
-            Ok(value) => Outcome::Confirmed(value),
-            Err(error) => Outcome::Unknown(error.to_string()),
+        let published = &intent.observation.published;
+        match self.request(&published.destination,Method::Put,&format!("/pulls/{}/merge-async",published.identity.number),Some(json!({"sha":published.head,"merge_method":"squash","merge_action":"direct_merge","bypass_rules":false}))) {
+            Ok(response)=>self.observe_execution_response(execution,&response,true),
+            Err(error)=> {
+                let mut next=execution.clone();next.state=LandExecutionState::UnobservedAck;
+                match next.next(LandExecutionState::UnobservedAck) {
+                    Ok(sealed)=>uncertain(sealed,error.to_string()),
+                    Err(seal_error)=>uncertain(next,seal_error.to_string()),
+                }
+            }
         }
     }
-    fn settle_async(&self, intent: &LandIntent, result: AsyncResult) -> Result<LandProgress> {
+    fn observe_execution_response(
+        &self,
+        execution: &LandExecution,
+        response: &HttpResponse,
+        initial: bool,
+    ) -> LandOutcome {
+        let evidence = response_evidence(response);
+        let mut next = execution.clone();
+        if next.request_uuid.is_none() {
+            next.request_uuid = evidence.async_uuid.clone();
+        }
+        next.state = LandExecutionState::Quarantined {
+            reason: LandQuarantineReason::UnrecognizedResponse,
+            response: evidence.clone(),
+        };
+        let result = (|| {
+            next = next.next(next.state.clone())?;
+            let reason = if evidence.bypass_rules == Some(true) {
+                Some(LandQuarantineReason::Bypass)
+            } else if evidence
+                .merge_action
+                .as_deref()
+                .is_some_and(|s| s != "direct_merge")
+            {
+                Some(LandQuarantineReason::Action)
+            } else if evidence
+                .merge_method
+                .as_deref()
+                .is_some_and(|s| s != "squash")
+            {
+                Some(LandQuarantineReason::Method)
+            } else if evidence
+                .expected_head_sha
+                .as_deref()
+                .is_some_and(|s| s != execution.intent.observation.published.head)
+            {
+                Some(LandQuarantineReason::Head)
+            } else if evidence.status.as_deref() == Some("enqueued") {
+                Some(LandQuarantineReason::Enqueued)
+            } else if evidence.status.as_deref() == Some("failed") {
+                Some(LandQuarantineReason::Failed)
+            } else if response.next_page
+                || !(response.status == 200 || initial && response.status == 202)
+            {
+                Some(LandQuarantineReason::UnexpectedHttpStatus)
+            } else if execution.request_uuid.is_some()
+                && evidence.async_uuid.is_some()
+                && execution.request_uuid != evidence.async_uuid
+            {
+                Some(LandQuarantineReason::RequestIdentity)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                next = next.next(LandExecutionState::Quarantined {
+                    reason,
+                    response: evidence,
+                })?;
+                bail!("Observed prohibited/contradictory merge execution: {reason:?}; never Land/Deploy");
+            }
+            match decode_async(&response.body)? {
+                AsyncResult::Pending(details) => {
+                    ensure!(
+                        details.merge_method == "squash"
+                            && details.merge_action == "direct_merge"
+                            && details.expected_head_sha
+                                == execution.intent.observation.published.head
+                            && details.bypass_rules != Some(true),
+                        "Unknown execution options"
+                    );
+                    ensure!(
+                        uuid::Uuid::parse_str(&details.uuid)?.to_string() == details.uuid,
+                        "Unknown async request UUID"
+                    );
+                    next = next.next(LandExecutionState::Accepted {
+                        uuid: details.uuid,
+                        response: evidence,
+                    })?;
+                    Ok(LandProgress::Pending(Box::new(next.clone())))
+                }
+                AsyncResult::Merged(sha) => {
+                    ensure!(response.status == 200, "Unexpected merge response status");
+                    next = next.next(LandExecutionState::Merged {
+                        sha: sha.clone(),
+                        response: evidence,
+                    })?;
+                    Ok(LandProgress::Landed(Box::new(
+                        self.landed_receipt(&next, Some(&sha))?,
+                    )))
+                }
+                AsyncResult::Enqueued | AsyncResult::Failed => bail!("Merge is quarantined"),
+            }
+        })();
         match result {
-            AsyncResult::Pending(details) => {
-                ensure!(
-                    details.merge_method == "squash"
-                        && details.merge_action == "direct_merge"
-                        && details.expected_head_sha == intent.observation.published.head
-                        && details.bypass_rules != Some(true),
-                    "Async merge options missing/different; inspect only"
-                );
-                ensure!(
-                    uuid::Uuid::parse_str(&details.uuid)?.to_string() == details.uuid,
-                    "Unknown async request UUID"
-                );
-                let mut next = intent.clone();
-                next.async_uuid = Some(details.uuid);
-                Ok(LandProgress::Pending(Box::new(next)))
-            }
-            AsyncResult::Merged(sha) => Ok(LandProgress::Landed(Box::new(
-                self.landed_receipt(intent, Some(&sha))?,
-            ))),
-            AsyncResult::Enqueued => {
-                bail!("Queue admission is not landing; no queue fallback authorized")
-            }
-            AsyncResult::Failed => bail!("GitHub merge failed; no retry/fallback authorized"),
+            Ok(progress) => LandOutcome::Confirmed(progress),
+            Err(error) => uncertain(next, error.to_string()),
         }
     }
     fn landed_receipt(
         &self,
-        intent: &LandIntent,
+        execution: &LandExecution,
         expected_merge: Option<&str>,
     ) -> Result<LandedSource> {
-        intent.validate()?;
+        execution.validate()?;
+        ensure!(
+            !matches!(execution.state, LandExecutionState::Quarantined { .. }),
+            "Quarantined execution cannot authorize Land/Deploy"
+        );
+        let intent = &execution.intent;
         let published = &intent.observation.published;
         self.repository(&published.destination)?;
         let actual = self.actual_pr(published, false)?;
@@ -503,6 +591,8 @@ impl<T: Transport> Forge<T> {
             "Actual landed skill tree differs from approved skill"
         );
         Ok(LandedSource {
+            execution_version: LandExecutionVersion::V1,
+            execution_digest: execution.digest.clone(),
             identity: published.identity.clone(),
             approved_head: published.head.clone(),
             merged_commit: merged.into(),
@@ -515,50 +605,83 @@ impl<T: Transport> Forge<T> {
             api_version: API_VERSION.into(),
         })
     }
-    /// Read-only reconciliation. Even a missing/expired async UUID never resubmits merge.
-    pub fn reconcile_land(&self, intent: &LandIntent) -> Outcome<LandProgress> {
-        let result = (|| {
-            intent.validate()?;
-            if let Some(uuid) = &intent.async_uuid {
-                ensure!(
-                    uuid::Uuid::parse_str(uuid)?.to_string() == *uuid,
-                    "Invalid async UUID"
-                );
-                let published = &intent.observation.published;
-                let response = self.request(
-                    &published.destination,
-                    Method::Get,
-                    &format!("/pulls/{}/merge-async/{uuid}", published.identity.number),
-                    None,
-                )?;
-                if response.status == 200 && !response.next_page {
-                    return self.settle_async(intent, decode_async(&response.body)?);
+    /// Read-only. Only the latest durable execution is accepted, never LandIntent.
+    /// Quarantine is permanent even when the same PR/head/tree later looks merged.
+    pub fn reconcile_land(&self, execution: &LandExecution) -> LandOutcome {
+        if let Err(error) = execution.validate() {
+            return uncertain(execution.clone(), error.to_string());
+        }
+        if matches!(execution.state, LandExecutionState::Quarantined { .. }) {
+            return uncertain(
+                execution.clone(),
+                "Known prohibited/unknown execution is quarantined; no Land/Deploy authority",
+            );
+        }
+        if let LandExecutionState::Accepted { uuid, .. } = &execution.state {
+            let published = &execution.intent.observation.published;
+            match self.request(
+                &published.destination,
+                Method::Get,
+                &format!("/pulls/{}/merge-async/{uuid}", published.identity.number),
+                None,
+            ) {
+                Ok(response) if expired_async_response(&response) => {}
+                Ok(response) => {
+                    return self.observe_execution_response(execution, &response, false)
                 }
+                Err(error) => return uncertain(execution.clone(), error.to_string()),
             }
-            Ok(LandProgress::Landed(Box::new(
-                self.landed_receipt(intent, None)?,
-            )))
-        })();
-        match result {
-            Ok(value) => Outcome::Confirmed(value),
-            Err(error) => Outcome::Unknown(error.to_string()),
+        }
+        let expected = match &execution.state {
+            LandExecutionState::Merged { sha, .. } => Some(sha.as_str()),
+            _ => None,
+        };
+        match self.landed_receipt(execution, expected) {
+            Ok(receipt) => LandOutcome::Confirmed(LandProgress::Landed(Box::new(receipt))),
+            Err(error) => uncertain(execution.clone(), error.to_string()),
         }
     }
-    /// Bounded polling of persisted pending intent; no merge writes or unbounded retry loop.
-    pub fn poll_land(&self, intent: &LandIntent) -> Outcome<LandProgress> {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let mut current = intent.clone();
-        for _ in 0..10 {
-            match self.reconcile_land(&current) {
-                Outcome::Confirmed(LandProgress::Pending(next)) => current = *next,
-                result => return result,
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        Outcome::Confirmed(LandProgress::Pending(Box::new(current)))
+    /// Bounded reads. The host must persist each returned execution before the next read.
+    pub fn poll_land(&self, execution: &LandExecution) -> LandOutcome {
+        self.reconcile_land(execution)
+    }
+}
+
+fn uncertain(execution: LandExecution, reason: impl Into<String>) -> LandOutcome {
+    LandOutcome::Uncertain {
+        execution: Box::new(execution),
+        reason: reason.into(),
+    }
+}
+fn expired_async_response(response: &HttpResponse) -> bool {
+    if response.status != 404 || response.next_page {
+        return false;
+    }
+    let Ok(Value::Object(value)) = serde_json::from_slice::<Value>(&response.body) else {
+        return false;
+    };
+    value.get("message").and_then(Value::as_str) == Some("Not Found")
+        && value
+            .keys()
+            .all(|k| matches!(k.as_str(), "message" | "documentation_url" | "status"))
+        && value.get("status").is_none_or(|v| v == "404")
+}
+fn response_evidence(response: &HttpResponse) -> LandResponseEvidence {
+    let value: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+    let text = |value: &Value| value.as_str().filter(|s| s.len() <= 200).map(str::to_owned);
+    LandResponseEvidence {
+        http_status: response.status,
+        body_digest: Sha256::digest(&response.body)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect(),
+        status: text(&value["status"]),
+        async_uuid: text(&value["details"]["uuid"]),
+        merge_action: text(&value["details"]["merge_action"]),
+        merge_method: text(&value["details"]["merge_method"]),
+        expected_head_sha: text(&value["details"]["expected_head_sha"]),
+        bypass_rules: value["details"]["bypass_rules"].as_bool(),
+        merged_commit: text(&value["details"]["sha"]),
     }
 }
 

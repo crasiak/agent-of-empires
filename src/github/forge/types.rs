@@ -277,17 +277,14 @@ pub struct LandApproval {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LandIntent {
+    pub(super) version: LandExecutionVersion,
     pub(super) attempt: String,
     pub(super) observation: PolicyObservation,
     pub(super) approval: LandApproval,
-    pub(super) async_uuid: Option<String>,
 }
 impl LandIntent {
     pub fn attempt(&self) -> &str {
         &self.attempt
-    }
-    pub fn async_uuid(&self) -> Option<&str> {
-        self.async_uuid.as_deref()
     }
     pub fn observation(&self) -> &PolicyObservation {
         &self.observation
@@ -304,6 +301,176 @@ impl LandIntent {
         Ok(())
     }
 }
+/// Required on all new Land intents, execution records and landed receipts.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LandExecutionVersion {
+    V1,
+}
+
+/// A received response is distinct from an acknowledgment that was never observed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LandResponseEvidence {
+    pub http_status: u16,
+    pub body_digest: String,
+    pub status: Option<String>,
+    pub async_uuid: Option<String>,
+    pub merge_action: Option<String>,
+    pub merge_method: Option<String>,
+    pub expected_head_sha: Option<String>,
+    pub bypass_rules: Option<bool>,
+    pub merged_commit: Option<String>,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LandQuarantineReason {
+    Bypass,
+    Action,
+    Method,
+    Head,
+    Enqueued,
+    Failed,
+    UnrecognizedResponse,
+    UnexpectedHttpStatus,
+    RequestIdentity,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LandExecutionState {
+    /// Host-persisted admission; a crash may occur before the write acknowledgment.
+    Admitted,
+    UnobservedAck,
+    Accepted {
+        uuid: String,
+        response: LandResponseEvidence,
+    },
+    Merged {
+        sha: String,
+        response: LandResponseEvidence,
+    },
+    Quarantined {
+        reason: LandQuarantineReason,
+        response: LandResponseEvidence,
+    },
+}
+/// Persist the latest returned execution before continuing. Never restore an older
+/// admission over observed evidence, even if the PR later looks correctly merged.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LandExecution {
+    pub(super) version: LandExecutionVersion,
+    pub(super) intent: LandIntent,
+    pub(super) state: LandExecutionState,
+    pub(super) request_uuid: Option<String>,
+    pub(super) digest: String,
+}
+impl LandExecution {
+    pub fn intent(&self) -> &LandIntent {
+        &self.intent
+    }
+    pub fn attempt(&self) -> &str {
+        self.intent.attempt()
+    }
+    pub fn state(&self) -> &LandExecutionState {
+        &self.state
+    }
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+    pub fn async_uuid(&self) -> Option<&str> {
+        self.request_uuid.as_deref()
+    }
+    fn computed_digest(&self) -> Result<String> {
+        let mut copy = self.clone();
+        copy.digest.clear();
+        digest(&copy)
+    }
+    pub(super) fn next(&self, state: LandExecutionState) -> Result<Self> {
+        let mut next = Self {
+            state,
+            ..self.clone()
+        };
+        next.digest = next.computed_digest()?;
+        Ok(next)
+    }
+    pub(super) fn validate(&self) -> Result<()> {
+        self.intent.validate()?;
+        ensure!(
+            self.computed_digest()? == self.digest,
+            "Land execution evidence changed"
+        );
+        if let LandExecutionState::Accepted { response, .. }
+        | LandExecutionState::Merged { response, .. }
+        | LandExecutionState::Quarantined { response, .. } = &self.state
+        {
+            ensure!(
+                response.body_digest.len() == 64
+                    && response
+                        .body_digest
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+                "Missing/invalid execution response identity"
+            );
+        }
+        match &self.state {
+            LandExecutionState::Accepted { uuid, response } => {
+                ensure!(
+                    uuid::Uuid::parse_str(uuid)?.to_string() == *uuid
+                        && self.request_uuid.as_deref() == Some(uuid)
+                        && response.async_uuid.as_deref() == Some(uuid)
+                        && response.status.as_deref() == Some("pending")
+                        && response.merge_action.as_deref() == Some("direct_merge")
+                        && response.merge_method.as_deref() == Some("squash")
+                        && response.expected_head_sha.as_deref()
+                            == Some(&self.intent.observation.published.head)
+                        && response.bypass_rules != Some(true),
+                    "Invalid accepted execution evidence"
+                );
+            }
+            LandExecutionState::Merged { sha, response } => {
+                oid(sha)?;
+                ensure!(
+                    response.http_status == 200
+                        && response.status.as_deref() == Some("merged")
+                        && response.merged_commit.as_deref() == Some(sha)
+                        && response.bypass_rules != Some(true)
+                        && response
+                            .merge_action
+                            .as_deref()
+                            .is_none_or(|v| v == "direct_merge")
+                        && response
+                            .merge_method
+                            .as_deref()
+                            .is_none_or(|v| v == "squash")
+                        && response
+                            .expected_head_sha
+                            .as_deref()
+                            .is_none_or(|v| v == self.intent.observation.published.head),
+                    "Invalid merged execution evidence"
+                );
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "outcome",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum LandOutcome {
+    Confirmed(LandProgress),
+    Refused(String),
+    /// May have completed. Persist this exact execution, never retry the write.
+    Uncertain {
+        execution: Box<LandExecution>,
+        reason: String,
+    },
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -312,13 +479,15 @@ impl LandIntent {
     deny_unknown_fields
 )]
 pub enum LandProgress {
-    Pending(Box<LandIntent>),
+    Pending(Box<LandExecution>),
     Landed(Box<LandedSource>),
 }
 /// Only actual merged PR and Git commit/tree evidence can produce this receipt.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LandedSource {
+    pub execution_version: LandExecutionVersion,
+    pub execution_digest: String,
     pub identity: PrIdentity,
     pub approved_head: String,
     pub merged_commit: String,
@@ -329,4 +498,18 @@ pub struct LandedSource {
     pub land_intent_digest: String,
     pub policy_digest: String,
     pub api_version: String,
+}
+
+impl LandedSource {
+    pub(super) fn validate_execution(&self) -> Result<()> {
+        ensure!(
+            self.execution_digest.len() == 64
+                && self
+                    .execution_digest
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
+            "Missing/invalid landed execution evidence"
+        );
+        Ok(())
+    }
 }

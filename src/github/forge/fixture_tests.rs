@@ -303,11 +303,53 @@ impl Transport for Fake {
                     bail!("fixture lost merge ACK");
                 }
                 status = 202;
-                json!({"status":"pending","details":{"message":"accepted, not protection approval","uuid":ASYNC_UUID,"merge_method":"squash","merge_action":"direct_merge","expected_head_sha":body["sha"],"bypass_rules":false}})
+                let mut response = json!({"status":"pending","details":{"message":"accepted, not protection approval","uuid":ASYNC_UUID,"merge_method":"squash","merge_action":"direct_merge","expected_head_sha":body["sha"],"bypass_rules":false}});
+                match state.fault.as_str() {
+                    "bad_bypass" => response["details"]["bypass_rules"] = json!(true),
+                    "bad_action" => response["details"]["merge_action"] = json!("merge_queue"),
+                    "bad_method" => response["details"]["merge_method"] = json!("merge"),
+                    "bad_head" => {
+                        response["details"]["expected_head_sha"] =
+                            json!("1111111111111111111111111111111111111111")
+                    }
+                    "bad_unknown" => response["details"]["unknown_policy"] = json!(true),
+                    "bad_enqueued" => {
+                        response = json!({"status":"enqueued","details":{"message":"queued"}})
+                    }
+                    _ => {}
+                }
+                response
             }
             (Method::Get, p) if p == format!("/pulls/3/merge-async/{ASYNC_UUID}") => {
                 state.pending_reads += 1;
-                json!({"status":"merged","details":{"message":"merged","sha":state.pr.as_ref().unwrap()["merge_commit_sha"]}})
+                if state.fault == "expired" {
+                    status = 404;
+                    json!({"message":"Not Found","status":"404"})
+                } else if state.fault.starts_with("bad_") || state.fault == "404_bypass" {
+                    let mut value = json!({"status":"pending","details":{"message":"observed contradictory execution","uuid":ASYNC_UUID,"merge_method":"squash","merge_action":"direct_merge","expected_head_sha":state.source.commit_oid,"bypass_rules":false}});
+                    match state.fault.as_str() {
+                        "bad_bypass" | "404_bypass" => {
+                            value["details"]["bypass_rules"] = json!(true);
+                            if state.fault == "404_bypass" {
+                                status = 404;
+                            }
+                        }
+                        "bad_action" => value["details"]["merge_action"] = json!("merge_queue"),
+                        "bad_method" => value["details"]["merge_method"] = json!("merge"),
+                        "bad_head" => {
+                            value["details"]["expected_head_sha"] =
+                                json!("1111111111111111111111111111111111111111")
+                        }
+                        "bad_unknown" => value["details"]["future"] = json!(true),
+                        "bad_enqueued" => {
+                            value = json!({"status":"enqueued","details":{"message":"queued"}})
+                        }
+                        _ => {}
+                    }
+                    value
+                } else {
+                    json!({"status":"merged","details":{"message":"merged","sha":state.pr.as_ref().unwrap()["merge_commit_sha"]}})
+                }
             }
             _ => panic!(
                 "Unexpected fixture request {:?} {}",
@@ -465,12 +507,15 @@ fn host_publish_and_nonbypass_land_verify_actual_subtree_under_advanced_base() {
     let published = setup.published();
     assert_eq!(published.head, setup.source.commit_oid);
     let intent = setup.land_intent(&published);
-    let pending = match setup.forge().land(&intent) {
-        Outcome::Confirmed(LandProgress::Pending(next)) => next,
+    let pending = match setup
+        .forge()
+        .land(&setup.forge().begin_land(&intent).unwrap())
+    {
+        LandOutcome::Confirmed(LandProgress::Pending(next)) => next,
         other => panic!("{other:?}"),
     };
     let landed = match setup.forge().poll_land(&pending) {
-        Outcome::Confirmed(LandProgress::Landed(receipt)) => receipt,
+        LandOutcome::Confirmed(LandProgress::Landed(receipt)) => receipt,
         other => panic!("{other:?}"),
     };
     assert_eq!(landed.approved_head, published.head);
@@ -582,13 +627,16 @@ fn exclusive_custody_is_explicit_and_detected_concurrent_drift_blocks_landed_pro
         .prepare_land(intent.observation.clone(), approval)
         .is_err());
     setup.remote.lock().unwrap().fault = "drift_after_merge".into();
-    let pending = match setup.forge().land(&intent) {
-        Outcome::Confirmed(LandProgress::Pending(next)) => next,
+    let pending = match setup
+        .forge()
+        .land(&setup.forge().begin_land(&intent).unwrap())
+    {
+        LandOutcome::Confirmed(LandProgress::Pending(next)) => next,
         other => panic!("{other:?}"),
     };
     assert!(matches!(
         setup.forge().reconcile_land(&pending),
-        Outcome::Unknown(_)
+        LandOutcome::Uncertain { .. }
     ));
 }
 #[test]
@@ -598,20 +646,32 @@ fn lost_merge_ack_only_inspects_and_wrong_landed_tree_never_produces_receipt() {
         let published = setup.published();
         let intent = setup.land_intent(&published);
         setup.remote.lock().unwrap().fault = fault.into();
-        let result = setup.forge().land(&intent);
+        let result = setup
+            .forge()
+            .land(&setup.forge().begin_land(&intent).unwrap());
         let writes = setup.remote.lock().unwrap().writes.len();
         match (fault, result) {
-            ("merge_ack", Outcome::Unknown(_)) => assert!(matches!(
-                setup.forge().reconcile_land(&intent),
-                Outcome::Confirmed(LandProgress::Landed(_))
-            )),
-            ("wrong_tree", Outcome::Confirmed(LandProgress::Pending(next))) => assert!(matches!(
-                setup.forge().reconcile_land(&next),
-                Outcome::Unknown(_)
-            )),
-            ("policy_rejected", Outcome::Unknown(_)) => assert!(matches!(
-                setup.forge().reconcile_land(&intent),
-                Outcome::Unknown(_)
+            ("merge_ack", LandOutcome::Uncertain { execution, .. }) => {
+                assert!(matches!(
+                    execution.state(),
+                    LandExecutionState::UnobservedAck
+                ));
+                let restored: LandExecution =
+                    serde_json::from_slice(&serde_json::to_vec(&execution).unwrap()).unwrap();
+                assert!(matches!(
+                    setup.forge().reconcile_land(&restored),
+                    LandOutcome::Confirmed(LandProgress::Landed(_))
+                ));
+            }
+            ("wrong_tree", LandOutcome::Confirmed(LandProgress::Pending(next))) => {
+                assert!(matches!(
+                    setup.forge().reconcile_land(&next),
+                    LandOutcome::Uncertain { .. }
+                ))
+            }
+            ("policy_rejected", LandOutcome::Uncertain { execution, .. }) => assert!(matches!(
+                setup.forge().reconcile_land(&execution),
+                LandOutcome::Uncertain { .. }
             )),
             (_, other) => panic!("{other:?}"),
         }
@@ -623,12 +683,15 @@ fn actual_landed(setup: &Setup, fault: &str) -> (PublishedPr, Box<LandedSource>)
     let published = setup.published();
     let intent = setup.land_intent(&published);
     setup.remote.lock().unwrap().fault = fault.into();
-    let pending = match setup.forge().land(&intent) {
-        Outcome::Confirmed(LandProgress::Pending(next)) => next,
+    let pending = match setup
+        .forge()
+        .land(&setup.forge().begin_land(&intent).unwrap())
+    {
+        LandOutcome::Confirmed(LandProgress::Pending(next)) => next,
         other => panic!("{other:?}"),
     };
     let landed = match setup.forge().reconcile_land(&pending) {
-        Outcome::Confirmed(LandProgress::Landed(receipt)) => receipt,
+        LandOutcome::Confirmed(LandProgress::Landed(receipt)) => receipt,
         other => panic!("{other:?}"),
     };
     (published, landed)
@@ -927,4 +990,196 @@ fn source_and_account_changes_refuse_before_writes_and_user_index_is_preserved()
         Outcome::Refused(_)
     ));
     assert_eq!(setup.remote.lock().unwrap().writes.len(), writes);
+}
+
+#[test]
+fn known_prohibited_execution_never_upgrades_through_reconciliation() {
+    for fault in [
+        "bad_bypass",
+        "bad_enqueued",
+        "bad_action",
+        "bad_method",
+        "bad_head",
+        "bad_unknown",
+    ] {
+        let setup = Setup::new();
+        let published = setup.published();
+        let intent = setup.land_intent(&published);
+        let admitted = setup.forge().begin_land(&intent).unwrap();
+        setup.remote.lock().unwrap().fault = fault.into();
+        let execution = match setup.forge().land(&admitted) {
+            LandOutcome::Uncertain { execution, .. } => execution,
+            other => panic!("{fault}: {other:?}"),
+        };
+        assert!(
+            matches!(execution.state(), LandExecutionState::Quarantined { .. }),
+            "{fault}"
+        );
+        assert_eq!(execution.attempt(), intent.attempt());
+        assert_eq!(
+            execution.intent().observation().published.head,
+            published.head
+        );
+        if fault != "bad_enqueued" {
+            assert_eq!(execution.async_uuid(), Some(ASYNC_UUID));
+        }
+        assert_eq!(
+            setup.remote.lock().unwrap().pr.as_ref().unwrap()["merged"],
+            true
+        );
+        let encoded = serde_json::to_vec(&execution).unwrap();
+        drop(execution);
+        drop(admitted);
+        drop(intent);
+        let restored: LandExecution = serde_json::from_slice(&encoded).unwrap();
+        setup.remote.lock().unwrap().fault = String::new();
+        let writes = setup.remote.lock().unwrap().writes.len();
+        let next = match setup.forge().reconcile_land(&restored) {
+            LandOutcome::Uncertain { execution, .. } => execution,
+            other => panic!("{fault}: quarantined operation upgraded to {other:?}"),
+        };
+        assert!(matches!(
+            next.state(),
+            LandExecutionState::Quarantined { .. }
+        ));
+        assert_eq!(next.digest(), restored.digest());
+        assert!(matches!(
+            setup.forge().poll_land(&next),
+            LandOutcome::Uncertain { .. }
+        ));
+        assert!(matches!(
+            setup.forge().land(&next),
+            LandOutcome::Uncertain { .. }
+        ));
+        assert_eq!(
+            setup.remote.lock().unwrap().writes.len(),
+            writes,
+            "Quarantine is never replayed"
+        );
+    }
+}
+
+#[test]
+fn polling_preserves_prohibited_response_and_never_reverts_to_prior_accepted_evidence() {
+    for fault in [
+        "bad_bypass",
+        "bad_enqueued",
+        "bad_action",
+        "bad_method",
+        "bad_head",
+        "bad_unknown",
+        "404_bypass",
+    ] {
+        let setup = Setup::new();
+        let published = setup.published();
+        let intent = setup.land_intent(&published);
+        let admitted = setup.forge().begin_land(&intent).unwrap();
+        let pending = match setup.forge().land(&admitted) {
+            LandOutcome::Confirmed(LandProgress::Pending(next)) => next,
+            other => panic!("{other:?}"),
+        };
+        let persisted: LandExecution =
+            serde_json::from_slice(&serde_json::to_vec(&pending).unwrap()).unwrap();
+        drop(pending);
+        setup.remote.lock().unwrap().fault = fault.into();
+        let quarantine = match setup.forge().poll_land(&persisted) {
+            LandOutcome::Uncertain { execution, .. } => execution,
+            other => panic!("{fault}: {other:?}"),
+        };
+        assert!(matches!(
+            quarantine.state(),
+            LandExecutionState::Quarantined { .. }
+        ));
+        assert_eq!(quarantine.async_uuid(), Some(ASYNC_UUID));
+        let persisted: LandExecution =
+            serde_json::from_slice(&serde_json::to_vec(&quarantine).unwrap()).unwrap();
+        drop(quarantine);
+        setup.remote.lock().unwrap().fault = String::new();
+        let reads = setup.remote.lock().unwrap().pending_reads;
+        assert!(matches!(
+            setup.forge().reconcile_land(&persisted),
+            LandOutcome::Uncertain { .. }
+        ));
+        assert_eq!(
+            setup.remote.lock().unwrap().pending_reads,
+            reads,
+            "Quarantine must not be upgraded by later merged response"
+        );
+        assert_eq!(
+            setup.remote.lock().unwrap().pr.as_ref().unwrap()["merged"],
+            true
+        );
+    }
+}
+#[test]
+fn execution_versions_fence_old_intents_landed_sources_and_projection_receipts() {
+    let setup = Setup::new();
+    let published = setup.published();
+    let intent = setup.land_intent(&published);
+    let mut old_intent = serde_json::to_value(&intent).unwrap();
+    old_intent.as_object_mut().unwrap().remove("version");
+    assert!(serde_json::from_value::<LandIntent>(old_intent).is_err());
+    assert!(
+        serde_json::from_value::<LandExecution>(serde_json::to_value(&intent).unwrap()).is_err(),
+        "Original intent is not execution/reconciliation evidence"
+    );
+    let admitted = setup.forge().begin_land(&intent).unwrap();
+    let mut missing_evidence = serde_json::to_value(&admitted).unwrap();
+    missing_evidence.as_object_mut().unwrap().remove("state");
+    assert!(serde_json::from_value::<LandExecution>(missing_evidence).is_err());
+    let pending = match setup.forge().land(&admitted) {
+        LandOutcome::Confirmed(LandProgress::Pending(next)) => next,
+        other => panic!("{other:?}"),
+    };
+    setup.remote.lock().unwrap().fault = "expired".into();
+    let landed = match setup.forge().reconcile_land(&pending) {
+        LandOutcome::Confirmed(LandProgress::Landed(receipt)) => receipt,
+        other => panic!("{other:?}"),
+    };
+    for field in ["execution_version", "execution_digest"] {
+        let mut old_landed = serde_json::to_value(&landed).unwrap();
+        old_landed.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<LandedSource>(old_landed).is_err(),
+            "{field}"
+        );
+    }
+    let mut invalid = (*landed).clone();
+    invalid.execution_digest.clear();
+    let parent = private_parent();
+    assert!(setup
+        .forge()
+        .export_landed(
+            &invalid,
+            &published.destination,
+            &parent.path().canonicalize().unwrap()
+        )
+        .is_err());
+    assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    let receipt = setup
+        .forge()
+        .export_landed(
+            &landed,
+            &published.destination,
+            &parent.path().canonicalize().unwrap(),
+        )
+        .unwrap();
+    let mut old_projection = serde_json::to_value(&receipt).unwrap();
+    old_projection["landed"]
+        .as_object_mut()
+        .unwrap()
+        .remove("execution_digest");
+    assert!(serde_json::from_value::<ProjectionReceipt>(old_projection.clone()).is_err());
+    std::fs::write(
+        receipt.directory().join("projection.json"),
+        serde_json::to_vec(&old_projection).unwrap(),
+    )
+    .unwrap();
+    assert!(receipt.verify().is_err());
+    let directory = receipt.directory().to_owned();
+    drop(receipt);
+    assert!(
+        directory.exists(),
+        "Receipt fence must not delete retained evidence"
+    );
 }

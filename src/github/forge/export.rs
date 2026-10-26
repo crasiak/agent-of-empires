@@ -33,6 +33,7 @@ impl ProjectionReceipt {
     }
     /// Local-only reopen verification, including full private-cache file fingerprint.
     pub fn verify(&self) -> Result<()> {
+        self.landed.validate_execution()?;
         ensure!(
             self.computed_digest()? == self.digest,
             "Projection receipt changed"
@@ -67,6 +68,7 @@ impl<T: Transport> Forge<T> {
         destination: &Destination,
         private_parent: &Path,
     ) -> Result<ProjectionReceipt> {
+        landed.validate_execution()?;
         destination.validate()?;
         ensure!(
             landed.identity.repository_id == destination.repository_id
