@@ -3,7 +3,9 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::TryRecvError;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
@@ -72,6 +74,8 @@ pub struct SessionSearchDialog {
     error: Option<QueryError>,
     /// Latest generation requested; older results are dropped.
     generation: u64,
+    /// `generation`, shared with the worker so it skips queued stale requests.
+    latest: Arc<AtomicU64>,
     in_flight: usize,
     pending: Pending,
     spin: usize,
@@ -80,7 +84,17 @@ pub struct SessionSearchDialog {
 }
 
 impl SessionSearchDialog {
-    pub fn new(here_repo: Option<String>, runner: Runner, resolver: Resolver) -> Self {
+    pub fn new(here_repo: Option<String>, mut runner: Runner, resolver: Resolver) -> Self {
+        let latest = Arc::new(AtomicU64::new(0));
+        let seen = Arc::clone(&latest);
+        // The worker runs one request at a time; anything superseded while it
+        // waited answers empty at once rather than running to its timeout.
+        let worker = Worker::spawn("aoe-session-search", move |req: Request| {
+            if req.generation < seen.load(Ordering::Relaxed) {
+                return (req.generation, Ok(Vec::new()));
+            }
+            runner(req)
+        });
         Self {
             input: Input::default(),
             scope: Scope::All,
@@ -92,10 +106,11 @@ impl SessionSearchDialog {
             preview_on: None,
             error: None,
             generation: 0,
+            latest,
             in_flight: 0,
             pending: Pending::Idle,
             spin: 0,
-            worker: Worker::spawn("aoe-session-search", runner),
+            worker,
             resolver,
         }
     }
@@ -205,16 +220,21 @@ impl SessionSearchDialog {
         }
         // Too short to search: clear, and orphan any query still running.
         self.pending = Pending::Idle;
-        self.generation += 1;
+        self.bump();
         self.rows.clear();
         self.expanded.clear();
         self.cursor = 0;
         self.error = None;
     }
 
+    fn bump(&mut self) {
+        self.generation += 1;
+        self.latest.store(self.generation, Ordering::Relaxed);
+    }
+
     fn send(&mut self) {
         self.pending = Pending::Idle;
-        self.generation += 1;
+        self.bump();
         self.in_flight += 1;
         self.worker.request(Request {
             generation: self.generation,
@@ -742,20 +762,62 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_query_skips_the_ones_queued_behind_a_slow_one() {
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let (started, running) = std::sync::mpsc::channel::<()>();
+        let mut calls = 0;
+        let (mut d, sent) = dialog(
+            Some("attic"),
+            Box::new(move |req| {
+                calls += 1;
+                if calls == 1 {
+                    started.send(()).unwrap();
+                    blocked.recv().unwrap();
+                    let mut one = fixture();
+                    one.truncate(1);
+                    return (req.generation, Ok(one));
+                }
+                (req.generation, Ok(fixture()))
+            }),
+        );
+        let t = Instant::now();
+        type_text(&mut d, "abc");
+        d.tick(t);
+        d.tick(t + ms(301));
+        running.recv_timeout(Duration::from_secs(10)).unwrap();
+        for _ in 0..3 {
+            d.handle_key(key(KeyCode::Tab));
+        }
+        release.send(()).unwrap();
+        settle(&mut d, t + ms(301));
+        assert_eq!(
+            *sent.lock().unwrap(),
+            [
+                ("abc".to_string(), Scope::All),
+                ("abc".to_string(), Scope::All)
+            ]
+        );
+        assert_eq!(d.rows.len(), 2);
+    }
+
+    #[test]
     fn tab_cycles_the_scope_and_requeries() {
         let (mut d, sent) = dialog(Some("attic"), honest());
         let t = Instant::now();
         type_text(&mut d, "abc");
-        let here = Scope::Here("attic".into());
-        for want in [here.clone(), Scope::Recent, Scope::All] {
+        let before = d.generation;
+        for want in [Scope::Here("attic".into()), Scope::Recent, Scope::All] {
             d.handle_key(key(KeyCode::Tab));
             assert_eq!(d.scope, want);
         }
+        // Each Tab sends at once and absorbs the pending edit. Requests a
+        // later Tab superseded may be skipped, so only the last is certain.
+        assert_eq!(d.generation, before + 3);
         settle(&mut d, t);
-        // Tab sends at once and absorbs the pending edit.
         d.tick(t + ms(900));
-        let scopes: Vec<Scope> = sent.lock().unwrap().iter().map(|s| s.1.clone()).collect();
-        assert_eq!(scopes, [here, Scope::Recent, Scope::All]);
+        assert_eq!(d.generation, before + 3);
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.last().map(|s| &s.1), Some(&Scope::All));
 
         let (mut d, _) = dialog(None, honest());
         for want in [Scope::Recent, Scope::All] {
