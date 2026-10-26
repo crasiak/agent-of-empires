@@ -57,13 +57,9 @@ fn native_resume(
         _ => return None,
     };
     let (session_id, cwd, profile) = (session_id?, s.cwd.as_deref()?, s.profile.as_deref()?);
-    // The transcript is the resumed conversation's only when the hit is that
-    // conversation, not a subagent resuming its parent.
-    let transcript_path = s
-        .transcript_path
-        .as_deref()
-        .filter(|_| s.harness_session_id.as_deref() == Some(session_id))
-        .map(PathBuf::from);
+    // Way-back fields name the resume target, so a subagent hit carries its
+    // parent's transcript; the launch checks the header id against it.
+    let transcript_path = s.transcript_path.as_deref().map(PathBuf::from);
     // Pi resumes only from its exact transcript.
     if tool == "pi" && transcript_path.is_none() {
         return None;
@@ -172,11 +168,27 @@ mod tests {
             resolve(&pi, &|_| false, &profiles, home),
             Target::CopyOnly(_)
         ));
-        // A subagent hit resumes its parent, whose transcript it does not carry.
+        // A subagent hit resumes its parent, natively only with the parent's transcript.
         assert!(matches!(
             resolve(&hits[2].session, &|_| false, &profiles, home),
             Target::CopyOnly(c) if c.contains("--session p-222")
         ));
+        let mut run = crate::session_search::query::parse(include_bytes!("testdata/query_v1.json"))
+            .unwrap()
+            .remove(2)
+            .session;
+        run.transcript_path = hits[1].session.transcript_path.clone();
+        assert_eq!(run.harness_session_id.as_deref(), Some("r-333"));
+        match resolve(&run, &|_| false, &profiles, home) {
+            Target::Resume(r) => {
+                assert_eq!(r.session_id, "p-222");
+                assert_eq!(
+                    r.transcript_path.as_deref(),
+                    run.transcript_path.as_deref().map(Path::new)
+                );
+            }
+            _ => panic!("expected the parent's resume"),
+        }
         let mut bare =
             crate::session_search::query::parse(include_bytes!("testdata/query_v1.json"))
                 .unwrap()
