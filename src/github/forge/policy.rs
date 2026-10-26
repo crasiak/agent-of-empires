@@ -699,7 +699,13 @@ pub(super) struct PendingDetails {
     merge_method: String,
     merge_action: String,
     expected_head_sha: String,
+    #[serde(default, deserialize_with = "optional_bypass")]
     bypass_rules: Option<bool>,
+}
+fn optional_bypass<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> std::result::Result<Option<bool>, D::Error> {
+    bool::deserialize(decoder).map(Some)
 }
 pub(super) enum AsyncResult {
     Pending(PendingDetails),

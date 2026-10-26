@@ -306,6 +306,7 @@ impl Transport for Fake {
                 let mut response = json!({"status":"pending","details":{"message":"accepted, not protection approval","uuid":ASYNC_UUID,"merge_method":"squash","merge_action":"direct_merge","expected_head_sha":body["sha"],"bypass_rules":false}});
                 match state.fault.as_str() {
                     "bad_bypass" => response["details"]["bypass_rules"] = json!(true),
+                    "bad_null_bypass" => response["details"]["bypass_rules"] = Value::Null,
                     "bad_action" => response["details"]["merge_action"] = json!("merge_queue"),
                     "bad_method" => response["details"]["merge_method"] = json!("merge"),
                     "bad_head" => {
@@ -328,6 +329,7 @@ impl Transport for Fake {
                 } else if state.fault.starts_with("bad_") || state.fault == "404_bypass" {
                     let mut value = json!({"status":"pending","details":{"message":"observed contradictory execution","uuid":ASYNC_UUID,"merge_method":"squash","merge_action":"direct_merge","expected_head_sha":state.source.commit_oid,"bypass_rules":false}});
                     match state.fault.as_str() {
+                        "bad_null_bypass" => value["details"]["bypass_rules"] = Value::Null,
                         "bad_bypass" | "404_bypass" => {
                             value["details"]["bypass_rules"] = json!(true);
                             if state.fault == "404_bypass" {
@@ -996,6 +998,7 @@ fn source_and_account_changes_refuse_before_writes_and_user_index_is_preserved()
 fn known_prohibited_execution_never_upgrades_through_reconciliation() {
     for fault in [
         "bad_bypass",
+        "bad_null_bypass",
         "bad_enqueued",
         "bad_action",
         "bad_method",
@@ -1063,6 +1066,7 @@ fn known_prohibited_execution_never_upgrades_through_reconciliation() {
 fn polling_preserves_prohibited_response_and_never_reverts_to_prior_accepted_evidence() {
     for fault in [
         "bad_bypass",
+        "bad_null_bypass",
         "bad_enqueued",
         "bad_action",
         "bad_method",
