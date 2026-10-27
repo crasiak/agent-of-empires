@@ -128,8 +128,15 @@ struct WireChunk {
 }
 
 pub fn parse(stdout: &[u8]) -> Result<Vec<Hit>, QueryError> {
-    let wire: Wire =
-        serde_json::from_slice(stdout).map_err(|e| QueryError::BadOutput(e.to_string()))?;
+    // Not e.to_string(): serde quotes the bad value, which can be transcript text.
+    let wire: Wire = serde_json::from_slice(stdout).map_err(|e| {
+        QueryError::BadOutput(format!(
+            "{:?} error at line {} column {}",
+            e.classify(),
+            e.line(),
+            e.column()
+        ))
+    })?;
     if wire.contract != CONTRACT {
         return Err(QueryError::BadOutput(format!(
             "unexpected contract {:?}",
@@ -205,7 +212,7 @@ impl Client {
             ]),
             Scope::Recent => args.extend(["--lens".into(), "recent".into()]),
         }
-        args.push(req.text.clone());
+        args.extend(["--".into(), req.text.clone()]);
         args
     }
 
@@ -222,8 +229,8 @@ impl Client {
                 let first = String::from_utf8_lossy(&out.stderr)
                     .lines()
                     .next()
-                    .unwrap_or("")
-                    .to_string();
+                    .filter(|l| !l.is_empty())
+                    .map_or_else(|| out.status.to_string(), str::to_string);
                 if first.contains("cannot reach the service") {
                     Err(QueryError::NotRunning(first))
                 } else {
@@ -264,6 +271,13 @@ mod tests {
             Err(QueryError::BadOutput(_))
         ));
         assert!(matches!(parse(b"not json"), Err(QueryError::BadOutput(_))));
+        match parse(br#"{"contract":"session-search-query-v1","hits":"secret-words"}"#) {
+            Err(QueryError::BadOutput(e)) => {
+                assert!(!e.contains("secret-words"), "{e}");
+                assert!(e.contains("line 1"), "{e}");
+            }
+            _ => panic!("expected BadOutput"),
+        }
     }
 
     #[test]
@@ -275,7 +289,7 @@ mod tests {
         };
         assert_eq!(
             Client::args(&req(Scope::All)),
-            ["query", "--json", "--limit", "50", "two words"]
+            ["query", "--json", "--limit", "50", "--", "two words"]
         );
         assert_eq!(
             Client::args(&req(Scope::Here("attic".into()))),
@@ -288,6 +302,7 @@ mod tests {
                 "here",
                 "--param",
                 "repo=attic",
+                "--",
                 "two words"
             ]
         );
@@ -300,6 +315,7 @@ mod tests {
                 "50",
                 "--lens",
                 "recent",
+                "--",
                 "two words"
             ]
         );
@@ -336,6 +352,11 @@ mod tests {
             client(down, 2000).run(&req),
             Err(QueryError::NotRunning(_))
         ));
+        let silent = script("silent", "exit 3");
+        match client(silent, 2000).run(&req) {
+            Err(QueryError::Failed(e)) => assert!(e.contains('3'), "{e:?}"),
+            _ => panic!("expected Failed"),
+        }
         let slow = script("slow", "exec sleep 5");
         assert!(matches!(
             client(slow, 200).run(&req),
