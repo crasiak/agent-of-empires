@@ -208,7 +208,8 @@ test("the extension registers the status writer only for a valid AOE_INSTANCE_ID
       const pi = bus();
       aoeSessionId(pi);
       // Registration only: firing would write under the real per-user base.
-      for (const name of ["agent_start", "tool_execution_start", "tool_execution_end"]) {
+      // agent_start is always registered: the work arc tracks busy turns.
+      for (const name of ["tool_execution_start", "tool_execution_end"]) {
         assert.equal(pi.handlers.has(name), expected, `${id}: ${name}`);
       }
       assert.equal(pi.handlers.has("agent_end"), false, "agent_end never writes idle");

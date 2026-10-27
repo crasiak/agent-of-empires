@@ -14,7 +14,7 @@ const sid = "11111111-1111-4111-8111-111111111111";
 function setup(t) {
   const dir = mkdtempSync(join(tmpdir(), "aoe-pi-arc-cursor-"));
   const prior = Object.fromEntries(
-    ["AOE_SESSION_ID_FILE", "AOE_SESSION_SOURCE", "AOE_USAGE_BIN", "AOE_INSTANCE_ID"].map(
+    ["AOE_SESSION_ID_FILE", "AOE_SESSION_SOURCE", "AOE_USAGE_BIN", "AOE_INSTANCE_ID", "AOE_HOOK_BASE"].map(
       (key) => [key, process.env[key]],
     ),
   );
@@ -22,6 +22,8 @@ function setup(t) {
   process.env.AOE_SESSION_SOURCE = source;
   delete process.env.AOE_USAGE_BIN;
   process.env.AOE_INSTANCE_ID = "aoe-test";
+  // The absent sandbox mount: the hook status writer registers but writes nothing.
+  process.env.AOE_HOOK_BASE = "/root/.pi/aoe-session";
   t.after(async () => {
     await handlers.get("session_shutdown")({}, ctx);
     for (const [key, value] of Object.entries(prior)) {
@@ -31,7 +33,17 @@ function setup(t) {
     rmSync(dir, { recursive: true, force: true });
   });
   const handlers = new Map();
-  install({ on: (name, handler) => handlers.set(name, handler) });
+  // Pi runs every handler registered for an event, in order; the first one's result is the arc's.
+  install({
+    on: (name, handler) => {
+      const prior = handlers.get(name);
+      handlers.set(name, prior ? async (...args) => {
+        const result = await prior(...args);
+        await handler(...args);
+        return result;
+      } : handler);
+    },
+  });
   const state = { sid, leaf: null };
   const ctx = {
     isIdle: () => true,
