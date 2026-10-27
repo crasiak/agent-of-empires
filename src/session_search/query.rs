@@ -62,6 +62,8 @@ pub struct Snippet {
     pub ts: String,
     pub text: String,
     pub redactions: u32,
+    /// Byte offset of the snippet's record in `Session::transcript_path`.
+    pub offset: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -125,6 +127,13 @@ struct WireChunk {
     ts: String,
     #[serde(default)]
     redactions: u32,
+    #[serde(default)]
+    span: Option<WireSpan>,
+}
+
+#[derive(Deserialize)]
+struct WireSpan {
+    start: u64,
 }
 
 pub fn parse(stdout: &[u8]) -> Result<Vec<Hit>, QueryError> {
@@ -172,6 +181,7 @@ pub fn parse(stdout: &[u8]) -> Result<Vec<Hit>, QueryError> {
                         ts: c.ts,
                         text: c.snippet,
                         redactions: c.redactions,
+                        offset: c.span.map(|s| s.start),
                     })
                     .collect(),
             }
@@ -262,6 +272,7 @@ mod tests {
             "ledger-parent"
         );
         assert_eq!(hits[2].snippets[0].redactions, 1);
+        assert_eq!(hits[0].snippets[0].offset, Some(0));
     }
 
     #[test]
