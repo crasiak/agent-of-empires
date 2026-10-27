@@ -29,7 +29,12 @@ impl<'a> CachedPreview<'a> {
 
 /// Metadata rows before resources. `PreviewLayout` adds the shared info chrome.
 pub fn agent_info_height(instance: &Instance) -> u16 {
-    let base: u16 = 3 + u16::from(instance.current_launch_identity().is_some());
+    let arc_rows = if crate::session::work_arc::supported(instance) {
+        1 + 4 * u16::from(instance.work_arc_enabled)
+    } else {
+        0
+    };
+    let base: u16 = 3 + u16::from(instance.current_launch_identity().is_some()) + arc_rows;
     let sandbox_lines: u16 = if instance.is_sandboxed() { 1 } else { 0 };
     if let Some(wt) = instance.worktree_info.as_ref() {
         // blank + header + branch + main (+ optional base)
@@ -138,6 +143,28 @@ impl InfoAreas {
             badges: Rect::new(area.right() - badge_width, area.y, badge_width, area.height),
         }
     }
+}
+
+fn clip_info_text(text: &str, width: u16) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= usize::from(width) {
+        return text.into();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut columns = 0;
+    for ch in text.chars() {
+        let next = columns + ch.width().unwrap_or(0);
+        if next >= usize::from(width) {
+            break;
+        }
+        out.push(ch);
+        columns = next;
+    }
+    out.push('…');
+    out
 }
 
 pub struct Preview;
@@ -399,6 +426,51 @@ impl Preview {
             }
         }
 
+        if crate::session::work_arc::supported(instance) {
+            let record = crate::session::work_arc::visible_record(instance);
+            let covered = record
+                .map(|r| format!(", covered {}", r.at.format("%m-%d %H:%MZ")))
+                .unwrap_or_default();
+            let status = crate::session::work_arc::projection(instance);
+            let prior =
+                if record.is_some() && status != crate::session::work_arc::ArcStatus::Current {
+                    " (prior stale)"
+                } else {
+                    ""
+                };
+            let expand = if instance.work_arc_enabled {
+                " [menu: expand]"
+            } else {
+                ""
+            };
+            info_lines.push(Line::styled(
+                format!("Arc: {}{prior}{covered}{expand}", status.label()),
+                Style::default().fg(theme.dimmed),
+            ));
+            if instance.work_arc_enabled {
+                for (label, value) in [
+                    ("Goal: ", record.map(|r| r.arc.goal.as_str())),
+                    ("Now: ", record.map(|r| r.arc.now.as_str())),
+                    ("Remaining: ", record.map(|r| r.arc.remaining.as_str())),
+                    ("Next: ", record.map(|r| r.arc.next.as_str())),
+                ] {
+                    let label_width = unicode_width::UnicodeWidthStr::width(label) as u16;
+                    info_lines.push(Line::from(vec![
+                        Span::styled(
+                            clip_info_text(label, area.width),
+                            Style::default().fg(theme.dimmed),
+                        ),
+                        Span::styled(
+                            clip_info_text(
+                                value.unwrap_or("Unknown"),
+                                area.width.saturating_sub(label_width),
+                            ),
+                            Style::default().fg(theme.text),
+                        ),
+                    ]));
+                }
+            }
+        }
         let paragraph = Paragraph::new(info_lines);
         frame.render_widget(paragraph, area);
     }
@@ -740,6 +812,102 @@ mod tests {
             format_scroll_indicator(100, 20, 500),
             Some(" [80/80] ".to_string())
         );
+    }
+
+    #[test]
+    fn work_arc_info_buffer_shows_four_bounded_fields_states_and_expand_hint() {
+        use crate::session::work_arc::{ArcIdentity, ArcStatus, StoredArc, WorkArc};
+        use ratatui::{backend::TestBackend, Terminal};
+        let theme = crate::tui::styles::load_theme("empire");
+        let mut session = Instance::new("synthetic", "/tmp/synthetic");
+        session.tool = "pi".into();
+        session.agent_session_id = Some("synthetic-pi".into());
+        session.work_arc_enabled = true;
+        for (status, width) in [
+            (ArcStatus::Missing, 55),
+            (ArcStatus::Loading, 140),
+            (ArcStatus::Stale, 140),
+            (ArcStatus::Failed, 55),
+            (ArcStatus::Unavailable, 55),
+        ] {
+            session.work_arc_status = Some(status);
+            if status == ArcStatus::Stale {
+                session.work_arc.record = Some(StoredArc {
+                    identity: ArcIdentity {
+                        session_id: session.id.clone(),
+                        pi_id: "synthetic-pi".into(),
+                        launch_id: "launch".into(),
+                        generation: 0,
+                        leaf: "leaf".into(),
+                    },
+                    at: chrono::Utc::now(),
+                    arc: WorkArc {
+                        goal: "Goal evidence ".repeat(8),
+                        now: "Reported progress".into(),
+                        remaining: "Unknown".into(),
+                        next: "Review".into(),
+                    },
+                    selected_route: "fake/route".into(),
+                    provider: "fake".into(),
+                    model: "model".into(),
+                    usage: None,
+                });
+            }
+            let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    Preview::render_info(frame, frame.area(), &session, &theme, Duration::ZERO)
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let rows: Vec<String> = (0..buffer.area.height)
+                .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect();
+            let text = rows.join("\n");
+            assert!(
+                text.contains(status.label().split_whitespace().next().unwrap()),
+                "{text}"
+            );
+            for field in ["Goal:", "Now:", "Remaining:", "Next:"] {
+                assert!(text.contains(field), "{text}");
+            }
+            if status == ArcStatus::Stale {
+                assert!(rows[4].contains('…'), "clipped Goal has a cue: {text}");
+                assert!(text.contains("menu: expand"), "{text}");
+            }
+            assert!(rows[8].trim().is_empty(), "arc cannot spill into resources");
+        }
+    }
+
+    #[test]
+    fn work_arc_geometry_keeps_fields_resources_and_output_separate() {
+        let mut session = Instance::new("synthetic", "/tmp/synthetic");
+        session.tool = "pi".into();
+        session.work_arc_enabled = true;
+        for (width, height) in [(140, 40), (55, 30), (30, 8)] {
+            let area = Rect::new(0, 0, width, height);
+            let metadata = agent_info_height(&session);
+            assert_eq!(metadata, 8);
+            let layout = PreviewLayout::compute(area, false, true, metadata);
+            if height == 8 {
+                assert_eq!(layout.output, area);
+            }
+            if let Some(info) = layout.info {
+                let areas = InfoAreas::compute(info, metadata);
+                assert_eq!(areas.resources.y, areas.metadata.bottom());
+                assert_eq!(areas.resources.height, 3);
+                assert!(areas.badges.x > areas.metadata.right());
+                assert!(layout.output.y > areas.resources.bottom());
+            }
+            assert_eq!(
+                PreviewLayout::compute(area, true, true, metadata).output,
+                area
+            );
+            assert_eq!(
+                PreviewLayout::compute(area, false, false, metadata).output,
+                area
+            );
+        }
     }
 
     // `agent_info_height` drives both the preview layout split and the live-send

@@ -55,20 +55,21 @@ impl Drop for FailNextPiPathWriteGuard {
 /// the usage reporter when usage tracking is on (`bin`, instance id, profile).
 fn pi_extension_env(
     sidecar: &Path,
-    usage: Option<(&Path, &str, &str)>,
+    instance_id: &str,
+    usage: Option<(&Path, &str)>,
     waiting_tools: &[String],
 ) -> String {
     // An inherited `AOE_HOOK_BASE` would move the host Pi's status writes.
     let mut env = format!(
-        "AOE_SESSION_ID_FILE={} AOE_HOOK_BASE='' {}",
+        "AOE_SESSION_ID_FILE={} AOE_INSTANCE_ID={} AOE_HOOK_BASE='' {}",
         shell_escape(&sidecar.to_string_lossy()),
+        shell_escape(instance_id),
         pi_waiting_tools_env(waiting_tools),
     );
-    if let Some((bin, instance_id, profile)) = usage {
+    if let Some((bin, profile)) = usage {
         env.push_str(&format!(
-            "AOE_USAGE_BIN={} AOE_INSTANCE_ID={} AOE_PROFILE={} ",
+            "AOE_USAGE_BIN={} AOE_PROFILE={} ",
             shell_escape(&bin.to_string_lossy()),
-            shell_escape(instance_id),
             shell_escape(profile),
         ));
     }
@@ -122,9 +123,8 @@ impl Instance {
                 format!(" -e {}", shell_escape(&extension.to_string_lossy())),
                 pi_extension_env(
                     &sidecar,
-                    usage_bin
-                        .as_deref()
-                        .map(|bin| (bin, self.id.as_str(), profile.as_str())),
+                    &self.id,
+                    usage_bin.as_deref().map(|bin| (bin, profile.as_str())),
                     &crate::agents::pi_waiting_tools(&config),
                 ),
             ));
@@ -1164,8 +1164,9 @@ pi = "~/.pi-personal"
         let sidecar = std::path::Path::new("/tmp/aoe-hooks-1/abc/session_id");
         let bin = std::path::Path::new("/opt/aoe");
         let tools = ["ask_user".to_string(), "permission_gate".to_string()];
-        let without = pi_extension_env(sidecar, None, &tools);
+        let without = pi_extension_env(sidecar, "abc", None, &tools);
         assert!(without.starts_with("AOE_SESSION_ID_FILE="));
+        assert!(without.contains("AOE_INSTANCE_ID='abc'"));
         assert!(!without.contains("AOE_USAGE_BIN"));
         let entries = shell_words::split(&without).unwrap();
         for cleared in ["AOE_HOOK_BASE=", "AOE_PI_EXTENSION_PID="] {
@@ -1174,7 +1175,7 @@ pi = "~/.pi-personal"
                 "the host clears an inherited {cleared} so a Pi AoE launched owns the default base: {entries:?}"
             );
         }
-        let with = pi_extension_env(sidecar, Some((bin, "abc", "work")), &tools);
+        let with = pi_extension_env(sidecar, "abc", Some((bin, "work")), &tools);
         for needle in [
             "AOE_USAGE_BIN='/opt/aoe'",
             "AOE_INSTANCE_ID='abc'",

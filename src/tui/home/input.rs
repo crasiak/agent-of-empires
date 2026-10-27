@@ -1013,6 +1013,10 @@ impl HomeView {
     /// mouse-click path so both produce the same end state.
     pub(super) fn dispatch_confirm_submit(&mut self, action: &str) -> Option<Action> {
         match action {
+            "enable_work_arc" => {
+                self.confirm_work_arc();
+                None
+            }
             "delete_group" => {
                 if let Err(e) = self.delete_selected_group(&GroupDeleteOptions::default()) {
                     tracing::error!(target: "tui.input", "Failed to delete group: {}", e);
@@ -4322,6 +4326,7 @@ impl HomeView {
                 }
             }
             if self.selected_session != prev_session {
+                self.invalidate_work_arc_selection();
                 self.request_usage_refresh();
                 self.request_ledger_refresh();
                 self.system_health_open = false;
@@ -4955,6 +4960,13 @@ impl HomeView {
                     super::Item::Session { id, .. } => self.session_switch_view_target(id),
                     super::Item::Group { .. } => None,
                 };
+                let work_arc = match &self.flat_items[idx] {
+                    super::Item::Session { id, .. } => self
+                        .get_instance(id)
+                        .filter(|row| crate::session::work_arc::supported(row))
+                        .map(|row| row.work_arc_enabled),
+                    _ => None,
+                };
                 let menu = ContextMenuDialog::for_session_with_highlights(
                     anchor,
                     is_archived,
@@ -4963,7 +4975,8 @@ impl HomeView {
                     can_fork,
                     switch_view,
                     SessionHighlightMenu::new(self.show_session_colors, has_highlight),
-                );
+                )
+                .with_work_arc(work_arc);
                 // Manual groups are invisible in project and org grouping, so
                 // a move there would look like a no-op; offer group edits only
                 // where the result shows.
@@ -5031,6 +5044,8 @@ impl HomeView {
     /// site.
     pub(super) fn dispatch_context_menu_action(&mut self, action: ContextMenuAction) {
         match action {
+            ContextMenuAction::ToggleWorkArc => self.toggle_work_arc(),
+            ContextMenuAction::ExpandWorkArc => self.expand_work_arc(),
             ContextMenuAction::ProjectColor(color) => self.set_project_highlight(color),
             ContextMenuAction::Rename => self.open_rename_for_selected(),
             ContextMenuAction::Delete => self.open_delete_for_selected(),

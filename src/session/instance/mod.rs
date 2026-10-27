@@ -291,6 +291,12 @@ pub struct Instance {
     pub agent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_binding: Option<ConversationBinding>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) work_arc_enabled: bool,
+    #[serde(default)]
+    pub(crate) work_arc: Box<crate::session::work_arc::ArcState>,
+    #[serde(skip)]
+    pub(crate) work_arc_status: Option<crate::session::work_arc::ArcStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resume_binding: Option<ConversationBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

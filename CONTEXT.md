@@ -76,6 +76,10 @@ _Avoid_: star, pin (different concept)
 **Unread**:
 A Session with output the user has not looked at since it last changed.
 
+**Work arc**:
+A short, provenance-bound orientation cue for one Session's Agent conversation: goal, current progress, remaining work and next permissible action. It is derived from bounded conversation evidence, not the Session's Title, Status, a progress percentage or an independent verification of the Agent's claims. A stale arc does not describe the current branch.
+_Avoid_: conversation summary (the separate ACP transcript callout), task list, status report
+
 ### Where sessions run
 
 **Project**:

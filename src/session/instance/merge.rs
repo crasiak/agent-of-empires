@@ -96,6 +96,19 @@ impl Instance {
         self.adopt_poller(previous);
         self.adopt_poller_repair(previous);
         self.acp_load_session_capable = previous.acp_load_session_capable;
+        self.work_arc_status = if self.work_arc_enabled
+            && previous.work_arc_enabled
+            && self.id == previous.id
+            && self.agent_session_id == previous.agent_session_id
+            && self.agent_session_binding == previous.agent_session_binding
+            && self.active_execution == previous.active_execution
+            && self.lifecycle_generation == previous.lifecycle_generation
+            && self.work_arc == previous.work_arc
+        {
+            previous.work_arc_status
+        } else {
+            None
+        };
     }
 
     /// Carry every in-process field from a pre-move live row onto the committed disk-derived
@@ -148,6 +161,11 @@ impl Instance {
         }
         if new_tool == self.tool {
             return;
+        }
+        if self.work_arc_enabled || self.work_arc.record.is_some() {
+            self.work_arc.clear();
+            self.work_arc_enabled = false;
+            self.work_arc_status = None;
         }
         if !matches!(self.resume_intent, ResumeIntent::Fork { .. }) {
             let outgoing = PriorToolSession {
@@ -323,6 +341,21 @@ impl Instance {
             &post.pre_trash_project_path,
         );
         splice(&mut self.unread, &pre.unread, &post.unread);
+        if pre.work_arc_enabled != post.work_arc_enabled {
+            if !post.work_arc_enabled {
+                self.work_arc_enabled = false;
+                self.work_arc.clear();
+                self.work_arc_status = None;
+            } else if self.agent_session_id == pre.agent_session_id
+                && self.active_execution == pre.active_execution
+                && self.work_arc.epoch == pre.work_arc.epoch
+            {
+                self.work_arc_enabled = true;
+                self.work_arc.clear();
+                self.work_arc.cleared = false;
+                self.work_arc_status = None;
+            }
+        }
         splice(
             &mut self.base_branch_override,
             &pre.base_branch_override,

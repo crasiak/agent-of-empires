@@ -2845,6 +2845,13 @@ impl Instance {
         binding: Option<ConversationBinding>,
         pi_session_path: Option<String>,
     ) {
+        if self.agent_session_id != sid {
+            if self.work_arc_enabled || self.work_arc.record.is_some() {
+                self.work_arc.clear();
+            }
+            self.work_arc_enabled = false;
+            self.work_arc_status = None;
+        }
         self.agent_session_binding =
             binding.filter(|binding| Some(&binding.session_id) == sid.as_ref());
         self.pi_session_path = pi_session_path.filter(|_| sid.is_some());

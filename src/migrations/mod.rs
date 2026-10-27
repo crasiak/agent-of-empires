@@ -63,6 +63,7 @@ mod v050_tailored_history;
 mod v051_research_requests;
 mod v052_document_conversations;
 mod v053_skill_workshop;
+mod v054_work_arc_consent;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -109,7 +110,7 @@ use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 53;
+const CURRENT_VERSION: u32 = 54;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -289,6 +290,7 @@ const MIGRATIONS: &[Migration] = &[
         v052_document_conversations::run,
     ),
     (53, "skill_workshop", v053_skill_workshop::run),
+    (54, "work_arc_consent", v054_work_arc_consent::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install

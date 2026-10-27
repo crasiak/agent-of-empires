@@ -23,6 +23,7 @@ pub struct InfoDialog {
     width: u16,
     height: u16,
     scroll_mode: ScrollMode,
+    manual_scroll: Option<u16>,
     dialog_area: Rect,
     /// The `[OK]` button. A click anywhere dismisses, but the button takes
     /// the hover highlight so it reads as clickable.
@@ -38,6 +39,7 @@ impl InfoDialog {
             width: 50,
             height: 9,
             scroll_mode: ScrollMode::Top,
+            manual_scroll: None,
             dialog_area: Rect::default(),
             ok_button_area: Rect::default(),
             hover: HoverState::default(),
@@ -120,7 +122,23 @@ impl InfoDialog {
         self
     }
 
+    pub(crate) fn scrollable(mut self) -> Self {
+        self.manual_scroll = Some(0);
+        self
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> DialogResult<()> {
+        if let Some(scroll) = self.manual_scroll.as_mut() {
+            match key.code {
+                KeyCode::Up => *scroll = scroll.saturating_sub(1),
+                KeyCode::Down => *scroll = scroll.saturating_add(1),
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+                KeyCode::Home => *scroll = 0,
+                KeyCode::End => *scroll = u16::MAX,
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => DialogResult::Cancel,
             _ => DialogResult::Continue,
@@ -148,9 +166,14 @@ impl InfoDialog {
         // head anchored and clips the bottom, the default for read-top-down
         // dialogs.
         let rows = wrap_to_width(&self.message, chunks[0].width as usize);
-        let scroll = match self.scroll_mode {
-            ScrollMode::Top => 0,
-            ScrollMode::Tail => (rows.len() as u16).saturating_sub(chunks[0].height),
+        let scroll = if let Some(scroll) = self.manual_scroll.as_mut() {
+            *scroll = (*scroll).min((rows.len() as u16).saturating_sub(chunks[0].height));
+            *scroll
+        } else {
+            match self.scroll_mode {
+                ScrollMode::Top => 0,
+                ScrollMode::Tail => (rows.len() as u16).saturating_sub(chunks[0].height),
+            }
         };
         let message = Paragraph::new(rows.join("\n"))
             .style(Style::default().fg(theme.text))
@@ -316,6 +339,16 @@ mod tests {
         );
         assert!(!dialog.message.contains("line 33\n"), "{}", dialog.message);
         assert!(dialog.message.contains("line 34\n"), "{}", dialog.message);
+    }
+
+    #[test]
+    fn expanded_work_arc_can_scroll_to_clipped_text() {
+        let mut dialog = InfoDialog::new("Work arc", &numbered(30)).scrollable();
+        assert!(rendered(&mut dialog).contains("line 1 "));
+        dialog.handle_key(key(KeyCode::End));
+        assert!(rendered(&mut dialog).contains("line 30"));
+        dialog.handle_key(key(KeyCode::Home));
+        assert!(rendered(&mut dialog).contains("line 1 "));
     }
 
     #[test]
