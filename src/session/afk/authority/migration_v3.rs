@@ -401,7 +401,7 @@ pub(crate) fn run_at(app: &Path) -> Result<()> {
         return ready(app);
     }
     ensure!(
-        matches!(schema, cursor::BATCHES | cursor::USAGE),
+        matches!(cursor::read_cursor(app)?, cursor::BATCHES | cursor::USAGE),
         "AFK usage import requires global schema {} or {}",
         cursor::BATCHES,
         cursor::USAGE
