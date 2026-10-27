@@ -1,0 +1,379 @@
+{
+  "schema": "cra1260.workshop-producer.v1",
+  "profiles": [
+    {
+      "description": {
+        "environment_policy": {
+          "version": 1,
+          "mode": "allowlist",
+          "baseline": "host-v1",
+          "enforcement": "launch",
+          "contract": "ledger-environment-v2",
+          "sources": {
+            "aoe-workshop-personal": {
+              "version": 1,
+              "mode": "allowlist",
+              "baseline": "host-v1",
+              "enforcement": "launch"
+            }
+          }
+        },
+        "environment_contract": "ledger-environment-v2",
+        "profile": "aoe-workshop-personal",
+        "harness": "pi",
+        "target": "direct",
+        "cwd": "/fixture/user/repo",
+        "ready": true,
+        "state": "current",
+        "prerequisites": [],
+        "command": [
+          "ledger",
+          "run",
+          "pi",
+          "--profile",
+          "aoe-workshop-personal"
+        ],
+        "executable": "/fixture/store/pi-core-0.87.1-nodejs-24.13.0/bin/node",
+        "arguments": [
+          "/fixture/store/pi-core-0.87.1/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
+        ],
+        "environment": {
+          "AI_GATEWAY_API_KEY": "",
+          "ANTHROPIC_API_KEY": "",
+          "ANTHROPIC_OAUTH_TOKEN": "",
+          "ANT_LING_API_KEY": "",
+          "AWS_ACCESS_KEY_ID": "",
+          "AWS_BEARER_TOKEN_BEDROCK": "",
+          "AWS_PROFILE": "",
+          "AWS_SECRET_ACCESS_KEY": "",
+          "AWS_SESSION_TOKEN": "",
+          "AZURE_OPENAI_API_KEY": "",
+          "CEREBRAS_API_KEY": "",
+          "CLOUDFLARE_API_KEY": "",
+          "DEEPSEEK_API_KEY": "",
+          "FIREWORKS_API_KEY": "",
+          "GEMINI_API_KEY": "",
+          "GOOGLE_API_KEY": "",
+          "GOOGLE_APPLICATION_CREDENTIALS": "",
+          "GROQ_API_KEY": "",
+          "HF_TOKEN": "",
+          "KIMI_API_KEY": "",
+          "MINIMAX_API_KEY": "",
+          "MINIMAX_CN_API_KEY": "",
+          "MISTRAL_API_KEY": "",
+          "NODE_OPTIONS": "",
+          "NVIDIA_API_KEY": "",
+          "OPENAI_API_KEY": "",
+          "OPENCODE_API_KEY": "",
+          "OPENROUTER_API_KEY": "",
+          "PI_CODING_AGENT_DIR": "/fixture/user/ledger/homes/aoe-workshop-personal/pi/runtime",
+          "PI_CODING_AGENT_SESSION_DIR": "",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "RADIUS_API_KEY": "",
+          "TOGETHER_API_KEY": "",
+          "XAI_API_KEY": "",
+          "XIAOMI_API_KEY": "",
+          "XIAOMI_TOKEN_PLAN_AMS_API_KEY": "",
+          "XIAOMI_TOKEN_PLAN_CN_API_KEY": "",
+          "XIAOMI_TOKEN_PLAN_SGP_API_KEY": "",
+          "ZAI_API_KEY": "",
+          "ZAI_CODING_CN_API_KEY": ""
+        }
+      },
+      "lock": {
+        "schema": "ledger-profile-lock-v4",
+        "hash": "249d14bb51cccac6518e9302c9a02448d9e0c7cb7d79180690959cb761c9e530",
+        "profile": {
+          "id": "pro_88cef50a016fede27415505e32d499b6",
+          "name": "aoe-workshop-personal",
+          "revision": "2c0956df771d7e3e1801fe5bce7d21d1b69837eba8746a8f26f5f806d6be4655"
+        },
+        "closure": [
+          {
+            "id": "pro_88cef50a016fede27415505e32d499b6",
+            "name": "aoe-workshop-personal",
+            "revision": "2c0956df771d7e3e1801fe5bce7d21d1b69837eba8746a8f26f5f806d6be4655"
+          }
+        ],
+        "binding": {
+          "id": "bin_7c6d0c8b9f094eb9cc1c81eaa0ff7c58",
+          "revision": "d3da89de7a2f3c9f2efa27adf891b27df7a3e19a79a193e575ac279ddfb1be00",
+          "harness": "pi",
+          "launcher": "direct",
+          "account_id": "acc_09e280d476dc6de625381d807c63e22e",
+          "account_revision": "1ad1ae854d3afcb43da4e28c0800438873c4957ac74ce667e43c00d57054014f",
+          "account_class": "pi-home",
+          "account_locator": "/fixture/user/workshop-account",
+          "config_resource_id": "res_3b1634f8cbd26691c4b4f2280182bcc2",
+          "config_version": "798815b294c8d236d39f5433ae3e2dc984753c2ec6ad3592df106dd4302d0f58",
+          "config_variant_hash": "d754dace036ad50be0728d17e8f0e5f6ef9df86bfde1f4a4d02ac41502930464",
+          "config_blob": "daaad781e38e92f4e474c4d76c57c4efc658183cb8a5015148f715bcd93023b7",
+          "config_provenance_id": 4,
+          "config_source_name": "aoe-workshop-personal",
+          "core": {
+            "mode": "immutable",
+            "path": "/fixture/store/pi-core-0.87.1"
+          },
+          "launch": {
+            "share": []
+          }
+        },
+        "resources": [
+          {
+            "resource_id": "res_8048ff0c2dbccb2775ca5df92c48dc5b",
+            "key": "models/pi-personal-20261023-91c9b81e",
+            "version_hash": "8991b3a9c3a710b27d02ea5bb2ec003ebe674255fc2e4d0c9e82677812e48bdd",
+            "variant_hash": "633d97a6af5ae268f6323444d471e6a89699ec8beade8a61a00a96d8843c944b",
+            "provenance_id": 3,
+            "provenance_name": "personal-20261023-91c9b81e"
+          }
+        ],
+        "policy": {
+          "environment": {
+            "version": 1,
+            "mode": "allowlist",
+            "baseline": "host-v1",
+            "enforcement": "launch",
+            "contract": "ledger-environment-v2",
+            "sources": {
+              "aoe-workshop-personal": {
+                "version": 1,
+                "mode": "allowlist",
+                "baseline": "host-v1",
+                "enforcement": "launch"
+              }
+            }
+          },
+          "deny_sources": []
+        },
+        "resolver_version": "profile-resolver-v2",
+        "adapter": {
+          "api": "pi-adapter-v1",
+          "renderer_version": "pi-alpha-v3",
+          "path_policy_version": "pi-paths-v2"
+        },
+        "platform": "darwin/arm64"
+      },
+      "account_data": {
+        "auth": {
+          "openai-codex": {
+            "key": "EXAMPLE_AUTH_KEY",
+            "type": "api_key"
+          }
+        },
+        "models": {
+          "providers": {
+            "openai-codex": {
+              "api": "openai-responses",
+              "apiKey": "EXAMPLE_MODEL_KEY",
+              "baseUrl": "https://model.invalid/v1",
+              "models": [
+                {
+                  "id": "gpt-6.1-sol"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "settings": {
+        "defaultModel": "gpt-6.1-sol",
+        "defaultProvider": "openai-codex",
+        "defaultThinkingLevel": "medium",
+        "defaultTools": [],
+        "extensions": [],
+        "packages": [],
+        "skills": [],
+        "transport": "sse"
+      }
+    },
+    {
+      "description": {
+        "environment_policy": {
+          "version": 1,
+          "mode": "allowlist",
+          "baseline": "host-v1",
+          "enforcement": "launch",
+          "contract": "ledger-environment-v2",
+          "sources": {
+            "aoe-workshop-work": {
+              "version": 1,
+              "mode": "allowlist",
+              "baseline": "host-v1",
+              "enforcement": "launch"
+            }
+          }
+        },
+        "environment_contract": "ledger-environment-v2",
+        "profile": "aoe-workshop-work",
+        "harness": "pi",
+        "target": "direct",
+        "cwd": "/fixture/user/repo",
+        "ready": true,
+        "state": "current",
+        "prerequisites": [],
+        "command": [
+          "ledger",
+          "run",
+          "pi",
+          "--profile",
+          "aoe-workshop-work"
+        ],
+        "executable": "/fixture/store/pi-core-0.87.1-nodejs-24.13.0/bin/node",
+        "arguments": [
+          "/fixture/store/pi-core-0.87.1/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js"
+        ],
+        "environment": {
+          "AI_GATEWAY_API_KEY": "",
+          "ANTHROPIC_API_KEY": "",
+          "ANTHROPIC_OAUTH_TOKEN": "",
+          "ANT_LING_API_KEY": "",
+          "AWS_ACCESS_KEY_ID": "",
+          "AWS_BEARER_TOKEN_BEDROCK": "",
+          "AWS_PROFILE": "",
+          "AWS_SECRET_ACCESS_KEY": "",
+          "AWS_SESSION_TOKEN": "",
+          "AZURE_OPENAI_API_KEY": "",
+          "CEREBRAS_API_KEY": "",
+          "CLOUDFLARE_API_KEY": "",
+          "DEEPSEEK_API_KEY": "",
+          "FIREWORKS_API_KEY": "",
+          "GEMINI_API_KEY": "",
+          "GOOGLE_API_KEY": "",
+          "GOOGLE_APPLICATION_CREDENTIALS": "",
+          "GROQ_API_KEY": "",
+          "HF_TOKEN": "",
+          "KIMI_API_KEY": "",
+          "MINIMAX_API_KEY": "",
+          "MINIMAX_CN_API_KEY": "",
+          "MISTRAL_API_KEY": "",
+          "NODE_OPTIONS": "",
+          "NVIDIA_API_KEY": "",
+          "OPENAI_API_KEY": "",
+          "OPENCODE_API_KEY": "",
+          "OPENROUTER_API_KEY": "",
+          "PI_CODING_AGENT_DIR": "/fixture/user/ledger/homes/aoe-workshop-work/pi/runtime",
+          "PI_CODING_AGENT_SESSION_DIR": "",
+          "PI_SKIP_VERSION_CHECK": "1",
+          "RADIUS_API_KEY": "",
+          "TOGETHER_API_KEY": "",
+          "XAI_API_KEY": "",
+          "XIAOMI_API_KEY": "",
+          "XIAOMI_TOKEN_PLAN_AMS_API_KEY": "",
+          "XIAOMI_TOKEN_PLAN_CN_API_KEY": "",
+          "XIAOMI_TOKEN_PLAN_SGP_API_KEY": "",
+          "ZAI_API_KEY": "",
+          "ZAI_CODING_CN_API_KEY": ""
+        }
+      },
+      "lock": {
+        "schema": "ledger-profile-lock-v4",
+        "hash": "4004c3f49aa58ba77205a50cfc3e1ce04b44ac1b8fb31acb88990882228d8f80",
+        "profile": {
+          "id": "pro_b56b48321dbd1ebb407bcff2114ac3f6",
+          "name": "aoe-workshop-work",
+          "revision": "740d88bf4ce1d75cb3bcbebc4bfca11ac66edc18d1ed65907783c2992accff85"
+        },
+        "closure": [
+          {
+            "id": "pro_b56b48321dbd1ebb407bcff2114ac3f6",
+            "name": "aoe-workshop-work",
+            "revision": "740d88bf4ce1d75cb3bcbebc4bfca11ac66edc18d1ed65907783c2992accff85"
+          }
+        ],
+        "binding": {
+          "id": "bin_b6bd13afe4300deb9a6595920134c990",
+          "revision": "2e542852c5b7af0bb3348f9426700674f4b2e2c379283f4d0f88e61c6bbfa195",
+          "harness": "pi",
+          "launcher": "direct",
+          "account_id": "acc_934ee609092e0fd630717e1d55b77d8d",
+          "account_revision": "174a609a6a9fec826a24a4242d61e764b3ba3a4d014a0eaa8d37ab2b5a01cb14",
+          "account_class": "pi-home",
+          "account_locator": "/fixture/user/workshop-account",
+          "config_resource_id": "res_fc37e6cbf51c13e4bb36d96cac76d566",
+          "config_version": "ab01c2186956b178a6fd83f49e3dfc63a1c1da9d5e9f033848ea26d031e5bda8",
+          "config_variant_hash": "c8cc3f4383cbfe313e5695eb6f686f88acdb145b749cdbe547afe488ba4d7fac",
+          "config_blob": "b8cae0ef575cc7a7db0d7d534f87d4237a6c2c5bc5fd3a0d96950f18553cc6d8",
+          "config_provenance_id": 4,
+          "config_source_name": "aoe-workshop-work",
+          "core": {
+            "mode": "immutable",
+            "path": "/fixture/store/pi-core-0.87.1"
+          },
+          "launch": {
+            "share": []
+          }
+        },
+        "resources": [
+          {
+            "resource_id": "res_e94989fb41714032e68b7951a50609dc",
+            "key": "models/pi-work-20261023-7d64261b",
+            "version_hash": "4f8d45e66f7c5c02225090d3f2d689688013992b10128240318bf42f086764cf",
+            "variant_hash": "c0781333ecb629110793baa709ec405b34f64a8da1ceb1648e31b4d542ae6077",
+            "provenance_id": 3,
+            "provenance_name": "work-20261023-7d64261b"
+          }
+        ],
+        "policy": {
+          "environment": {
+            "version": 1,
+            "mode": "allowlist",
+            "baseline": "host-v1",
+            "enforcement": "launch",
+            "contract": "ledger-environment-v2",
+            "sources": {
+              "aoe-workshop-work": {
+                "version": 1,
+                "mode": "allowlist",
+                "baseline": "host-v1",
+                "enforcement": "launch"
+              }
+            }
+          },
+          "deny_sources": [
+            "personal",
+            "personal-transport"
+          ]
+        },
+        "resolver_version": "profile-resolver-v2",
+        "adapter": {
+          "api": "pi-adapter-v1",
+          "renderer_version": "pi-alpha-v3",
+          "path_policy_version": "pi-paths-v2"
+        },
+        "platform": "darwin/arm64"
+      },
+      "account_data": {
+        "auth": {
+          "aperture": {
+            "key": "EXAMPLE_AUTH_KEY",
+            "type": "api_key"
+          }
+        },
+        "models": {
+          "providers": {
+            "aperture": {
+              "api": "openai-responses",
+              "apiKey": "EXAMPLE_MODEL_KEY",
+              "baseUrl": "https://model.invalid/v1",
+              "models": [
+                {
+                  "id": "gpt-6.1-sol"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "settings": {
+        "defaultModel": "gpt-6.1-sol",
+        "defaultProvider": "aperture",
+        "defaultThinkingLevel": "medium",
+        "defaultTools": [],
+        "extensions": [],
+        "packages": [],
+        "skills": []
+      }
+    }
+  ]
+}

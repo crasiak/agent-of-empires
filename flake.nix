@@ -55,6 +55,7 @@
                 ./docker
                 ./src/session_search/testdata
                 ./tests/fixtures/cli-read
+                ./tests/fixtures/workshop
                 ./web/tests/helpers/fakeAcpAgent.mjs
               ];
             };

@@ -322,6 +322,7 @@ pub(super) const CITYHALL_MUTATION_ALLOW: &[(&str, &str)] = &[
 pub(super) const CITYHALL_MUTATION_DENY: &[(&str, &str)] = &[
     ("PATCH", "/api/sessions/{id}/tailored-history"),
     ("POST", "/api/research"),
+    ("POST", "/api/workshop"),
     ("POST", "/api/research/{id}/reply"),
     // Terminal surface.
     ("POST", "/api/sessions/{id}/ensure"),

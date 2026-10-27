@@ -1,0 +1,361 @@
+{
+  "preview": {
+    "schema": "cra1260.workshop-import-preview.v1",
+    "directory": "/fixture/import",
+    "ledger_home": "/fixture/ledger",
+    "request": {
+      "schema": "cra1260.workshop-import-request.v1",
+      "landed": {
+        "repository": "/fixture/repo",
+        "commit": "14cde6c8695b5b775c780772816cda8d51387d2e",
+        "source_tree": "3821782b8cb18c210b022136189ef1d471a1b82e",
+        "skill_tree": "28a53e637eec0af5023a63a5bbc9cfa4c3adcff7",
+        "path": ".agents/skills/new-skill",
+        "tree_hash": "69c674fb87373e965d74baef0d318cabd2fb560638d439db6fce7b63e4067bab"
+      },
+      "source_root": "/fixture/repo/.agents/skills/new-skill",
+      "source_name": "fixture",
+      "targets": [
+        {
+          "profile": "selected",
+          "harness": "codex",
+          "account": "fixture",
+          "sessions": []
+        },
+        {
+          "profile": "selected-child",
+          "harness": "codex",
+          "account": "fixture",
+          "sessions": []
+        }
+      ]
+    },
+    "base": {
+      "schema": "ledger-config-base-v1",
+      "revision": "92ea611c5618e6ee3569ff80642f6ad4ecd068ea52bbdc20512db798dfb5e7ca",
+      "document": {
+        "hash": "9910355cc0798289d58b06a8b252f2778304a37f237374ca4672fd2828213856",
+        "content_hash": "9d9114a88f2480dac5a3e4a86ef748236930a0001128d5a53ff2943ee4040aa0",
+        "content": "apiVersion: ledger.dev/v1alpha1\nkind: LedgerConfig\naccounts:\n  fixture: {class: codex-home, locator: /fixture/root/account}\nprofiles:\n  selected:\n    bindings:\n      codex: {accountRef: fixture, launcher: direct, config: settings/codex-fixture}\n  unrelated:\n    resources: {add: []}\n  selected-child:\n    bindings:\n      codex: {accountRef: fixture, launcher: direct, config: settings/codex-fixture}\n",
+        "source": "/fixture/config/ledger.yaml",
+        "config_hash": "6d02422225554059f2d1c7297e21ec4de3605a955f190304261d7a92285f496d",
+        "created_at": "2026-10-26T18:27:35.454096Z"
+      }
+    },
+    "guard": {
+      "schema": "ledger.skill-import-guard.v1",
+      "revision": "92ea611c5618e6ee3569ff80642f6ad4ecd068ea52bbdc20512db798dfb5e7ca",
+      "source": {
+        "root": "/fixture/repo/.agents/skills/new-skill",
+        "name": "fixture",
+        "key": {
+          "kind": "skill",
+          "name": "new-skill"
+        },
+        "tree_hash": "69c674fb87373e965d74baef0d318cabd2fb560638d439db6fce7b63e4067bab",
+        "git_repo": "/fixture/repo",
+        "git_ref": "master",
+        "git_commit": "14cde6c8695b5b775c780772816cda8d51387d2e"
+      },
+      "resource_id": "",
+      "current_version": "",
+      "targets": [
+        {
+          "profile": "selected",
+          "harness": "codex",
+          "account": "fixture",
+          "sessions": []
+        },
+        {
+          "profile": "selected-child",
+          "harness": "codex",
+          "account": "fixture",
+          "sessions": []
+        }
+      ],
+      "consumers": [],
+      "affected": [],
+      "selected": [
+        {
+          "profile": "selected",
+          "harness": "codex",
+          "account": "fixture",
+          "account_revision": "ddcc14f2d8c90e1633c55b2e8a89cb61d42b136a7fc8bcc9861ea9edab894cfc"
+        },
+        {
+          "profile": "selected-child",
+          "harness": "codex",
+          "account": "fixture",
+          "account_revision": "ddcc14f2d8c90e1633c55b2e8a89cb61d42b136a7fc8bcc9861ea9edab894cfc"
+        }
+      ],
+      "digest": "5c2501cfb1db960ccdb6d445e22afc327752e0392c7950cadb6de2fffb1cb4de"
+    },
+    "digest": "2900bd4d52c278528de193aa337b39f68490a76efcc8401918a9eefc279e3172"
+  },
+  "receipt": {
+    "schema": "cra1260.workshop-deploy-receipt.v1",
+    "preview_digest": "2900bd4d52c278528de193aa337b39f68490a76efcc8401918a9eefc279e3172",
+    "state": "imported",
+    "result": {
+      "schema": "ledger.skill-import-receipt.v1",
+      "guard": {
+        "schema": "ledger.skill-import-guard.v1",
+        "revision": "92ea611c5618e6ee3569ff80642f6ad4ecd068ea52bbdc20512db798dfb5e7ca",
+        "source": {
+          "root": "/fixture/repo/.agents/skills/new-skill",
+          "name": "fixture",
+          "key": {
+            "kind": "skill",
+            "name": "new-skill"
+          },
+          "tree_hash": "69c674fb87373e965d74baef0d318cabd2fb560638d439db6fce7b63e4067bab",
+          "git_repo": "/fixture/repo",
+          "git_ref": "master",
+          "git_commit": "14cde6c8695b5b775c780772816cda8d51387d2e"
+        },
+        "resource_id": "",
+        "current_version": "",
+        "targets": [
+          {
+            "profile": "selected",
+            "harness": "codex",
+            "account": "fixture",
+            "sessions": []
+          },
+          {
+            "profile": "selected-child",
+            "harness": "codex",
+            "account": "fixture",
+            "sessions": []
+          }
+        ],
+        "consumers": [],
+        "affected": [],
+        "selected": [
+          {
+            "profile": "selected",
+            "harness": "codex",
+            "account": "fixture",
+            "account_revision": "ddcc14f2d8c90e1633c55b2e8a89cb61d42b136a7fc8bcc9861ea9edab894cfc"
+          },
+          {
+            "profile": "selected-child",
+            "harness": "codex",
+            "account": "fixture",
+            "account_revision": "ddcc14f2d8c90e1633c55b2e8a89cb61d42b136a7fc8bcc9861ea9edab894cfc"
+          }
+        ],
+        "digest": "5c2501cfb1db960ccdb6d445e22afc327752e0392c7950cadb6de2fffb1cb4de"
+      },
+      "import": {
+        "import_id": "imp_a730129b31ed84445ed443f7b976ed1e",
+        "status": "completed",
+        "resources": [
+          {
+            "key": {
+              "kind": "skill",
+              "name": "new-skill"
+            },
+            "resource_id": "res_055355b676439202339a9dc0e7799c63",
+            "version_hash": "bf6ba3fcb7a282a175d17920d24eae6b33631c9f5ff9bd28bc47f1b53f2a3cc0",
+            "tree_hash": "69c674fb87373e965d74baef0d318cabd2fb560638d439db6fce7b63e4067bab",
+            "source_root": "/fixture/repo/.agents/skills/new-skill",
+            "source_path": "."
+          }
+        ],
+        "collisions": [],
+        "rejected": []
+      },
+      "revision": "a74f520bcf9b4d8c531a2f88205c1993203fbae38b16dda75f02389c5473ae61"
+    }
+  },
+  "candidate": {
+    "schema": "cra1260.workshop-deploy-candidate.v2",
+    "directory": "/fixture/candidate",
+    "ledger_home": "/fixture/ledger",
+    "request": {
+      "schema": "cra1260.workshop-deploy-request.v1",
+      "landed": {
+        "repository": "/fixture/repo",
+        "commit": "14cde6c8695b5b775c780772816cda8d51387d2e",
+        "source_tree": "3821782b8cb18c210b022136189ef1d471a1b82e",
+        "skill_tree": "28a53e637eec0af5023a63a5bbc9cfa4c3adcff7",
+        "path": ".agents/skills/new-skill",
+        "tree_hash": "69c674fb87373e965d74baef0d318cabd2fb560638d439db6fce7b63e4067bab"
+      },
+      "resource": {
+        "key": {
+          "kind": "skill",
+          "name": "new-skill"
+        },
+        "resource_id": "res_055355b676439202339a9dc0e7799c63",
+        "version_hash": "bf6ba3fcb7a282a175d17920d24eae6b33631c9f5ff9bd28bc47f1b53f2a3cc0",
+        "tree_hash": "69c674fb87373e965d74baef0d318cabd2fb560638d439db6fce7b63e4067bab",
+        "source_root": "/fixture/repo/.agents/skills/new-skill",
+        "source_path": "."
+      },
+      "targets": [
+        {
+          "profile": "selected",
+          "harness": "codex",
+          "account": "fixture",
+          "sessions": []
+        },
+        {
+          "profile": "selected-child",
+          "harness": "codex",
+          "account": "fixture",
+          "sessions": []
+        }
+      ]
+    },
+    "base": {
+      "schema": "ledger-config-base-v1",
+      "revision": "a74f520bcf9b4d8c531a2f88205c1993203fbae38b16dda75f02389c5473ae61",
+      "document": {
+        "hash": "9910355cc0798289d58b06a8b252f2778304a37f237374ca4672fd2828213856",
+        "content_hash": "9d9114a88f2480dac5a3e4a86ef748236930a0001128d5a53ff2943ee4040aa0",
+        "content": "apiVersion: ledger.dev/v1alpha1\nkind: LedgerConfig\naccounts:\n  fixture: {class: codex-home, locator: /fixture/root/account}\nprofiles:\n  selected:\n    bindings:\n      codex: {accountRef: fixture, launcher: direct, config: settings/codex-fixture}\n  unrelated:\n    resources: {add: []}\n  selected-child:\n    bindings:\n      codex: {accountRef: fixture, launcher: direct, config: settings/codex-fixture}\n",
+        "source": "/fixture/config/ledger.yaml",
+        "config_hash": "6d02422225554059f2d1c7297e21ec4de3605a955f190304261d7a92285f496d",
+        "created_at": "2026-10-26T18:27:35.454096Z"
+      }
+    },
+    "content": "apiVersion: ledger.dev/v1alpha1\nkind: LedgerConfig\naccounts:\n  fixture: {class: codex-home, locator: /fixture/root/account}\nprofiles:\n  selected:\n    bindings:\n      codex: {accountRef: fixture, launcher: direct, config: settings/codex-fixture}\n    resources:\n      add:\n        - skill/new-skill\n  unrelated:\n    resources: {add: []}\n  selected-child:\n    bindings:\n      codex: {accountRef: fixture, launcher: direct, config: settings/codex-fixture}\n    resources:\n      add:\n        - skill/new-skill\n",
+    "bytes_digest": "da819bda1c5a91a6a1872661502f2c669640452bb564254fdb349e0425cfcda1",
+    "preview": {
+      "changes": [
+        {
+          "kind": "profile",
+          "name": "selected",
+          "action": "update"
+        },
+        {
+          "kind": "profile",
+          "name": "selected-child",
+          "action": "update"
+        }
+      ],
+      "affected": [
+        {
+          "profile": "selected",
+          "harness": "codex",
+          "action": "rematerialize"
+        },
+        {
+          "profile": "selected-child",
+          "harness": "codex",
+          "action": "rematerialize"
+        }
+      ]
+    },
+    "digest": "e073df08ebc2cf72b7ad65c9d92a62517b1259cf837f926d03dbbcd3846d8b03",
+    "import_receipt": {
+      "schema": "ledger.skill-import-receipt.v1",
+      "guard": {
+        "schema": "ledger.skill-import-guard.v1",
+        "revision": "92ea611c5618e6ee3569ff80642f6ad4ecd068ea52bbdc20512db798dfb5e7ca",
+        "source": {
+          "root": "/fixture/repo/.agents/skills/new-skill",
+          "name": "fixture",
+          "key": {
+            "kind": "skill",
+            "name": "new-skill"
+          },
+          "tree_hash": "69c674fb87373e965d74baef0d318cabd2fb560638d439db6fce7b63e4067bab",
+          "git_repo": "/fixture/repo",
+          "git_ref": "master",
+          "git_commit": "14cde6c8695b5b775c780772816cda8d51387d2e"
+        },
+        "resource_id": "",
+        "current_version": "",
+        "targets": [
+          {
+            "profile": "selected",
+            "harness": "codex",
+            "account": "fixture",
+            "sessions": []
+          },
+          {
+            "profile": "selected-child",
+            "harness": "codex",
+            "account": "fixture",
+            "sessions": []
+          }
+        ],
+        "consumers": [],
+        "affected": [],
+        "selected": [
+          {
+            "profile": "selected",
+            "harness": "codex",
+            "account": "fixture",
+            "account_revision": "ddcc14f2d8c90e1633c55b2e8a89cb61d42b136a7fc8bcc9861ea9edab894cfc"
+          },
+          {
+            "profile": "selected-child",
+            "harness": "codex",
+            "account": "fixture",
+            "account_revision": "ddcc14f2d8c90e1633c55b2e8a89cb61d42b136a7fc8bcc9861ea9edab894cfc"
+          }
+        ],
+        "digest": "5c2501cfb1db960ccdb6d445e22afc327752e0392c7950cadb6de2fffb1cb4de"
+      },
+      "import": {
+        "import_id": "imp_a730129b31ed84445ed443f7b976ed1e",
+        "status": "completed",
+        "resources": [
+          {
+            "key": {
+              "kind": "skill",
+              "name": "new-skill"
+            },
+            "resource_id": "res_055355b676439202339a9dc0e7799c63",
+            "version_hash": "bf6ba3fcb7a282a175d17920d24eae6b33631c9f5ff9bd28bc47f1b53f2a3cc0",
+            "tree_hash": "69c674fb87373e965d74baef0d318cabd2fb560638d439db6fce7b63e4067bab",
+            "source_root": "/fixture/repo/.agents/skills/new-skill",
+            "source_path": "."
+          }
+        ],
+        "collisions": [],
+        "rejected": []
+      },
+      "revision": "a74f520bcf9b4d8c531a2f88205c1993203fbae38b16dda75f02389c5473ae61"
+    },
+    "materialize_pairs": [
+      {
+        "profile": "selected-child",
+        "harness": "codex",
+        "action": "rematerialize"
+      },
+      {
+        "profile": "selected",
+        "harness": "codex",
+        "action": "rematerialize"
+      }
+    ]
+  },
+  "materialized": {
+    "schema": "cra1260.workshop-materialize-receipt.v2",
+    "candidate_digest": "e073df08ebc2cf72b7ad65c9d92a62517b1259cf837f926d03dbbcd3846d8b03",
+    "publication_revision": "fa7a15c012970531a2f6538be5842bcd51598e97ca722db3d467cfec10722ebe",
+    "state": "materialized",
+    "pairs": [
+      {
+        "profile": "selected-child",
+        "harness": "codex",
+        "lock": "136f36e07652bc8fba4f49858b457804c674b439b0f4b6117368acf44e2ae324",
+        "materialization": "ca0e93fbf6425e32c50ea44a2f390c8d511827bda7893aa28e2f8e3ecb4a0eba",
+        "state": "materialized"
+      },
+      {
+        "profile": "selected",
+        "harness": "codex",
+        "lock": "2ba3fbf2c43d25b6355f594749c9b1bc1d1db788397ba8915f9ef63c99f52c2b",
+        "materialization": "c85c2c68bb4a9ebc43909b5334e6ca3c9d614d384985a597356fbe7eefd7dec6",
+        "state": "materialized"
+      }
+    ]
+  }
+}

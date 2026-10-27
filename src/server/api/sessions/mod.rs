@@ -45,6 +45,7 @@ mod send;
 mod tailored;
 mod update;
 mod usage;
+mod workshop;
 
 pub use artifacts::*;
 pub use create::*;
@@ -61,6 +62,7 @@ pub use send::*;
 pub use tailored::*;
 pub use update::*;
 pub use usage::*;
+pub use workshop::*;
 
 #[cfg(test)]
 mod tests;

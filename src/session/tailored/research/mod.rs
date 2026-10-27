@@ -419,6 +419,7 @@ impl Draft {
             created_at: self.created_at,
             hidden: self.hidden,
             research: true,
+            workshop: false,
         }
     }
 }

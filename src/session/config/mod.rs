@@ -2573,6 +2573,16 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, SettingsSection)]
 #[setting_section(name = "skills", category = "Skills")]
 pub struct SkillsConfig {
+    /// Default versioned repository for Workshop source at .agents/skills. Unset asks for a repository.
+    #[serde(default)]
+    #[setting(
+        label = "Workshop source repository",
+        widget = "optional_text",
+        web = "local_only:selects a host repository for approved Git writes",
+        repo = "deny"
+    )]
+    pub workshop_repository: Option<String>,
+
     /// Copy AoE-managed skills into an agent's own skills directory when
     /// launching a session for it, so a skill authored once in AoE is available
     /// to every agent. Defaults to `false`.

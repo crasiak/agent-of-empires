@@ -11,6 +11,8 @@ struct HistorySession {
     session: Option<SessionResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     research: Option<crate::session::tailored::research::Draft>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workshop: Option<crate::session::tailored::workshop::Request>,
 }
 
 pub async fn list_tailored_sessions(
@@ -38,6 +40,7 @@ pub async fn list_tailored_sessions(
                 entry,
                 session: Some(SessionResponse::from_instance(instance, fullscreen)),
                 research: None,
+                workshop: None,
             })
         })
         .collect();
@@ -55,6 +58,7 @@ pub async fn list_tailored_sessions(
                     entry,
                     session: None,
                     research: Some(draft),
+                    workshop: None,
                 });
             }
         }
@@ -63,6 +67,23 @@ pub async fn list_tailored_sessions(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "research_history_unavailable",
                 "Cannot read research history",
+            )
+        }
+    }
+    match tokio::task::spawn_blocking(|| crate::session::tailored::workshop::Store::open()?.list())
+        .await
+    {
+        Ok(Ok(requests)) => entries.extend(requests.into_iter().map(|request| HistorySession {
+            entry: request.history(),
+            session: None,
+            research: None,
+            workshop: Some(request),
+        })),
+        _ => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "workshop_history_unavailable",
+                "Cannot read Workshop history",
             )
         }
     }

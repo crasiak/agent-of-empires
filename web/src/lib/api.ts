@@ -1,3 +1,4 @@
+import { isWorkshopRequest } from "./workshop";
 import type { AgentLifecycleInfo } from "./agentProfiles";
 import { notifySettingsChanged } from "./settingsEvents";
 import { clientFormFactor } from "./formFactor";
@@ -2257,4 +2258,34 @@ export function getResearchOutput(id: string): Promise<{ output: string } | null
 }
 export function replyResearch(id: string, answer: string): Promise<{ ok: boolean; message?: string }> {
   return okWithMessage(`/api/research/${encodeURIComponent(id)}/reply`, jsonInit("POST", { answer }));
+}
+
+export async function workshopOperation(
+  body: import("./types").WorkshopOperation,
+): Promise<{ request?: import("./types").WorkshopRequest; error?: string; uncertain?: boolean }> {
+  const result = await send("/api/workshop", jsonInit("POST", body)).catch(() => null);
+  if (!result)
+    return {
+      error: "Outcome unknown. Reopen this Workshop UUID; do not create another request or replay a commit.",
+      uncertain: true,
+    };
+  if (!result.ok || !result.payload?.request)
+    return {
+      error: stringField(result.payload, "message") ?? "Workshop operation refused",
+      uncertain: result.ok || result.status >= 500,
+    };
+  if (!isWorkshopRequest(result.payload.request, body.id, body.operation === "create" ? body.envelope : undefined))
+    return {
+      error:
+        "Outcome unknown: invalid or mismatched Workshop success. Retain the same UUID/envelope and reopen; never replay a write.",
+      uncertain: true,
+    };
+  return { request: result.payload.request };
+}
+export async function getWorkshop(id: string): Promise<{ request: import("./types").WorkshopRequest } | null> {
+  const result = await fetchJson<{ request: unknown }>(`/api/workshop/${encodeURIComponent(id)}`);
+  return isWorkshopRequest(result?.request, id) ? { request: result!.request } : null;
+}
+export function getWorkshopDefaults(): Promise<{ repository: string | null } | null> {
+  return fetchJson("/api/workshop-defaults");
 }

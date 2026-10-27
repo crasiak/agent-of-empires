@@ -1,0 +1,186 @@
+{
+  "schema": "cra1260.native-fake-backend-fixture.v1",
+  "fake_backend_only": true,
+  "skill": "approved",
+  "plan": {
+    "schema": "cra1260.workshop-rollout.v2",
+    "candidate_digest": "e09f584491350a519e2fffeb3a0698191526e5805ba2e951520782921de85573",
+    "publication_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-10-26T20:34:41.352803+00:00",
+    "skill": "approved",
+    "targets": [
+      {
+        "id": "aaaaaaaaaaaaaaaa",
+        "state": "published-not-adopted",
+        "plan": {
+          "id": "aaaaaaaaaaaaaaaa",
+          "title": "canary",
+          "aoe_profile": "personal-aoe",
+          "result": "eligible",
+          "target": {
+            "id": "aaaaaaaaaaaaaaaa",
+            "title": "canary",
+            "aoe_profile": "personal-aoe",
+            "ledger_profile": "personal",
+            "native_id": "01a15ff5-473c-7618-b33a-dc386d709bba",
+            "cwd": "/fixture/native",
+            "pane": {
+              "name": "aoe_canary_aaaaaaaa",
+              "pane": "%10",
+              "pid": 100,
+              "dead": false,
+              "ledger": {
+                "instance_id": "aaaaaaaaaaaaaaaa",
+                "pane_id": "%10",
+                "run_id": "run_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              }
+            },
+            "identity": {
+              "pid": 101,
+              "run_id": "run_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "native_id": "01a15ff5-473c-7618-b33a-dc386d709bba",
+              "cwd": "/fixture/native",
+              "generation": "native-generation",
+              "instance_id": "aaaaaaaaaaaaaaaa",
+              "profile": "personal",
+              "lock_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "session_file": "/fixture/native/history.jsonl",
+              "aoe_profile": "personal-aoe"
+            },
+            "row_fingerprint": "36ee66e06d71cac0bc9c5b3c8656db60d0fe7e8fb1f340e514b63b83309916c5",
+            "extension": {
+              "path": "/fixture/agent-extensions/pi-aoe-session-id.js",
+              "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+            },
+            "preview": {
+              "contract": "ledger.current-profile-resume.v1",
+              "resume_profile": "current",
+              "profile": "personal",
+              "harness": "pi",
+              "native_id": "01a15ff5-473c-7618-b33a-dc386d709bba",
+              "cwd": "/fixture/native",
+              "source_run_id": "run_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "source_revision": 2,
+              "expected_lock": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "expected_native_snapshot": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "native_session_path": "/fixture/native/history.jsonl",
+              "skills": [],
+              "effective_skill_names": [
+                "approved",
+                "launch-local"
+              ]
+            }
+          }
+        }
+      }
+    ]
+  },
+  "result": {
+    "schema": "cra1260.workshop-rollout.v2",
+    "candidate_digest": "e09f584491350a519e2fffeb3a0698191526e5805ba2e951520782921de85573",
+    "publication_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "plan_digest": "adc72d331ec71a8b1d43c27926489fe280073fdad5e2710c75deb9c704946625",
+    "targets": [
+      {
+        "id": "aaaaaaaaaaaaaaaa",
+        "state": "adopted",
+        "plan": {
+          "id": "aaaaaaaaaaaaaaaa",
+          "title": "canary",
+          "aoe_profile": "personal-aoe",
+          "result": "eligible",
+          "target": {
+            "id": "aaaaaaaaaaaaaaaa",
+            "title": "canary",
+            "aoe_profile": "personal-aoe",
+            "ledger_profile": "personal",
+            "native_id": "01a15ff5-473c-7618-b33a-dc386d709bba",
+            "cwd": "/fixture/native",
+            "pane": {
+              "name": "aoe_canary_aaaaaaaa",
+              "pane": "%10",
+              "pid": 100,
+              "dead": false,
+              "ledger": {
+                "instance_id": "aaaaaaaaaaaaaaaa",
+                "pane_id": "%10",
+                "run_id": "run_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              }
+            },
+            "identity": {
+              "pid": 101,
+              "run_id": "run_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "native_id": "01a15ff5-473c-7618-b33a-dc386d709bba",
+              "cwd": "/fixture/native",
+              "generation": "native-generation",
+              "instance_id": "aaaaaaaaaaaaaaaa",
+              "profile": "personal",
+              "lock_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "session_file": "/fixture/native/history.jsonl",
+              "aoe_profile": "personal-aoe"
+            },
+            "row_fingerprint": "36ee66e06d71cac0bc9c5b3c8656db60d0fe7e8fb1f340e514b63b83309916c5",
+            "extension": {
+              "path": "/fixture/agent-extensions/pi-aoe-session-id.js",
+              "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+            },
+            "preview": {
+              "contract": "ledger.current-profile-resume.v1",
+              "resume_profile": "current",
+              "profile": "personal",
+              "harness": "pi",
+              "native_id": "01a15ff5-473c-7618-b33a-dc386d709bba",
+              "cwd": "/fixture/native",
+              "source_run_id": "run_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "source_revision": 2,
+              "expected_lock": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "expected_native_snapshot": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "native_session_path": "/fixture/native/history.jsonl",
+              "skills": [],
+              "effective_skill_names": [
+                "approved",
+                "launch-local"
+              ]
+            }
+          }
+        },
+        "receipt": {
+          "id": "aaaaaaaaaaaaaaaa",
+          "title": "canary",
+          "aoe_profile": "personal-aoe",
+          "started_at": "2026-10-26T20:34:41.353915+00:00",
+          "stop_accepted": true,
+          "result": "refreshed",
+          "verification": {
+            "identity": {
+              "pid": 101,
+              "run_id": "run_ffffffffffffffffffffffffffffffff",
+              "native_id": "01a15ff5-473c-7618-b33a-dc386d709bba",
+              "cwd": "/fixture/native",
+              "generation": "native-generation",
+              "instance_id": "aaaaaaaaaaaaaaaa",
+              "profile": "personal",
+              "lock_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "session_file": "/fixture/native/history.jsonl",
+              "aoe_profile": "personal-aoe"
+            },
+            "resource_discovery": {
+              "skill_names": [
+                "approved",
+                "launch-local"
+              ]
+            }
+          },
+          "finished_at": "2026-10-26T20:34:41.354746+00:00"
+        }
+      }
+    ]
+  },
+  "calls": [
+    "probe",
+    "probe",
+    "stop",
+    "wait-exit",
+    "respawn"
+  ]
+}

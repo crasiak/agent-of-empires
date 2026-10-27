@@ -1364,3 +1364,62 @@ it("research operations preserve revision and never retry ambiguous submissions"
   expect(await api.replyResearch("a/b", "target; $(literal)")).toEqual({ ok: true });
   expect(bodyOf(lastCall().init)).toEqual({ answer: "target; $(literal)" });
 });
+
+it("workshop treats HTTP success with an unreadable body as unknown, never as a definite refusal", async () => {
+  for (const body of [
+    {
+      operation: "create" as const,
+      id: "workshop-id",
+      envelope: {
+        account: "work" as const,
+        idea: "literal",
+        repository: "/fixture",
+        slug: "example",
+        source_scope: "public",
+      },
+    },
+    { operation: "refine" as const, id: "workshop-id", revision: 2, message: "literal" },
+    { operation: "commit" as const, id: "workshop-id", revision: 4, review_digest: "exact" },
+  ]) {
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new Error("body truncated after commit")),
+    } as unknown as Response);
+    expect(await api.workshopOperation(body)).toMatchObject({ uncertain: true });
+    expect(bodyOf(lastCall().init)).toEqual(body);
+  }
+  fetchSpy.mockResolvedValueOnce(json({ message: "stale revision" }, 409));
+  expect(await api.workshopOperation({ operation: "review", id: "workshop-id", revision: 2 })).toMatchObject({
+    uncertain: false,
+    error: "stale revision",
+  });
+});
+
+it("workshop post-effect persistence failures keep exact keyed operations uncertain", async () => {
+  for (const operation of [
+    { operation: "commit" as const, id: "same-id", revision: 4, review_digest: "review" },
+    {
+      operation: "publish" as const,
+      id: "same-id",
+      revision: 8,
+      preview_digest: "preview",
+      disclosure_confirmed: true,
+    },
+    {
+      operation: "land" as const,
+      id: "same-id",
+      revision: 12,
+      policy_digest: "policy",
+      current_base_and_rules: true,
+      exclusive_pr_custody: true,
+    },
+    { operation: "deploy" as const, id: "same-id", revision: 20, candidate_digest: "candidate" },
+  ]) {
+    fetchSpy.mockResolvedValueOnce(
+      json({ code: "workshop_operation_uncertain", message: "Effect outcome unknown; reopen same UUID" }, 500),
+    );
+    expect(await api.workshopOperation(operation)).toMatchObject({ uncertain: true });
+    expect(bodyOf(lastCall().init)).toEqual(operation);
+  }
+});

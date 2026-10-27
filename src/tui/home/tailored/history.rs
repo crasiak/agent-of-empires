@@ -10,6 +10,7 @@ pub(super) enum HistoryAction {
     None,
     New,
     Research,
+    Workshop,
     Document,
     Open(String),
     Visibility { id: String, hidden: bool },
@@ -19,6 +20,7 @@ pub(super) enum HistoryAction {
 enum Item {
     New,
     Research,
+    Workshop,
     Document,
     Session(HistoryEntry),
 }
@@ -45,6 +47,9 @@ impl HistoryPicker {
         }
         if !self.hidden && "document chat".contains(&query) {
             items.push(Item::Document);
+        }
+        if !self.hidden && "skill workshop".contains(&query) {
+            items.push(Item::Workshop);
         }
         items.extend(
             self.rows
@@ -106,6 +111,7 @@ impl HistoryPicker {
                 return match items.get(self.selected) {
                     Some(Item::New) => HistoryAction::New,
                     Some(Item::Research) => HistoryAction::Research,
+                    Some(Item::Workshop) => HistoryAction::Workshop,
                     Some(Item::Document) => HistoryAction::Document,
                     Some(Item::Session(entry)) => HistoryAction::Open(entry.id.clone()),
                     None => HistoryAction::None,
@@ -197,6 +203,7 @@ impl HistoryPicker {
                     "Public Markdown/PDF link, direct tool-free conversation".into(),
                     HistoryAction::Document,
                 ),
+                Item::Workshop => ("+ Skill workshop".into(), "Tool-free refinement, exact Review/local Commit, destination Publish, separate Land and targeted Deploy".into(), HistoryAction::Workshop),
                 Item::Research => (
                     "+ Tailored research".into(),
                     "Develop prompt, choose ORX/EVO, review then explicit Run".into(),
@@ -307,9 +314,11 @@ mod tests {
             created_at: chrono::Utc::now(),
             hidden: false,
             research: false,
+            workshop: false,
         };
         let mut picker = HistoryPicker::default();
         picker.replace_rows(vec![entry.clone()]);
+        picker.handle_key(key(KeyCode::Down));
         picker.handle_key(key(KeyCode::Down));
         picker.handle_key(key(KeyCode::Down));
         picker.handle_key(key(KeyCode::Down));

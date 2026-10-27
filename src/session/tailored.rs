@@ -3,6 +3,7 @@
 pub mod document;
 pub mod history;
 pub mod research;
+pub mod workshop;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
