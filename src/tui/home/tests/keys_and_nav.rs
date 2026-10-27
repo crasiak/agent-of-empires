@@ -50,6 +50,8 @@ fn tailored_history_hide_is_persistent_without_touching_session_lifecycle() {
     env.view
         .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), None);
     env.view
+        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), None);
+    env.view
         .handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE), None);
     assert!(
         crate::session::tailored::history::entry(
@@ -1298,4 +1300,47 @@ fn ctrl_l_toggles_footer_when_not_in_live_send() {
         !env.view.show_last_prompt,
         "Ctrl+L turns the footer back off"
     );
+}
+
+#[test]
+#[serial]
+fn workshop_history_lock_contention_does_not_block_tui_keys_or_ticks() {
+    let mut env = create_test_env_with_sessions(1);
+    let app = crate::session::get_app_dir().unwrap();
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let owner = std::thread::spawn(move || {
+        let lock = crate::session::acquire_storage_flock(&app, ".workshop.json.lock").unwrap();
+        held_tx.send(()).unwrap();
+        let released = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+        drop(lock);
+        released.expect("TUI did not service keys before the held-lock deadline");
+    });
+    held_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let (contended_tx, contended_rx) = std::sync::mpsc::channel();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _observer = crate::session::observe_lock_contention_for_test(contended_tx);
+        let _ = result_tx.send(super::super::tailored::load_workshop_history());
+    });
+    contended_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let shortcut = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
+    env.view.tailored_window = Some(super::super::tailored::TailoredWindow::new(
+        crate::session::tailored::CaptureAccount::Personal,
+    ));
+    let window = env.view.tailored_window.as_mut().unwrap();
+    window.set_history_worker_for_test(result_rx);
+    env.view.tick_tailored();
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE), None);
+    assert!(env.view.tailored_window.is_some());
+    env.view.handle_key(shortcut, None);
+    assert!(env.view.tailored_window.is_none());
+    release_tx.send(()).unwrap();
+    owner.join().unwrap();
+    worker.join().unwrap();
 }

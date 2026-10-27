@@ -1,6 +1,7 @@
 mod document;
 mod history;
 mod research;
+mod workshop;
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -18,9 +19,16 @@ use crate::tui::styles::Theme;
 pub(in crate::tui) struct TailoredWindow {
     picker: HistoryPicker,
     research: Option<research::ResearchWindow>,
+    workshop: Option<workshop::WorkshopWindow>,
     document: Option<document::DocumentWindow>,
     starting_document: Option<document::StartWorker>,
     profile: String,
+    workshop_history: Option<(
+        u64,
+        mpsc::Receiver<Result<Vec<crate::session::tailored::history::HistoryEntry>, String>>,
+    )>,
+    workshop_history_generation: u64,
+    workshop_visibility: Option<mpsc::Receiver<Result<(), String>>>,
     history_refreshed: Option<Instant>,
     draft_committed: bool,
     composing: bool,
@@ -54,6 +62,14 @@ struct CaptureTerminal {
     size: (u16, u16),
 }
 
+pub(super) fn load_workshop_history(
+) -> Result<Vec<crate::session::tailored::history::HistoryEntry>, String> {
+    crate::session::tailored::workshop::Store::open()
+        .and_then(|store| store.list())
+        .map(|requests| requests.iter().map(|r| r.history()).collect())
+        .map_err(|e| format!("{e:#}"))
+}
+
 fn idea_textarea() -> TextArea<'static> {
     let mut textarea = TextArea::default();
     textarea.set_wrap_mode(WrapMode::WordOrGlyph);
@@ -61,13 +77,17 @@ fn idea_textarea() -> TextArea<'static> {
 }
 
 impl TailoredWindow {
-    fn new(account: CaptureAccount) -> Self {
+    pub(super) fn new(account: CaptureAccount) -> Self {
         Self {
             picker: HistoryPicker::default(),
             research: None,
+            workshop: None,
             document: None,
             starting_document: None,
             profile: String::new(),
+            workshop_history: None,
+            workshop_history_generation: 0,
+            workshop_visibility: None,
             history_refreshed: None,
             draft_committed: false,
             composing: false,
@@ -82,6 +102,17 @@ impl TailoredWindow {
             immediately_rect: Rect::default(),
             submit_rect: Rect::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_history_worker_for_test(
+        &mut self,
+        receiver: mpsc::Receiver<
+            Result<Vec<crate::session::tailored::history::HistoryEntry>, String>,
+        >,
+    ) {
+        self.workshop_history = Some((self.workshop_history_generation, receiver));
+        self.history_refreshed = Some(Instant::now());
     }
 
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> WindowAction {
@@ -100,6 +131,7 @@ impl TailoredWindow {
         if key.code == KeyCode::F(2) && self.checking.is_none() {
             self.terminal = None;
             self.research = None;
+            self.workshop = None;
             self.document = None;
             self.composing = false;
             self.picker.recent();
@@ -112,6 +144,13 @@ impl TailoredWindow {
                 return WindowAction::Close;
             }
             document.key(key, &self.profile);
+            return WindowAction::Continue;
+        }
+        if let Some(workshop) = &mut self.workshop {
+            if key.code == KeyCode::Esc {
+                return WindowAction::Close;
+            }
+            workshop.key(key);
             return WindowAction::Continue;
         }
         if let Some(research) = &mut self.research {
@@ -175,6 +214,10 @@ impl TailoredWindow {
                 self.document = Some(document::DocumentWindow::new(self.account));
                 WindowAction::Continue
             }
+            HistoryAction::Workshop => {
+                self.workshop = Some(workshop::WorkshopWindow::new(self.account, None));
+                WindowAction::Continue
+            }
             HistoryAction::Research => {
                 self.research = Some(research::ResearchWindow::new(self.account, None));
                 WindowAction::Continue
@@ -196,6 +239,10 @@ impl TailoredWindow {
     }
 
     pub(super) fn handle_paste(&mut self, text: &str) {
+        if let Some(workshop) = &mut self.workshop {
+            workshop.paste(text);
+            return;
+        }
         if let Some(document) = &mut self.document {
             document.paste(text);
             return;
@@ -224,7 +271,11 @@ impl TailoredWindow {
             document.click(col, row, &self.profile);
             return WindowAction::Continue;
         }
-        if self.checking.is_some() || self.terminal.is_some() || self.research.is_some() {
+        if self.checking.is_some()
+            || self.terminal.is_some()
+            || self.research.is_some()
+            || self.workshop.is_some()
+        {
             return WindowAction::Continue;
         }
         if !self.composing {
@@ -279,14 +330,14 @@ impl TailoredWindow {
 
     pub(super) fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let width = area.width.saturating_sub(4).min(
-            if self.terminal.is_some() || self.research.is_some() {
+            if self.terminal.is_some() || self.research.is_some() || self.workshop.is_some() {
                 140
             } else {
                 84
             },
         );
         let height = area.height.saturating_sub(4).min(
-            if self.terminal.is_some() || self.research.is_some() {
+            if self.terminal.is_some() || self.research.is_some() || self.workshop.is_some() {
                 48
             } else if self.composing || self.document.is_some() {
                 20
@@ -314,6 +365,10 @@ impl TailoredWindow {
         self.submit_rect = Rect::default();
         if let Some(document) = &mut self.document {
             document.render(frame, inner, theme);
+            return;
+        }
+        if let Some(workshop) = &mut self.workshop {
+            workshop.render(frame, inner, theme);
             return;
         }
         if let Some(research) = &mut self.research {
@@ -484,6 +539,14 @@ impl HomeView {
             WindowAction::Continue => {}
             WindowAction::Close => self.tailored_window = None,
             WindowAction::Open(id) => {
+                if let Some(window) = &mut self.tailored_window {
+                    if let Some(entry) =
+                        window.picker.rows.iter().find(|r| r.id == id && r.workshop)
+                    {
+                        window.workshop = Some(workshop::WorkshopWindow::load(entry.account, id));
+                        return;
+                    }
+                }
                 if let Ok(draft) = crate::session::tailored::research::Store::open()
                     .and_then(|store| store.get(&id))
                 {
@@ -518,6 +581,33 @@ impl HomeView {
                 }
             }
             WindowAction::Visibility { id, hidden } => {
+                if let Some(window) = &mut self.tailored_window {
+                    if window.picker.rows.iter().any(|r| r.id == id && r.workshop) {
+                        if window.workshop_visibility.is_some() {
+                            return;
+                        }
+                        window.workshop_history_generation += 1;
+                        let (tx, rx) = mpsc::channel();
+                        window.workshop_visibility = Some(rx);
+                        std::thread::spawn(move || {
+                            let result = (|| -> anyhow::Result<()> {
+                                let store = crate::session::tailored::workshop::Store::open()?;
+                                let request = store.get(&id)?;
+                                store.operate(
+                                    crate::session::tailored::workshop::Operation::Visibility {
+                                        id,
+                                        revision: request.revision,
+                                        hidden,
+                                    },
+                                )?;
+                                Ok(())
+                            })()
+                            .map_err(|e| format!("{e:#}"));
+                            let _ = tx.send(result);
+                        });
+                        return;
+                    }
+                }
                 if let Ok(store) = crate::session::tailored::research::Store::open() {
                     if store.get(&id).is_ok() {
                         let result = store.change(&id, |d| {
@@ -562,9 +652,21 @@ impl HomeView {
         let Some(window) = &mut self.tailored_window else {
             return false;
         };
+        if window.workshop_history.is_none() && window.workshop_visibility.is_none() {
+            let (tx, rx) = mpsc::channel();
+            window.workshop_history = Some((window.workshop_history_generation, rx));
+            std::thread::spawn(move || {
+                let result = load_workshop_history();
+                let _ = tx.send(result);
+            });
+        }
         window.history_refreshed = Some(Instant::now());
         match result {
-            Ok(rows) => window.picker.replace_rows(rows),
+            Ok(mut rows) => {
+                rows.extend(window.picker.rows.iter().filter(|r| r.workshop).cloned());
+                rows.sort_by(crate::session::tailored::history::compare);
+                window.picker.replace_rows(rows)
+            }
             Err(error) => {
                 let message = format!("Cannot read capture history: {error:#}");
                 let changed = window.error.as_deref() != Some(&message);
@@ -575,12 +677,64 @@ impl HomeView {
     }
 
     pub(super) fn tick_tailored(&mut self) -> bool {
+        let mut workshop_changed = false;
+        if let Some(window) = &mut self.tailored_window {
+            if let Some((generation, result)) = window
+                .workshop_history
+                .as_ref()
+                .map(|(generation, rx)| (*generation, rx.try_recv()))
+                .filter(|(_, r)| !matches!(r, Err(mpsc::TryRecvError::Empty)))
+            {
+                window.workshop_history = None;
+                if generation != window.workshop_history_generation {
+                    window.history_refreshed = None;
+                } else {
+                    match result {
+                        Ok(Ok(workshop)) => {
+                            let mut rows: Vec<_> = window
+                                .picker
+                                .rows
+                                .iter()
+                                .filter(|r| !r.workshop)
+                                .cloned()
+                                .collect();
+                            rows.extend(workshop);
+                            rows.sort_by(crate::session::tailored::history::compare);
+                            workshop_changed |= window.picker.replace_rows(rows);
+                        }
+                        _ => {
+                            window.error = Some(
+                                "Workshop history unavailable; previous snapshot retained".into(),
+                            );
+                            workshop_changed = true;
+                        }
+                    }
+                }
+            }
+            if let Some(result) = window
+                .workshop_visibility
+                .as_ref()
+                .map(|rx| rx.try_recv())
+                .filter(|r| !matches!(r, Err(mpsc::TryRecvError::Empty)))
+            {
+                window.workshop_visibility = None;
+                window.error = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error),
+                    _ => {
+                        Some("Workshop visibility outcome unknown; refresh the same history".into())
+                    }
+                };
+                window.history_refreshed = None;
+                workshop_changed = true;
+            }
+        }
         let refresh = self.tailored_window.as_ref().is_some_and(|window| {
             window
                 .history_refreshed
                 .is_none_or(|last| last.elapsed() >= Duration::from_secs(2))
         });
-        let refreshed = refresh && self.refresh_tailored_history();
+        let refreshed = (refresh && self.refresh_tailored_history()) || workshop_changed;
         let started = self
             .tailored_window
             .as_ref()
@@ -600,6 +754,13 @@ impl HomeView {
                 }
             }
             return true;
+        }
+        if let Some(workshop) = self
+            .tailored_window
+            .as_mut()
+            .and_then(|w| w.workshop.as_mut())
+        {
+            return workshop.tick() || refreshed;
         }
         if let Some(research) = self
             .tailored_window

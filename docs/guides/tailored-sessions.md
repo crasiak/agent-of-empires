@@ -281,3 +281,90 @@ explicit abandonment, not automatic model retry. Late results from the abandoned
 revision are ignored. Run/uncertain requests cannot use this recovery action.
 The exact frozen prompt is limited to 65,536 UTF-8 bytes before Run commits;
 oversize reviews remain editable and are never silently truncated.
+
+## Author a versioned skill
+
+Choose **Skill workshop** in Ctrl+Y history. Supply Personal or Work, an idea,
+a lowercase skill slug, an existing canonical absolute source repository and
+explicit account/source suitability. The local-only `skills.workshop_repository`
+setting supplies the repository default; an unset installation does not guess.
+The source destination is `.agents/skills/<slug>` in an owned linked worktree.
+Existing uncommitted skill changes must be preserved and reconciled first.
+
+Create retains the complete envelope under one UUID. Refinement uses dedicated
+`aoe-workshop-personal` or `aoe-workshop-work` direct, pinned Pi profiles with only
+model resources and their own minimal settings binding. It disables tools, MCP,
+ambient context, skills, extensions and saved model sessions. Model proposals are
+bounded UTF-8 bundles, not approval or evidence that scripts ran. Review and edit
+proposed files as data; generated scripts are never executed automatically.
+
+**Review exact source** freezes the base, old/new files, full diff, tree identities
+and static-only evidence. **Approve reviewed local commit** approves only that
+review digest and revision. It creates a scoped local branch/worktree without
+changing the source worktree's index or invoking checkout filters/hooks. Source
+or base changes require a new review. A local commit is neither landed nor deployed.
+
+### Publish and Land separately
+
+Enter a canonical GitHub HTTPS remote, actual repository ID, base branch and PR
+text. **Preview destination disclosure** is read-only. Review its actual visibility,
+host actor, account, content and PR text before approving **Publish**. Work source
+suitability is not permission to disclose that content publicly. Publication creates
+only the owned skill PR; it does not land it. The actual remote head may have
+metadata different from the local Commit while retaining exactly the reviewed tree.
+
+**Preview current Land rules**, then separately confirm the exact head under
+then-current base/rules and exclusive PR custody. Only the Workshop's own unstacked,
+default-branch PR is eligible. Land uses direct non-bypass squash, never admin,
+queue or auto-merge fallback. Unrelated base progress is allowed. GitHub does not
+provide stack-membership or target-ref CAS: you assume nobody else retargets,
+stacks or edits this PR during Land. Missing/private/unsupported policy blocks.
+A pending UUID is not landed. Reconcile until actual merged commit and exact skill
+subtree are verified. Prohibited execution evidence stays quarantined, not upgraded
+by a later successful-looking PR observation.
+
+### Import, publish config and adopt separately
+
+Deploy requires a current Ledger companion and fleet protocol plus a reachable
+existing daemon. Missing or old helpers block; AoE does not install them or start
+a daemon. Select explicit profile/harness/account targets and exact Session IDs.
+An empty `sessions` array is publish-only, never all Sessions. There is no implicit
+`common` or all-profile selection.
+
+1. **Preview guarded import** shows the exact landed source, every current consumer
+   including binding-less, denied and changing Profiles, selected future pairs and
+   account revisions. Approve that digest before import visibility. All changing
+   bound consumers must be selected; partial global-version updates are unsupported.
+2. **Preview complete post-import config** retains the original complete candidate
+   and post-import CAS revision. Approve **Deploy** separately. A stale config or
+   changed source/account/consumer set requires new review, never a moving replay.
+3. **Materialize approved pairs** requires the actual atomic publication epoch.
+   Import-affected pairs are retained even when config selection did not change.
+   Publication and files on disk are not evidence of native adoption.
+4. **Preview or recheck native plan**, then approve its exact digest. CRA-931 alone
+   owns native admission and refresh, with one target attempted per approval.
+   Waiting-idle means native admission reported busy, not a sidebar label. Recheck
+   and approve again after actual idle; no autonomous watcher is promised.
+
+Receipts distinguish publish-only, waiting-idle, unsupported, verified adoption
+and unknown. Adoption requires expected full Lock, a new run in the same Agent
+conversation/cwd and actual discovery of the skill plus launch-local grants.
+Unsupported MCP/codemode, Claude/Codex refresh, ACP, sandbox and old cores remain
+visible. No active-terminal injection, force, restart-all, fresh conversation or
+local-grant discard is a fallback.
+
+The TUI uses Ctrl+S to create, Ctrl+D to refine, Ctrl+B to save proposed files,
+Ctrl+R to review, Ctrl+K to approve local Commit and F11 for complete evidence.
+F8 switches to publication/deploy fields. Alt+P previews the destination; F4
+confirms disclosure and Alt+U approves Publish. Alt+L previews Land policy;
+F5 confirms current rules, F6 exclusive custody and Alt+G approves Land.
+Alt+I/Alt+J preview/approve import, Alt+V previews complete config, Alt+O
+approves Deploy, Alt+M materializes, and Alt+N/Alt+A preview/approve the native plan.
+
+F10 reopens the same UUID; F9 inspects retained receipts without replaying uncertain
+writes. A lost response requires this same-request recovery, not a replacement
+request. Private landed projections and effect evidence survive close/restart;
+missing or changed projection evidence blocks instead of regenerating a new source
+under an old approval. F12 abandons pending refinement and fences late output.
+Closing or hiding the Workshop does not discard its request. Migration v053 fences
+older writers; stop old clients before upgrading and do not lower the schema cursor.

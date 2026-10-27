@@ -213,3 +213,47 @@ test("research owns keyboard focus and returns to history without dispatch", asy
   await expect(dialog).toBeHidden();
   await expect(underlying).toBeFocused();
 });
+
+test("workshop keeps account-scoped edits through resize and returns focus without host effects", async ({ page }) => {
+  await mockTerminalApis(page);
+  await page.route("**/api/tailored-sessions", (route) => route.fulfill({ json: { entries: [] } }));
+  await page.route("**/api/workshop-defaults", (route) => route.fulfill({ json: { repository: "/tmp/skills" } }));
+  await page.goto("/session/pinch-test");
+  const underlying = page.locator('[data-term="agent"] textarea').first();
+  await underlying.focus();
+  await pressShortcut(page, "Control+y");
+  const dialog = page.getByRole("dialog", {
+    name: "Tailored Sessions",
+    exact: true,
+  });
+  const search = dialog.getByLabel("Find a tailored preset");
+  await search.fill("workshop");
+  await search.press("Enter");
+  await expect(dialog.getByLabel("Source repository")).toHaveValue("/tmp/skills");
+  await dialog.getByLabel("Workshop account").selectOption("work");
+  await dialog.getByLabel("Skill slug").fill("review-evidence");
+  await dialog.getByLabel("Account/source suitability").fill("Work-only source repository");
+  const idea = dialog.getByLabel("Skill idea", { exact: true });
+  const exactIdea = "Check evidence and preserve account boundaries. ".repeat(20);
+  await idea.fill(exactIdea);
+  await page.setViewportSize({ width: 520, height: 720 });
+  await expect(idea).toHaveValue(exactIdea);
+  expect(await idea.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await expect(dialog.getByLabel("Workshop account")).toHaveValue("work");
+  const screenshot = test.info().outputPath("skill-workshop-form.png");
+  await dialog.screenshot({ path: screenshot });
+  await test.info().attach("Skill Workshop form", {
+    path: screenshot,
+    contentType: "image/png",
+  });
+  await dialog.getByRole("button", { name: "Reopen same request", exact: true }).focus();
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByRole("button", { name: "Back to history · F2" })).toBeFocused();
+  await page.keyboard.press("F2");
+  await expect(search).toBeFocused();
+  expect(await publishedRequests(page, "/api/workshop", "POST")).toEqual([]);
+  expect(await publishedRequests(page, "/api/sessions", "POST")).toEqual([]);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(underlying).toBeFocused();
+});

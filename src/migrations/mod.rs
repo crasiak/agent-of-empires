@@ -62,6 +62,7 @@ mod v049_afk_return_review;
 mod v050_tailored_history;
 mod v051_research_requests;
 mod v052_document_conversations;
+mod v053_skill_workshop;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -108,7 +109,7 @@ use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 52;
+const CURRENT_VERSION: u32 = 53;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -287,6 +288,7 @@ const MIGRATIONS: &[Migration] = &[
         "document_conversations",
         v052_document_conversations::run,
     ),
+    (53, "skill_workshop", v053_skill_workshop::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -636,7 +638,7 @@ mod tests {
         );
         assert_eq!(row[0]["pi_session_path"], transcript);
         run_migrations().unwrap();
-        assert_eq!(get_current_version(), 52);
+        assert_eq!(get_current_version(), CURRENT_VERSION);
         assert_eq!(fs::read(storage.sessions_path()).unwrap(), before);
         run_migrations().unwrap();
         assert_eq!(fs::read(storage.sessions_path()).unwrap(), before);
