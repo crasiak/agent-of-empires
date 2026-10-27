@@ -97,6 +97,7 @@ has_acknowledged_agent_hooks = true
 
 [session]
 default_attach_mode = "live_send"
+session_search_supervise = false
 
 {systemd_off}"#,
         version = env!("CARGO_PKG_VERSION"),
@@ -282,6 +283,7 @@ has_acknowledged_agent_hooks = true
 
 [session]
 default_attach_mode = "live_send"
+session_search_supervise = false
 custom_agents = {{ "{LINK_AGENT}" = "{LINK_AGENT}" }}
 
 {systemd_off}"#,
