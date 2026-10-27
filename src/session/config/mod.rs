@@ -1106,7 +1106,8 @@ pub struct SessionConfig {
     #[setting(
         label = "Keep session search running",
         widget = "toggle",
-        web = "local_only:starts host processes"
+        web = "local_only:starts host processes",
+        global_only
     )]
     pub session_search_supervise: bool,
 
