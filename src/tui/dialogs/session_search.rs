@@ -205,6 +205,12 @@ impl SessionSearchDialog {
         repaint
     }
 
+    /// A query is still running, for tests that wait on the worker.
+    #[cfg(test)]
+    pub(crate) fn busy(&self) -> bool {
+        self.in_flight > 0
+    }
+
     fn query(&self) -> &str {
         self.input.value().trim()
     }

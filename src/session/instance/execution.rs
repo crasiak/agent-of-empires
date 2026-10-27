@@ -4118,6 +4118,7 @@ mod tests {
             store: agent_dir.clone(),
             title: "pi hit".into(),
             transcript_path: Some(transcript.clone()),
+            command: String::new(),
         };
 
         let inst = crate::session_search::instance(&spec, &Default::default()).unwrap();

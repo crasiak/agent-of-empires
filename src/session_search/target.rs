@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::query::Session;
+use super::query::{Resume, Session};
 
 /// An AoE profile and the agent config dir it uses for each tool.
 pub struct ProfileHomes {
@@ -18,6 +18,8 @@ pub struct ResumeSpec {
     pub store: PathBuf,
     pub title: String,
     pub transcript_path: Option<PathBuf>,
+    /// The hit's resume command, copied when the native resume cannot be built.
+    pub command: String,
 }
 
 pub enum Target {
@@ -39,7 +41,7 @@ pub fn resolve(
     let Some(resume) = &s.resume else {
         return Target::Nothing;
     };
-    match native_resume(s, resume.session_id.as_deref(), profiles, ledger_home) {
+    match native_resume(s, resume, profiles, ledger_home) {
         Some(spec) => Target::Resume(spec),
         None => Target::CopyOnly(resume.command.clone()),
     }
@@ -47,7 +49,7 @@ pub fn resolve(
 
 fn native_resume(
     s: &Session,
-    session_id: Option<&str>,
+    resume: &Resume,
     profiles: &[ProfileHomes],
     ledger_home: &Path,
 ) -> Option<ResumeSpec> {
@@ -56,7 +58,11 @@ fn native_resume(
         "pi" => "pi",
         _ => return None,
     };
-    let (session_id, cwd, profile) = (session_id?, s.cwd.as_deref()?, s.profile.as_deref()?);
+    let (session_id, cwd, profile) = (
+        resume.session_id.as_deref()?,
+        s.cwd.as_deref()?,
+        s.profile.as_deref()?,
+    );
     // Way-back fields name the resume target, so a subagent hit carries its
     // parent's transcript; the launch checks the header id against it.
     let transcript_path = s.transcript_path.as_deref().map(PathBuf::from);
@@ -84,6 +90,7 @@ fn native_resume(
         store,
         title,
         transcript_path,
+        command: resume.command.clone(),
     })
 }
 
@@ -142,6 +149,7 @@ mod tests {
                     ("claude", "c-111", "personal-sub")
                 );
                 assert_eq!(r.store, home.join("homes/personal/claude-code/runtime"));
+                assert!(r.command.ends_with("--resume c-111"));
             }
             _ => panic!("expected resume"),
         }

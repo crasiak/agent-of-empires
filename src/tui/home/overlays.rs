@@ -123,6 +123,7 @@ impl HomeView {
             || self.plugin_manager_dialog.is_some()
             || self.skills_manager_dialog.is_some()
             || self.command_palette.is_some()
+            || self.session_search.is_some()
             || self.tool_picker_dialog.is_some()
             || self.send_message_dialog.is_some()
             || self.permission_response_dialog.is_some()

@@ -294,6 +294,7 @@ impl HomeView {
             plugin_manager_dialog: None,
             skills_manager_dialog: None,
             command_palette: None,
+            session_search: None,
             serve_view: None,
             update_confirm_dialog: None,
             telemetry_consent_dialog: None,

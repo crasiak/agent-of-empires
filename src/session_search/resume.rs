@@ -58,6 +58,7 @@ mod tests {
             store: PathBuf::from(store),
             title: "fix the parser".into(),
             transcript_path: None,
+            command: String::new(),
         }
     }
 

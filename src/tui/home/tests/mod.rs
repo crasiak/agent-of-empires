@@ -70,6 +70,7 @@ mod scroll_pane_isolation;
 mod search;
 mod session_feed_tests;
 mod session_info;
+mod session_search;
 mod settings_scroll_wiring;
 mod shortcut_bar;
 mod sidebar_position;

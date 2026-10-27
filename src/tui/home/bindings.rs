@@ -30,6 +30,7 @@ pub enum ActionId {
     ToolPicker,
     SearchStart,
     HighlightFilter,
+    SessionSearch,
     ProjectContext,
     SearchNext,
     NewSession,
@@ -595,6 +596,21 @@ pub static BINDINGS: &[Binding] = &[
         palette: Some(PaletteMeta {
             title: "Filter session and project highlights",
             keywords: &["color", "filter", "highlight"],
+            group: PaletteGroup::Views,
+        }),
+    },
+    Binding {
+        id: ActionId::SessionSearch,
+        non_strict: &[ctrl('f')],
+        strict: &[ctrl('f')],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Other,
+            desc: "Search transcripts",
+        }),
+        palette: Some(PaletteMeta {
+            title: "Search transcripts",
+            keywords: &["search", "transcript", "history", "session-search", "find"],
             group: PaletteGroup::Views,
         }),
     },
@@ -1202,6 +1218,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::ToolPicker => "tool-picker",
         ActionId::SearchStart => "search",
         ActionId::HighlightFilter => "highlight-filter",
+        ActionId::SessionSearch => "session-search",
         ActionId::ProjectContext => "project-context",
         ActionId::SearchNext => "search-next",
         ActionId::Update => "update",
