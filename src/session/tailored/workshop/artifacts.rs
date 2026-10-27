@@ -485,6 +485,70 @@ pub(super) fn accept_artifact(d: &mut Deployment) -> Result<State> {
 }
 
 #[cfg(test)]
+pub(super) fn check_real_completed_receipt_fences(d: &Deployment) {
+    validate_candidate(d, d.candidate.as_ref().unwrap()).unwrap();
+    validate_publication(d, d.publication_receipt.as_ref().unwrap()).unwrap();
+    validate_materialization(d, d.materialize_receipt.as_ref().unwrap()).unwrap();
+    for change in [
+        "old-schema",
+        "missing-epoch",
+        "pre-cas-epoch",
+        "missing-pair",
+        "duplicate-pair",
+        "extra-pair",
+    ] {
+        let mut receipt = d.materialize_receipt.clone().unwrap();
+        match change {
+            "old-schema" => receipt["schema"] = json!("cra1260.workshop-materialize-receipt.v1"),
+            "missing-epoch" => {
+                receipt
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("publication_revision");
+            }
+            "pre-cas-epoch" => {
+                receipt["publication_revision"] =
+                    d.candidate.as_ref().unwrap()["base"]["revision"].clone()
+            }
+            "missing-pair" => {
+                receipt["pairs"].as_array_mut().unwrap().pop();
+            }
+            "duplicate-pair" => {
+                let pair = receipt["pairs"][0].clone();
+                receipt["pairs"].as_array_mut().unwrap().push(pair);
+            }
+            _ => {
+                let mut pair = receipt["pairs"][0].clone();
+                pair["profile"] = json!("unselected");
+                receipt["pairs"].as_array_mut().unwrap().push(pair);
+            }
+        }
+        assert!(validate_materialization(d, &receipt).is_err(), "{change}");
+    }
+    for change in ["old-schema", "missing-epoch", "pre-cas-epoch", "unknown"] {
+        let mut receipt = d.publication_receipt.clone().unwrap();
+        match change {
+            "old-schema" => receipt["schema"] = json!("cra1260.workshop-publication-receipt.v1"),
+            "missing-epoch" => {
+                receipt["summary"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("publication_revision");
+            }
+            "pre-cas-epoch" => {
+                receipt["summary"]["publication_revision"] =
+                    d.candidate.as_ref().unwrap()["base"]["revision"].clone()
+            }
+            _ => receipt["state"] = json!("unknown"),
+        }
+        assert!(validate_publication(d, &receipt).is_err(), "{change}");
+    }
+    let mut unknown = d.import_receipt.clone().unwrap();
+    unknown["state"] = json!("unknown");
+    assert!(validate_import(d, &unknown).is_err());
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn fixture() -> Value {
@@ -599,68 +663,4 @@ mod tests {
             assert!(serde_json::from_value::<Operation>(value).is_err());
         }
     }
-}
-
-#[cfg(test)]
-pub(super) fn check_real_completed_receipt_fences(d: &Deployment) {
-    validate_candidate(d, d.candidate.as_ref().unwrap()).unwrap();
-    validate_publication(d, d.publication_receipt.as_ref().unwrap()).unwrap();
-    validate_materialization(d, d.materialize_receipt.as_ref().unwrap()).unwrap();
-    for change in [
-        "old-schema",
-        "missing-epoch",
-        "pre-cas-epoch",
-        "missing-pair",
-        "duplicate-pair",
-        "extra-pair",
-    ] {
-        let mut receipt = d.materialize_receipt.clone().unwrap();
-        match change {
-            "old-schema" => receipt["schema"] = json!("cra1260.workshop-materialize-receipt.v1"),
-            "missing-epoch" => {
-                receipt
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("publication_revision");
-            }
-            "pre-cas-epoch" => {
-                receipt["publication_revision"] =
-                    d.candidate.as_ref().unwrap()["base"]["revision"].clone()
-            }
-            "missing-pair" => {
-                receipt["pairs"].as_array_mut().unwrap().pop();
-            }
-            "duplicate-pair" => {
-                let pair = receipt["pairs"][0].clone();
-                receipt["pairs"].as_array_mut().unwrap().push(pair);
-            }
-            _ => {
-                let mut pair = receipt["pairs"][0].clone();
-                pair["profile"] = json!("unselected");
-                receipt["pairs"].as_array_mut().unwrap().push(pair);
-            }
-        }
-        assert!(validate_materialization(d, &receipt).is_err(), "{change}");
-    }
-    for change in ["old-schema", "missing-epoch", "pre-cas-epoch", "unknown"] {
-        let mut receipt = d.publication_receipt.clone().unwrap();
-        match change {
-            "old-schema" => receipt["schema"] = json!("cra1260.workshop-publication-receipt.v1"),
-            "missing-epoch" => {
-                receipt["summary"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("publication_revision");
-            }
-            "pre-cas-epoch" => {
-                receipt["summary"]["publication_revision"] =
-                    d.candidate.as_ref().unwrap()["base"]["revision"].clone()
-            }
-            _ => receipt["state"] = json!("unknown"),
-        }
-        assert!(validate_publication(d, &receipt).is_err(), "{change}");
-    }
-    let mut unknown = d.import_receipt.clone().unwrap();
-    unknown["state"] = json!("unknown");
-    assert!(validate_import(d, &unknown).is_err());
 }
