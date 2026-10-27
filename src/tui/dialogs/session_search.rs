@@ -434,7 +434,7 @@ impl SessionSearchDialog {
                 Style::default()
                     .fg(theme.text)
                     .add_modifier(Modifier::REVERSED)
-            } else if i % 2 == 1 {
+            } else if (start + i) % 2 == 1 {
                 Style::default().fg(theme.text).bg(stripe)
             } else {
                 Style::default().fg(theme.text)
@@ -903,6 +903,21 @@ mod tests {
         assert!(!lines.iter().any(|l| l.contains('│')));
         assert!(!lines.iter().any(|l| l.contains("attic·")));
         assert!(lines[17].starts_with('▌'), "{:?}", lines[17]);
+    }
+
+    #[test]
+    fn stripes_stay_on_their_rows_when_the_list_scrolls() {
+        let mut d = loaded();
+        d.handle_key(key(KeyCode::Up));
+        d.handle_key(key(KeyCode::Right));
+        d.cursor = 2;
+        let theme = crate::tui::styles::load_theme("empire");
+        let stripe = theme.highlight_background(theme.dimmed);
+        // Row 1 of three sits second from the bottom; a two-row list scrolls it to the bottom.
+        let tall = draw(90, 20, |f, theme| d.render(f, f.area(), theme));
+        let short = draw(90, 4, |f, theme| d.render(f, f.area(), theme));
+        assert_eq!(tall[(2, 16)].bg, stripe);
+        assert_eq!(short[(2, 1)].bg, stripe);
     }
 
     #[test]

@@ -71,6 +71,12 @@ impl HomeView {
 
     /// Add an instance resuming the hit natively; on failure copy its command instead.
     fn resume_search_hit(&mut self, spec: ResumeSpec) -> Option<Action> {
+        if !Path::new(&spec.cwd).is_dir() {
+            return Some(Action::CopyToClipboard {
+                text: spec.command,
+                status: "folder is gone; command copied".into(),
+            });
+        }
         // Repo config included, as `aoe session import` resolves it.
         let config = crate::session::config::repo_config::resolve_config_with_repo_or_warn(
             &spec.aoe_profile,

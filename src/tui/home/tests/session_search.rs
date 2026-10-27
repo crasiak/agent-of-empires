@@ -140,23 +140,35 @@ fn enter_on_a_resume_adds_one_resuming_instance_and_selects_it() {
 #[test]
 #[serial]
 fn a_resume_that_cannot_build_copies_its_command_instead() {
-    let mut env = create_test_env_with_sessions(1);
-    // Pi without its transcript cannot resume natively.
-    open_stub(&mut env.view, |_| {
-        Target::Resume(resume_spec("pi", "/nonexistent/session-search/repo"))
-    });
-    load(&mut env.view);
-    let before = env.view.instances().len();
+    let cwd = TempDir::new().unwrap();
+    let cwd_path = cwd.path().to_string_lossy().into_owned();
+    // Pi without its transcript cannot resume natively; a gone folder is not tried.
+    for (tool, cwd, want) in [
+        ("pi", cwd_path.as_str(), "resume failed: "),
+        (
+            "claude",
+            "/nonexistent/session-search/repo",
+            "folder is gone",
+        ),
+    ] {
+        let mut env = create_test_env_with_sessions(1);
+        let spec_cwd = cwd.to_string();
+        open_stub(&mut env.view, move |_| {
+            Target::Resume(resume_spec(tool, &spec_cwd))
+        });
+        load(&mut env.view);
+        let before = env.view.instances().len();
 
-    let action = env.view.handle_key(key(KeyCode::Enter), None);
-    assert_eq!(env.view.instances().len(), before);
-    match action {
-        Some(Action::CopyToClipboard { text, status }) => {
-            assert_eq!(text, "ledger run claude -- --resume c-111");
-            assert!(status.starts_with("resume failed: "), "{status}");
-            assert!(status.ends_with("; command copied"), "{status}");
+        let action = env.view.handle_key(key(KeyCode::Enter), None);
+        assert_eq!(env.view.instances().len(), before, "{tool}");
+        match action {
+            Some(Action::CopyToClipboard { text, status }) => {
+                assert_eq!(text, "ledger run claude -- --resume c-111");
+                assert!(status.starts_with(want), "{status}");
+                assert!(status.ends_with("; command copied"), "{status}");
+            }
+            other => panic!("expected a copy, got {other:?}"),
         }
-        other => panic!("expected a copy, got {other:?}"),
     }
 }
 
