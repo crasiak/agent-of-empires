@@ -137,9 +137,8 @@ impl Instance {
     /// Best-effort wait for a freshly-started pane to settle past its initial shell/splash so
     /// subsequent `send-keys` land in the agent instead of a boot prompt.
     fn wait_for_pane_ready(&self, session: &tmux::Session) {
-        let shell_check_unreliable = self.expects_shell()
-            || self.has_command_override()
-            || crate::hooks::read_hook_status(&self.id).is_some();
+        let shell_check_unreliable =
+            self.expects_shell() || self.has_command_override() || self.hook_status().is_some();
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(3000);
         loop {
             if !session.exists() {

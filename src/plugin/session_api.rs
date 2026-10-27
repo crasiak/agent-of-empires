@@ -443,6 +443,7 @@ async fn admit_and_create(
     };
 
     let spec = StructuredSessionSpec {
+        document: None,
         title: req.title,
         path: project_path,
         group: req.group.unwrap_or_default(),

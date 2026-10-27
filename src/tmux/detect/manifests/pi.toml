@@ -7,8 +7,52 @@ line_regex = ['(?i)^\s*─{3,}\s*$']
 occurrence = 2
 max_depth = 6
 
-# Pi has no hooks and always auto-approves, so the only question is whether a
-# turn is live.
+# AoE's Pi extension (`assets/session/aoe-session-id.js`) writes the hook file
+# at every turn boundary, so a write outranks every screen rule below. Those
+# rules are the fallback for a Pi that started without the extension.
+[[rules]]
+id = "hook_waiting"
+state = "waiting"
+priority = 1000
+region = "hook"
+hook_status = "waiting"
+
+[[rules]]
+id = "hook_running_fresh"
+state = "running"
+priority = 1000
+region = "hook"
+hook_status = "running"
+max_age_secs = 30
+
+# Rewritten at every tool start, so an older write outlived its turn.
+[[rules]]
+id = "hook_running_standing"
+state = "running"
+priority = 1000
+region = "hook"
+hook_status = "running"
+max_age_secs = 900
+
+[[rules]]
+id = "hook_idle"
+state = "idle"
+priority = 1000
+region = "hook"
+hook_status = "idle"
+
+# pi-ask-user's prompt frame, by its titled top border and versioned bottom
+# border, for a Pi without the extension. It outranks the spinner a turn keeps
+# drawing under the overlay.
+[[rules]]
+id = "ask_user_prompt"
+state = "waiting"
+priority = 980
+region = "whole_recent"
+visible = true
+line_regex = ['╭─ ask_user [^╮]*─╮', '╰─+ v\d+(?:\.\d+)*\S* ─╯']
+
+# Otherwise the only question is whether a turn is live.
 [[rules]]
 extends = "spinner"
 id = "spinner"

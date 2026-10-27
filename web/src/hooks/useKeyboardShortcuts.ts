@@ -17,6 +17,8 @@ export function useKeyboardShortcuts(getActions: () => ShortcutActions) {
       );
       const matched = matchShortcut(e, { mac: IS_MAC, isInput, isSessionInput });
       if (!matched) return;
+      // Modal terminal keys belong to the overlay, not the underlying Session.
+      if (document.querySelector("[data-tailored-overlay]") && matched.shortcut.id !== "tailored") return;
 
       if (matched.preventDefault) e.preventDefault();
       if (matched.stopPropagation) e.stopPropagation();

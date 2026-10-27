@@ -29,17 +29,20 @@ pub(crate) use codex::{
 pub(crate) use command::HOOK_STATUS_BASE_IN_CONTAINER;
 #[cfg(test)]
 pub(crate) use command::{
-    hook_command, hook_command_session_id, hook_command_usage_event, status_command_for_event,
+    hook_command, hook_command_attention, hook_command_session_id, hook_command_usage_event,
+    status_command_for_event,
 };
 pub(crate) use command::{identity_field_name, identity_publisher_arg};
 pub(crate) use config_io::with_config_lock_policy;
 pub use config_io::SymlinkPolicy;
 pub(crate) use dir_guard::{
     ensure_instance_dir_path, hook_base_path, session_id_leaf, unlink_session_id_via_guard,
-    write_session_id_via_guard,
+    write_attention_via_guard, write_session_id_via_guard,
 };
 pub(crate) use status_file::{
-    read_hook_session_id_within, read_hook_sidecar_at, SESSION_ID_SIDECAR_MAX_AGE,
+    read_hook_attention_from, read_hook_observation_from, read_hook_session_id_within,
+    read_hook_sidecar_at, read_hook_sidecar_prefix_at, sanitize_attention_summary,
+    SESSION_ID_SIDECAR_MAX_AGE,
 };
 pub(crate) const SESSION_SOURCE_ENV: &str = "AOE_SESSION_SOURCE";
 pub use hermes::{install_hermes_hooks_with_events, uninstall_hermes_hooks, HERMES_ALLOWLIST_FILE};
@@ -54,9 +57,9 @@ pub use kiro::{
 };
 pub use settl::{install_settl_hooks_with_events, uninstall_settl_hooks};
 pub use status_file::{
-    cleanup_hook_status_dir, hook_status_dir, read_hook_session_id, read_hook_session_id_any_age,
-    read_hook_session_path, read_hook_status, read_hook_status_age, read_hook_urgent,
-    session_id_sidecar_exists,
+    cleanup_hook_status_dir, clear_hook_status, hook_status_dir, read_hook_attention,
+    read_hook_session_id, read_hook_session_id_any_age, read_hook_session_path, read_hook_status,
+    read_hook_status_age, read_hook_urgent, session_id_sidecar_exists, HookAttention,
 };
 pub(crate) use targets::{
     has_aoe_marker, iter_hook_targets, iter_hook_targets_in, HookTarget, HookTargetKind,

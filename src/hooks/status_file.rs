@@ -25,6 +25,10 @@ const STATUS_FILE_READ_CAP: usize = 64;
 const SESSION_ID_FILE_MAX_PAYLOAD: usize = crate::session::capture::MAX_SESSION_ID_LEN + 1;
 const SESSION_ID_FILE_READ_CAP: usize = SESSION_ID_FILE_MAX_PAYLOAD + 1;
 const ATTENTION_FILE_READ_CAP: usize = 16 * 1024;
+/// Room for a full summary of four-byte characters; the rest is never read.
+const ATTENTION_SUMMARY_READ_CAP: usize = 1024;
+const ATTENTION_SUMMARY_MAX_CHARS: usize = 200;
+const ATTENTION_SUMMARY_FALLBACK: &str = "Waiting for your answer";
 
 /// `<host base>/<instance_id>`. The base is the per-user directory
 /// `/tmp/aoe-hooks-<euid>` resolved by `dir_guard::hook_base_path()`.
@@ -182,6 +186,124 @@ pub(crate) fn read_hook_session_id_within(
     crate::session::capture::is_valid_session_id(&id).then_some(id)
 }
 
+/// The status in an instance's recorded hook directory, and how long it has stood.
+pub(crate) fn read_hook_observation_from(
+    source: &crate::session::SessionSidecarSource,
+    instance_id: &str,
+) -> Option<(Status, Option<Duration>)> {
+    let (bytes, modified) = source.read_prefix(instance_id, "status", STATUS_FILE_READ_CAP)?;
+    Some((parse_status(&bytes)?, modified.elapsed().ok()))
+}
+
+/// [`read_hook_attention`] from an instance's recorded hook directory.
+pub(crate) fn read_hook_attention_from(
+    source: &crate::session::SessionSidecarSource,
+    instance_id: &str,
+) -> Option<HookAttention> {
+    if read_hook_observation_from(source, instance_id)?.0 != Status::Waiting {
+        return None;
+    }
+    let (bytes, since) =
+        source.read_prefix(instance_id, "attention", ATTENTION_SUMMARY_READ_CAP)?;
+    Some(HookAttention {
+        summary: sanitize_attention_summary(&bytes),
+        since,
+    })
+}
+
+pub(crate) fn read_hook_sidecar_prefix_at(
+    instance_id: &str,
+    directory: &std::path::Path,
+    leaf: &str,
+    cap: usize,
+) -> Option<(Vec<u8>, std::time::SystemTime)> {
+    let dir = dir_guard::open_recorded_instance_dir(instance_id, directory).ok()??;
+    let modified = dir_guard::metadata_at(dir.as_fd(), leaf)
+        .ok()??
+        .modified()
+        .ok()?;
+    let bytes = dir_guard::read_file_at(dir.as_fd(), leaf, cap).ok()??;
+    Some((bytes, modified))
+}
+
+/// What a waiting agent is asking, from the hook-written `attention` file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookAttention {
+    /// One line of at most 200 characters, with no control characters.
+    pub summary: String,
+    /// The file's mtime: when the agent started waiting.
+    pub since: std::time::SystemTime,
+}
+
+/// The `attention` summary, present only while the hook status is `waiting`.
+///
+/// The file is sanitized whatever wrote it: invalid UTF-8 is replaced,
+/// controls and whitespace runs collapse to one space, and the result is
+/// capped at 200 characters, falling back to a fixed summary when empty.
+pub fn read_hook_attention(instance_id: &str) -> Option<HookAttention> {
+    if read_hook_status(instance_id)? != Status::Waiting {
+        return None;
+    }
+    let dir = dir_guard::open_instance_dir_read_only(instance_id).ok()??;
+    let since = dir_guard::metadata_at(dir.as_fd(), "attention")
+        .ok()??
+        .modified()
+        .ok()?;
+    let bytes =
+        dir_guard::read_file_at(dir.as_fd(), "attention", ATTENTION_SUMMARY_READ_CAP).ok()??;
+    Some(HookAttention {
+        summary: sanitize_attention_summary(&bytes),
+        since,
+    })
+}
+
+/// Unicode format characters (category Cf): bidi overrides and isolates,
+/// zero-width characters, BOM and tags. They are invisible but can disguise
+/// the text a model asks the user, so the summary drops them.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+pub(crate) fn sanitize_attention_summary(bytes: &[u8]) -> String {
+    let text: String = String::from_utf8_lossy(bytes)
+        .chars()
+        .filter(|&c| !is_format_char(c))
+        .collect();
+    let line = text
+        .split(|c: char| c.is_control() || c.is_whitespace())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let capped: String = line.chars().take(ATTENTION_SUMMARY_MAX_CHARS).collect();
+    match capped.trim_end() {
+        "" => ATTENTION_SUMMARY_FALLBACK.to_string(),
+        summary => summary.to_string(),
+    }
+}
+
 /// Read the urgent flag from the hook-written `attention.json`.
 ///
 /// See the `attention-urgent` cx-script for the writer contract: `urgent`
@@ -212,6 +334,17 @@ pub fn read_hook_urgent(instance_id: &str) -> bool {
         }
     }
     true
+}
+
+/// Remove the `status` and `attention` a previous run left, keeping the
+/// directory and its identity sidecars. A launch calls this before the agent
+/// starts: Claude writes no status on `SessionStart`, so a `waiting` from a
+/// crashed pane would otherwise outlive the restart.
+pub fn clear_hook_status(instance_id: &str) {
+    if let Err(e) = dir_guard::unlink_leaves_via_guard(instance_id, &["status", "attention"]) {
+        tracing::warn!(target: "hooks.status",
+            "Failed to clear hook status for {}: {}", instance_id, e);
+    }
 }
 
 /// Remove the hook status directory for a given instance (cleanup on stop/delete).
@@ -275,6 +408,38 @@ mod tests {
     fn test_read_hook_status_age_none_when_absent() {
         let (_g, _, _tmp) = BaseGuard::ready();
         assert_eq!(read_hook_status_age("age_absent_instance"), None);
+    }
+
+    #[test]
+    #[serial_test::serial(hook_base)]
+    fn clear_hook_status_keeps_identity_and_never_follows_links() {
+        let (_g, base, tmp) = BaseGuard::ready();
+        let decoy = tmp.path().join("decoy");
+        std::fs::write(&decoy, "waiting").unwrap();
+        for (id, linked) in [("clear_files", false), ("clear_links", true)] {
+            let dir = dir_guard::open_instance_dir(id).unwrap();
+            for leaf in ["status", "attention"] {
+                if linked {
+                    std::os::unix::fs::symlink(&decoy, base.join(id).join(leaf)).unwrap();
+                } else {
+                    dir_guard::write_short(dir.as_fd(), leaf, b"waiting").unwrap();
+                }
+            }
+            dir_guard::write_short(dir.as_fd(), "session_id", b"sid").unwrap();
+            dir_guard::write_short(dir.as_fd(), "session_path", b"/p").unwrap();
+
+            clear_hook_status(id);
+            let mut left: Vec<_> = std::fs::read_dir(base.join(id))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            left.sort();
+            assert_eq!(left, ["session_id", "session_path"], "{id}");
+        }
+        assert_eq!(std::fs::read_to_string(&decoy).unwrap(), "waiting");
+        clear_hook_status("clear_absent");
+        clear_hook_status("../escape");
+        assert!(!base.join("clear_absent").exists());
     }
 
     #[test]
@@ -358,6 +523,184 @@ mod tests {
             }
             assert_eq!(read_hook_urgent(id), expected, "{id}");
         }
+    }
+
+    /// The summary is read only under a `waiting` status, dated by the file's
+    /// mtime, and always sanitized: whatever wrote it, the result is one line
+    /// of at most 200 characters with no controls.
+    #[test]
+    #[serial_test::serial(hook_base)]
+    fn read_hook_attention_is_gated_on_waiting_and_always_sanitized() {
+        let (_g, base, _tmp) = BaseGuard::ready();
+        let mut hostile = b"  Deploy\x00now?\r\n\x1b[31m\t\xff\xfe".to_vec();
+        hostile.extend_from_slice("\u{85}\u{2028}é".repeat(300).as_bytes());
+        hostile.extend_from_slice(&[b'z'; 4096]);
+        let disguised = "Ship \u{202e}gnp.exe\u{2066} now\u{200b}?\u{feff}\u{e0041}";
+        let cases: [(&str, &str, Option<&[u8]>, Option<String>); 8] = [
+            (
+                "att_format",
+                "waiting",
+                Some(disguised.as_bytes()),
+                Some("Ship gnp.exe now?".into()),
+            ),
+            (
+                "att_plain",
+                "waiting",
+                Some(b"Ship it?"),
+                Some("Ship it?".into()),
+            ),
+            ("att_absent", "waiting", None, None),
+            ("att_running", "running", Some(b"Ship it?"), None),
+            ("att_idle", "idle", Some(b"Ship it?"), None),
+            (
+                "att_empty",
+                "waiting",
+                Some(b" \n\t\x07 "),
+                Some("Waiting for your answer".into()),
+            ),
+            (
+                "att_collapsed",
+                "waiting",
+                Some(b"a \n\n  b\x7fc"),
+                Some("a b c".into()),
+            ),
+            (
+                "att_hostile",
+                "waiting",
+                Some(&hostile),
+                Some(
+                    format!("Deploy now? [31m \u{fffd}\u{fffd} {}", "é ".repeat(300))
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string(),
+                ),
+            ),
+        ];
+        for (id, status, attention, expected) in cases {
+            write_status_via_guard(id, status);
+            if let Some(bytes) = attention {
+                let dir = dir_guard::open_instance_dir(id).unwrap();
+                dir_guard::write_short(dir.as_fd(), "attention", bytes).unwrap();
+            }
+            let got = read_hook_attention(id);
+            assert_eq!(got.as_ref().map(|a| a.summary.clone()), expected, "{id}");
+            if let Some(got) = got {
+                assert!(got.summary.chars().count() <= 200, "{id}");
+                assert!(!got.summary.chars().any(char::is_control), "{id}");
+                assert!(!got.summary.chars().any(is_format_char), "{id}");
+                let mtime = std::fs::metadata(base.join(id).join("attention"))
+                    .unwrap()
+                    .modified()
+                    .unwrap();
+                assert_eq!(got.since, mtime, "{id}");
+            }
+        }
+    }
+
+    /// A sandboxed Pi's files are read through the anchored sandbox store: no
+    /// symlink anywhere on the path, regular files only, bounded, and parsed
+    /// and sanitized exactly like the host's.
+    #[test]
+    fn sandbox_hook_files_read_through_the_anchored_store() {
+        use crate::session::SessionSidecarSource;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = tmp.path().join("store");
+        let id = "sbx_pi";
+        let dir = store.join("aoe-session").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = SessionSidecarSource::SandboxDir(dir.clone());
+        let observe = || read_hook_observation_from(&source, id);
+
+        assert_eq!(observe(), None, "no status file");
+        for (written, expected) in [
+            ("running", Some(Status::Running)),
+            ("waiting\n", Some(Status::Waiting)),
+            ("idle", Some(Status::Idle)),
+            ("bogus", None),
+        ] {
+            std::fs::write(dir.join("status"), written).unwrap();
+            assert_eq!(observe().map(|(status, _)| status), expected, "{written:?}");
+        }
+        std::fs::write(dir.join("status"), "waiting").unwrap();
+        let (_, age) = observe().unwrap();
+        assert!(
+            age.is_some_and(|age| age < Duration::from_secs(5)),
+            "{age:?}"
+        );
+
+        assert_eq!(
+            read_hook_attention_from(&source, id),
+            None,
+            "no attention file"
+        );
+        let mut hostile = "Ship \u{202e}it\u{2066}\n\tnow?".as_bytes().to_vec();
+        hostile.extend_from_slice(&[b'z'; 8192]);
+        std::fs::write(dir.join("attention"), &hostile).unwrap();
+        let attention = read_hook_attention_from(&source, id).expect("attention while waiting");
+        assert!(
+            attention.summary.starts_with("Ship it now?zzz"),
+            "{}",
+            attention.summary
+        );
+        assert_eq!(
+            attention.summary.chars().count(),
+            200,
+            "an oversized file is read capped"
+        );
+        let mtime = std::fs::metadata(dir.join("attention"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(attention.since, mtime);
+        std::fs::write(dir.join("status"), "running").unwrap();
+        assert_eq!(
+            read_hook_attention_from(&source, id),
+            None,
+            "attention is gated on waiting"
+        );
+
+        let other = SessionSidecarSource::SandboxDir(store.join("aoe-session").join("other"));
+        assert_eq!(
+            read_hook_observation_from(&other, id),
+            None,
+            "a source for another id"
+        );
+
+        std::fs::write(tmp.path().join("decoy"), "waiting").unwrap();
+        std::fs::remove_file(dir.join("status")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("decoy"), dir.join("status")).unwrap();
+        assert_eq!(observe(), None, "a symlinked status leaf");
+        std::fs::remove_file(dir.join("status")).unwrap();
+        std::fs::create_dir(dir.join("status")).unwrap();
+        assert_eq!(observe(), None, "a status that is not a regular file");
+        std::fs::remove_dir(dir.join("status")).unwrap();
+
+        let foreign = tmp.path().join("foreign");
+        std::fs::create_dir_all(foreign.join(id)).unwrap();
+        std::fs::write(foreign.join(id).join("status"), "waiting").unwrap();
+        std::fs::remove_dir_all(store.join("aoe-session")).unwrap();
+        std::os::unix::fs::symlink(&foreign, store.join("aoe-session")).unwrap();
+        assert_eq!(observe(), None, "a symlinked aoe-session ancestor");
+    }
+
+    #[test]
+    #[serial_test::serial(hook_base)]
+    fn a_recorded_host_hook_dir_reads_the_same_way() {
+        let (_g, base, _tmp) = BaseGuard::ready();
+        write_status_via_guard("host_rec", "waiting");
+        let dir = dir_guard::open_instance_dir("host_rec").unwrap();
+        dir_guard::write_short(dir.as_fd(), "attention", b"Ship\nit?").unwrap();
+        let source = crate::session::SessionSidecarSource::HostHooks(base.join("host_rec"));
+        let (status, age) = read_hook_observation_from(&source, "host_rec").unwrap();
+        assert_eq!(status, Status::Waiting);
+        assert!(age.is_some());
+        assert_eq!(
+            read_hook_attention_from(&source, "host_rec").map(|a| a.summary),
+            Some("Ship it?".to_string())
+        );
+        assert_eq!(read_hook_observation_from(&source, "other"), None);
     }
 
     fn write_session_id_sidecar(instance_id: &str, content: &str) {

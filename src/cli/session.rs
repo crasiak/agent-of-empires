@@ -1921,12 +1921,7 @@ async fn capture_session(profile: &str, args: CaptureArgs) -> Result<()> {
         };
         let rules_tool =
             crate::tmux::status_rules::detection_tool(profile, &inst.tool, &inst.detect_as);
-        let hook = crate::hooks::read_hook_status(&inst.id).map(|status| {
-            crate::tmux::detect::HookObservation {
-                status,
-                age: crate::hooks::read_hook_status_age(&inst.id),
-            }
-        });
+        let hook = inst.hook_observation();
         let status = if let Some(plan) =
             crate::tmux::DetectionPlan::for_manifest(profile, &rules_tool, manifest_tool)
         {

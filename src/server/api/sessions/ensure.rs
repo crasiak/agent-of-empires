@@ -41,7 +41,7 @@ pub async fn ensure_session(
         let pane_dead = exists && tmux_session.is_pane_dead();
         let needs_restart = if !exists || pane_dead {
             true
-        } else if crate::hooks::read_hook_status(&decision_instance.id).is_some() {
+        } else if decision_instance.hook_status().is_some() {
             // Hook status tracks this session; shell detection is unreliable.
             false
         } else if decision_instance.has_command_override() {

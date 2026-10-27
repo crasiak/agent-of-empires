@@ -396,6 +396,9 @@ async fn run(
         Some(Commands::ExtractSessionId(args)) => {
             return exit_zero(cli::extract_session_id::run(args).await)
         }
+        Some(Commands::HookAttention(args)) => {
+            return exit_zero(cli::hook_attention::run(args).await)
+        }
         Some(Commands::UsageEvent(args)) => return exit_zero(cli::usage_event::run(args).await),
         Some(Commands::Tmux { command }) => {
             use cli::tmux::TmuxCommands;

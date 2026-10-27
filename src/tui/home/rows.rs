@@ -37,6 +37,12 @@ pub(super) fn project_group_key(inst: &Instance) -> String {
 pub(super) const NO_ORG_GROUP_LABEL: &str = "No organization";
 
 impl HomeView {
+    pub(super) fn unified_manual_groups(&self) -> bool {
+        self.group_by == GroupByMode::Manual
+            && self.active_profile.is_none()
+            && self.storages.len() > 1
+    }
+
     pub fn instances(&self) -> impl ExactSizeIterator<Item = &Instance> + '_ {
         self.instances.values()
     }
@@ -268,7 +274,12 @@ impl HomeView {
                 .next()
                 .map_or_else(Vec::new, |tree| flatten_tree(tree, &pool, self.sort_order))
         } else {
-            flatten_tree_all_profiles(&pool, &self.group_trees, self.sort_order)
+            flatten_tree_all_profiles(
+                &pool,
+                &self.group_trees,
+                self.sort_order,
+                &self.unified_group_collapsed,
+            )
         };
         if self.highlight_filters.active() {
             items.retain(|item| match item {
@@ -284,9 +295,24 @@ impl HomeView {
                 }),
             });
         }
+        self.filter_empty_group_headers(&mut items);
         append_archived_section(&mut items, &pool, self.archived_section_collapsed);
         append_trash_section(&mut items, &pool, self.trashed_section_collapsed);
         items
+    }
+
+    fn filter_empty_group_headers(&self, items: &mut Vec<Item>) {
+        if self.hide_empty_groups {
+            items.retain(|item| {
+                !matches!(
+                    item,
+                    Item::Group {
+                        session_count: 0,
+                        ..
+                    }
+                )
+            });
+        }
     }
 
     pub(super) fn instance_matches_highlight_view(&self, inst: &Instance) -> bool {
@@ -338,7 +364,7 @@ impl HomeView {
             .filter(|i| !i.is_archived() && !i.is_trashed())
             .cloned()
             .collect();
-        // Seeded before hiding, so a group whose sessions are all hidden keeps its header.
+        // Keep the seed so empty headers remain available when their setting allows them.
         (shown_in_groups(grouped, hide_stopped), tree_seed)
     }
 
@@ -356,6 +382,7 @@ impl HomeView {
             tree.set_collapsed(path, true);
         }
         let mut items = flatten_tree(&tree, grouped, self.sort_order);
+        self.filter_empty_group_headers(&mut items);
         append_archived_section_by_project(
             &mut items,
             grouped,
@@ -374,7 +401,7 @@ impl HomeView {
             .map(|i| i.group_path.clone())
             .filter(|p| !p.is_empty())
             .collect();
-        // Pinned registered projects with no live session render as empty headers.
+        // Seed pinned projects even without live sessions.
         let mut seed_groups: Vec<Group> = crate::session::projects::unpopulated_projects(
             &populated_labels,
             &self.registered_projects,

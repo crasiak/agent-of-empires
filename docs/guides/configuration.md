@@ -116,6 +116,7 @@ You can browse tips from **Ctrl+K > Show tips** even with the bar hidden.
 | `agent_config_dir` | `{}` | Config directory an agent reads instead of its built-in default, keyed by agent name. Wins over the agent's config-dir environment variable. Two names pointing at the same agent are two accounts of it; a restart that swaps between them carries the conversation across. A resumed host or structured Claude conversation keeps the store it recorded, which outranks this entry; a sandboxed one keeps the store its container was created with and follows the entry only once that container is recreated, see [Session Resume](session-resume.md#swapping-the-engine-on-a-restart). Global/profile only. |
 | `agents.<name>.status_map` | `{}` | Trusted hook-event to status mapping (`running`, `waiting`, `idle`, `error`), applied on the next hook install. Hooks receive `AOE_PROFILE`, so a script can read the resolved map with `aoe -p "$AOE_PROFILE" profile show --status-map <agent> --json`. Global/profile only. |
 | `agents.<name>.status_rules` | `[]` | Declarative pane status rules. See [Status rules](#status-rules-for-custom-agents). Global/profile only. |
+| `agents.pi.waiting_tools` | `[]` | Pi tools that block on the user, beside `ask_user`, which always counts. AoE's Pi extension reports `waiting` while one runs, as it does for a blocking extension UI prompt. Names must match `[A-Za-z0-9_.:-]{1,64}`; others are dropped, and at most 32 names in all, `ask_user` included, are passed on. Changes take effect at the session's next launch. A sandboxed Pi writes its status to `<sandbox store>/aoe-session/<id>/{status,attention}` on the host, its `/root/.pi/aoe-session` mount. A profile's list replaces the global one. Global/profile only. |
 
 Per-agent structured view defaults live under `[acp]`, not `[session]`:
 
@@ -526,7 +527,14 @@ environment = ["GH_TOKEN=$AOE_GH_TOKEN"]
 
 ## Profiles
 
-Profiles are separate workspaces with their own sessions, groups, and overrides of profile-overridable settings.
+Profiles isolate their sessions, stored groups, and profile-overridable settings.
+In the TUI's all-profiles view, Manual grouping shows one heading per group path,
+with sessions from any profile beneath it. When multiple profiles are loaded,
+collapse is local to that TUI view and does not change their stored groups.
+Filter to one profile before
+renaming, deleting, archiving, or manually reordering groups and their rows.
+Individual session actions still use the session's own profile. Attention sort
+remains a flat session list in Manual grouping.
 
 ```bash
 aoe                        # "default" profile

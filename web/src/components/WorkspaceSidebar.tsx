@@ -13,6 +13,7 @@ import {
 } from "../lib/sidebarGroups";
 import type { RepoAppearanceUpdate } from "../lib/repoAppearance";
 import { useSessionColorsEnabled } from "../lib/sessionColors";
+import { useHideEmptyGroups } from "../lib/hideEmptyGroups";
 import { useWebSettings } from "../hooks/useWebSettings";
 import { SidebarCompactContext } from "../lib/sidebarCompact";
 import { TOUR_ANCHORS, tourAnchor } from "../lib/tourSteps";
@@ -119,6 +120,7 @@ export function WorkspaceSidebar(props: Props) {
   const [sessionHighlights, setSessionHighlights] = useState<(string | null)[]>([]);
   const [projectHighlights, setProjectHighlights] = useState<(string | null)[]>([]);
   const sessionColorsEnabled = useSessionColorsEnabled();
+  const hideEmptyGroups = useHideEmptyGroups();
   const [facetOpen, setFacetOpen] = useState(false);
   const filterRef = useRef<HTMLInputElement>(null);
   const [sunkExpanded, toggleSunkExpanded] = usePersistedFlag("aoe-sidebar-sunk-expanded", false);
@@ -149,7 +151,7 @@ export function WorkspaceSidebar(props: Props) {
 
   const { matchesFacets } = facets;
   const [filteredGroups, filteredNested, filteredOrgGroups] = useMemo(() => {
-    if (!hasFilter) return [groups, nestedGroups, orgGroups] as const;
+    if (!hasFilter && !hideEmptyGroups) return [groups, nestedGroups, orgGroups] as const;
     const keep = makeRowFilter(
       q,
       (ws) =>
@@ -158,6 +160,7 @@ export function WorkspaceSidebar(props: Props) {
         matchesProjectHighlight(repoColorsByWorkspace.get(ws.id) ?? null),
     );
     const keepEmpty = (g: SidebarGroup, ...parents: string[]) =>
+      !hideEmptyGroups &&
       activeSessionHighlights.length === 0 &&
       !hasFacets &&
       matchesProjectHighlight(g.color) &&
@@ -169,6 +172,7 @@ export function WorkspaceSidebar(props: Props) {
     ] as const;
   }, [
     hasFilter,
+    hideEmptyGroups,
     q,
     matchesFacets,
     activeSessionHighlights,

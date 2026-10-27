@@ -502,7 +502,10 @@ mod tests {
                     if !cmd.contains("aoe-hooks") {
                         continue;
                     }
-                    if cmd.contains("__extract-session-id") || cmd.contains("__usage-event") {
+                    if cmd.contains("__extract-session-id")
+                        || cmd.contains("__usage-event")
+                        || cmd.contains("__hook-attention")
+                    {
                         continue;
                     }
                     status_writers += 1;

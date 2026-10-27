@@ -14,6 +14,7 @@ import type { RepoGroup, Workspace } from "../../lib/types";
 import type { SidebarAxis } from "../../lib/sidebarAxis";
 import type { PluginUiEntry } from "../../lib/api";
 import { SessionColorsContext } from "../../lib/sessionColors";
+import { HideEmptyGroupsContext } from "../../lib/hideEmptyGroups";
 
 const pluginEntries = vi.hoisted(() => ({ current: [] as PluginUiEntry[] }));
 vi.mock("../../lib/pluginUiContext", () => ({
@@ -54,6 +55,7 @@ function Sidebar({
   axis = "repo",
   collapsed = false,
   colorsEnabled = true,
+  hideEmptyGroups = true,
   readOnly = false,
 }: {
   repoGroups?: RepoGroup[];
@@ -61,55 +63,58 @@ function Sidebar({
   axis?: SidebarAxis;
   collapsed?: boolean;
   colorsEnabled?: boolean;
+  hideEmptyGroups?: boolean;
   readOnly?: boolean;
 }) {
   const opts = { idleDecayWindowMs: 60_000, sortMode: "manual" as const, isCollapsed: () => collapsed };
   const groups = repoGroups.map(repoGroupToSidebarGroup).map((g) => ({ ...g, collapsed }));
   return (
-    <SessionColorsContext.Provider value={colorsEnabled}>
-      <WorkspaceSidebar
-        groups={
-          axis === "group"
-            ? buildSessionGroups(
-                repoGroups.flatMap((r) => r.workspaces),
-                opts,
-              )
-            : groups
-        }
-        repoGroups={repoGroups}
-        nestedGroups={buildNestedSidebarGroups(repoGroups, { ...opts, isSubgroupCollapsed: () => collapsed })}
-        orgGroups={buildOrgGroups(repoGroups, {
-          isOrgCollapsed: () => collapsed,
-          isRepoCollapsed: () => collapsed,
-        })}
-        savedProjects={savedProjects}
-        activeId={null}
-        mainPanelFocused={false}
-        open
-        readOnly={readOnly}
-        onToggle={noop}
-        onSelect={noop}
-        onToggleGroup={noop}
-        onToggleSubgroup={noop}
-        onToggleOrg={noop}
-        onToggleOrgRepo={noop}
-        onReorderWorkspaces={noop}
-        onReorderGroups={noop}
-        onUpdateRepoAppearance={noop}
-        onNew={noop}
-        onCreateSession={noop}
-        onAddProject={noop}
-        onEditProject={noop}
-        onRemoveProject={noop}
-        onSettings={noop}
-        sortMode="manual"
-        onSortModeChange={noop}
-        pluginSortRef={null}
-        onPluginSortChange={noop}
-        axis={axis}
-        onAxisChange={noop}
-      />
-    </SessionColorsContext.Provider>
+    <HideEmptyGroupsContext.Provider value={hideEmptyGroups}>
+      <SessionColorsContext.Provider value={colorsEnabled}>
+        <WorkspaceSidebar
+          groups={
+            axis === "group"
+              ? buildSessionGroups(
+                  repoGroups.flatMap((r) => r.workspaces),
+                  opts,
+                )
+              : groups
+          }
+          repoGroups={repoGroups}
+          nestedGroups={buildNestedSidebarGroups(repoGroups, { ...opts, isSubgroupCollapsed: () => collapsed })}
+          orgGroups={buildOrgGroups(repoGroups, {
+            isOrgCollapsed: () => collapsed,
+            isRepoCollapsed: () => collapsed,
+          })}
+          savedProjects={savedProjects}
+          activeId={null}
+          mainPanelFocused={false}
+          open
+          readOnly={readOnly}
+          onToggle={noop}
+          onSelect={noop}
+          onToggleGroup={noop}
+          onToggleSubgroup={noop}
+          onToggleOrg={noop}
+          onToggleOrgRepo={noop}
+          onReorderWorkspaces={noop}
+          onReorderGroups={noop}
+          onUpdateRepoAppearance={noop}
+          onNew={noop}
+          onCreateSession={noop}
+          onAddProject={noop}
+          onEditProject={noop}
+          onRemoveProject={noop}
+          onSettings={noop}
+          sortMode="manual"
+          onSortModeChange={noop}
+          pluginSortRef={null}
+          onPluginSortChange={noop}
+          axis={axis}
+          onAxisChange={noop}
+        />
+      </SessionColorsContext.Provider>
+    </HideEmptyGroupsContext.Provider>
   );
 }
 
@@ -121,6 +126,22 @@ const openFilter = () => click("Filter sessions");
 beforeEach(() => {
   localStorage.clear();
   pluginEntries.current = [];
+});
+
+describe("empty group visibility", () => {
+  it.each(["repo", "repo+group", "org"] as const)(
+    "%s hides empty headers by default and restores them when the setting changes",
+    (axis) => {
+      const repoGroups = [repo("pinned-empty", "sky", [], true)];
+      const view = render(<Sidebar repoGroups={repoGroups} axis={axis} />);
+      expect(screen.queryAllByTestId("sidebar-group-header")).toHaveLength(0);
+      view.rerender(<Sidebar repoGroups={repoGroups} axis={axis} hideEmptyGroups={false} />);
+      expect(screen.getByText("pinned-empty")).toBeTruthy();
+      view.rerender(<Sidebar repoGroups={repoGroups} axis={axis} />);
+      expect(screen.queryAllByTestId("sidebar-group-header")).toHaveLength(0);
+      expect(rows()).toEqual([]);
+    },
+  );
 });
 
 describe("sidebar highlight filters", () => {
@@ -216,6 +237,7 @@ describe("sidebar highlight filters", () => {
       render(
         <Sidebar
           axis={axis}
+          hideEmptyGroups={false}
           repoGroups={[...repos(), repo("pinned-sky", "sky", [], true), repo("pinned-rose", "rose", [], true)]}
           savedProjects={[repo("saved-sky", "sky"), repo("saved-rose", "rose")]}
         />,

@@ -276,6 +276,8 @@ pub struct HookEvent {
     pub waiting_tools: &'static [&'static str],
     /// Also record the event in the usage log (`crate::usage`).
     pub usage: bool,
+    /// Also record what the agent asks, via `aoe __hook-attention` (host only).
+    pub attention: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,6 +288,7 @@ pub struct ResolvedHookEvent {
     pub identity_field: Option<HookIdentityField>,
     pub waiting_tools: Vec<String>,
     pub usage: bool,
+    pub attention: bool,
     /// Binary of the agent whose config declares this event. The identity publisher carries it
     /// so a nested agent of another kind cannot publish into the pane's sidecar.
     pub publisher: Option<&'static str>,
@@ -411,6 +414,7 @@ const fn hook(name: &'static str, status: HookStatus) -> HookEvent {
         identity_field: None,
         waiting_tools: &[],
         usage: false,
+        attention: false,
     }
 }
 
@@ -440,6 +444,7 @@ const fn sidecar(name: &'static str, status: HookStatus) -> SidecarHookEvent {
 
 /// `Notification`/`idle_prompt` and `StopFailure` backstop `Stop`, which misses API-error and
 /// interrupted turn ends. `waiting_tools` marks `AskUserQuestion` as waiting until `PostToolUse`.
+/// Attention text rides matched entries only, so no process is spawned per tool call.
 const CLAUDE_HOOK_EVENTS: &[HookEvent] = &[
     HookEvent {
         status: None,
@@ -451,6 +456,11 @@ const CLAUDE_HOOK_EVENTS: &[HookEvent] = &[
         waiting_tools: &["AskUserQuestion"],
         ..hook("PreToolUse", HookStatus::Running)
     },
+    HookEvent {
+        status: None,
+        attention: true,
+        ..matched_hook("PreToolUse", "AskUserQuestion", HookStatus::Waiting)
+    },
     matched_hook("PostToolUse", "AskUserQuestion", HookStatus::Running),
     HookEvent {
         identity_field: Some(HookIdentityField::SessionId),
@@ -459,16 +469,23 @@ const CLAUDE_HOOK_EVENTS: &[HookEvent] = &[
     },
     usage_hook("Stop", Some(HookStatus::Idle)),
     usage_hook("StopFailure", Some(HookStatus::Idle)),
-    matched_hook(
-        "Notification",
-        "permission_prompt|elicitation_dialog|agent_needs_input",
-        HookStatus::Waiting,
-    ),
+    HookEvent {
+        attention: true,
+        ..matched_hook(
+            "Notification",
+            "permission_prompt|elicitation_dialog|agent_needs_input",
+            HookStatus::Waiting,
+        )
+    },
     matched_hook(
         "Notification",
         "idle_prompt|agent_completed",
         HookStatus::Idle,
     ),
+    HookEvent {
+        attention: true,
+        ..hook("PermissionRequest", HookStatus::Waiting)
+    },
     hook("ElicitationResult", HookStatus::Running),
     usage_hook("PostCompact", None),
     usage_hook("SessionEnd", None),
@@ -1550,6 +1567,33 @@ fn configured_status_map<'a>(
         .filter(|status_map| !status_map.is_empty())
 }
 
+/// `ask_user` plus the valid `[agents.pi] waiting_tools`, at most 32 in all.
+pub(crate) fn pi_waiting_tools(config: &crate::session::config::Config) -> Vec<String> {
+    const MAX_TOOLS: usize = 32;
+    let valid = |name: &&String| {
+        (1..=64).contains(&name.len())
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'))
+    };
+    let mut tools = vec!["ask_user".to_string()];
+    for name in config
+        .agents
+        .get("pi")
+        .into_iter()
+        .flat_map(|pi| pi.waiting_tools.iter())
+        .filter(valid)
+    {
+        if tools.len() == MAX_TOOLS {
+            break;
+        }
+        if !tools.contains(name) {
+            tools.push(name.clone());
+        }
+    }
+    tools
+}
+
 // Duplicate events with different matchers collapse to the first default.
 fn default_status_map_for_agent(agent: &AgentDef) -> BTreeMap<String, HookStatus> {
     let mut map = BTreeMap::new();
@@ -1613,6 +1657,7 @@ fn append_configured_status_events(
                 identity_field: None,
                 waiting_tools: Vec::new(),
                 usage: false,
+                attention: false,
                 publisher: None,
             });
         }
@@ -1649,12 +1694,19 @@ pub fn resolved_hook_events(
         .map(|event| ResolvedHookEvent {
             name: event.name.to_string(),
             matcher: event.matcher.map(str::to_string),
-            status: overrides
-                .and_then(|map| map.get(event.name).copied())
-                .or(event.status),
+            // An attention-only entry shares its event name with a status writer, so an
+            // override must not make it a second one.
+            status: if event.attention && event.status.is_none() {
+                None
+            } else {
+                overrides
+                    .and_then(|map| map.get(event.name).copied())
+                    .or(event.status)
+            },
             identity_field: event.identity_field,
             waiting_tools: event.waiting_tools.iter().map(|t| t.to_string()).collect(),
             usage: event.usage && config.session.usage_tracking,
+            attention: event.attention,
             publisher: Some(agent.binary),
         })
         .collect();
@@ -1684,6 +1736,7 @@ pub fn resolved_sidecar_hook_events(
             identity_field: event.identity_field,
             waiting_tools: Vec::new(),
             usage: false,
+            attention: false,
             publisher: Some(agent.binary),
         })
         .collect();
@@ -2435,6 +2488,62 @@ if [ "$PROBE_MODE" = legacy ]; then printf '%s\n' 'FLAGS --fork fork session'; e
     }
 
     #[test]
+    fn pi_waiting_tools_extend_ask_user_and_drop_invalid_names() {
+        let mut config = crate::session::config::Config::default();
+        assert_eq!(pi_waiting_tools(&config), vec!["ask_user"]);
+        let configured = &mut config
+            .agents
+            .entry("pi".to_string())
+            .or_default()
+            .waiting_tools;
+        *configured = [
+            "permission_gate",
+            "my.tool:v2-x",
+            "bad name",
+            "a/b",
+            "",
+            "ask_user",
+        ]
+        .map(String::from)
+        .to_vec();
+        configured.push("permission_gate".to_string());
+        configured.push("x".repeat(65));
+        assert_eq!(
+            pi_waiting_tools(&config),
+            vec!["ask_user", "permission_gate", "my.tool:v2-x"]
+        );
+        config.agents.get_mut("pi").unwrap().waiting_tools =
+            (0..40).map(|i| format!("t{i}")).collect();
+        let capped = pi_waiting_tools(&config);
+        assert_eq!(capped.len(), 32, "ask_user included");
+        assert_eq!(capped[0], "ask_user");
+        assert_eq!(capped[31], "t30");
+        // The extension applies the same rule (`waitingTools` in aoe-session-id.js).
+        config.agents.get_mut("pi").unwrap().waiting_tools =
+            ["ask_user", "t0", "t0"].map(String::from).to_vec();
+        config
+            .agents
+            .get_mut("pi")
+            .unwrap()
+            .waiting_tools
+            .extend((0..40).map(|i| format!("t{i}")));
+        let deduped = pi_waiting_tools(&config);
+        assert_eq!(deduped.len(), 32, "duplicates take no slot");
+        assert_eq!(deduped[31], "t30");
+        config.agents.clear();
+        config
+            .agents
+            .entry("claude".to_string())
+            .or_default()
+            .waiting_tools = vec!["other_agent".to_string()];
+        assert_eq!(
+            pi_waiting_tools(&config),
+            vec!["ask_user"],
+            "only [agents.pi] counts"
+        );
+    }
+
+    #[test]
     fn status_map_overrides_merge_into_defaults() {
         let claude = get_agent("claude").unwrap();
         let config = config_with_status("claude", "Stop", HookStatus::Error);
@@ -2466,6 +2575,57 @@ if [ "$PROBE_MODE" = legacy ]; then printf '%s\n' 'FLAGS --fork fork session'; e
         let config = config_with_status("vertex", "session.idle", HookStatus::Idle);
         let map = effective_status_map(&config, "vertex").unwrap();
         assert_eq!(map.get("session.idle"), Some(&HookStatus::Idle));
+    }
+
+    /// Attention text comes only from the events where Claude waits, and a
+    /// `status_map` override cannot turn the attention-only entry into a
+    /// second status writer.
+    #[test]
+    fn claude_attention_rides_only_its_waiting_events() {
+        let claude = get_agent("claude").unwrap();
+        for config in [
+            crate::session::config::Config::default(),
+            config_with_status("claude", "PreToolUse", HookStatus::Idle),
+        ] {
+            let attention: Vec<(&str, Option<&str>, Option<HookStatus>)> =
+                resolved_hook_events(claude, &config)
+                    .unwrap()
+                    .iter()
+                    .filter(|event| event.attention)
+                    .map(|event| {
+                        (
+                            match event.name.as_str() {
+                                "PreToolUse" => "PreToolUse",
+                                "Notification" => "Notification",
+                                "PermissionRequest" => "PermissionRequest",
+                                other => panic!("attention on {other}"),
+                            },
+                            event.matcher.as_deref().map(|m| match m {
+                                "AskUserQuestion" => "AskUserQuestion",
+                                "permission_prompt|elicitation_dialog|agent_needs_input" => {
+                                    "waiting"
+                                }
+                                other => panic!("attention on matcher {other}"),
+                            }),
+                            event.status,
+                        )
+                    })
+                    .collect();
+            assert_eq!(
+                attention,
+                [
+                    ("PreToolUse", Some("AskUserQuestion"), None),
+                    ("Notification", Some("waiting"), Some(HookStatus::Waiting)),
+                    ("PermissionRequest", None, Some(HookStatus::Waiting)),
+                ]
+            );
+        }
+        assert_eq!(
+            effective_status_map(&crate::session::config::Config::default(), "claude")
+                .unwrap()
+                .get("PermissionRequest"),
+            Some(&HookStatus::Waiting)
+        );
     }
 
     /// Codex publishes a top-level string `session_id` on `SessionStart`, so

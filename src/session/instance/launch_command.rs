@@ -1540,6 +1540,17 @@ impl Instance {
                 }),
             }
         } else {
+            let document_chat = crate::session::tailored::document::account(self).is_some();
+            if document_chat {
+                anyhow::ensure!(
+                    identity_extension.is_some() && !self.is_sandboxed(),
+                    "Document chat requires the standard host-owned Pi identity extension"
+                );
+                anyhow::ensure!(
+                    execution.is_some_and(|e| e.agent.name == "pi" && e.pi_pinnable),
+                    "Document chat requires a native, pinnable Pi launch"
+                );
+            }
             let mut cmd =
                 self.freeze_native_invocation(self.command.clone(), execution, launch_context)?;
             if let Some((ref flag, _)) = identity_extension {
@@ -1580,6 +1591,14 @@ impl Instance {
             apply_ssh_prompt_suppression(&mut cmd);
             apply_no_daemon_flag(&mut cmd, agent, self, execution);
             apply_agent_launch_env(&mut cmd, agent);
+            if document_chat {
+                anyhow::ensure!(!is_existing || execution.is_some_and(|e| e.pi_transcript_path.is_some()), "Document native transcript is unavailable; refusing to start a fresh conversation");
+                let initial = crate::session::tailored::document::initial_args(self, is_existing)?;
+                if !initial.is_empty() {
+                    cmd.push(' ');
+                    cmd.push_str(&initial);
+                }
+            }
             let raw_command = format!(
                 "{}{}",
                 env_prefix,
@@ -1649,6 +1668,87 @@ mod tests {
             .unwrap()
             .command
             .unwrap()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn document_native_command_attaches_once_and_resumes_without_source_or_new_turn() {
+        let home = tempfile::tempdir().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(home.path());
+        crate::agents::forget_agent_help_for_test();
+        let _pi_env = EnvGuard::unset(&["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"]);
+        let _pi = crate::session::test_support::install_login_shell_path_command(
+            home.path(),
+            "pi",
+            "#!/bin/sh\nprintf '%s\\n' '--session-id --session --extension'\n",
+        );
+        let _ledger = crate::session::test_support::install_login_shell_path_command(
+            home.path(),
+            "ledger",
+            "#!/bin/sh\nexit 99\n",
+        );
+        let scratch = home.path().join("scratch-fixture");
+        std::fs::create_dir(&scratch).unwrap();
+        let mut instance = tool_instance("pi", scratch.to_str().unwrap());
+        let mut native = instance.resolve_native_execution(None).unwrap();
+        native.pi_pinnable = true;
+        native.program = home.path().join("bin/ledger");
+        instance.scratch = true;
+        instance.command = "ledger run pi --profile aoe-document-work --".into();
+        instance.extra_args = crate::session::tailored::document::restrictive_args();
+        let text = b"# Frozen document\n";
+        use sha2::{Digest, Sha256};
+        let hash: String = Sha256::digest(text)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        std::fs::write(scratch.join("source.txt"), text).unwrap();
+        std::fs::write(scratch.join("provenance.json"), serde_json::to_vec(&serde_json::json!({"source_url":"https://example.org/a.md", "final_url":"https://example.org/a.md", "retrieved_at":chrono::Utc::now(), "media_type":"text/markdown", "extractor":"UTF-8 identity", "raw_bytes":text.len(), "text_bytes":text.len(), "raw_sha256":hash, "text_sha256":hash, "opening_question":"Opening question, exactly once"})).unwrap()).unwrap();
+        let first = instance
+            .build_host_command(
+                instance.resolved_agent(),
+                Some(&native),
+                &mut instance.conversation_state(),
+            )
+            .unwrap();
+        let command = first.command.unwrap();
+        assert!(!first.is_existing);
+        assert_eq!(command.matches("source.txt").count(), 1, "{command}");
+        assert_eq!(command.matches("Opening question, exactly once").count(), 1);
+        assert!(command.contains("--no-tools") && command.contains("--no-extensions"));
+        assert!(command.contains("pi-aoe-session-id.js"));
+        let sid = instance.agent_session_id.clone().unwrap();
+        let store = home.path().join("native-history");
+        std::fs::create_dir(&store).unwrap();
+        let transcript = publish_host_pi_transcript(&instance.id, &sid, &store);
+        native.pi_transcript_path = Some(transcript.to_str().unwrap().into());
+        std::fs::remove_file(scratch.join("source.txt")).unwrap();
+        let resumed = instance
+            .build_host_command(
+                instance.resolved_agent(),
+                Some(&native),
+                &mut instance.conversation_state(),
+            )
+            .unwrap();
+        let command = resumed.command.unwrap();
+        assert!(resumed.is_existing);
+        assert!(command.contains("--session ") && command.contains(transcript.to_str().unwrap()));
+        assert!(
+            !command.contains("source.txt") && !command.contains("Opening question, exactly once")
+        );
+        assert!(command.contains("--no-tools") && command.contains("--no-mcp"));
+        assert_eq!(instance.agent_session_id.as_deref(), Some(sid.as_str()));
+        native.pi_transcript_path = None;
+        assert!(
+            instance
+                .build_host_command(
+                    instance.resolved_agent(),
+                    Some(&native),
+                    &mut instance.conversation_state()
+                )
+                .is_err(),
+            "Missing native history must not silently start/replay a paid turn"
+        );
     }
 
     const CLAUDE_HELP_WITH_NAME: &str = "  -n, --name <name>  Set a display name";
@@ -1727,6 +1827,13 @@ mod tests {
         assert_eq!(
             value("AOE_SESSION_ID_FILE"),
             Some(sidecar.split_once('=').unwrap().1)
+        );
+        assert_eq!(value("AOE_HOOK_BASE"), Some("/root/.pi/aoe-session"));
+        assert_eq!(value("AOE_PI_WAITING_TOOLS"), Some("ask_user"));
+        assert_eq!(
+            value("AOE_PI_EXTENSION_PID"),
+            Some(""),
+            "the env-file clears the extension's owner claim"
         );
 
         let parts = inst

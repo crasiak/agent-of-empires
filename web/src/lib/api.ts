@@ -1,3 +1,4 @@
+import { isWorkshopRequest } from "./workshop";
 import type { AgentLifecycleInfo } from "./agentProfiles";
 import { notifySettingsChanged } from "./settingsEvents";
 import { clientFormFactor } from "./formFactor";
@@ -17,6 +18,7 @@ import type {
   DockerStatusResponse,
   CreateProgress,
   CreateSessionRequest,
+  TailoredHistoryEntry,
   ImportableSession,
   SettingsFieldDescriptor,
 } from "./types";
@@ -114,6 +116,14 @@ export interface SessionsEnvelope {
 
 export function fetchSessions(): Promise<SessionsEnvelope | null> {
   return fetchJson<SessionsEnvelope>("/api/sessions");
+}
+
+export function fetchTailoredHistory(signal?: AbortSignal): Promise<{ entries: TailoredHistoryEntry[] } | null> {
+  return fetchJson("/api/tailored-sessions", { signal });
+}
+
+export function setTailoredHistoryHidden(id: string, hidden: boolean): Promise<{ ok: boolean; message?: string }> {
+  return okWithMessage(`/api/sessions/${encodeURIComponent(id)}/tailored-history`, jsonInit("PATCH", { hidden }));
 }
 
 export interface ConversationSearchHit {
@@ -2222,4 +2232,60 @@ export function importRepoAppearances(
   appearances: Record<string, import("./repoAppearance").RepoAppearance>,
 ): Promise<Record<string, import("./repoAppearance").RepoAppearance> | null> {
   return fetchJson("/api/app-state/repo-appearances/import", jsonInit("POST", { appearances }));
+}
+
+export async function researchOperation(
+  body: import("./types").ResearchOperation,
+): Promise<{ draft?: import("./types").ResearchDraft; error?: string; uncertain?: boolean }> {
+  const result = await send("/api/research", jsonInit("POST", body)).catch(() => null);
+  if (!result)
+    return {
+      error: "Outcome not confirmed. Reopen this request from history; do not start another run.",
+      uncertain: true,
+    };
+  if (!result.ok || !result.payload?.draft)
+    return {
+      error: stringField(result.payload, "message") ?? "Research operation failed. Reopen to check its state.",
+      uncertain: result.status >= 500,
+    };
+  return { draft: result.payload.draft as import("./types").ResearchDraft };
+}
+export function getResearch(id: string): Promise<{ draft: import("./types").ResearchDraft } | null> {
+  return fetchJson(`/api/research/${encodeURIComponent(id)}`);
+}
+export function getResearchOutput(id: string): Promise<{ output: string } | null> {
+  return fetchJson(`/api/research/${encodeURIComponent(id)}/output`);
+}
+export function replyResearch(id: string, answer: string): Promise<{ ok: boolean; message?: string }> {
+  return okWithMessage(`/api/research/${encodeURIComponent(id)}/reply`, jsonInit("POST", { answer }));
+}
+
+export async function workshopOperation(
+  body: import("./types").WorkshopOperation,
+): Promise<{ request?: import("./types").WorkshopRequest; error?: string; uncertain?: boolean }> {
+  const result = await send("/api/workshop", jsonInit("POST", body)).catch(() => null);
+  if (!result)
+    return {
+      error: "Outcome unknown. Reopen this Workshop UUID; do not create another request or replay a commit.",
+      uncertain: true,
+    };
+  if (!result.ok || !result.payload?.request)
+    return {
+      error: stringField(result.payload, "message") ?? "Workshop operation refused",
+      uncertain: result.ok || result.status >= 500,
+    };
+  if (!isWorkshopRequest(result.payload.request, body.id, body.operation === "create" ? body.envelope : undefined))
+    return {
+      error:
+        "Outcome unknown: invalid or mismatched Workshop success. Retain the same UUID/envelope and reopen; never replay a write.",
+      uncertain: true,
+    };
+  return { request: result.payload.request };
+}
+export async function getWorkshop(id: string): Promise<{ request: import("./types").WorkshopRequest } | null> {
+  const result = await fetchJson<{ request: unknown }>(`/api/workshop/${encodeURIComponent(id)}`);
+  return isWorkshopRequest(result?.request, id) ? { request: result!.request } : null;
+}
+export function getWorkshopDefaults(): Promise<{ repository: string | null } | null> {
+  return fetchJson("/api/workshop-defaults");
 }

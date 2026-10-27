@@ -164,6 +164,24 @@ mod tests {
 
     /// Every shape `validate_patch` refuses, and the rejection each returns.
     #[test]
+    fn workshop_repository_is_local_only_and_repo_denied() {
+        let mut patch = serde_json::json!({"skills":{"workshop_repository":"/fixture/source"}});
+        strip_local_only(&mut patch);
+        assert!(patch["skills"].get("workshop_repository").is_none());
+        let descriptor =
+            crate::session::config::settings_schema::descriptor("skills", "workshop_repository")
+                .unwrap();
+        assert_eq!(
+            descriptor.repo_policy,
+            crate::session::config::settings_schema::RepoPolicy::Deny
+        );
+        assert!(matches!(
+            descriptor.web_write,
+            WebWritePolicy::LocalOnly { .. }
+        ));
+    }
+
+    #[test]
     fn validate_patch_rejects_unknown_malformed_and_invalid_shapes() {
         let err = validate_patch(&json!({"nope": {"x": 1}}), Scope::Global, true).unwrap_err();
         assert!(matches!(err, PatchRejection::UnknownSection(_)));
