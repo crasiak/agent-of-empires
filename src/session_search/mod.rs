@@ -1,5 +1,6 @@
 //! Client for the `session-search` CLI, free of TUI types.
 
+pub mod context;
 pub mod group;
 pub mod query;
 pub mod resume;

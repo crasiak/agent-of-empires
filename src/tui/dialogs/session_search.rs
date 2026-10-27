@@ -1,5 +1,6 @@
 //! fzf-style session search overlay: one line per hit with the best hit nearest
-//! the prompt, an info line, and a preview pane on wide terminals.
+//! the prompt, an info line, and a preview pane on wide terminals that shows
+//! the exchange around the hit, read from its transcript.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -11,11 +12,12 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
 use super::{paste_into_input, DialogResult};
+use crate::session_search::context::{self, Role, Turn};
 use crate::session_search::{
     group, supervisor, Hit, QueryError, Request, Row, Scope, Session, Target,
 };
@@ -35,7 +37,12 @@ const LABEL_COLS: usize = 28;
 const HARNESS_COLS: usize = 6;
 const DATE_COLS: usize = 5;
 const MARKER_COLS: usize = 4;
-const SNIPPETS: usize = 3;
+/// Turns read either side of a hit for the preview.
+const CONTEXT_TURNS: usize = 3;
+/// Other matches listed under the preview's exchange.
+const ALSO: usize = 2;
+/// Preview gutter: hit bar, role, time.
+const GUTTER: usize = 11;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 pub enum SearchOutcome {
@@ -81,6 +88,8 @@ pub struct SessionSearchDialog {
     spin: usize,
     worker: Worker<Request, Reply>,
     resolver: Resolver,
+    /// Turns around the selected hit, keyed by transcript and offset.
+    context: Option<((String, u64), Vec<Turn>)>,
 }
 
 impl SessionSearchDialog {
@@ -112,6 +121,7 @@ impl SessionSearchDialog {
             spin: 0,
             worker,
             resolver,
+            context: None,
         }
     }
 
@@ -336,11 +346,20 @@ impl SessionSearchDialog {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        frame.render_widget(Clear, area);
-        frame.render_widget(
-            Block::default().style(Style::default().bg(theme.background)),
-            area,
-        );
+        let (window, area) = window(area);
+        frame.render_widget(Clear, window);
+        let block = Block::default()
+            .style(Style::default().bg(theme.background).fg(theme.text))
+            .border_style(Style::default().fg(theme.accent));
+        let block = if window == area {
+            block
+        } else {
+            block
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(" Search sessions ")
+        };
+        frame.render_widget(block, window);
         let preview_on = *self.preview_on.get_or_insert(area.width >= WIDE);
         let (main, preview) = if preview_on {
             let [main, sep, preview] = Layout::horizontal([
@@ -391,6 +410,7 @@ impl SessionSearchDialog {
         );
 
         if let Some(preview) = preview {
+            self.load_context();
             self.render_preview(frame, preview, theme);
         } else if let Some(e) = &self.error {
             let bottom = Rect {
@@ -419,11 +439,7 @@ impl SessionSearchDialog {
             .max()
             .unwrap_or(0)
             .min(LABEL_COLS);
-        let terms: Vec<String> = self
-            .query()
-            .split_whitespace()
-            .map(|t| t.to_ascii_lowercase())
-            .collect();
+        let terms = self.terms();
         let today = Local::now().date_naive();
         let stripe = theme.highlight_background(theme.dimmed);
 
@@ -502,6 +518,30 @@ impl SessionSearchDialog {
         window.iter().filter(|e| e.1.is_none()).count()
     }
 
+    /// Reads the turns around the selected hit's best snippet, once per selection.
+    fn load_context(&mut self) {
+        let key = self.selected().and_then(|hit| {
+            let path = hit.session.transcript_path.clone()?;
+            let offset = hit.snippets.first()?.offset?;
+            Some((path, offset))
+        });
+        let Some(key) = key else {
+            self.context = None;
+            return;
+        };
+        if self.context.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        let turns = context::around(
+            std::path::Path::new(&key.0),
+            key.1,
+            CONTEXT_TURNS,
+            CONTEXT_TURNS,
+        )
+        .unwrap_or_default();
+        self.context = Some((key, turns));
+    }
+
     fn render_preview(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let block = Block::default().padding(Padding::horizontal(1));
         let inner = block.inner(area);
@@ -519,12 +559,19 @@ impl SessionSearchDialog {
             return;
         };
         let s = &hit.session;
+        let width = inner.width as usize;
         let dim = Style::default().fg(theme.dimmed);
+        let terms = self.terms();
+        let today = Local::now().date_naive();
         let mut lines = Vec::new();
-        lines.push(match &s.resume {
-            Some(r) => Line::styled(r.command.clone(), Style::default().fg(theme.text)),
-            None => Line::styled("no resume command", dim),
-        });
+        match &s.resume {
+            Some(r) => lines.extend(
+                clamp(wrap(&r.command, width), 2)
+                    .into_iter()
+                    .map(|l| Line::styled(l, Style::default().fg(theme.text))),
+            ),
+            None => lines.push(Line::styled("no resume command", dim)),
+        }
         let place: Vec<String> = [
             s.cwd.as_deref().map(tilde),
             s.branch.clone(),
@@ -533,25 +580,276 @@ impl SessionSearchDialog {
         .into_iter()
         .flatten()
         .collect();
-        lines.push(Line::styled(place.join(" · "), dim));
-        lines.push(Line::styled("─".repeat(inner.width as usize), dim));
-        for snippet in hit.snippets.iter().take(SNIPPETS) {
-            lines.push(Line::styled(
-                format!("{:<9} {}", snippet.role, stamp(&snippet.ts)),
-                Style::default().fg(theme.accent),
-            ));
-            lines.push(Line::styled(
-                format!(" {}", snippet.text),
-                Style::default().fg(theme.text),
-            ));
+        lines.push(Line::styled(fixed_width(&place.join(" · "), width), dim));
+        lines.push(Line::styled("─".repeat(width), dim));
+
+        let also: Vec<_> = hit.snippets.iter().skip(1).take(ALSO).collect();
+        let room = (inner.height as usize).saturating_sub(lines.len() + also.len());
+        let turns = self
+            .context
+            .as_ref()
+            .map(|(_, turns)| turns.as_slice())
+            .filter(|turns| turns.iter().any(|t| t.hit));
+        match turns {
+            Some(turns) => {
+                lines.extend(exchange(turns, width, room, &terms, today, theme));
+            }
+            // No transcript to read: the snippets are all there is.
+            None => {
+                for snippet in hit.snippets.iter().take(1) {
+                    let turn = Turn {
+                        role: snippet_role(&snippet.role),
+                        ts: Some(snippet.ts.clone()),
+                        text: snippet.text.clone(),
+                        hit: true,
+                    };
+                    lines.extend(exchange(&[turn], width, room, &terms, today, theme));
+                }
+            }
         }
-        frame.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .block(block),
-            area,
-        );
+        if !also.is_empty() {
+            let pad = (inner.height as usize).saturating_sub(lines.len() + also.len());
+            lines.extend(std::iter::repeat_n(Line::default(), pad));
+        }
+        for snippet in also {
+            let head = format!("also {:<9} ", stamp(&snippet.ts));
+            let text = fixed_width(&one_line(&snippet.text), width.saturating_sub(head.len()));
+            let mut spans = vec![Span::styled(head, dim)];
+            spans.extend(highlight(&text, &terms, dim));
+            lines.push(Line::from(spans));
+        }
+        frame.render_widget(Paragraph::new(lines).block(block), area);
     }
+
+    fn terms(&self) -> Vec<String> {
+        self.query()
+            .split_whitespace()
+            .map(|t| t.to_ascii_lowercase())
+            .collect()
+    }
+}
+
+/// The overlay's window and its inner area: a bordered window with a margin
+/// that shows the screen behind it, as the tailored-sessions window does.
+/// Small terminals get the whole area, unbordered.
+fn window(area: Rect) -> (Rect, Rect) {
+    if area.width < 60 || area.height < 12 {
+        return (area, area);
+    }
+    let mx = (area.width / 16).max(2);
+    let my = (area.height / 12).max(1);
+    let outer = Rect {
+        x: area.x + mx,
+        y: area.y + my,
+        width: area.width - 2 * mx,
+        height: area.height - 2 * my,
+    };
+    let inner = Rect {
+        x: outer.x + 1,
+        y: outer.y + 1,
+        width: outer.width - 2,
+        height: outer.height - 2,
+    };
+    (outer, inner)
+}
+
+fn snippet_role(role: &str) -> Role {
+    match role {
+        "user" => Role::User,
+        "assistant" => Role::Assistant,
+        _ => Role::ToolResult,
+    }
+}
+
+/// The hit's turn and its neighbours in `room` lines, in transcript order.
+/// The nearest turn either side goes in first, then the hit from its first
+/// match, then further turns while they fit. Neighbours get one line (tool
+/// calls) or two; the hit keeps its line breaks.
+fn exchange(
+    turns: &[Turn],
+    width: usize,
+    room: usize,
+    terms: &[String],
+    today: chrono::NaiveDate,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let text_cols = width.saturating_sub(GUTTER).max(1);
+    let Some(first_hit) = turns.iter().position(|t| t.hit) else {
+        return Vec::new();
+    };
+    let last_hit = turns.iter().rposition(|t| t.hit).unwrap_or(first_hit);
+    let body: Vec<Vec<String>> = turns
+        .iter()
+        .map(|t| {
+            if t.hit {
+                hit_lines(&t.text, terms, text_cols)
+            } else {
+                let cap = if t.role == Role::Tool { 1 } else { 2 };
+                clamp(wrap(&one_line(&t.text), text_cols), cap)
+            }
+        })
+        .collect();
+
+    // Nearest-first neighbour order: before, after, before, after...
+    let mut order = Vec::new();
+    let (mut b, mut a) = (first_hit, last_hit + 1);
+    while b > 0 || a < turns.len() {
+        if b > 0 {
+            b -= 1;
+            order.push(b);
+        }
+        if a < turns.len() {
+            order.push(a);
+            a += 1;
+        }
+    }
+    let mut take = vec![0usize; turns.len()];
+    let mut left = room;
+    // Keep at least three lines for the hit when reserving its first neighbours.
+    for &i in order.iter().take(2) {
+        if left >= body[i].len() + 3 {
+            take[i] = body[i].len();
+            left -= take[i];
+        }
+    }
+    for i in first_hit..=last_hit {
+        take[i] = body[i].len().min(left);
+        left -= take[i];
+    }
+    for &i in order.iter().skip(2) {
+        if left >= body[i].len() {
+            take[i] = body[i].len();
+            left -= take[i];
+        }
+    }
+
+    let mut out = Vec::new();
+    for (i, turn) in turns.iter().enumerate() {
+        if take[i] == 0 {
+            continue;
+        }
+        let (label, label_style) = match turn.role {
+            Role::User => ("you", Style::default().fg(theme.accent)),
+            Role::Assistant => ("ai", Style::default().fg(theme.dimmed)),
+            Role::Tool => ("⚙", Style::default().fg(theme.dimmed)),
+            Role::ToolResult => ("↳", Style::default().fg(theme.dimmed)),
+        };
+        let text_style = if turn.hit {
+            Style::default().fg(theme.text)
+        } else {
+            Style::default().fg(theme.dimmed)
+        };
+        let label_style = if turn.hit {
+            label_style.fg(theme.accent).bold()
+        } else {
+            label_style
+        };
+        let when = turn
+            .ts
+            .as_deref()
+            .map(|ts| short_date(ts, today))
+            .unwrap_or_default();
+        for (n, text) in body[i].iter().take(take[i]).enumerate() {
+            let bar = if turn.hit {
+                Span::styled("▌", Style::default().fg(theme.accent))
+            } else {
+                Span::raw(" ")
+            };
+            let head = if n == 0 {
+                format!(
+                    "{} {} ",
+                    fixed_width(label, 3),
+                    fixed_width(&when, DATE_COLS)
+                )
+            } else {
+                " ".repeat(GUTTER - 1)
+            };
+            let mut spans = vec![bar, Span::styled(head, label_style)];
+            spans.extend(highlight(text, terms, text_style));
+            out.push(Line::from(spans));
+        }
+    }
+    out
+}
+
+/// The hit's text wrapped to `cols`, starting a line above the first match
+/// so the matching part shows even in a long message.
+fn hit_lines(text: &str, terms: &[String], cols: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut blank = false;
+    for raw in text.lines() {
+        let raw = raw.trim_end();
+        if raw.is_empty() {
+            if !blank && !lines.is_empty() {
+                lines.push(String::new());
+            }
+            blank = true;
+            continue;
+        }
+        blank = false;
+        lines.extend(wrap(raw, cols));
+    }
+    let first = lines.iter().position(|l| {
+        let l = l.to_ascii_lowercase();
+        terms
+            .iter()
+            .any(|t| !t.is_empty() && l.contains(t.as_str()))
+    });
+    match first {
+        Some(i) if i > 1 => {
+            let mut rest = lines.split_off(i - 1);
+            rest.insert(0, "…".to_string());
+            rest
+        }
+        _ => lines,
+    }
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Keeps `cap` lines, marking a cut with `…`.
+fn clamp(mut lines: Vec<String>, cap: usize) -> Vec<String> {
+    if lines.len() > cap {
+        lines.truncate(cap);
+        if let Some(last) = lines.last_mut() {
+            last.push('…');
+        }
+    }
+    lines
+}
+
+/// Greedy word wrap by display width; words wider than `cols` are split.
+fn wrap(text: &str, cols: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut used = 0;
+    for word in text.split(' ') {
+        let w: usize = word.chars().map(|c| c.width().unwrap_or(0)).sum();
+        if used > 0 && used + 1 + w > cols {
+            lines.push(std::mem::take(&mut line));
+            used = 0;
+        }
+        if used > 0 {
+            line.push(' ');
+            used += 1;
+        }
+        for c in word.chars() {
+            let cw = c.width().unwrap_or(0);
+            if used + cw > cols && used > 0 {
+                lines.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            line.push(c);
+            used += cw;
+        }
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// `repo·folder`, folder being the last segment of `cwd`; just `repo` when narrow.
@@ -721,11 +1019,37 @@ mod tests {
         d
     }
 
+    /// The rows inside the overlay's window, cropped to it.
     fn screen(d: &mut SessionSearchDialog, width: u16, height: u16) -> Vec<String> {
         let buf = draw(width, height, |f, theme| d.render(f, f.area(), theme));
-        (0..height)
-            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
+        let (_, inner) = window(Rect::new(0, 0, width, height));
+        (inner.y..inner.bottom())
+            .map(|y| {
+                (inner.x..inner.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect()
+            })
             .collect()
+    }
+
+    /// The fixture with its first hit pointed at `transcript`, offset `at`.
+    fn loaded_with_transcript(transcript: &std::path::Path, at: u64) -> SessionSearchDialog {
+        let path = transcript.to_string_lossy().into_owned();
+        let (mut d, _) = dialog(
+            None,
+            Box::new(move |req| {
+                let mut hits = fixture();
+                hits[0].session.transcript_path = Some(path.clone());
+                hits[0].snippets[0].offset = Some(at);
+                (req.generation, Ok(hits))
+            }),
+        );
+        let t = Instant::now();
+        type_text(&mut d, "margin");
+        d.tick(t);
+        d.tick(t + ms(301));
+        settle(&mut d, t + ms(301));
+        d
     }
 
     #[test]
@@ -890,19 +1214,82 @@ mod tests {
     #[test]
     fn renders_prompt_info_rows_and_preview() {
         let mut d = loaded();
-        let lines = screen(&mut d, 140, 20);
-        assert!(lines[19].starts_with("> abc"), "{:?}", lines[19]);
-        assert!(lines[18].contains("2/2"), "{:?}", lines[18]);
-        assert!(lines[17].starts_with('▌'), "{:?}", lines[17]);
-        assert!(lines[17].contains("attic·deploy"), "{:?}", lines[17]);
+        let lines = screen(&mut d, 150, 24);
+        let n = lines.len();
+        assert!(lines[n - 1].starts_with("> abc"), "{:?}", lines[n - 1]);
+        assert!(lines[n - 2].contains("2/2"), "{:?}", lines[n - 2]);
+        assert!(lines[n - 3].starts_with('▌'), "{:?}", lines[n - 3]);
+        assert!(lines[n - 3].contains("attic·deploy"), "{:?}", lines[n - 3]);
         assert!(lines.iter().any(|l| l.contains('│')));
-        assert!(lines.iter().any(|l| l.contains("ledger run claude")));
+        assert!(lines.iter().any(|l| l.contains("ledger run")));
+        // No transcript to read: the best snippet stands in for the exchange.
+        assert!(lines.iter().any(|l| l.contains("kickstart the daemon")));
 
         let mut d = loaded();
         let lines = screen(&mut d, 90, 20);
+        let n = lines.len();
         assert!(!lines.iter().any(|l| l.contains('│')));
         assert!(!lines.iter().any(|l| l.contains("attic·")));
-        assert!(lines[17].starts_with('▌'), "{:?}", lines[17]);
+        assert!(lines[n - 3].starts_with('▌'), "{:?}", lines[n - 3]);
+    }
+
+    #[test]
+    fn the_window_leaves_a_margin_showing_the_screen_behind() {
+        let mut d = loaded();
+        let buf = draw(150, 24, |f, theme| {
+            f.render_widget(
+                Paragraph::new("behind".repeat(200)).wrap(ratatui::widgets::Wrap { trim: false }),
+                f.area(),
+            );
+            d.render(f, f.area(), theme)
+        });
+        let (outer, _) = window(Rect::new(0, 0, 150, 24));
+        assert!(outer.x > 0 && outer.y > 0);
+        assert_ne!(buf[(0, 0)].symbol(), " ");
+        assert_eq!(buf[(outer.x, outer.y)].symbol(), "╭");
+        let title: String = (outer.x..outer.right())
+            .map(|x| buf[(x, outer.y)].symbol())
+            .collect();
+        assert!(title.contains("Search sessions"), "{title}");
+        // Too small for a margin: the whole area, unbordered.
+        assert_eq!(window(Rect::new(0, 0, 50, 10)).0, Rect::new(0, 0, 50, 10));
+    }
+
+    #[test]
+    fn the_preview_shows_the_exchange_around_the_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let records = [
+            r#"{"type":"user","timestamp":"2026-10-27T13:30:00Z","message":{"role":"user","content":"hitting ctrl-f shows nothing"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-27T13:31:00Z","message":{"role":"assistant","content":[{"type":"text","text":"the old binary is running"},{"type":"tool_use","name":"Bash","input":{"command":"ls -la ~/.local/bin/aoe"}}]}}"#,
+            r#"{"type":"user","timestamp":"2026-10-27T13:37:00Z","message":{"role":"user","content":"the window can overlay with a margin to show the background"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-27T13:38:00Z","message":{"role":"assistant","content":[{"type":"text","text":"making it a bordered window"}]}}"#,
+        ];
+        let mut body = String::new();
+        let mut at = 0;
+        for (i, r) in records.iter().enumerate() {
+            if i == 2 {
+                at = body.len() as u64;
+            }
+            body.push_str(r);
+            body.push('\n');
+        }
+        std::fs::write(&path, body).unwrap();
+
+        let mut d = loaded_with_transcript(&path, at);
+        let lines = screen(&mut d, 150, 30);
+        let find = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} not shown: {lines:#?}"))
+        };
+        let ask = find("hitting ctrl-f");
+        let tool = find("Bash ls -la");
+        let hit = find("overlay with a margin");
+        let reply = find("making it a bordered window");
+        assert!(ask < tool && tool < hit && hit < reply);
+        assert!(lines[hit].contains("▌you"), "{:?}", lines[hit]);
     }
 
     #[test]
@@ -916,7 +1303,9 @@ mod tests {
         // Row 1 of three sits second from the bottom; a two-row list scrolls it to the bottom.
         let tall = draw(90, 20, |f, theme| d.render(f, f.area(), theme));
         let short = draw(90, 4, |f, theme| d.render(f, f.area(), theme));
-        assert_eq!(tall[(2, 16)].bg, stripe);
+        let (_, inner) = window(Rect::new(0, 0, 90, 20));
+        // Above the prompt and info lines, one row up from the list's bottom.
+        assert_eq!(tall[(inner.x + 2, inner.bottom() - 4)].bg, stripe);
         assert_eq!(short[(2, 1)].bg, stripe);
     }
 
@@ -935,5 +1324,20 @@ mod tests {
             let lines = screen(&mut d, width, 20);
             assert!(lines.iter().any(|l| l.contains("search timed out")));
         }
+    }
+
+    #[test]
+    fn hit_lines_start_just_above_the_first_match() {
+        let text = "one\ntwo\nthree\nfour has the margin\nfive";
+        let lines = hit_lines(text, &["margin".into()], 40);
+        assert_eq!(lines, ["…", "three", "four has the margin", "five"]);
+        assert_eq!(hit_lines("a\n\n\nb", &[], 40), ["a", "", "b"]);
+    }
+
+    #[test]
+    fn wrap_and_clamp_fit_the_width() {
+        assert_eq!(wrap("aa bb cc", 5), ["aa bb", "cc"]);
+        assert_eq!(wrap("abcdefg", 3), ["abc", "def", "g"]);
+        assert_eq!(clamp(wrap("aa bb cc dd", 2), 2), ["aa", "bb…"]);
     }
 }
