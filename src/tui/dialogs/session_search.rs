@@ -731,7 +731,7 @@ fn exchange(
         let (label, label_style) = match turn.role {
             Role::User => ("you", Style::default().fg(theme.accent)),
             Role::Assistant => ("ai", Style::default().fg(theme.dimmed)),
-            Role::Tool => ("⚙", Style::default().fg(theme.dimmed)),
+            Role::Tool => ("▸", Style::default().fg(theme.dimmed)),
             Role::ToolResult => ("↳", Style::default().fg(theme.dimmed)),
         };
         let text_style = if turn.hit {
