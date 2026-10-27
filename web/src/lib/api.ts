@@ -1,6 +1,8 @@
+import { isWorkshopRequest } from "./workshop";
 import type { AgentLifecycleInfo } from "./agentProfiles";
 import { notifySettingsChanged } from "./settingsEvents";
 import { clientFormFactor } from "./formFactor";
+import type { SchemaSettings } from "./generated/settingsKeys";
 import type {
   SessionResponse,
   RichDiffFilesResponse,
@@ -8,6 +10,7 @@ import type {
   AgentInfo,
   ProfileInfo,
   ProfileSettingsResponse,
+  HooksOverride,
   BrowseResponse,
   GroupInfo,
   ProjectInfo,
@@ -15,6 +18,7 @@ import type {
   DockerStatusResponse,
   CreateProgress,
   CreateSessionRequest,
+  TailoredHistoryEntry,
   ImportableSession,
   SettingsFieldDescriptor,
 } from "./types";
@@ -112,6 +116,14 @@ export interface SessionsEnvelope {
 
 export function fetchSessions(): Promise<SessionsEnvelope | null> {
   return fetchJson<SessionsEnvelope>("/api/sessions");
+}
+
+export function fetchTailoredHistory(signal?: AbortSignal): Promise<{ entries: TailoredHistoryEntry[] } | null> {
+  return fetchJson("/api/tailored-sessions", { signal });
+}
+
+export function setTailoredHistoryHidden(id: string, hidden: boolean): Promise<{ ok: boolean; message?: string }> {
+  return okWithMessage(`/api/sessions/${encodeURIComponent(id)}/tailored-history`, jsonInit("PATCH", { hidden }));
 }
 
 export interface ConversationSearchHit {
@@ -269,15 +281,14 @@ export function sessionRawFileUrl(id: string, filePath: string): string {
 
 // --- Settings ---
 
-export interface SettingsResponse {
-  theme?: {
-    idle_decay_minutes?: number;
-  };
+/** Sections and fields come from the server schema (`SchemaSettings`, generated), so a name the
+ *  server lacks fails to compile. `app_state`, `hooks` and plugin sections are outside the schema. */
+export type SettingsResponse = SchemaSettings & {
   app_state?: {
     has_seen_web_tour?: boolean;
   };
-  [key: string]: unknown;
-}
+  hooks?: HooksOverride;
+} & { [K in `plugin:${string}`]?: Record<string, unknown> };
 
 export interface SystemHealthAgent {
   id: string;
@@ -332,6 +343,33 @@ async function announceSave(save: Promise<boolean>): Promise<boolean> {
   return ok;
 }
 
+/** `uncertain`: the write may have landed (network error, 5xx, or a failure after the server persisted). */
+export type SaveOutcome = "committed" | "rejected" | "uncertain";
+
+const POST_PERSIST_ERRORS = new Set(["partially_saved", "load_failed"]);
+
+// Stamps each settings PATCH so the server can drop one that commits after a newer edit of the same field.
+const writeTab = globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+let writeSeq = 0;
+
+async function sendSave(url: string, init: RequestInit): Promise<SaveOutcome> {
+  const headers = { ...(init.headers as Record<string, string>), "X-Aoe-Write-Stamp": `${writeTab}.${++writeSeq}` };
+  try {
+    const { ok, status, payload } = await send(url, { ...init, headers });
+    if (ok) return "committed";
+    if (status >= 500 || POST_PERSIST_ERRORS.has(stringField(payload, "error") ?? "")) return "uncertain";
+    return "rejected";
+  } catch {
+    return "uncertain";
+  }
+}
+
+async function announceOutcome(save: Promise<SaveOutcome>): Promise<SaveOutcome> {
+  const outcome = await save;
+  if (outcome !== "rejected") notifySettingsChanged();
+  return outcome;
+}
+
 /** This install's CityHall config bundle as TOML; throws with the server's message. */
 export async function fetchCityHallBundle(): Promise<string> {
   const res = await fetch("/api/cityhall/bundle");
@@ -340,6 +378,24 @@ export async function fetchCityHallBundle(): Promise<string> {
     throw new Error(detail?.message ?? `Export failed (HTTP ${res.status})`);
   }
   return res.text();
+}
+
+export interface LogsSnapshot {
+  status: "available" | "missing" | "stdout" | "unavailable";
+  /** Redacted server-side. */
+  content: string;
+  lineCount: number;
+  truncated: boolean;
+}
+
+/** Redacted tail of the active log file; throws with the server's message. */
+export async function fetchLogs(lines: number, signal?: AbortSignal): Promise<LogsSnapshot> {
+  const res = await fetch(`/api/system/logs?lines=${lines}`, { signal });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null);
+    throw new Error(detail?.message ?? `Could not load logs (HTTP ${res.status})`);
+  }
+  return (await res.json()) as LogsSnapshot;
 }
 
 // The schema is static per server run; only a successful fetch is cached.
@@ -778,15 +834,15 @@ export function invokePluginCommand(fqid: string, sessionId: string): Promise<bo
 /** Save settings; the server puts each field in the layer `fetchSettings`
  *  reads it from: `profile` (default: the served one) where it may override,
  *  machine-wide otherwise. */
-export function updateSettings(updates: Record<string, unknown>, profile?: string): Promise<boolean> {
+export function updateSettings(updates: Record<string, unknown>, profile?: string): Promise<SaveOutcome> {
   const params = profile ? `?profile=${encodeURIComponent(profile)}` : "";
-  return announceSave(fetchOk(`/api/settings${params}`, jsonInit("PATCH", updates)));
+  return announceOutcome(sendSave(`/api/settings${params}`, jsonInit("PATCH", updates)));
 }
 
 /** Set the machine-wide value of every field in `updates`, for editors that
  *  set the value a profile inherits. */
-export function updateMachineSettings(updates: Record<string, unknown>): Promise<boolean> {
-  return announceSave(fetchOk("/api/settings?layer=machine", jsonInit("PATCH", updates)));
+export function updateMachineSettings(updates: Record<string, unknown>): Promise<SaveOutcome> {
+  return announceOutcome(sendSave("/api/settings?layer=machine", jsonInit("PATCH", updates)));
 }
 
 // Theme, tour, tips and acknowledgement flags use dedicated endpoints so these
@@ -898,17 +954,17 @@ export function profileWritableSections(schema: SettingsFieldDescriptor[]): Set<
 }
 
 /** PATCH profile settings, refusing blocked sections. Without a schema, defers to the server's guard. */
-export async function updateProfileSettings(name: string, updates: Record<string, unknown>): Promise<boolean> {
+export async function updateProfileSettings(name: string, updates: Record<string, unknown>): Promise<SaveOutcome> {
   const schema = await getSettingsSchema();
   if (schema) {
     const writable = profileWritableSections(schema);
     const blocked = Object.keys(updates).find((key) => !writable.has(key));
     if (blocked !== undefined) {
       console.error(`updateProfileSettings: refusing to send blocked profile section "${blocked}"`);
-      return false;
+      return "rejected";
     }
   }
-  return announceSave(fetchOk(`/api/profiles/${encodeURIComponent(name)}/settings`, jsonInit("PATCH", updates)));
+  return announceOutcome(sendSave(`/api/profiles/${encodeURIComponent(name)}/settings`, jsonInit("PATCH", updates)));
 }
 
 // --- Themes & Sounds ---
@@ -1045,6 +1101,15 @@ export function fetchBranches(path: string, includeRemote = false): Promise<Bran
   const params = new URLSearchParams({ path });
   if (includeRemote) params.set("include_remote", "true");
   return fetchJson<BranchInfo[]>(`/api/git/branches?${params.toString()}`);
+}
+
+export interface WorktreeInfo {
+  branch: string;
+  path: string;
+}
+
+export function fetchWorktrees(path: string): Promise<WorktreeInfo[] | null> {
+  return fetchJson<WorktreeInfo[]>(`/api/git/worktrees?${new URLSearchParams({ path }).toString()}`);
 }
 
 /** Null on a transient failure so callers stay optimistic. */
@@ -1560,11 +1625,13 @@ export interface LoginStatus {
   /** Inside the step-up window that sensitive routes require. */
   elevated: boolean;
   elevated_until_secs: number | null;
+  /** This origin has an enrolled passkey. */
+  passkey_available?: boolean;
 }
 
 export async function loginStatus(): Promise<LoginStatus> {
   return (
-    (await fetchJson<LoginStatus>("/api/login/status")) ?? {
+    (await fetchJson<LoginStatus>(`/api/login/status?origin=${encodeURIComponent(window.location.origin)}`)) ?? {
       required: false,
       authenticated: true,
       elevated: true,
@@ -1606,6 +1673,93 @@ export function login(passphrase: string): Promise<{ ok: boolean; error?: string
   });
 }
 
+/** The browser can parse and serialize WebAuthn JSON, which the passkey calls rely on. */
+export function passkeysSupported(): boolean {
+  return (
+    typeof PublicKeyCredential !== "undefined" &&
+    typeof PublicKeyCredential.parseRequestOptionsFromJSON === "function" &&
+    typeof PublicKeyCredential.parseCreationOptionsFromJSON === "function"
+  );
+}
+
+interface PasskeyCeremony<Options> {
+  transaction_id: string;
+  options: { publicKey: Options };
+}
+
+type PasskeyResult = { ok: boolean; error?: string; cancelled?: boolean };
+
+/** Start a ceremony, let the browser run it, and finish it. `finishExtra` adds fields to the finish request. */
+async function runPasskeyCeremony<Options>(
+  startUrl: string,
+  startBody: unknown,
+  finishUrl: string,
+  finishExtra: Record<string, unknown>,
+  prompt: (options: Options) => Promise<Credential | null>,
+  failure: string,
+): Promise<PasskeyResult> {
+  const start = await send(startUrl, jsonInit("POST", startBody));
+  if (!start.ok) return { ok: false, error: rawMessage(start.payload) ?? `${failure} (${start.status})` };
+  const ceremony = start.payload as unknown as PasskeyCeremony<Options>;
+  let credential: unknown;
+  try {
+    const result = await prompt(ceremony.options.publicKey);
+    if (!result) return { ok: false, cancelled: true };
+    credential = (result as PublicKeyCredential).toJSON();
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "NotAllowedError") return { ok: false, cancelled: true };
+    return { ok: false, error: err instanceof Error ? err.message : failure };
+  }
+  const finish = await send(
+    finishUrl,
+    jsonInit("POST", { transaction_id: ceremony.transaction_id, credential, ...finishExtra }),
+  );
+  return finish.ok ? { ok: true } : { ok: false, error: rawMessage(finish.payload) ?? `${failure} (${finish.status})` };
+}
+
+/** Sign in with an enrolled passkey. `cancelled` means the user dismissed the browser prompt. */
+export function loginWithPasskey(): Promise<PasskeyResult> {
+  return withBindingSecret("Could not create device binding for this browser", (secret) =>
+    runPasskeyCeremony<PublicKeyCredentialRequestOptionsJSON>(
+      "/api/login/passkey/start",
+      undefined,
+      "/api/login/passkey/finish",
+      { device_binding_secret: secret },
+      (options) => navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) }),
+      "Passkey sign-in failed",
+    ).catch(() => ({ ok: false as const, error: "Network error" })),
+  );
+}
+
+/** Enrol a passkey for this origin. Elevation-gated; a 403 pops the passphrase prompt (fetch interceptor). */
+export function registerPasskey(label: string): Promise<PasskeyResult> {
+  return runPasskeyCeremony<PublicKeyCredentialCreationOptionsJSON>(
+    "/api/passkeys/register/start",
+    { label },
+    "/api/passkeys/register/finish",
+    {},
+    (options) => navigator.credentials.create({ publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(options) }),
+    "Could not add passkey",
+  ).catch(() => ({ ok: false, error: "Network error" }));
+}
+
+export interface PasskeyInfo {
+  credential_id: string;
+  label: string;
+  origin: string;
+  created_at_ms: number;
+  last_used_at_ms: number | null;
+}
+
+export function fetchPasskeys(): Promise<PasskeyInfo[] | null> {
+  return fetchJson<PasskeyInfo[]>("/api/passkeys");
+}
+
+/** Elevation-gated; resolves false when the interceptor pops the passphrase prompt. */
+export function removePasskey(credentialId: string): Promise<boolean> {
+  return fetchOk(`/api/passkeys/${encodeURIComponent(credentialId)}`, { method: "DELETE" });
+}
+
 /** Re-verify the passphrase to open a fresh elevation window. Sends the binding header
  *  explicitly so the second factor does not depend on the fetch interceptor. */
 export function elevateLogin(
@@ -1635,8 +1789,8 @@ export async function logout(): Promise<void> {
     }
     // Don't leak the previous user's cached approval sound to the next user of this tab.
     try {
-      const { clearApprovalSoundCache } = await import("../hooks/useApprovalSound");
-      clearApprovalSoundCache();
+      const { clearSoundCache } = await import("./soundPlayer");
+      clearSoundCache();
     } catch {
       // ignore
     }
@@ -1733,7 +1887,7 @@ export function setSessionNotifications(id: string, preset: "off" | "default" | 
 }
 
 const sessionUpdate = (id: string, action: string, init: RequestInit) =>
-  fetchJson<SessionResponse>(`/api/sessions/${id}/${action}`, init);
+  fetchJson<SessionResponse>(`/api/sessions/${encodeURIComponent(id)}/${action}`, init);
 
 /** Set or clear (`null`) one repo's diff base; omit `repo` for a single-repo session. */
 export function setSessionDiffBase(
@@ -1910,6 +2064,38 @@ export function dropMcpServer(name: string, agent: string): Promise<boolean> {
   return fetchOk(mcpPath(name, "drop"), jsonInit("POST", { agent }));
 }
 
+/** `value` omitted keeps the stored secret on edit. */
+export interface McpSecretEntry {
+  name: string;
+  value?: string;
+}
+
+export type McpServerInput =
+  | { transport: "stdio"; command: string; args: string[]; env: McpSecretEntry[] }
+  | { transport: "http" | "sse"; url: string; headers: McpSecretEntry[] };
+
+export interface McpMutationResult {
+  ok: boolean;
+  error?: string;
+  status?: number;
+}
+
+function mcpMutation(url: string, method: string, body?: unknown): Promise<McpMutationResult> {
+  return skillRequest<McpMutationResult>(url, body === undefined ? { method } : jsonInit(method, body), () => ({}));
+}
+
+export function createMcpServer(name: string, input: McpServerInput): Promise<McpMutationResult> {
+  return mcpMutation("/api/mcp/servers", "POST", { name, ...input });
+}
+
+export function updateMcpServer(name: string, input: McpServerInput): Promise<McpMutationResult> {
+  return mcpMutation(`/api/mcp/servers/${encodeURIComponent(name)}`, "PUT", input);
+}
+
+export function deleteMcpServer(name: string): Promise<McpMutationResult> {
+  return mcpMutation(`/api/mcp/servers/${encodeURIComponent(name)}`, "DELETE");
+}
+
 // --- Skills ---
 
 export type SkillProvenance = { kind: "aoe-managed" } | { kind: "external"; root: string };
@@ -2046,4 +2232,60 @@ export function importRepoAppearances(
   appearances: Record<string, import("./repoAppearance").RepoAppearance>,
 ): Promise<Record<string, import("./repoAppearance").RepoAppearance> | null> {
   return fetchJson("/api/app-state/repo-appearances/import", jsonInit("POST", { appearances }));
+}
+
+export async function researchOperation(
+  body: import("./types").ResearchOperation,
+): Promise<{ draft?: import("./types").ResearchDraft; error?: string; uncertain?: boolean }> {
+  const result = await send("/api/research", jsonInit("POST", body)).catch(() => null);
+  if (!result)
+    return {
+      error: "Outcome not confirmed. Reopen this request from history; do not start another run.",
+      uncertain: true,
+    };
+  if (!result.ok || !result.payload?.draft)
+    return {
+      error: stringField(result.payload, "message") ?? "Research operation failed. Reopen to check its state.",
+      uncertain: result.status >= 500,
+    };
+  return { draft: result.payload.draft as import("./types").ResearchDraft };
+}
+export function getResearch(id: string): Promise<{ draft: import("./types").ResearchDraft } | null> {
+  return fetchJson(`/api/research/${encodeURIComponent(id)}`);
+}
+export function getResearchOutput(id: string): Promise<{ output: string } | null> {
+  return fetchJson(`/api/research/${encodeURIComponent(id)}/output`);
+}
+export function replyResearch(id: string, answer: string): Promise<{ ok: boolean; message?: string }> {
+  return okWithMessage(`/api/research/${encodeURIComponent(id)}/reply`, jsonInit("POST", { answer }));
+}
+
+export async function workshopOperation(
+  body: import("./types").WorkshopOperation,
+): Promise<{ request?: import("./types").WorkshopRequest; error?: string; uncertain?: boolean }> {
+  const result = await send("/api/workshop", jsonInit("POST", body)).catch(() => null);
+  if (!result)
+    return {
+      error: "Outcome unknown. Reopen this Workshop UUID; do not create another request or replay a commit.",
+      uncertain: true,
+    };
+  if (!result.ok || !result.payload?.request)
+    return {
+      error: stringField(result.payload, "message") ?? "Workshop operation refused",
+      uncertain: result.ok || result.status >= 500,
+    };
+  if (!isWorkshopRequest(result.payload.request, body.id, body.operation === "create" ? body.envelope : undefined))
+    return {
+      error:
+        "Outcome unknown: invalid or mismatched Workshop success. Retain the same UUID/envelope and reopen; never replay a write.",
+      uncertain: true,
+    };
+  return { request: result.payload.request };
+}
+export async function getWorkshop(id: string): Promise<{ request: import("./types").WorkshopRequest } | null> {
+  const result = await fetchJson<{ request: unknown }>(`/api/workshop/${encodeURIComponent(id)}`);
+  return isWorkshopRequest(result?.request, id) ? { request: result!.request } : null;
+}
+export function getWorkshopDefaults(): Promise<{ repository: string | null } | null> {
+  return fetchJson("/api/workshop-defaults");
 }

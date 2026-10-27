@@ -8,7 +8,7 @@ use super::access::{access_policy, cityhall_gate, security_headers};
 #[cfg(feature = "web")]
 use super::assets::{serve_asset, serve_index, serve_public_file};
 use super::state::AppState;
-use crate::server::{acp_ws, api, auth, live_ws, login, push};
+use crate::server::{acp_ws, api, auth, live_ws, login, passkeys, push, runtime_ws};
 
 pub(super) fn build_router(state: Arc<AppState>) -> Router {
     use axum::routing::{delete, get, patch, post, put};
@@ -24,6 +24,18 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         // Static segment; registered before /api/sessions/{id} so the
         // literal "search" never resolves as a session id. See #2515.
         .route("/api/sessions/search", get(api::search_sessions))
+        .route("/api/tailored-sessions", get(api::list_tailored_sessions))
+        .route("/api/workshop", post(api::workshop_operation))
+        .route("/api/workshop/{id}", get(api::workshop_get))
+        .route("/api/workshop-defaults", get(api::workshop_defaults))
+        .route("/api/research", post(api::research_operation))
+        .route("/api/research/{id}", get(api::research_get))
+        .route("/api/research/{id}/output", get(api::research_output))
+        .route("/api/research/{id}/reply", post(api::research_reply))
+        .route(
+            "/api/sessions/{id}/tailored-history",
+            patch(api::update_tailored_visibility),
+        )
         .route(
             "/api/sessions/create-progress/{key}",
             get(api::create_session_progress),
@@ -36,7 +48,14 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         // Atomic multi-session workspace delete.
         .route("/api/workspaces", delete(api::delete_workspace))
         // Unified MCP management surface (#1996)
-        .route("/api/mcp/servers", get(api::get_mcp_servers))
+        .route(
+            "/api/mcp/servers",
+            get(api::get_mcp_servers).post(api::create_mcp_server),
+        )
+        .route(
+            "/api/mcp/servers/{name}",
+            put(api::edit_mcp_server).delete(api::delete_mcp_server),
+        )
         .route(
             "/api/mcp/servers/{name}/resolve",
             post(api::resolve_mcp_conflict),
@@ -73,6 +92,8 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/sessions/{id}/file", get(api::session_file))
         .route("/api/sessions/{id}/file/raw", get(api::session_file_raw))
+        // Read-only runtime read: one Hello, one Snapshot, one clean close.
+        .route("/api/runtime/read/ws", get(runtime_ws::runtime_ws))
         .route(
             "/api/sessions/{id}/artifacts/{*path}",
             get(api::serve_session_artifact),
@@ -154,6 +175,7 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/filesystem/browse", get(api::browse_filesystem))
         .route("/api/filesystem/home", get(api::filesystem_home))
         .route("/api/git/branches", get(api::list_branches))
+        .route("/api/git/worktrees", get(api::list_worktrees))
         .route("/api/git/is-repo", get(api::is_git_repo))
         .route("/api/git/clone", post(api::clone_repo))
         .route("/api/groups", get(api::list_groups))
@@ -167,6 +189,7 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/docker/status", get(api::docker_status))
         .route("/api/system/health", get(api::system_health))
+        .route("/api/system/logs", get(api::get_logs))
         // Settings + themes
         .route(
             "/api/settings",
@@ -285,6 +308,25 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
             "/api/login/sessions/{id}",
             delete(login::revoke_session_handler),
         )
+        // Passkey (WebAuthn) sign-in. Register and delete are elevation-gated.
+        .route(
+            "/api/login/passkey/start",
+            post(passkeys::login_start_handler),
+        )
+        .route(
+            "/api/login/passkey/finish",
+            post(passkeys::login_finish_handler),
+        )
+        .route(
+            "/api/passkeys/register/start",
+            post(passkeys::register_start_handler),
+        )
+        .route(
+            "/api/passkeys/register/finish",
+            post(passkeys::register_finish_handler),
+        )
+        .route("/api/passkeys", get(passkeys::list_handler))
+        .route("/api/passkeys/{id}", delete(passkeys::delete_handler))
         // Devices.
         .route("/api/devices", get(login::devices_handler))
         // About (version, auth status, read-only state)
@@ -323,6 +365,10 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/sessions/{id}/acp/install-agent",
             post(api::install_agent),
+        )
+        .route(
+            "/api/sessions/{id}/acp/install-info",
+            get(api::agent_install_info),
         )
         .route("/api/sessions/{id}/acp", delete(api::shutdown_acp))
         .route(
@@ -393,6 +439,12 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
             "/api/importable-sessions",
             get(api::list_importable_sessions),
         );
+
+    let app = if state.web_config.mcp_enabled {
+        app.route_service("/mcp", super::mcp::service(state.clone()))
+    } else {
+        app
+    };
 
     // Dashboard bundle (Vite build output) plus the SPA fallback.
     #[cfg(feature = "web")]

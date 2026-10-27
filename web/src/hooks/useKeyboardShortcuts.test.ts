@@ -16,6 +16,7 @@ function mount() {
     onFocusSidebar: vi.fn(),
     onJumpToAttention: vi.fn(),
     onNewScratch: vi.fn(),
+    onTailored: vi.fn(),
     onDiff: vi.fn(),
     onEscape: vi.fn(),
     onHelp: vi.fn(),
@@ -31,6 +32,26 @@ function mount() {
 type ActionName = keyof ShortcutActions;
 
 describe("useKeyboardShortcuts", () => {
+  it("opens Tailored Sessions from inputs and leaves other modal terminal shortcuts alone", () => {
+    const { actions, unmount } = mount();
+    const overlay = document.createElement("div");
+    overlay.dataset.tailoredOverlay = "";
+    const input = document.createElement("textarea");
+    overlay.append(input);
+    document.body.append(overlay);
+    try {
+      const open = dispatch(input, { key: "y", code: "KeyY", ctrlKey: true });
+      expect(open.defaultPrevented).toBe(true);
+      expect(actions.onTailored).toHaveBeenCalledOnce();
+      dispatch(input, { key: "k", code: "KeyK", ctrlKey: true });
+      dispatch(input, { key: "Escape", code: "Escape" });
+      expect(actions.onPalette).not.toHaveBeenCalled();
+      expect(actions.onEscape).not.toHaveBeenCalled();
+    } finally {
+      overlay.remove();
+      unmount();
+    }
+  });
   it.each<[string, KeyboardEventInit, ActionName | null, ActionName | null]>([
     [
       "Ctrl+Alt+B toggles the right panel, not the sidebar",
@@ -148,5 +169,12 @@ describe("useKeyboardShortcuts", () => {
     expect(actions.onNew).toHaveBeenCalledOnce();
     unmount();
     input.remove();
+  });
+
+  it("marks the document ready once the listener is attached", () => {
+    delete document.documentElement.dataset.shortcutsReady;
+    const { unmount } = mount();
+    expect(document.documentElement.dataset.shortcutsReady).toBe("true");
+    unmount();
   });
 });

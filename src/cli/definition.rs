@@ -8,6 +8,7 @@ use super::add::AddArgs;
 use super::cityhall::CityHallCommands;
 use super::extract_session_id::ExtractSessionIdArgs;
 use super::group::GroupCommands;
+use super::hook_attention::HookAttentionArgs;
 use super::hooks::HooksCommands;
 use super::init::InitArgs;
 use super::killall::KillallArgs;
@@ -54,18 +55,21 @@ pub struct Cli {
     /// consume or create profile state require an existing profile: an unknown
     /// name is refused, not created (make one with `aoe profile create`).
     /// Profile-independent commands such as `list --all` and `serve --stop`
-    /// ignore it
-    #[arg(short = 'p', long, global = true, env = "AGENT_OF_EMPIRES_PROFILE")]
+    /// ignore it. `AGENT_OF_EMPIRES_PROFILE` names one too, and an explicit
+    /// `-p` wins over it.
+    // No env attribute: explicit and environment profiles are tracked separately.
+    #[arg(short = 'p', long, global = true)]
     pub profile: Option<String>,
 
-    /// Attach to a remote agent daemon instead of using the local
-    /// session list. Equivalent to setting `AOE_DAEMON_URL`; pair with
-    /// `AOE_DAEMON_TOKEN` for the bearer token. The session list goes
-    /// through a bearer-only client, so `AOE_DAEMON_PASSPHRASE` does not
-    /// work here yet; it works for `aoe acp <verb>` against the same
-    /// `AOE_DAEMON_URL`. Only meaningful at the no-subcommand `aoe`
-    /// invocation (the TUI dashboard); ignored otherwise.
-    #[arg(long, global = true, env = "AOE_DAEMON_URL")]
+    /// Select a daemon endpoint for read-only CLI commands or the TUI
+    ///
+    /// Explicit CLI endpoints never fall back. `AOE_DAEMON_URL` discovery may
+    /// fall back to local storage before reaching a TCP peer, with a notice.
+    /// Authenticate CLI reads with `AOE_DAEMON_TOKEN` or `AOE_DAEMON_PASSPHRASE`;
+    /// TUI session lists support bearer tokens only. An unauthenticated daemon
+    /// needs neither. See the HTTP API reference for transport and fallback rules.
+    // Keep the explicit flag separate from the optional environment endpoint.
+    #[arg(long, global = true)]
     pub daemon_url: Option<String>,
 
     #[command(subcommand)]
@@ -108,6 +112,8 @@ pub enum Commands {
     Send(SendArgs),
 
     /// Show session status summary
+    ///
+    /// JSON takes precedence over quiet, which takes precedence over verbose.
     Status(StatusArgs),
 
     /// Session usage: context resets, prompts, and turns from the local usage log
@@ -254,6 +260,11 @@ pub enum Commands {
     #[command(name = "__extract-session-id", hide = true)]
     ExtractSessionId(ExtractSessionIdArgs),
 
+    /// Internal: write what a waiting agent asks to the `attention` sidecar.
+    /// Spawned by host hooks on the agent's waiting events. Hidden from help.
+    #[command(name = "__hook-attention", hide = true)]
+    HookAttention(HookAttentionArgs),
+
     /// Internal: record one agent hook event in the usage log. Spawned by
     /// host hooks and the Pi extension. Hidden from help.
     #[command(name = "__usage-event", hide = true)]
@@ -269,7 +280,8 @@ pub enum Commands {
     /// moves its own agent store when it starts; use this to move every
     /// eligible store at once instead. Trashed and archived sessions are
     /// skipped; each moves when it is started, or restore or unarchive it
-    /// and run this again.
+    /// and run this again. Refuses while the aoe serve daemon runs; stop it
+    /// with `aoe serve --stop` first.
     Migrate,
 
     /// Generate shell completions
@@ -353,7 +365,7 @@ pub fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Url(_) => "url",
         Commands::Acp { .. } => "acp",
         Commands::AcpRunner(_) | Commands::PrimeRunner(_) => return None,
-        Commands::ExtractSessionId(_) => return None,
+        Commands::ExtractSessionId(_) | Commands::HookAttention(_) => return None,
         Commands::UsageEvent(_) => return None,
         Commands::Uninstall(_) => "uninstall",
         Commands::Update(_) => "update",
@@ -393,8 +405,13 @@ mod tests {
                 "`{name}` is not an identifier-safe token"
             );
         }
-        let cli = Cli::try_parse_from(["aoe", "__extract-session-id"]).expect("parse");
-        assert_eq!(command_name(cli.command.as_ref().expect("command")), None);
+        for argv in [
+            &["aoe", "__extract-session-id"][..],
+            &["aoe", "__hook-attention", "--agent", "claude"],
+        ] {
+            let cli = Cli::try_parse_from(argv).expect("parse");
+            assert_eq!(command_name(cli.command.as_ref().expect("command")), None);
+        }
     }
 
     #[test]

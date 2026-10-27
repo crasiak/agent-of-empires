@@ -119,6 +119,18 @@ pub struct GroupTree {
 
 impl GroupTree {
     pub fn new_with_groups(instances: &[Instance], existing_groups: &[Group]) -> Self {
+        Self::new_with_group_paths(
+            instances
+                .iter()
+                .map(|instance| instance.group_path.as_str()),
+            existing_groups,
+        )
+    }
+
+    pub(crate) fn new_with_group_paths<'a>(
+        paths: impl IntoIterator<Item = &'a str>,
+        existing_groups: &[Group],
+    ) -> Self {
         let mut tree = Self {
             roots: Vec::new(),
             groups_by_path: HashMap::new(),
@@ -132,10 +144,9 @@ impl GroupTree {
             tree.insertion_order.push(group.path.clone());
         }
 
-        // Ensure all instance groups exist
-        for inst in instances {
-            if !inst.group_path.is_empty() {
-                tree.ensure_group_exists(&inst.group_path);
+        for path in paths {
+            if !path.is_empty() {
+                tree.ensure_group_exists(path);
             }
         }
 
@@ -403,7 +414,7 @@ pub enum Item {
         depth: usize,
         collapsed: bool,
         session_count: usize,
-        /// Which profile this group belongs to (set in all-profiles mode)
+        /// Explicit profile owner, absent for unified and synthetic headers.
         profile: Option<String>,
         /// When the group was archived (None = active).
         archived_at: Option<DateTime<Utc>>,
@@ -752,88 +763,40 @@ fn attention_group_key(
     )
 }
 
-/// Flatten instances from multiple profiles into a single flat list.
+/// Present each group path once without changing the profiles' stored trees.
 pub fn flatten_tree_all_profiles(
     instances: &[Instance],
-    group_trees: &std::collections::HashMap<String, GroupTree>,
+    group_trees: &HashMap<String, GroupTree>,
     sort_order: SortOrder,
+    collapsed: &HashMap<String, bool>,
 ) -> Vec<Item> {
-    let mut items = Vec::new();
-
-    // Archived sessions are excluded from the natural flow.
-    let mut ungrouped: Vec<&Instance> = instances
-        .iter()
-        .filter(|i| i.group_path.is_empty() && !i.is_archived() && !i.is_trashed())
-        .collect();
-
-    sort_sessions(&mut ungrouped, sort_order);
-
-    for inst in ungrouped {
-        items.push(Item::Session {
-            id: inst.id.clone(),
-            depth: 0,
-        });
-    }
-
-    // Collect and flatten groups from all profiles at depth 0
-    let mut all_roots: Vec<(&str, &Group, Vec<Instance>)> = Vec::new();
-    // Iterating the map directly would order the profile blocks differently on every rebuild
-    // under Custom, which keeps whatever order it is handed.
-    let mut profiles: Vec<(&String, &GroupTree)> = group_trees.iter().collect();
+    let mut groups: Vec<Group> = Vec::new();
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    // Custom sort needs a stable base even when profiles disagree on group order.
+    let mut profiles: Vec<_> = group_trees.iter().collect();
     profiles.sort_by(|a, b| a.0.cmp(b.0));
-    for (profile_name, tree) in profiles {
-        let profile_instances: Vec<Instance> = instances
-            .iter()
-            .filter(|i| i.source_profile == *profile_name)
-            .cloned()
-            .collect();
-        for root in tree.get_roots() {
-            all_roots.push((profile_name, root, profile_instances.clone()));
+    for (_, tree) in profiles {
+        for group in tree.get_all_groups() {
+            if let Some(&at) = positions.get(&group.path) {
+                let merged = &mut groups[at];
+                merged.collapsed &= group.collapsed;
+                merged.archived_at = merged
+                    .archived_at
+                    .zip(group.archived_at)
+                    .map(|(a, b)| a.max(b));
+            } else {
+                positions.insert(group.path.clone(), groups.len());
+                groups.push(group);
+            }
         }
     }
-
-    // Sort using the per-profile instances stored in each tuple (element 2), not the global
-    // instances slice, so groups from different profiles with the same name get sort keys scoped to
-    // their own profile's sessions.
-    match sort_order {
-        SortOrder::Oldest => {
-            all_roots.sort_by_key(|(_, g, insts)| created_at_bounds(&g.path, insts).1);
+    for group in &mut groups {
+        if let Some(&state) = collapsed.get(&group.path) {
+            group.collapsed = state;
         }
-        SortOrder::Newest => {
-            all_roots.sort_by_key(|(_, g, insts)| Reverse(created_at_bounds(&g.path, insts).0));
-        }
-        SortOrder::LastActivity => {
-            all_roots.sort_by_key(|(_, g, insts)| last_activity_group_key(&g.path, insts));
-        }
-        SortOrder::Attention => {
-            all_roots
-                .sort_by_key(|(_, g, insts)| attention_group_key(&g.path, g.archived_at, insts));
-        }
-        SortOrder::AZ | SortOrder::ZA => {
-            sort_by_name(&mut all_roots, sort_order, |(_, g, _)| &*g.name)
-        }
-        // Groups keep the order the user arranged; see `sort_groups_inner`.
-        SortOrder::Custom => {}
     }
-    // Favorites-first second pass, matching `sort_groups_inner`.
-    if !matches!(sort_order, SortOrder::Attention | SortOrder::Custom)
-        && crate::session::favorites_first()
-    {
-        all_roots.sort_by_key(|(_, g, insts)| !has_live_favorite(&g.path, insts));
-    }
-
-    for (profile_name, root, profile_instances) in &all_roots {
-        flatten_group(
-            root,
-            profile_instances,
-            &mut items,
-            0,
-            sort_order,
-            Some(profile_name),
-        );
-    }
-
-    items
+    let tree = GroupTree::new_with_groups(instances, &groups);
+    flatten_tree(&tree, instances, sort_order)
 }
 
 /// Flat session list for the Attention sort: skip group hierarchy entirely.
@@ -888,7 +851,7 @@ pub fn flatten_tree(
     );
 
     for root in roots_to_iterate {
-        flatten_group(root, instances, &mut items, 0, sort_order, None);
+        flatten_group(root, instances, &mut items, 0, sort_order);
     }
 
     items
@@ -900,7 +863,6 @@ fn flatten_group(
     items: &mut Vec<Item>,
     depth: usize,
     sort_order: SortOrder,
-    profile: Option<&str>,
 ) {
     let session_count = count_sessions_in_group(&group.path, instances);
 
@@ -910,7 +872,7 @@ fn flatten_group(
         depth,
         collapsed: group.collapsed,
         session_count,
-        profile: profile.map(|s| s.to_string()),
+        profile: None,
         archived_at: group.archived_at,
     });
 
@@ -945,7 +907,7 @@ fn flatten_group(
     );
 
     for child in children_to_iterate {
-        flatten_group(child, instances, items, depth + 1, sort_order, profile);
+        flatten_group(child, instances, items, depth + 1, sort_order);
     }
 }
 
@@ -1503,6 +1465,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn attention_group_key_cases() {
         let now = Utc::now();
         let mut fresh = with_status("f", "fresh", Status::Idle);
@@ -1706,9 +1669,107 @@ mod tests {
         let instances = vec![old_fav, new_plain];
         for (enabled, want) in [(false, "new"), (true, "old")] {
             crate::session::set_favorites_first(enabled);
-            let items = flatten_tree_all_profiles(&instances, &trees, SortOrder::Newest);
+            let items =
+                flatten_tree_all_profiles(&instances, &trees, SortOrder::Newest, &HashMap::new());
             assert_eq!(group_names(&items)[0], want, "favorites_first={enabled}");
         }
+    }
+
+    #[test]
+    fn all_profiles_unifies_group_paths_without_changing_ownership() {
+        let member = |title: &str, path: &str, profile: &str| {
+            let mut i = inst(title, path);
+            i.source_profile = profile.to_string();
+            i
+        };
+        let mut archived = member("archived", "work", "beta");
+        archived.archive();
+        let mut trashed = member("trashed", "work/sub", "alpha");
+        trashed.trash();
+        let instances = vec![
+            member("zulu", "work", "alpha"),
+            member("alpha", "work", "beta"),
+            member("nested-a", "work/sub", "alpha"),
+            member("nested-b", "work/sub", "beta"),
+            member("loose", "", "beta"),
+            archived,
+            trashed,
+        ];
+        let trees: HashMap<_, _> = ["alpha", "beta"]
+            .into_iter()
+            .map(|profile| {
+                let rows: Vec<_> = instances
+                    .iter()
+                    .filter(|i| i.source_profile == profile)
+                    .cloned()
+                    .collect();
+                let mut empty = Group::new("empty", "empty");
+                empty.collapsed = true;
+                (
+                    profile.to_string(),
+                    GroupTree::new_with_groups(&rows, &[empty]),
+                )
+            })
+            .collect();
+        for sort in [
+            SortOrder::AZ,
+            SortOrder::ZA,
+            SortOrder::Newest,
+            SortOrder::Oldest,
+            SortOrder::LastActivity,
+            SortOrder::Attention,
+            SortOrder::Custom,
+        ] {
+            let items = flatten_tree_all_profiles(&instances, &trees, sort, &HashMap::new());
+            for (path, count, depth) in [("work", 4, 0), ("work/sub", 2, 1), ("empty", 0, 0)] {
+                let headers: Vec<_> = items
+                    .iter()
+                    .filter(|item| matches!(item, Item::Group { path: p, .. } if p == path))
+                    .collect();
+                assert_eq!(headers.len(), 1, "{sort:?} {path}");
+                assert!(
+                    matches!(headers[0], Item::Group { profile: None, session_count, depth: d, .. } if *session_count == count && *d == depth)
+                );
+            }
+            let ids: Vec<_> = items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Session { id, .. } => Some(id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ids.len(), 5);
+            for i in instances
+                .iter()
+                .filter(|i| !i.is_archived() && !i.is_trashed())
+            {
+                assert_eq!(ids.iter().filter(|id| ***id == i.id).count(), 1);
+            }
+            if sort == SortOrder::AZ {
+                assert_eq!(
+                    session_titles(&items, &instances),
+                    ["loose", "alpha", "zulu", "nested-a", "nested-b"]
+                );
+            }
+        }
+        let collapsed = HashMap::from([("work".to_string(), true)]);
+        let items = flatten_tree_all_profiles(&instances, &trees, SortOrder::AZ, &collapsed);
+        assert_eq!(session_titles(&items, &instances), ["loose"]);
+        assert!(!items
+            .iter()
+            .any(|item| matches!(item, Item::Group { path, .. } if path == "work/sub")));
+        let reverse = HashMap::from([
+            ("beta".to_string(), trees["beta"].clone()),
+            ("alpha".to_string(), trees["alpha"].clone()),
+        ]);
+        let custom = |trees: &HashMap<String, GroupTree>| {
+            flatten_tree_all_profiles(&instances, trees, SortOrder::Custom, &HashMap::new())
+        };
+        assert_eq!(group_names(&custom(&trees)), group_names(&custom(&reverse)));
+        assert_eq!(
+            session_titles(&custom(&trees), &instances),
+            session_titles(&custom(&reverse), &instances)
+        );
     }
 
     #[test]

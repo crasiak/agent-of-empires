@@ -24,8 +24,9 @@ const ROOTS: [(&str, u32); 8] = [
     ("afk-review-v1", REVIEW),
 ];
 
-pub(crate) fn includes_migration(current: u32, introduced: u32) -> bool {
-    (introduced..=crate::migrations::current_schema_version()).contains(&current)
+// Non-AFK migrations can advance the app cursor without changing frozen AFK stores.
+pub(crate) fn supports_stage(cursor: u32, stage: u32) -> bool {
+    (stage..=crate::migrations::current_schema_version()).contains(&cursor)
 }
 
 pub(crate) fn read_cursor(app: &Path) -> Result<u32> {

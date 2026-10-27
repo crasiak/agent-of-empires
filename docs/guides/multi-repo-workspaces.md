@@ -81,9 +81,9 @@ aoe project remove backend                           # by name or canonical path
 
 `aoe project add` defaults to global, or to the profile when you pass `-p <profile>`. Adding a path that exists in another scope is an error unless you pass `--allow-override`, which lets a profile entry shadow the global one and win in merged views.
 
-A saved project appears in the pickers whether or not it has sessions. **Pinning** is separate: it keeps the project's header visible in the sidebar even with zero sessions. So unpinning does not delete a project; only `aoe project remove` (or the **Remove** action) deletes the registry entry.
+A saved project appears in the pickers whether or not it has sessions. **Pinning** is separate: it lets the project's header remain in the sidebar with zero sessions when **Settings > Session > Hide empty groups** is off. Empty group headers are hidden by default on both the TUI and web dashboard (`session.hide_empty_groups = true`). Hiding or unpinning does not delete a project; only `aoe project remove` (or the **Remove** action) deletes the registry entry.
 
-Pin from the TUI project view (press `g`, pick Project grouping, then `p` on a header, or use its right-click menu) or from the web sidebar's project header menu. Pinning registers the repo globally if it was not saved yet, marks the header with `◆`, and sorts pinned-but-empty projects below active repositories. The pin lives in the registry, so it shows up on the other surface too.
+Pin from the TUI project view (press `g`, pick Project grouping, then `p` on a header, or use its right-click menu) or from the web sidebar's project header menu. Pinning registers the repo globally if it was not saved yet and marks the header with `◆`. When empty groups are shown, pinned-but-empty projects sort below active repositories. The pin lives in the registry, so it shows up on the other surface too.
 
 ## Where workspaces appear
 

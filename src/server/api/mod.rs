@@ -8,7 +8,9 @@ mod client_log;
 mod file_provenance;
 mod git;
 mod log_level;
+mod logs;
 mod mcp;
+mod mutation_guard;
 pub(crate) mod plugin_settings;
 pub mod plugins;
 mod projects;
@@ -22,17 +24,21 @@ pub(crate) use acp::structured_spawn_error_message;
 pub use acp::{
     acp_attachment, acp_cancel, acp_context_primer, acp_disable, acp_enable, acp_files,
     acp_force_end_turn, acp_prompt, acp_prompt_diff_comments, acp_replay, acp_set_config_option,
-    acp_set_mode, acp_worker_log, get_option_catalog, install_agent, list_acp_agents,
-    list_importable_sessions, resolve_approval, resolve_elicitation, shutdown_acp, spawn_acp,
-    switch_acp_agent, switch_acp_provider,
+    acp_set_mode, acp_worker_log, agent_install_info, get_option_catalog, install_agent,
+    list_acp_agents, list_importable_sessions, resolve_approval, resolve_elicitation, shutdown_acp,
+    spawn_acp, switch_acp_agent, switch_acp_provider,
 };
 
 pub use queue::{queue_clear, queue_edit, queue_enqueue, queue_list, queue_remove};
 
 pub use client_log::post_client_log;
-pub use git::{clone_repo, is_git_repo, list_branches};
+pub use git::{clone_repo, is_git_repo, list_branches, list_worktrees};
 pub use log_level::{get_log_level, patch_log_level};
-pub use mcp::{drop_mcp_server, get_mcp_servers, keep_mcp_server, resolve_mcp_conflict};
+pub use logs::get_logs;
+pub use mcp::{
+    create_mcp_server, delete_mcp_server, drop_mcp_server, edit_mcp_server, get_mcp_servers,
+    keep_mcp_server, resolve_mcp_conflict,
+};
 pub use plugin_settings::resolve_options;
 pub use plugins::{
     apply_plugin_update, dismiss_plugin_update, invoke_plugin_action, invoke_plugin_command,
@@ -45,14 +51,16 @@ pub use projects::{create_project, delete_project, list_projects, update_project
 pub use sessions::{
     attach_session_project, create_session, create_session_progress, delete_session,
     delete_workspace, ensure_container_terminal, ensure_session, ensure_terminal,
-    force_smart_rename, get_recent_projects, kill_terminal, list_sessions, paste_image,
-    preview_volume_ignores_globs, read_output, rename_session, restore_session, search_sessions,
+    force_smart_rename, get_recent_projects, kill_terminal, list_sessions, list_tailored_sessions,
+    paste_image, preview_volume_ignores_globs, read_output, rename_session, research_get,
+    research_operation, research_output, research_reply, restore_session, search_sessions,
     send_message, serve_session_artifact, session_diff_file, session_diff_file_raw,
     session_diff_files, session_file, session_file_raw, session_ledger_run, session_usage,
     set_worktree_name, start_session, stop_session, summarize_session, trash_session,
     update_session_archive, update_session_color, update_session_diff_base, update_session_group,
     update_session_notifications, update_session_pin, update_session_snooze, update_session_unread,
-    update_workspace_ordering, OutputQuery, SendMessageRequest,
+    update_tailored_visibility, update_workspace_ordering, workshop_defaults, workshop_get,
+    workshop_operation, OutputQuery, SendMessageRequest,
 };
 pub use skills::{
     adopt_skill, create_skill, delete_skill, edit_skill, list_skills, read_skill, sync_skills,

@@ -1,6 +1,7 @@
 import type { RateLimitInfo } from "./acpTypes";
 import type { RepoColor } from "./repoAppearance";
 import type { AgentLifecycleInfo } from "./agentProfiles";
+import type { SchemaSettings } from "./generated/settingsKeys";
 
 export type LaunchAccount = "personal" | "work" | "unknown";
 export type Launcher = "direct" | "headroom" | "ledger" | "ledger-headroom" | "unknown";
@@ -44,6 +45,8 @@ export interface SessionResponse {
    *  launcher never reported. The sidebar's `agent` row tag renders it as
    *  `[cc:p:lh]`, mirroring the TUI. */
   launch_identity?: LaunchIdentity | null;
+  /** The Working directory is not a Repository, so Diff does not auto-open. */
+  outside_repository?: boolean;
   /** True when the session was created in scratch mode (`aoe add
    *  --scratch` or the wizard toggle). The `project_path` points
    *  at an auto-provisioned directory under `<app_dir>/scratch/<id>/`,
@@ -223,7 +226,10 @@ export interface RichDiffFile {
 export interface RepoBase {
   /** Omitted for single-repo sessions. */
   repo_name?: string;
-  base_branch: string;
+  /** Absent when `outside_repository`. */
+  base_branch?: string;
+  /** The Working directory is not a Repository, so there is nothing to diff. */
+  outside_repository?: boolean;
   /** Worktree path this repo's diff was computed in. */
   repo_path: string;
   base_override?: string;
@@ -327,11 +333,10 @@ export interface HooksOverride {
 }
 
 /** Serialized ProfileConfig; only the fields the dashboard reads are typed. */
-export interface ProfileSettingsResponse {
+export type ProfileSettingsResponse = SchemaSettings & {
   description?: string | null;
   hooks?: HooksOverride;
-  [key: string]: unknown;
-}
+};
 
 export interface DirEntry {
   name: string;
@@ -354,6 +359,8 @@ export interface ProjectOverrides {
   worktree_enabled?: boolean;
   smart_rename?: boolean;
   sandbox_enabled?: boolean;
+  /** Values of plugin settings declared `per_project`, by plugin id then setting key. */
+  plugin_settings?: Record<string, Record<string, unknown>>;
 }
 
 export interface ProjectInfo {
@@ -372,7 +379,24 @@ export interface DockerStatusResponse {
   runtime: string | null;
 }
 
+export interface TailoredHistoryEntry {
+  id: string;
+  profile: string;
+  title: string;
+  account: "personal" | "work";
+  input_preview: string;
+  status: string;
+  created_at: string;
+  hidden: boolean;
+  session?: SessionResponse;
+  research?: ResearchDraft;
+  workshop?: WorkshopRequest;
+}
+
 export interface CreateSessionRequest {
+  tailored?:
+    | { preset: "capture-idea"; account: "personal" | "work"; idea: string; immediately: boolean }
+    | { preset: "document-chat"; account: "personal" | "work"; document: { url: string; opening_question: string } };
   title?: string;
   path: string;
   tool: string;
@@ -530,4 +554,232 @@ export interface SettingsFieldDescriptor {
   tui_only?: boolean;
   /** Present only on plugin fields, which have no stored value until saved. */
   default?: unknown;
+  /** Plugin field that can also be set per registered project. */
+  per_project?: boolean;
 }
+
+export type ResearchBackend = "orx" | "evo";
+export interface ResearchInputs {
+  account: "personal" | "work";
+  context: string;
+  sources: { category: "grafana" | "otel" | "zulip" | "slack" | "supplied" | "public"; scope: string }[];
+  developed_prompt: string;
+  backend: ResearchBackend | null;
+  workspace: string;
+  permitted_scope: string;
+  evaluation: string;
+  unknowns_resolution: string;
+  public_disclosure: string;
+  consequences_reviewed: boolean;
+}
+export interface ResearchDraft {
+  id: string;
+  original_prompt: string;
+  inputs: ResearchInputs;
+  revision: number;
+  state: "draft" | "developing" | "review" | "running" | "submitted" | "uncertain" | "failed";
+  recommendation?: ResearchBackend | null;
+  reason: string;
+  unknowns: string[];
+  created_at: string;
+  hidden: boolean;
+  error?: string | null;
+  frozen_prompt?: string | null;
+  receipt?: {
+    profile: string;
+    process_id: number;
+    backend_id: string;
+    return_path: string;
+    project_id?: string | null;
+    turn_id?: string | null;
+  } | null;
+}
+export interface ResearchOperation {
+  operation: "create" | "edit" | "develop" | "run" | "visibility" | "recover-development";
+  id: string;
+  revision?: number;
+  original_prompt?: string;
+  inputs?: ResearchInputs;
+  hidden?: boolean;
+}
+
+export interface WorkshopEnvelope {
+  account: "personal" | "work";
+  idea: string;
+  repository: string;
+  slug: string;
+  source_scope: string;
+}
+export interface WorkshopBundle {
+  files: Record<string, string>;
+}
+export interface WorkshopProposal {
+  reply: string;
+  bundle: WorkshopBundle;
+}
+export interface WorkshopReview {
+  revision: number;
+  repository: string;
+  base_commit: string;
+  source_tree: string;
+  skill_tree: string;
+  files: WorkshopBundle;
+  previous_files: Record<string, string>;
+  diff: string;
+  evidence: string[];
+  created_at: string;
+  digest: string;
+}
+export interface WorkshopCommitIntent {
+  review_digest: string;
+  commit_oid: string;
+  branch: string;
+  worktree: string;
+}
+export interface WorkshopCommitReceipt {
+  commit_oid: string;
+  source_tree: string;
+  skill_tree: string;
+  branch: string;
+  worktree: string;
+}
+export interface WorkshopRequest {
+  id: string;
+  envelope: WorkshopEnvelope;
+  revision: number;
+  state:
+    | "draft"
+    | "refining"
+    | "reviewing"
+    | "review"
+    | "committing"
+    | "committed"
+    | "uncertain"
+    | "failed"
+    | "publish-preview"
+    | "publishing"
+    | "publish-ready"
+    | "publish-unknown"
+    | "published"
+    | "land-preview"
+    | "landing"
+    | "land-pending"
+    | "land-unknown"
+    | "landed"
+    | "import-preview"
+    | "importing"
+    | "imported"
+    | "candidate-preview"
+    | "applying"
+    | "published-config"
+    | "materializing"
+    | "materialized"
+    | "rollout-preview"
+    | "rolling-out"
+    | "rollout-complete"
+    | "deploy-unknown";
+  created_at: string;
+  hidden: boolean;
+  turns: { user: string; proposal: WorkshopProposal | null }[];
+  bundle: WorkshopBundle | null;
+  review: WorkshopReview | null;
+  commit_intent: WorkshopCommitIntent | null;
+  commit: WorkshopCommitReceipt | null;
+  publication?: WorkshopPublication | null;
+  deployment?: WorkshopDeployment | null;
+  error: string | null;
+}
+export interface WorkshopPublishPreview {
+  source: {
+    account: "personal" | "work";
+    source_scope: string;
+    skill_path: string;
+    review_digest: string;
+    content_digest: string;
+  };
+  destination: { owner: string; name: string; repository_id: number; base_branch: string };
+  repository: { id: number; node_id: string; visibility: "public" | "private"; default_branch: string };
+  actor: { id: number; login: string };
+  base_head: string;
+  title: string;
+  body: string;
+  digest: string;
+}
+export interface WorkshopPublication {
+  land_execution?: unknown;
+  land_observation_pending?: boolean;
+  preview: WorkshopPublishPreview | null;
+  published: { identity: { number: number; url: string }; head: string; skill_tree: string } | null;
+  policy: { digest: string; base_head: string; rules: unknown[]; classic: unknown } | null;
+  landed: {
+    approved_head: string;
+    merged_commit: string;
+    source_tree: string;
+    skill_path: string;
+    skill_tree: string;
+  } | null;
+}
+export interface WorkshopDeployTarget {
+  profile: string;
+  harness: string;
+  account: string;
+  sessions: string[];
+}
+export interface WorkshopArtifact {
+  schema: string;
+  digest?: string;
+  [key: string]: unknown;
+}
+export interface WorkshopDeployment {
+  targets: WorkshopDeployTarget[];
+  intent: { attempt: string; stage: string; digest: string };
+  import_preview: WorkshopArtifact | null;
+  import_receipt: WorkshopArtifact | null;
+  candidate: WorkshopArtifact | null;
+  publication_receipt: WorkshopArtifact | null;
+  materialize_receipt: WorkshopArtifact | null;
+  rollouts: { directory: string; plan_digest: string; plan: WorkshopArtifact; result: WorkshopArtifact | null }[];
+}
+export type WorkshopOperation =
+  | { operation: "create"; id: string; envelope: WorkshopEnvelope }
+  | { operation: "propose"; id: string; revision: number; bundle: WorkshopBundle }
+  | { operation: "refine"; id: string; revision: number; message: string }
+  | {
+      operation:
+        | "recover-refinement"
+        | "review"
+        | "reconcile"
+        | "continue-publish"
+        | "preview-land"
+        | "reconcile-publication"
+        | "preview-deploy"
+        | "preview-rollout"
+        | "reconcile-deploy";
+      id: string;
+      revision: number;
+    }
+  | {
+      operation: "preview-publish";
+      id: string;
+      revision: number;
+      remote: string;
+      repository_id: number;
+      base_branch: string;
+      title: string;
+      body: string;
+    }
+  | { operation: "publish"; id: string; revision: number; preview_digest: string; disclosure_confirmed: boolean }
+  | {
+      operation: "land";
+      id: string;
+      revision: number;
+      policy_digest: string;
+      current_base_and_rules: boolean;
+      exclusive_pr_custody: boolean;
+    }
+  | { operation: "preview-import"; id: string; revision: number; source_name: string; targets: WorkshopDeployTarget[] }
+  | { operation: "approve-import"; id: string; revision: number; preview_digest: string }
+  | { operation: "deploy" | "materialize"; id: string; revision: number; candidate_digest: string }
+  | { operation: "apply-rollout"; id: string; revision: number; plan_digest: string }
+  | { operation: "commit"; id: string; revision: number; review_digest: string }
+  | { operation: "visibility"; id: string; revision: number; hidden: boolean };

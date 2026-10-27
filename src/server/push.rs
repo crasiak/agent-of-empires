@@ -131,7 +131,7 @@ impl VapidKeypair {
             .to_string();
 
         // Public key in uncompressed SEC1 form, base64url encoded.
-        let public_bytes = verifying_key.to_encoded_point(false);
+        let public_bytes = verifying_key.to_sec1_point(false);
         let public_b64url = base64_url_encode(public_bytes.as_bytes());
 
         Ok(Self {
@@ -1498,6 +1498,7 @@ mod tests {
             notify_on_idle: false, // globally off
             notify_on_error: true,
             notify_on_wake_fire: true,
+            ..WebConfig::default()
         };
 
         // No instance (session not in state): fall back to web defaults.

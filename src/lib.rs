@@ -20,6 +20,7 @@ pub mod logging;
 pub mod migrations;
 pub mod plugin;
 pub mod process;
+mod public_network;
 pub mod server;
 pub mod session;
 pub mod sound;
@@ -27,6 +28,9 @@ mod status_hooks;
 pub mod task_util;
 pub mod telemetry;
 pub mod terminal;
+/// Shared exclusion for the participating server/session environment guards.
+#[cfg(any(test, debug_assertions))]
+pub(crate) mod test_env_lock;
 pub mod tips;
 pub mod tmux;
 pub mod tui;

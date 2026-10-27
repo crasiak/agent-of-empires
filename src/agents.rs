@@ -123,6 +123,14 @@ pub enum SessionCaptureContext {
     ManagedExclusiveStore,
 }
 
+impl SessionCaptureContext {
+    /// Whether an id the agent mints after launch is captured authoritatively.
+    /// `Preassigned` names an id fixed before launch, so it proves nothing here.
+    const fn captures_minted_child(self) -> bool {
+        matches!(self, Self::PaneScoped | Self::ManagedExclusiveStore)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionCaptureSpec {
     pub backend: SessionCaptureBackend,
@@ -161,6 +169,9 @@ pub enum ForkStrategy {
     CodexFork,
     PiFork,
     Flag(&'static str),
+    /// A root flag whose value is the parent id, with no resume flag; the agent
+    /// mints the child, so AoE can fork only where it can capture that id.
+    ValueFlag(&'static str),
     /// The agent's store mints the child over its own API before the launch, so
     /// the session that follows is still the interactive one.
     ServeFork,
@@ -179,7 +190,7 @@ impl ForkStrategy {
     /// pre-pinned for the fork a placeholder to drop. A root fork flag never
     /// carries that id, so the agent mints one of its own.
     pub(crate) const fn mints_child(self) -> bool {
-        matches!(self, Self::CodexFork | Self::Flag(_))
+        matches!(self, Self::CodexFork | Self::Flag(_) | Self::ValueFlag(_))
     }
 
     /// The mechanism the installed build understands. A strategy that spans two
@@ -265,6 +276,8 @@ pub struct HookEvent {
     pub waiting_tools: &'static [&'static str],
     /// Also record the event in the usage log (`crate::usage`).
     pub usage: bool,
+    /// Also record what the agent asks, via `aoe __hook-attention` (host only).
+    pub attention: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,6 +288,7 @@ pub struct ResolvedHookEvent {
     pub identity_field: Option<HookIdentityField>,
     pub waiting_tools: Vec<String>,
     pub usage: bool,
+    pub attention: bool,
     /// Binary of the agent whose config declares this event. The identity publisher carries it
     /// so a nested agent of another kind cannot publish into the pane's sidecar.
     pub publisher: Option<&'static str>,
@@ -400,6 +414,7 @@ const fn hook(name: &'static str, status: HookStatus) -> HookEvent {
         identity_field: None,
         waiting_tools: &[],
         usage: false,
+        attention: false,
     }
 }
 
@@ -429,6 +444,7 @@ const fn sidecar(name: &'static str, status: HookStatus) -> SidecarHookEvent {
 
 /// `Notification`/`idle_prompt` and `StopFailure` backstop `Stop`, which misses API-error and
 /// interrupted turn ends. `waiting_tools` marks `AskUserQuestion` as waiting until `PostToolUse`.
+/// Attention text rides matched entries only, so no process is spawned per tool call.
 const CLAUDE_HOOK_EVENTS: &[HookEvent] = &[
     HookEvent {
         status: None,
@@ -440,6 +456,11 @@ const CLAUDE_HOOK_EVENTS: &[HookEvent] = &[
         waiting_tools: &["AskUserQuestion"],
         ..hook("PreToolUse", HookStatus::Running)
     },
+    HookEvent {
+        status: None,
+        attention: true,
+        ..matched_hook("PreToolUse", "AskUserQuestion", HookStatus::Waiting)
+    },
     matched_hook("PostToolUse", "AskUserQuestion", HookStatus::Running),
     HookEvent {
         identity_field: Some(HookIdentityField::SessionId),
@@ -448,16 +469,23 @@ const CLAUDE_HOOK_EVENTS: &[HookEvent] = &[
     },
     usage_hook("Stop", Some(HookStatus::Idle)),
     usage_hook("StopFailure", Some(HookStatus::Idle)),
-    matched_hook(
-        "Notification",
-        "permission_prompt|elicitation_dialog|agent_needs_input",
-        HookStatus::Waiting,
-    ),
+    HookEvent {
+        attention: true,
+        ..matched_hook(
+            "Notification",
+            "permission_prompt|elicitation_dialog|agent_needs_input",
+            HookStatus::Waiting,
+        )
+    },
     matched_hook(
         "Notification",
         "idle_prompt|agent_completed",
         HookStatus::Idle,
     ),
+    HookEvent {
+        attention: true,
+        ..hook("PermissionRequest", HookStatus::Waiting)
+    },
     hook("ElicitationResult", HookStatus::Running),
     usage_hook("PostCompact", None),
     usage_hook("SessionEnd", None),
@@ -983,8 +1011,7 @@ pub const AGENTS: &[AgentDef] = &[
             SessionCaptureContext::Unsupported,
             SessionCaptureContext::ManagedExclusiveStore,
         ),
-        // Prime exposes no fork surface, so the parent id has nothing to carry.
-        fork_strategy: ForkStrategy::Unsupported,
+        fork_strategy: ForkStrategy::ValueFlag("--fork"),
         ..agent(
             "prime-agent",
             "prime-agent",
@@ -994,6 +1021,24 @@ pub const AGENTS: &[AgentDef] = &[
 ];
 
 impl AgentDef {
+    /// Whether a fork can run in this context. A `ValueFlag` fork leaves the
+    /// child id to the agent, so it needs a capture context that can read it.
+    pub fn can_fork_in(&self, sandboxed: bool) -> bool {
+        if !matches!(self.fork_strategy, ForkStrategy::ValueFlag(_)) {
+            return true;
+        }
+        self.session_support
+            .and_then(|support| support.capture)
+            .is_some_and(|capture| {
+                if sandboxed {
+                    capture.sandbox
+                } else {
+                    capture.host
+                }
+                .captures_minted_child()
+            })
+    }
+
     pub fn lifecycle_label(&self) -> Option<&'static str> {
         match self.lifecycle {
             AgentLifecycle::Active => None,
@@ -1058,6 +1103,43 @@ impl AgentDef {
     ) -> Option<&'static str> {
         let flag = self.session_name_flag()?;
         with_agent_help(command, false, |help| help_advertises_flag(help, flag)).then_some(flag)
+    }
+
+    /// Flag keeping the agent's app server inside the launched process. A shared daemon runs
+    /// hooks under the env of the pane that spawned it, so every session's status lands on that
+    /// pane's `AOE_INSTANCE_ID`. `command` is the launch's own executable and environment: older
+    /// installs reject the flag. `options` are the arguments before any `--`; the flag is
+    /// withheld when they name a subcommand that does not define it.
+    pub(crate) fn supported_no_daemon_flag(
+        &self,
+        command: &std::process::Command,
+        options: &[String],
+    ) -> Option<&'static str> {
+        let flag = match self.name {
+            "codex" => "--no-daemon",
+            _ => return None,
+        };
+        // After an explicit `resume` or `fork`, later positionals are operands (a session id or
+        // prompt) that may spell a subcommand name. A root prompt does not shield a later
+        // subcommand: Codex still dispatches it.
+        let mut mode_known = false;
+        let mut words = options.iter().peekable();
+        while let Some(word) = words.next() {
+            // A remote TUI has no local app server, and Codex rejects the combination.
+            if word == "--remote" || word.starts_with("--remote=") {
+                return None;
+            } else if CODEX_VALUE_OPTIONS.contains(&word.as_str()) {
+                words.next();
+            } else if CODEX_VARIADIC_OPTIONS.contains(&word.as_str()) {
+                while words.next_if(|next| !next.starts_with('-')).is_some() {}
+            } else if !word.starts_with('-') && !mode_known {
+                if CODEX_NON_TUI_SUBCOMMANDS.contains(&word.as_str()) {
+                    return None;
+                }
+                mode_known = matches!(word.as_str(), "resume" | "fork");
+            }
+        }
+        agent_help_advertises(command, flag).then_some(flag)
     }
 
     pub fn launch_base_command(&self) -> String {
@@ -1144,6 +1226,69 @@ fn with_agent_help<R>(
         inspect,
     )
 }
+
+/// Codex subcommands, and their aliases, outside the interactive TUI. `--no-daemon` is defined on
+/// the TUI, `resume` and `fork` only; the others reject it.
+const CODEX_NON_TUI_SUBCOMMANDS: &[&str] = &[
+    "agents",
+    "exec",
+    "e",
+    "review",
+    "login",
+    "logout",
+    "mcp",
+    "mcp-server",
+    "plugin",
+    "app-server",
+    "remote-control",
+    "app",
+    "completion",
+    "update",
+    "doctor",
+    "sandbox",
+    "debug",
+    "apply",
+    "a",
+    "queue",
+    "archive",
+    "delete",
+    "migrate-rollouts",
+    "unarchive",
+    "cloud",
+    "cloud-tasks",
+    "execpolicy",
+    "responses-api-proxy",
+    "stdio-to-uds",
+    "tcp-tunnel",
+    "exec-server",
+    "features",
+    "help",
+];
+
+/// Codex options that take their value as the next word, which is not a subcommand.
+const CODEX_VALUE_OPTIONS: &[&str] = &[
+    "-c",
+    "--config",
+    "--enable",
+    "--disable",
+    "--remote",
+    "--remote-auth-token-env",
+    "-m",
+    "--model",
+    "--local-provider",
+    "-p",
+    "--profile",
+    "-s",
+    "--sandbox",
+    "-C",
+    "--cd",
+    "--add-dir",
+    "-a",
+    "--ask-for-approval",
+];
+
+/// Codex options that take every following word up to the next flag.
+const CODEX_VARIADIC_OPTIONS: &[&str] = &["-i", "--image"];
 
 /// A flag the older generation's help lists and the current one's does not.
 const LEGACY_GENERATION_MARKER: &str = "--fork";
@@ -1365,6 +1510,21 @@ fn pi_help_advertises(flag: &str) -> bool {
         .is_some_and(|program| agent_help_advertises(&ambient_help_command(&program), flag))
 }
 
+/// Whether the opencode at `program` has `--standalone` (2.x), which runs one command on a
+/// private server instead of the shared background service. Asked from `cwd`, the launch
+/// directory, because a version-manager shim picks its install by directory.
+pub(crate) fn opencode_supports_standalone(
+    program: &std::path::Path,
+    cwd: &std::path::Path,
+) -> bool {
+    let mut command = ambient_help_command(program);
+    command.current_dir(cwd);
+    // Uncached on success, like the generation probe: a shim can change what it runs.
+    with_agent_help(&command, false, |help| {
+        help_advertises_flag(help, "--standalone")
+    })
+}
+
 pub(crate) fn pi_supports_extension_flag() -> bool {
     pi_help_advertises("--extension")
 }
@@ -1405,6 +1565,33 @@ fn configured_status_map<'a>(
         .get(agent_name)
         .map(|agent| &agent.status_map)
         .filter(|status_map| !status_map.is_empty())
+}
+
+/// `ask_user` plus the valid `[agents.pi] waiting_tools`, at most 32 in all.
+pub(crate) fn pi_waiting_tools(config: &crate::session::config::Config) -> Vec<String> {
+    const MAX_TOOLS: usize = 32;
+    let valid = |name: &&String| {
+        (1..=64).contains(&name.len())
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'))
+    };
+    let mut tools = vec!["ask_user".to_string()];
+    for name in config
+        .agents
+        .get("pi")
+        .into_iter()
+        .flat_map(|pi| pi.waiting_tools.iter())
+        .filter(valid)
+    {
+        if tools.len() == MAX_TOOLS {
+            break;
+        }
+        if !tools.contains(name) {
+            tools.push(name.clone());
+        }
+    }
+    tools
 }
 
 // Duplicate events with different matchers collapse to the first default.
@@ -1470,6 +1657,7 @@ fn append_configured_status_events(
                 identity_field: None,
                 waiting_tools: Vec::new(),
                 usage: false,
+                attention: false,
                 publisher: None,
             });
         }
@@ -1506,12 +1694,19 @@ pub fn resolved_hook_events(
         .map(|event| ResolvedHookEvent {
             name: event.name.to_string(),
             matcher: event.matcher.map(str::to_string),
-            status: overrides
-                .and_then(|map| map.get(event.name).copied())
-                .or(event.status),
+            // An attention-only entry shares its event name with a status writer, so an
+            // override must not make it a second one.
+            status: if event.attention && event.status.is_none() {
+                None
+            } else {
+                overrides
+                    .and_then(|map| map.get(event.name).copied())
+                    .or(event.status)
+            },
             identity_field: event.identity_field,
             waiting_tools: event.waiting_tools.iter().map(|t| t.to_string()).collect(),
             usage: event.usage && config.session.usage_tracking,
+            attention: event.attention,
             publisher: Some(agent.binary),
         })
         .collect();
@@ -1541,6 +1736,7 @@ pub fn resolved_sidecar_hook_events(
             identity_field: event.identity_field,
             waiting_tools: Vec::new(),
             usage: false,
+            attention: false,
             publisher: Some(agent.binary),
         })
         .collect();
@@ -1829,6 +2025,34 @@ mod tests {
             !agent_help_advertises(&ambient_help_command(&older), "--name"),
             "an answer cached for one install was reused for another"
         );
+        forget_agent_help_for_test();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn standalone_support_is_probed_in_the_launch_cwd() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        // A version-manager shim: which opencode answers depends on the directory.
+        let shim = temp.path().join("opencode");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\nif [ -e .v2 ]; then echo '  --standalone  private server'; else echo '  --fork'; fi\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (v2, v1) = (temp.path().join("v2"), temp.path().join("v1"));
+        for dir in [&v2, &v1] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        std::fs::write(v2.join(".v2"), "").unwrap();
+        forget_agent_help_for_test();
+        assert!(opencode_supports_standalone(&shim, &v2));
+        assert!(!opencode_supports_standalone(&shim, &v1));
+        // The shim now dispatches to 2.x here: a cached answer must not outlive that.
+        std::fs::write(v1.join(".v2"), "").unwrap();
+        assert!(opencode_supports_standalone(&shim, &v1));
         forget_agent_help_for_test();
     }
 
@@ -2264,6 +2488,62 @@ if [ "$PROBE_MODE" = legacy ]; then printf '%s\n' 'FLAGS --fork fork session'; e
     }
 
     #[test]
+    fn pi_waiting_tools_extend_ask_user_and_drop_invalid_names() {
+        let mut config = crate::session::config::Config::default();
+        assert_eq!(pi_waiting_tools(&config), vec!["ask_user"]);
+        let configured = &mut config
+            .agents
+            .entry("pi".to_string())
+            .or_default()
+            .waiting_tools;
+        *configured = [
+            "permission_gate",
+            "my.tool:v2-x",
+            "bad name",
+            "a/b",
+            "",
+            "ask_user",
+        ]
+        .map(String::from)
+        .to_vec();
+        configured.push("permission_gate".to_string());
+        configured.push("x".repeat(65));
+        assert_eq!(
+            pi_waiting_tools(&config),
+            vec!["ask_user", "permission_gate", "my.tool:v2-x"]
+        );
+        config.agents.get_mut("pi").unwrap().waiting_tools =
+            (0..40).map(|i| format!("t{i}")).collect();
+        let capped = pi_waiting_tools(&config);
+        assert_eq!(capped.len(), 32, "ask_user included");
+        assert_eq!(capped[0], "ask_user");
+        assert_eq!(capped[31], "t30");
+        // The extension applies the same rule (`waitingTools` in aoe-session-id.js).
+        config.agents.get_mut("pi").unwrap().waiting_tools =
+            ["ask_user", "t0", "t0"].map(String::from).to_vec();
+        config
+            .agents
+            .get_mut("pi")
+            .unwrap()
+            .waiting_tools
+            .extend((0..40).map(|i| format!("t{i}")));
+        let deduped = pi_waiting_tools(&config);
+        assert_eq!(deduped.len(), 32, "duplicates take no slot");
+        assert_eq!(deduped[31], "t30");
+        config.agents.clear();
+        config
+            .agents
+            .entry("claude".to_string())
+            .or_default()
+            .waiting_tools = vec!["other_agent".to_string()];
+        assert_eq!(
+            pi_waiting_tools(&config),
+            vec!["ask_user"],
+            "only [agents.pi] counts"
+        );
+    }
+
+    #[test]
     fn status_map_overrides_merge_into_defaults() {
         let claude = get_agent("claude").unwrap();
         let config = config_with_status("claude", "Stop", HookStatus::Error);
@@ -2295,6 +2575,57 @@ if [ "$PROBE_MODE" = legacy ]; then printf '%s\n' 'FLAGS --fork fork session'; e
         let config = config_with_status("vertex", "session.idle", HookStatus::Idle);
         let map = effective_status_map(&config, "vertex").unwrap();
         assert_eq!(map.get("session.idle"), Some(&HookStatus::Idle));
+    }
+
+    /// Attention text comes only from the events where Claude waits, and a
+    /// `status_map` override cannot turn the attention-only entry into a
+    /// second status writer.
+    #[test]
+    fn claude_attention_rides_only_its_waiting_events() {
+        let claude = get_agent("claude").unwrap();
+        for config in [
+            crate::session::config::Config::default(),
+            config_with_status("claude", "PreToolUse", HookStatus::Idle),
+        ] {
+            let attention: Vec<(&str, Option<&str>, Option<HookStatus>)> =
+                resolved_hook_events(claude, &config)
+                    .unwrap()
+                    .iter()
+                    .filter(|event| event.attention)
+                    .map(|event| {
+                        (
+                            match event.name.as_str() {
+                                "PreToolUse" => "PreToolUse",
+                                "Notification" => "Notification",
+                                "PermissionRequest" => "PermissionRequest",
+                                other => panic!("attention on {other}"),
+                            },
+                            event.matcher.as_deref().map(|m| match m {
+                                "AskUserQuestion" => "AskUserQuestion",
+                                "permission_prompt|elicitation_dialog|agent_needs_input" => {
+                                    "waiting"
+                                }
+                                other => panic!("attention on matcher {other}"),
+                            }),
+                            event.status,
+                        )
+                    })
+                    .collect();
+            assert_eq!(
+                attention,
+                [
+                    ("PreToolUse", Some("AskUserQuestion"), None),
+                    ("Notification", Some("waiting"), Some(HookStatus::Waiting)),
+                    ("PermissionRequest", None, Some(HookStatus::Waiting)),
+                ]
+            );
+        }
+        assert_eq!(
+            effective_status_map(&crate::session::config::Config::default(), "claude")
+                .unwrap()
+                .get("PermissionRequest"),
+            Some(&HookStatus::Waiting)
+        );
     }
 
     /// Codex publishes a top-level string `session_id` on `SessionStart`, so

@@ -3,7 +3,7 @@
 use tracing::{info, warn};
 
 use super::errors::AcpError;
-use super::resolve_command::resolve_agent_command;
+use super::resolve_command::{resolve_agent_command, Unresolved};
 use super::session_sandbox::{build_sandbox_docker_argv, SessionSandbox};
 use super::spawn::{
     apply_claude_store_route, apply_env_filter, host_environment_denyreason, prepend_path_dirs,
@@ -55,7 +55,7 @@ pub(super) fn take_injected_fresh_handshake_failure() -> bool {
 /// `systemd-run` injects. Stdio and `pre_exec` are not carried over: set them
 /// on the result. A program containing `=` stays unscoped, since `env` would
 /// read it as an assignment.
-pub(super) fn wrap_in_scope(
+pub(crate) fn wrap_in_scope(
     cmd: tokio::process::Command,
     prefix: &crate::process::systemd::ScopePrefix,
 ) -> tokio::process::Command {
@@ -121,6 +121,39 @@ fn append_to_log(path: &std::path::Path) -> std::process::Stdio {
     }
 }
 
+/// A Worker started for a bare adapter name that resolved nowhere can only exit
+/// before its Hello, which loses the cause (#4576). `unresolved` is `None` when
+/// the name resolved or a sandbox resolves it inside its container; paths and
+/// `${placeholder}` commands resolve elsewhere. The adapter searches the last
+/// `PATH` in `agent_environment`, else the inherited one, from its cwd, so
+/// relative entries resolve against the project.
+fn refuse_unresolved_adapter(
+    config: &SpawnConfig,
+    unresolved: Option<&Unresolved>,
+    agent_environment: &[(String, String)],
+    inherited_path: Option<&std::ffi::OsStr>,
+) -> Result<(), AcpError> {
+    let Some(reason) = unresolved.filter(|reason| **reason != Unresolved::NotBare) else {
+        return Ok(());
+    };
+    let path = agent_environment
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, path)| std::ffi::OsStr::new(path))
+        .or(inherited_path);
+    if path
+        .is_some_and(|path| which::which_in(&config.spec.command, Some(path), &config.cwd).is_ok())
+    {
+        return Ok(());
+    }
+    Err(AcpError::unresolved_adapter_spawn_error(
+        &std::io::Error::from(std::io::ErrorKind::NotFound),
+        &config.spec.command,
+        reason,
+    ))
+}
+
 /// The runner owns the agent subprocess and outlives the daemon, so no `Child`
 /// handle is kept: the daemon reaches it over the unix socket, and the OS keeps
 /// it alive across `aoe serve` restarts.
@@ -178,14 +211,46 @@ pub(super) async fn spawn_runner_detached(
 
     // Resolve against PATH plus the node-manager dirs so the runner finds the
     // binary even when the daemon's frozen PATH does not carry it (#1048).
-    let resolved = if sandbox_argv.is_some() {
+    let resolution = if sandbox_argv.is_some() {
         None
     } else {
         // A get_app_dir failure only costs the bundled-adapter lookup; PATH
         // and the node-manager scan still run.
         let app_dir = crate::session::get_app_dir().ok();
-        resolve_agent_command(&config.spec.command, app_dir.as_deref())
+        Some(resolve_agent_command(
+            &config.spec.command,
+            app_dir.as_deref(),
+        ))
     };
+    // Trusted `Config.environment`, then the provider pick that outranks it, for
+    // the adapter only: they ride a carrier key the runner strips and applies to
+    // its child, because HOME, PATH or XDG_CONFIG_HOME set on the runner itself
+    // would move its worker registry (#1383) or change which binary it loads.
+    let host_environment: Vec<(String, String)> = config
+        .host_environment
+        .iter()
+        .chain(&config.provider_routing)
+        .filter(|(key, _)| match host_environment_denyreason(key) {
+            Some(reason) => {
+                warn!(
+                    target: "acp",
+                    key = %key,
+                    reason,
+                    "rejecting configured host environment key",
+                );
+                false
+            }
+            None => true,
+        })
+        .cloned()
+        .collect();
+    refuse_unresolved_adapter(
+        config,
+        resolution.as_ref().and_then(|r| r.as_ref().err()),
+        &host_environment,
+        std::env::var_os("PATH").as_deref(),
+    )?;
+    let resolved = resolution.and_then(Result::ok);
     let (spawn_command, extra_path_dirs): (String, Vec<std::path::PathBuf>) =
         match (&sandbox_argv, &resolved) {
             (Some(s), _) => (s.docker_binary.clone(), Vec::new()),
@@ -258,30 +323,6 @@ pub(super) async fn spawn_runner_detached(
     if let Ok(interval) = std::env::var("AOE_ACP_WATCHDOG_POLL_MS") {
         cmd.env("AOE_ACP_WATCHDOG_POLL_MS", interval);
     }
-    // Trusted `Config.environment`, then the provider pick that outranks it,
-    // for the adapter only, riding one reserved
-    // carrier key (JSON `[[key, value], ...]`) that the runner strips and
-    // applies to its child. HOME / PATH / XDG_CONFIG_HOME are legal entries
-    // here, and setting those on the runner itself would move the
-    // worker-registry path it writes (#1383) or change which binary it loads.
-    let host_environment: Vec<(String, String)> = config
-        .host_environment
-        .iter()
-        .chain(&config.provider_routing)
-        .filter(|(key, _)| match host_environment_denyreason(key) {
-            Some(reason) => {
-                warn!(
-                    target: "acp",
-                    key = %key,
-                    reason,
-                    "rejecting configured host environment key",
-                );
-                false
-            }
-            None => true,
-        })
-        .cloned()
-        .collect();
     if !host_environment.is_empty() {
         let encoded = serde_json::to_string(&host_environment)
             .map_err(|e| AcpError::Spawn(format!("encode host environment: {e}")))?;
@@ -592,6 +633,200 @@ mod tests {
             let mut want = vec!["A=1".to_string()];
             want.extend(own.map(|v| format!("INVOCATION_ID={v}")));
             assert_eq!(seen, want, "own INVOCATION_ID {own:?}");
+        }
+    }
+
+    /// #4576: an unresolved bare adapter name fails before a Worker starts,
+    /// naming that adapter's own install command.
+    #[test]
+    fn refuse_unresolved_adapter_cases() {
+        use std::os::unix::fs::PermissionsExt;
+        let cwd = tempfile::tempdir().unwrap();
+        // Only a PATH entry for this directory finds the adapter. As the
+        // relative entry `agent-bin`, it resolves from the project cwd, not the
+        // test process's.
+        let agent_bin = cwd.path().join("agent-bin");
+        std::fs::create_dir(&agent_bin).unwrap();
+        let adapter = agent_bin.join("codex-acp");
+        std::fs::write(&adapter, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let empty_bin = cwd.path().join("empty-bin");
+        std::fs::create_dir(&empty_bin).unwrap();
+        let (found, empty) = (agent_bin.to_str().unwrap(), empty_bin.to_str().unwrap());
+        let hint = |cmd: &str| Some(crate::acp::install_hints::install_hint_for(cmd).unwrap());
+        let missing = Some(Unresolved::NotFound);
+        let stale = "aoe acp doctor --fix --adapter aoe-agent";
+        let old_node = "needs Node 22.6 or newer to run its sources; found v22.1.0. Upgrade Node";
+        let cases: [(
+            &str,
+            Option<Unresolved>,
+            &[&str],
+            Option<&str>,
+            Option<&str>,
+        ); 15] = [
+            // (command, why it didn't resolve, configured PATHs, inherited PATH, expected error text)
+            ("codex-acp", missing.clone(), &[], None, hint("codex-acp")),
+            (
+                "claude-agent-acp",
+                missing.clone(),
+                &[],
+                None,
+                hint("claude-agent-acp"),
+            ),
+            (
+                "aoe-test-unknown-adapter",
+                missing.clone(),
+                &[],
+                None,
+                Some("binary `aoe-test-unknown-adapter` not found"),
+            ),
+            // Resolved, or sandboxed.
+            ("codex-acp", None, &[], None, None),
+            (
+                "/opt/agents/codex-acp",
+                Some(Unresolved::NotBare),
+                &[],
+                None,
+                None,
+            ),
+            // A bundled copy aoe refuses needs a reinstall or a newer Node, not an install.
+            (
+                "aoe-agent",
+                Some(Unresolved::StaleBundle),
+                &[],
+                None,
+                Some(stale),
+            ),
+            (
+                "aoe-agent",
+                Some(Unresolved::NodeTooOld("v22.1.0".into())),
+                &[],
+                None,
+                Some(old_node),
+            ),
+            ("codex-acp", missing.clone(), &[found], None, None),
+            (
+                "codex-acp",
+                missing.clone(),
+                &[empty],
+                None,
+                hint("codex-acp"),
+            ),
+            // The last configured PATH wins, as the runner applies them in order.
+            (
+                "codex-acp",
+                missing.clone(),
+                &[found, empty],
+                None,
+                hint("codex-acp"),
+            ),
+            ("codex-acp", missing.clone(), &[], Some("agent-bin"), None),
+            (
+                "codex-acp",
+                missing.clone(),
+                &[empty],
+                Some(found),
+                hint("codex-acp"),
+            ),
+            (
+                "codex-acp",
+                missing.clone(),
+                &[],
+                Some(empty),
+                hint("codex-acp"),
+            ),
+            // A copy on the adapter's PATH wins over a refused bundle.
+            (
+                "codex-acp",
+                Some(Unresolved::StaleBundle),
+                &[found],
+                None,
+                None,
+            ),
+            (
+                "codex-acp",
+                Some(Unresolved::NodeTooOld("v22.1.0".into())),
+                &[empty],
+                None,
+                Some("needs Node 22.6 or newer"),
+            ),
+        ];
+        for (command, unresolved, configured, inherited, expected) in cases {
+            let label = format!(
+                "{command} unresolved={unresolved:?} configured={configured:?} inherited={inherited:?}"
+            );
+            let mut config =
+                super::super::test_helpers::env_test_spawn_config(cwd.path().to_path_buf());
+            config.spec.command = command.into();
+            let environment: Vec<(String, String)> = configured
+                .iter()
+                .map(|path| ("PATH".to_string(), path.to_string()))
+                .collect();
+            let got = refuse_unresolved_adapter(
+                &config,
+                unresolved.as_ref(),
+                &environment,
+                inherited.map(std::ffi::OsStr::new),
+            )
+            .err()
+            .map(|e| match e {
+                AcpError::Spawn(msg) => msg,
+                other => panic!("{label}: unexpected {other:?}"),
+            });
+            match (&got, expected) {
+                (Some(msg), Some(want)) => assert!(msg.contains(want), "{label}: {msg}"),
+                _ => assert_eq!(got.is_some(), expected.is_some(), "{label}: {got:?}"),
+            }
+            if matches!(
+                unresolved,
+                Some(Unresolved::StaleBundle | Unresolved::NodeTooOld(_))
+            ) {
+                let msg = got.unwrap_or_default();
+                assert!(!msg.contains("Install with:"), "{label}: {msg}");
+            }
+        }
+        // Each adapter gets its own command, not another adapter's.
+        let mut config =
+            super::super::test_helpers::env_test_spawn_config(cwd.path().to_path_buf());
+        config.spec.command = "codex-acp".into();
+        let msg = format!(
+            "{:?}",
+            refuse_unresolved_adapter(&config, Some(&Unresolved::NotFound), &[], None)
+        );
+        assert!(!msg.contains(hint("claude-agent-acp").unwrap()), "{msg}");
+    }
+
+    /// #4576: the refusal leaves no Worker record, socket or log behind.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn spawn_refuses_an_unresolved_adapter_before_starting_a_worker() {
+        let _guard = crate::session::test_support::isolate_app_dir();
+        let cwd = tempfile::tempdir().unwrap();
+        let session = format!("aoe-test-missing-adapter-{}", std::process::id());
+        let socket = crate::process::worker_registry::socket_path_for(&session).unwrap();
+        let mut config =
+            super::super::test_helpers::env_test_spawn_config(cwd.path().to_path_buf());
+        config.spec.command = format!("aoe-test-no-such-adapter-{}", std::process::id());
+        config.socket_path = Some(socket.clone());
+
+        let err = super::super::AcpClient::spawn(
+            config,
+            crate::acp::state::AcpSessionId(session.clone()),
+        )
+        .await
+        .err()
+        .expect("spawn must fail");
+        assert!(
+            matches!(&err, AcpError::Spawn(msg) if msg.contains("not found on the daemon's PATH")),
+            "{err:?}"
+        );
+        for path in [
+            socket.clone(),
+            crate::process::worker::control_socket_sibling(&socket),
+            crate::process::worker_registry::log_path_for(&session).unwrap(),
+            crate::process::worker_registry::record_path(&session).unwrap(),
+        ] {
+            assert!(!path.exists(), "left behind: {}", path.display());
         }
     }
 }

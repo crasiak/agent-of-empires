@@ -25,6 +25,10 @@ const SESSION_SCHEMA = [
   descriptor("session", "auto_stop_idle_secs", "Auto-stop idle sessions (s)", { kind: "number", min: 0 }),
   descriptor("acp", "acp_defaults", "Structured View Defaults", { kind: "custom", id: "acp-defaults" }),
   descriptor("session", "show_diagnostics_pane", "Show system health strip", { kind: "toggle" }),
+  {
+    ...descriptor("session", "hide_empty_groups", "Hide empty groups", { kind: "toggle" }),
+    profile_overridable: false,
+  },
   descriptor("session", "smart_rename", "Smart Session Rename", { kind: "toggle" }),
   descriptor("session", "delete_to_trash", "Delete to Trash", { kind: "toggle" }),
   descriptor("session", "row_tag", "Row Tag", {
@@ -38,8 +42,8 @@ vi.mock("../../lib/api", () => ({
   fetchPlugins: vi.fn(() => Promise.resolve(null)),
   fetchSettings: vi.fn(),
   getSettingsSchema: vi.fn(() => Promise.resolve(SESSION_SCHEMA)),
-  updateSettings: vi.fn(() => Promise.resolve(true)),
-  updateProfileSettings: vi.fn(() => Promise.resolve(true)),
+  updateSettings: vi.fn(() => Promise.resolve("committed" as const)),
+  updateProfileSettings: vi.fn(() => Promise.resolve("committed" as const)),
   setDefaultProfile: vi.fn(() => Promise.resolve(true)),
   createProfile: vi.fn(() => Promise.resolve(true)),
   renameProfile: vi.fn(() => Promise.resolve(true)),
@@ -90,6 +94,10 @@ const autoStopInput = (container: HTMLElement) =>
 const expectSaved = (patch: Record<string, unknown>) =>
   waitFor(() => expect(vi.mocked(api.updateSettings)).toHaveBeenCalledWith(patch, "main"));
 
+import { resetSettingsStore } from "../../lib/settingsStore";
+
+beforeEach(resetSettingsStore);
+
 describe("Session tab", () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -98,6 +106,14 @@ describe("Session tab", () => {
     await waitFor(() => expect(autoStopInput(container).value).toBe("1800"));
     commit(autoStopInput(container), "7200");
     await expectSaved({ session: { auto_stop_idle_secs: 7200 } });
+  });
+
+  it("persists empty group visibility as a global setting", async () => {
+    const { container } = await renderTab("session", { hide_empty_groups: true }, "Hide empty groups");
+    const toggle = toggleByLabel(container, "Hide empty groups");
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(toggle);
+    await expectSaved({ session: { hide_empty_groups: false } });
   });
 
   it("persists smart_rename", async () => {

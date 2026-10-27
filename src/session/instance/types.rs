@@ -17,7 +17,9 @@ pub struct TerminalInfo {
 }
 
 /// How a session is rendered: ACP-native `Structured` or raw tmux `Terminal`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum View {
     #[default]
@@ -201,17 +203,39 @@ impl SessionSidecarSource {
             Self::HostHooks(directory) => {
                 crate::hooks::read_hook_sidecar_at(instance_id, directory, leaf, cap, max_age)
             }
-            Self::SandboxDir(directory) => {
-                let root = directory.parent()?.parent()?;
-                if root.join("aoe-session").join(instance_id) != *directory {
-                    return None;
-                }
-                crate::session::AnchoredDir::open(root)
-                    .ok()?
-                    .read_regular(&Path::new("aoe-session").join(instance_id).join(leaf), cap)
-                    .ok()?
-            }
+            Self::SandboxDir(directory) => Self::sandbox_root(directory, instance_id)?
+                .read_regular(&Path::new("aoe-session").join(instance_id).join(leaf), cap)
+                .ok()?,
         }
+    }
+
+    /// The first `cap` bytes of `leaf` and its mtime, for files read capped
+    /// rather than refused when long.
+    pub(crate) fn read_prefix(
+        &self,
+        instance_id: &str,
+        leaf: &str,
+        cap: usize,
+    ) -> Option<(Vec<u8>, std::time::SystemTime)> {
+        crate::session::validate_instance_id(instance_id).ok()?;
+        match self {
+            Self::HostHooks(directory) => {
+                crate::hooks::read_hook_sidecar_prefix_at(instance_id, directory, leaf, cap)
+            }
+            Self::SandboxDir(directory) => Self::sandbox_root(directory, instance_id)?
+                .read_regular_prefix(&Path::new("aoe-session").join(instance_id).join(leaf), cap)
+                .ok()?,
+        }
+    }
+
+    /// The store root `directory` is `aoe-session/<instance_id>` under, opened
+    /// so no component below it can be a symlink.
+    fn sandbox_root(directory: &Path, instance_id: &str) -> Option<crate::session::AnchoredDir> {
+        let root = directory.parent()?.parent()?;
+        if root.join("aoe-session").join(instance_id) != *directory {
+            return None;
+        }
+        crate::session::AnchoredDir::open(root).ok()
     }
 
     pub(crate) fn host_hooks(instance_id: &str) -> Self {

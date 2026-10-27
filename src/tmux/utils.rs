@@ -92,7 +92,15 @@ pub fn append_remain_on_exit_args(args: &mut Vec<String>, target: &str) {
     chain_set_option(args, &["-p", "-t", target, "remain-on-exit", "on"]);
 }
 
-/// Pins pane indices to 0 so `^.0` always targets the agent's pane.
+/// Sets the session's `pane-base-index` to 0, chained after `new-session` in
+/// the same argv. This does *not* retroactively renumber the pane
+/// `new-session` already created: tmux assigns that pane's index at creation
+/// time from the then-current (global or inherited) `pane-base-index`, so
+/// under an ambient default of 1 (e.g. `setw -g pane-base-index 1`) the first
+/// pane is still index 1 even after this option lands. `^.0` is therefore not
+/// guaranteed to target the agent's pane; callers instead rely on the
+/// first-listed-pane snapshot rule in `parse_pane_metadata` (`tmux/mod.rs`),
+/// which keeps each session's lowest window/pane regardless of its index.
 pub fn append_pane_base_index_args(args: &mut Vec<String>, target: &str) {
     chain_set_option(args, &["-t", target, "pane-base-index", "0"]);
 }
@@ -310,7 +318,7 @@ fn strip_display_delimiter(raw: &str) -> &str {
     raw.strip_suffix('\n').unwrap_or(raw)
 }
 
-fn pane_start_command_is_protected(session_name: &str) -> bool {
+pub(crate) fn pane_start_command_is_protected(session_name: &str) -> bool {
     display_first_pane(session_name, "#{pane_start_command}")
         .is_some_and(|command| command.contains(PANE_ENV_FILE_PREFIX))
 }

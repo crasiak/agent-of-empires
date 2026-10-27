@@ -97,6 +97,7 @@ You can browse tips from **Ctrl+K > Show tips** even with the bar hidden.
 | `show_activity_age` | `true` | Show the age column at the right edge of each TUI session row: time since the agent stopped on `Idle` rows, time since last access on `Unknown` rows, and remaining snooze time under the Attention sort. |
 | `sidebar_position` | `"left"` | TUI session sidebar position: `left` or `right`. Global only. Narrow terminals keep the stacked layout. |
 | `show_shortcut_bar` | `true` | Show the TUI's bottom shortcut row, including the LIVE banner. Global only, under Settings > Global > Interaction. Hiding it gives that row to the main view; shortcuts, `?` help, dialog controls, and temporary notifications still work. |
+| `preview_link_prefixes` | `[]` | Link targets beyond http and https that a click in the preview may open, as case-insensitive `scheme://authority/` prefixes, for example `["vscode://file/"]` to open file links in VS Code. Entries not in that form, including a missing `/` after the authority, are ignored, and `file:`, `javascript:`, `data:` and `vbscript:` never open. Unlisted targets are neither opened nor passed to the terminal; a new entry applies to links printed after it. Global only and not editable from the web dashboard; under Settings > Global > Interaction (advanced). |
 | `tie_workdir_to_name` | `true` | Keep a managed worktree session's directory named after its title. See [Worktrees](worktrees.md#naming). |
 | `pre_trust_agent_folders` | `false` | Pre-trust each host session's worktree in the agent's own config (Claude Code, Codex, Gemini) so it does not open on a folder-trust prompt. Config-dir overrides are honored, and an `agent_config_dir` entry wins over them. Trust also activates the repo's `.claude/settings.json`, hooks included, so enable it only for directories you would have trusted by hand. Sandboxed sessions always pre-trust their own staged config. |
 | `agent_status_hooks` | `true` | Install status-detection hooks into the agent's config; see [Agent hook approval](#agent-hook-approval) for the approval that gates it and [Adding a New Agent](../development/adding-agents.md#hook-format-reference) for the formats. Disabling it leaves status to pane reading but keeps identity hooks used for native resume. |
@@ -115,6 +116,7 @@ You can browse tips from **Ctrl+K > Show tips** even with the bar hidden.
 | `agent_config_dir` | `{}` | Config directory an agent reads instead of its built-in default, keyed by agent name. Wins over the agent's config-dir environment variable. Two names pointing at the same agent are two accounts of it; a restart that swaps between them carries the conversation across. A resumed host or structured Claude conversation keeps the store it recorded, which outranks this entry; a sandboxed one keeps the store its container was created with and follows the entry only once that container is recreated, see [Session Resume](session-resume.md#swapping-the-engine-on-a-restart). Global/profile only. |
 | `agents.<name>.status_map` | `{}` | Trusted hook-event to status mapping (`running`, `waiting`, `idle`, `error`), applied on the next hook install. Hooks receive `AOE_PROFILE`, so a script can read the resolved map with `aoe -p "$AOE_PROFILE" profile show --status-map <agent> --json`. Global/profile only. |
 | `agents.<name>.status_rules` | `[]` | Declarative pane status rules. See [Status rules](#status-rules-for-custom-agents). Global/profile only. |
+| `agents.pi.waiting_tools` | `[]` | Pi tools that block on the user, beside `ask_user`, which always counts. AoE's Pi extension reports `waiting` while one runs, as it does for a blocking extension UI prompt. Names must match `[A-Za-z0-9_.:-]{1,64}`; others are dropped, and at most 32 names in all, `ask_user` included, are passed on. Changes take effect at the session's next launch. A sandboxed Pi writes its status to `<sandbox store>/aoe-session/<id>/{status,attention}` on the host, its `/root/.pi/aoe-session` mount. A profile's list replaces the global one. Global/profile only. |
 
 Per-agent structured view defaults live under `[acp]`, not `[session]`:
 
@@ -279,6 +281,27 @@ regex = "esc to interrupt|thinking"
 
 Each rule sets `status` (`running`, `waiting`, `idle`, `error`) and exactly one of `contains` (case-insensitive substring) or `regex` (Rust regex; use `(?i)` for case-insensitive). Rules are matched in order against the ANSI-stripped pane; first match wins and no match reports `idle`, so put the specific states before broad ones. Rules outrank `agent_detect_as`, a built-in detector of the same name, and a status hook the agent writes. Invalid rules are skipped with a warning and take effect on the next config resolve.
 
+### OMP terminal status
+
+Built-in OMP detection reads the visible pane and locates activity, pinned errors,
+and blocking dialogs relative to the current composer. Question dialogs remain
+waiting when paging hides the selected option; session pickers accept bracketed
+key legends. Extension status rows, including plugin badges, do not need
+agent-specific matching rules.
+Editable composer text is excluded from dialog controls, even without status segments.
+
+A recognized working terminal title supplements visible controls; it does not
+override a blocking dialog or pinned error. Visible retry and compaction controls
+can indicate activity even when the turn timer is stopped. Disabling OMP title
+updates or terminal program-status reports does not disable visible-control detection.
+
+Untimed interrupt hints must start in the native two-space key column; alignment
+padding alone does not supply activity evidence.
+Custom editors or widgets can hide or replace these controls. Without a recognizable
+turn timer or working title, passive text that exactly reproduces a loader row
+remains indistinguishable from that control. Use the explicit status rules above
+for such interfaces; they remain authoritative, including their no-match behavior.
+
 ### Running a custom agent in the structured view
 
 Give the agent an ACP launch command; it must speak the [Agent Client Protocol](https://agentclientprotocol.com).
@@ -376,9 +399,12 @@ To see what a running daemon can forward, read its environment: `tr '\0' '\n' < 
 [host_hooks]
 before_start   = ['echo "GH_TOKEN=$(my-mint-tool "$AOE_REPO_SLUG")"']  # sandboxed sessions
 before_session = ['my-account-switcher env --profile "$AOE_PROFILE"']  # host sessions
+before_destroy = ['sync-transcripts "$AOE_SESSION_ID"']                 # any session, at purge
 ```
 
 A launch runs exactly one of them, chosen by whether the session is sandboxed. `before_start` runs when a container is created or restarted (attaching to a running container reuses the last values); `before_session` runs on every host agent launch, including a restart or a view switch, and persists nothing. A plain tool session is not an agent launch and runs neither.
+
+`before_destroy` is not a launch hook: it runs on the host for every session, sandboxed or not, when the session is purged, before container and worktree cleanup. With `session.delete_to_trash` on (the default), moving a session to trash does not run it; it runs when retention expires, on `empty-trash`, or on `aoe remove --purge`. Its output is ignored and never logged. A failure is logged without blocking removal, and a command still running after 2 minutes is killed.
 
 Each `KEY=VALUE` line the command prints to stdout becomes an environment variable for the agent; other lines are ignored, stdout is never logged (so it is safe to print a secret), and a non-zero exit aborts the launch. A key that is a single token but not a valid identifier is dropped with a warning. Minted pairs are applied after the static `environment` list, so they win over a same-keyed entry.
 
@@ -501,7 +527,14 @@ environment = ["GH_TOKEN=$AOE_GH_TOKEN"]
 
 ## Profiles
 
-Profiles are separate workspaces with their own sessions, groups, and overrides of profile-overridable settings.
+Profiles isolate their sessions, stored groups, and profile-overridable settings.
+In the TUI's all-profiles view, Manual grouping shows one heading per group path,
+with sessions from any profile beneath it. When multiple profiles are loaded,
+collapse is local to that TUI view and does not change their stored groups.
+Filter to one profile before
+renaming, deleting, archiving, or manually reordering groups and their rows.
+Individual session actions still use the session's own profile. Attention sort
+remains a flat session list in Manual grouping.
 
 ```bash
 aoe                        # "default" profile

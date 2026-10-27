@@ -19,11 +19,11 @@ use crate::tui::app::Action;
 use crate::tui::dialogs::ServeAction;
 use crate::tui::dialogs::{
     builtin_commands, CommandPaletteDialog, ConfirmDialog, ContextMenuAction, ContextMenuDialog,
-    DeleteDialogConfig, DialogResult, GroupDeleteOptionsDialog, HooksInstallDialog, InfoDialog,
-    IntroOutcome, NewSessionData, NewSessionDialog, NoAgentsAction, PaletteAction, PaletteCommand,
-    PaletteGroup, ProfilePickerAction, ProjectsDialog, RenameDialog, RenameMode, RepoTrustAction,
-    RestartDialog, SendMessageDialog, SessionHighlightMenu, TipsDialog, TipsOutcome,
-    UnifiedDeleteDialog, WorktreeNameDialog,
+    DeleteDialogConfig, DialogResult, GroupDeleteOptions, GroupDeleteOptionsDialog,
+    HooksInstallDialog, InfoDialog, IntroOutcome, NewSessionData, NewSessionDialog, NoAgentsAction,
+    PaletteAction, PaletteCommand, PaletteGroup, ProfilePickerAction, ProjectsDialog, RenameDialog,
+    RenameMode, RepoTrustAction, RestartDialog, SendMessageDialog, SessionHighlightMenu,
+    TipsDialog, TipsOutcome, UnifiedDeleteDialog, WorktreeNameDialog,
 };
 use crate::tui::diff::{DiffAction, DiffView};
 use crate::tui::responsive;
@@ -46,9 +46,16 @@ pub(super) enum SidebarSection {
     Archived,
 }
 
+/// The `aoe.web` plugin serves the dashboard; with it disabled, `R` explains why instead.
+pub(super) fn web_plugin_disabled() -> bool {
+    crate::plugin::registry()
+        .get("aoe.web")
+        .is_some_and(|p| !p.enabled)
+}
+
 /// Persist the first-run intro picks: theme name to `config.theme.name`, attach mode to
-/// `default_attach_mode`. Failures are logged and swallowed so a config write hiccup
-/// cannot block startup.
+/// `default_attach_mode`, telemetry opt-in to `config.telemetry.enabled`. Failures are
+/// logged and swallowed so a config write hiccup cannot block startup.
 fn apply_intro_outcome(outcome: &IntroOutcome) {
     if outcome.final_theme.is_none()
         && outcome.final_attach_mode.is_none()
@@ -1011,7 +1018,7 @@ impl HomeView {
                 None
             }
             "delete_group" => {
-                if let Err(e) = self.delete_selected_group() {
+                if let Err(e) = self.delete_selected_group(&GroupDeleteOptions::default()) {
                     tracing::error!(target: "tui.input", "Failed to delete group: {}", e);
                 }
                 None
@@ -1150,6 +1157,9 @@ impl HomeView {
         let Some(group_path) = self.selected_group.clone() else {
             return;
         };
+        if self.require_manual_group_profile() {
+            return;
+        }
         let count = self.active_sessions_in_selected_group().len();
         if count == 0 {
             return;
@@ -1191,6 +1201,10 @@ impl HomeView {
     }
 
     pub fn handle_dialog_click(&mut self, col: u16, row: u16) -> bool {
+        if self.tailored_window.is_some() {
+            self.handle_tailored_click(col, row);
+            return true;
+        }
         if self.afk_dialog.is_some()
             || self.afk_overview_dialog.is_some()
             || self.afk_batch_dialog.is_some()
@@ -1499,12 +1513,7 @@ impl HomeView {
             if let Some(DialogResult::Submit(action)) = dialog.handle_click(col, row) {
                 match action {
                     NoAgentsAction::Recheck => {
-                        crate::tmux::invalidate_agent_availability();
-                        let tools = crate::tmux::AvailableTools::detect();
-                        if tools.any_available() {
-                            self.set_available_tools(tools);
-                            self.no_agents_dialog = None;
-                        }
+                        self.pending_dialog_click_action = Some(Action::RecheckAgents);
                     }
                     NoAgentsAction::Quit => {
                         self.no_agents_dialog = None;
@@ -1536,11 +1545,7 @@ impl HomeView {
                     }
                     DialogResult::Submit(options) => {
                         self.group_delete_options_dialog = None;
-                        if options.delete_sessions {
-                            if let Err(e) = self.delete_group_with_sessions(&options) {
-                                tracing::error!(target: "tui.input", "Failed to delete group with sessions: {}", e);
-                            }
-                        } else if let Err(e) = self.delete_selected_group() {
+                        if let Err(e) = self.delete_selected_group(&options) {
                             tracing::error!(target: "tui.input", "Failed to delete group: {}", e);
                         }
                     }
@@ -1764,6 +1769,14 @@ impl HomeView {
         // coords, so once the user does anything else the cells underneath can change and
         // it would point at unrelated content. Covers the live-send branch below too.
         self.clear_preview_selection();
+        if self.tailored_window.is_some() {
+            self.handle_tailored_key(key);
+            return None;
+        }
+        if super::bindings::is_tailored_shortcut(&key) && !self.has_non_live_send_overlay() {
+            self.open_tailored();
+            return None;
+        }
 
         // Live-send capture normally wins over every other key handler: the home view is
         // a thin relay to the target pane, so dialog hotkeys, search and navigation
@@ -1779,8 +1792,7 @@ impl HomeView {
                 self.jump_to_adjacent_finished(delta);
                 return None;
             }
-            self.handle_live_send_key(key);
-            return None;
+            return self.handle_live_send_key(key);
         }
 
         // Handle unsaved changes confirmation for settings (shown over settings view)
@@ -1907,13 +1919,7 @@ impl HomeView {
                     return Some(Action::Quit);
                 }
                 DialogResult::Submit(NoAgentsAction::Recheck) => {
-                    crate::tmux::invalidate_agent_availability();
-                    let tools = crate::tmux::AvailableTools::detect();
-                    if tools.any_available() {
-                        self.set_available_tools(tools);
-                        self.no_agents_dialog = None;
-                    }
-                    // If still no agents, keep dialog open (user can try again)
+                    return Some(Action::RecheckAgents);
                 }
             }
             return None;
@@ -2253,11 +2259,7 @@ impl HomeView {
                 }
                 DialogResult::Submit(options) => {
                     self.group_delete_options_dialog = None;
-                    if options.delete_sessions {
-                        if let Err(e) = self.delete_group_with_sessions(&options) {
-                            tracing::error!(target: "tui.input", "Failed to delete group with sessions: {}", e);
-                        }
-                    } else if let Err(e) = self.delete_selected_group() {
+                    if let Err(e) = self.delete_selected_group(&options) {
                         tracing::error!(target: "tui.input", "Failed to delete group: {}", e);
                     }
                 }
@@ -2850,6 +2852,7 @@ impl HomeView {
                 self.update_selected();
             }
             ActionId::NewSession => self.open_new_session_dialog(),
+            ActionId::TailoredSessions => self.open_tailored(),
             ActionId::NewFromSelection => self.open_new_from_selection(),
             ActionId::NewFromProject => self.open_project_session_picker(),
             ActionId::AttachTerminal => return self.attach_terminal_for_selected(),
@@ -2941,6 +2944,7 @@ impl HomeView {
             }
             ActionId::ToggleContainer => self.toggle_container_for_selected(),
             ActionId::TogglePreviewInfo => self.toggle_preview_info(),
+            ActionId::ToggleSplitTerminal => self.toggle_split_terminal(),
             ActionId::ToggleHideStopped => self.toggle_hide_stopped_in_groups(),
             ActionId::ToggleDiagnostics => self.toggle_diagnostics(),
             ActionId::OpenSystemHealth => self.open_system_health(),
@@ -3003,8 +3007,7 @@ impl HomeView {
             });
 
         if prefill_path.is_some() || prefill_group.is_some() {
-            let existing_groups: Vec<String> =
-                self.all_groups().iter().map(|g| g.path.clone()).collect();
+            let existing_groups: Vec<String> = self.all_group_paths();
             let current_profile = self
                 .profile_for_cursor(self.cursor)
                 .unwrap_or_else(|| self.config_profile());
@@ -3057,19 +3060,18 @@ impl HomeView {
         if inst.is_structured() {
             crate::session::fork::structured_fork_capable(&inst.tool, inst.agent_name.as_deref())
         } else {
+            let sandboxed = inst.is_sandboxed();
             inst.fork_parent_ref().ok().flatten().is_some_and(|parent| {
                 let agent = match parent {
-                    crate::session::fork::ForkParentRef::Unattributed { agent, .. } => agent,
-                    _ => {
-                        return parent
-                            .binding()
-                            .and_then(|binding| binding.execution.as_ref())
-                            .is_some_and(|execution| {
-                                crate::session::fork::terminal_agent_can_fork(&execution.agent)
-                            })
-                    }
+                    crate::session::fork::ForkParentRef::Unattributed { agent, .. } => Some(agent),
+                    _ => parent
+                        .binding()
+                        .and_then(|binding| binding.execution.as_ref())
+                        .map(|execution| execution.agent.as_str()),
                 };
-                crate::session::fork::terminal_agent_can_fork(agent)
+                agent.is_some_and(|agent| {
+                    crate::session::fork::terminal_agent_can_fork_in(agent, sandboxed)
+                })
             })
         }
     }
@@ -3237,6 +3239,7 @@ impl HomeView {
         let parent_agent_name = parent.agent_name.clone();
         let parent_acp_session_id = parent.acp_session_id.clone();
         let parent_profile = parent.effective_profile();
+        let parent_sandboxed = parent.is_sandboxed();
 
         let seed = if parent_is_structured {
             // A structured parent forks via the ACP `session/fork` handshake rather than
@@ -3272,7 +3275,9 @@ impl HomeView {
         } else {
             let child_id = crate::session::capture::generate_session_uuid();
             let seed = match parent_ref {
-                Ok(parent_ref) => crate::session::fork::terminal_fork_seed(parent_ref, child_id),
+                Ok(parent_ref) => {
+                    crate::session::fork::terminal_fork_seed(parent_ref, child_id, parent_sandboxed)
+                }
                 Err(error) => {
                     self.info_dialog = Some(InfoDialog::new("Fork not supported", &error));
                     return;
@@ -3282,7 +3287,10 @@ impl HomeView {
                 Ok(s) => s,
                 Err(denied) => {
                     let dialog_title = match denied {
-                        crate::session::ForkDenied::AgentCannotFork { .. } => "Fork not supported",
+                        crate::session::ForkDenied::AgentCannotFork { .. }
+                        | crate::session::ForkDenied::ChildNotCapturable { .. } => {
+                            "Fork not supported"
+                        }
                         crate::session::ForkDenied::NoParentSession
                         | crate::session::ForkDenied::UnlaunchedFork => "Nothing to fork yet",
                         crate::session::ForkDenied::UnqualifiedParent { .. } => {
@@ -3298,8 +3306,7 @@ impl HomeView {
             }
         };
 
-        let existing_groups: Vec<String> =
-            self.all_groups().iter().map(|g| g.path.clone()).collect();
+        let existing_groups: Vec<String> = self.all_group_paths();
         let current_profile = self
             .profile_for_cursor(self.cursor)
             .unwrap_or_else(|| self.config_profile());
@@ -3696,10 +3703,7 @@ impl HomeView {
     }
 
     fn open_serve(&mut self) {
-        let web_disabled = crate::plugin::registry()
-            .get("aoe.web")
-            .is_some_and(|p| !p.enabled);
-        if web_disabled {
+        if web_plugin_disabled() {
             self.info_dialog = Some(InfoDialog::new(
                 "Web dashboard disabled",
                 "The aoe.web plugin is disabled, so the web dashboard cannot \
@@ -4412,14 +4416,22 @@ impl HomeView {
         ))
     }
 
+    pub(super) fn require_manual_group_profile(&mut self) -> bool {
+        if !self.unified_manual_groups() {
+            return false;
+        }
+        self.info_dialog = Some(InfoDialog::new(
+            "Select a Profile",
+            "Filter to one profile before modifying or reordering Manual groups. Session actions still use each session's own profile.",
+        ));
+        true
+    }
+
     fn toggle_group_collapsed(&mut self, path: &str) {
         self.toggle_group_collapsed_at(self.cursor, path);
     }
 
-    /// `row` is the `flat_items` index of the header being toggled. In the
-    /// all-profiles view the same group path can exist in several profiles,
-    /// so the owning GroupTree comes from that row, not from wherever the
-    /// cursor sits (a group click toggles without moving the cursor).
+    /// A group click toggles the clicked row without moving the cursor.
     fn toggle_group_collapsed_at(&mut self, row: usize, path: &str) {
         // The synthetic Archived section is not in any GroupTree; its collapsed state
         // lives on HomeView. Route here before either branch mutates a nonexistent group.
@@ -4451,7 +4463,34 @@ impl HomeView {
             self.save_org_group_collapsed();
             return;
         }
-        // Route to the correct profile's GroupTree
+        if self.unified_manual_groups() {
+            let Some(Item::Group { collapsed, .. }) = self.flat_items.get(row) else {
+                return;
+            };
+            let collapsing = !collapsed;
+            let hides_selection = collapsing
+                && self
+                    .selected_session
+                    .as_deref()
+                    .and_then(|id| self.get_instance(id))
+                    .is_some_and(|inst| {
+                        inst.group_path == path || inst.group_path.starts_with(&format!("{path}/"))
+                    });
+            self.unified_group_collapsed
+                .insert(path.to_string(), collapsing);
+            self.rebuild_flat_items_keeping_cursor();
+            if hides_selection {
+                if let Some(at) = self
+                    .flat_items
+                    .iter()
+                    .position(|item| matches!(item, Item::Group { path: p, .. } if p == path))
+                {
+                    self.cursor = at;
+                    self.update_selected();
+                }
+            }
+            return;
+        }
         let profile = self.profile_for_cursor(row);
         if let Some(profile) = profile {
             if let Some(tree) = self.group_trees.get_mut(&profile) {
@@ -4633,6 +4672,9 @@ impl HomeView {
     }
 
     pub fn handle_scroll_up(&mut self, col: u16, row: u16) -> bool {
+        if self.tailored_window.is_some() {
+            return true;
+        }
         const STEP: u16 = 3;
         // Settings is a full-screen takeover with its own scrollable fields panel, so the
         // wheel drives it wherever the now-hidden list/preview rects were. Checked before
@@ -5122,8 +5164,7 @@ impl HomeView {
         if self.selected_session.is_some() || self.selected_group.is_some() {
             self.record_new_session_with_selection();
         }
-        let existing_groups: Vec<String> =
-            self.all_groups().iter().map(|g| g.path.clone()).collect();
+        let existing_groups: Vec<String> = self.all_group_paths();
         let current_profile = self.config_profile();
         let profiles =
             list_profiles_for_display().unwrap_or_else(|_| vec![current_profile.clone()]);
@@ -5374,8 +5415,7 @@ impl HomeView {
 
             let profiles =
                 list_profiles_for_display().unwrap_or_else(|_| vec![current_profile.clone()]);
-            let existing_groups: Vec<String> =
-                self.all_groups().iter().map(|g| g.path.clone()).collect();
+            let existing_groups: Vec<String> = self.all_group_paths();
             let mut dialog = RenameDialog::new(
                 &title,
                 &group_path,
@@ -5395,12 +5435,14 @@ impl HomeView {
                 }
             }
             self.rename_dialog = Some(dialog);
-        } else if let Some(group_path) = &self.selected_group {
+        } else if let Some(group_path) = self.selected_group.clone() {
+            if self.require_manual_group_profile() {
+                return;
+            }
             if let Some((title, hint)) = self.automatic_group_hint() {
                 self.info_dialog = Some(InfoDialog::new(&title, &hint));
                 return;
             }
-            let group_path = group_path.clone();
             let current_profile = self
                 .selected_group_profile
                 .clone()
@@ -5584,21 +5626,21 @@ impl HomeView {
                     &profile,
                 ));
             }
-        } else if let Some(group_path) = &self.selected_group {
+        } else if let Some(group_path) = self.selected_group.clone() {
+            if self.require_manual_group_profile() {
+                return;
+            }
             if let Some((title, hint)) = self.automatic_group_hint() {
                 self.info_dialog = Some(InfoDialog::new(&title, &hint));
                 return;
             }
-            // Scope the count to the selected group's profile: two profiles can share a
-            // group path, and counting by path alone would pop the "delete N sessions"
-            // dialog for an empty group whose same-named twin still has rows.
             let owning_profile = self.selected_group_profile.clone();
             let prefix = format!("{}/", group_path);
             let session_count = self
                 .instances
                 .values()
                 .filter(|i| {
-                    (i.group_path == *group_path || i.group_path.starts_with(&prefix))
+                    (i.group_path == group_path || i.group_path.starts_with(&prefix))
                         && owning_profile
                             .as_ref()
                             .is_none_or(|p| &i.source_profile == p)
@@ -5607,12 +5649,12 @@ impl HomeView {
 
             if session_count > 0 {
                 let has_managed_worktrees = self.group_has_managed_worktrees(
-                    group_path,
+                    &group_path,
                     &prefix,
                     owning_profile.as_deref(),
                 );
                 let has_containers =
-                    self.group_has_containers(group_path, &prefix, owning_profile.as_deref());
+                    self.group_has_containers(&group_path, &prefix, owning_profile.as_deref());
                 self.group_delete_options_dialog = Some(GroupDeleteOptionsDialog::new(
                     group_path.clone(),
                     session_count,
@@ -5799,10 +5841,15 @@ impl HomeView {
             .lines
             .get(view.abs_line_at_row(row))?;
         let offset = col - view.pane.x;
-        crate::tui::links::link_spans_for_line(line, view.pane.width, &cache.links)
-            .into_iter()
-            .find(|span| (span.start..span.end).contains(&offset))
-            .map(|span| span.uri)
+        crate::tui::links::link_spans_for_line(
+            line,
+            view.pane.width,
+            &cache.links,
+            &self.preview_link_prefixes,
+        )
+        .into_iter()
+        .find(|span| (span.start..span.end).contains(&offset))
+        .map(|span| span.uri)
     }
 
     /// Same as `preview_double_click_action`, but the caller supplies `now` so
@@ -5993,6 +6040,9 @@ impl HomeView {
 
     /// Route a mouse-wheel-down at (col, row); see handle_scroll_up.
     pub fn handle_scroll_down(&mut self, col: u16, row: u16) -> bool {
+        if self.tailored_window.is_some() {
+            return true;
+        }
         const STEP: u16 = 3;
         // Settings takeover owns the wheel; see handle_scroll_up.
         if let Some(view) = &mut self.settings_view {
@@ -6062,6 +6112,10 @@ impl HomeView {
     /// dialogs come next so multi-line dictation lands where the user is typing. The
     /// settings view is last: its paste handler strips newlines.
     pub fn handle_paste(&mut self, text: &str) {
+        if let Some(window) = &mut self.tailored_window {
+            window.handle_paste(text);
+            return;
+        }
         // Right-click pastes also invalidate preview selection coordinates.
         self.clear_preview_selection();
         if self.afk_batch_dialog.is_some() {
@@ -6205,16 +6259,37 @@ impl HomeView {
         // against the shell on screen, Tool view to the named tool's pane.
         self.pending_live_send_target = match &self.view_mode {
             ViewMode::Structured => live_send::LiveSendTarget::Agent,
-            ViewMode::Terminal => {
-                if inst.is_sandboxed() && self.get_terminal_mode(&id) == TerminalMode::Container {
-                    live_send::LiveSendTarget::ContainerTerminal
-                } else {
-                    live_send::LiveSendTarget::Terminal
-                }
-            }
+            ViewMode::Terminal => self.paired_terminal_target(inst),
             ViewMode::Tool(name) => live_send::LiveSendTarget::Tool(name.clone()),
         };
         Some(Action::EnterLiveSend(id))
+    }
+
+    /// The paired terminal live send reaches for `inst`: the container shell when a
+    /// sandboxed session is in container mode, else the host shell.
+    fn paired_terminal_target(&self, inst: &crate::session::Instance) -> live_send::LiveSendTarget {
+        if inst.is_sandboxed() && self.get_terminal_mode(&inst.id) == TerminalMode::Container {
+            live_send::LiveSendTarget::ContainerTerminal
+        } else {
+            live_send::LiveSendTarget::Terminal
+        }
+    }
+
+    /// Leader `t`: move live send between the agent and its paired terminal without
+    /// leaving live mode. Re-enters through `EnterLiveSend` so a cold terminal gets the
+    /// same revive path as a fresh entry; the view follows only once that succeeds.
+    fn swap_live_send_target(&mut self, state: &live_send::LiveSendState) -> Option<Action> {
+        let inst = self.get_instance(&state.session_id)?;
+        let target = match state.target {
+            live_send::LiveSendTarget::Terminal | live_send::LiveSendTarget::ContainerTerminal => {
+                live_send::LiveSendTarget::Agent
+            }
+            live_send::LiveSendTarget::Agent | live_send::LiveSendTarget::Tool(_) => {
+                self.paired_terminal_target(inst)
+            }
+        };
+        self.pending_live_send_target = target;
+        Some(Action::EnterLiveSend(state.session_id.clone()))
     }
 
     /// Auto-start live-send after an explicit view switch (`ToggleView`,
@@ -6246,10 +6321,8 @@ impl HomeView {
     /// what the worker is targeting, the user would otherwise type
     /// into the void with only a `tracing::warn!` for company. Auto-
     /// exit + info dialog instead.
-    fn handle_live_send_key(&mut self, key: KeyEvent) {
-        let Some(state) = self.live_send.clone() else {
-            return;
-        };
+    fn handle_live_send_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let state = self.live_send.clone()?;
 
         // Leader menu: a prior keystroke matched the configured leader
         // (tmux-style prefix, default Ctrl+B), so this key picks a
@@ -6267,7 +6340,7 @@ impl HomeView {
                             worker.send(tmux_key);
                         }
                     }
-                    return;
+                    return None;
                 }
             }
             // Command letters match only when unmodified: the leader-again passthrough
@@ -6283,12 +6356,16 @@ impl HomeView {
                 KeyCode::Char('q') | KeyCode::Char('Q') if plain => {
                     self.exit_live_send_and_restore_sizing(&state)
                 }
+                KeyCode::Char('t') | KeyCode::Char('T') if plain => {
+                    return self.swap_live_send_target(&state)
+                }
+                KeyCode::Char('|') if plain => self.toggle_split_terminal(),
                 // Esc, or any unbound or modified key, cancels the menu without
                 // forwarding: the leader already swallowed the keystroke, as tmux's
                 // prefix does for unknown keys.
                 _ => {}
             }
-            return;
+            return None;
         }
 
         // `handle_key` already cleared any finalized preview selection at the top, which
@@ -6307,12 +6384,12 @@ impl HomeView {
                 KeyCode::PageUp => {
                     self.preview_scroll_offset =
                         self.preview_scroll_offset.saturating_add(PAGE_STEP);
-                    return;
+                    return None;
                 }
                 KeyCode::PageDown => {
                     self.preview_scroll_offset =
                         self.preview_scroll_offset.saturating_sub(PAGE_STEP);
-                    return;
+                    return None;
                 }
                 _ => {}
             }
@@ -6322,7 +6399,7 @@ impl HomeView {
         // escaping a stuck live mode shouldn't hit a "session ended" dialog on the way.
         if live_send::chord_list_matches(&state.exit_chords, key) {
             self.exit_live_send_and_restore_sizing(&state);
-            return;
+            return None;
         }
         // Leader press: arm the live-send command menu and swallow the keystroke; the
         // next key goes to the pending-leader branch at the top. Checked after the exit
@@ -6330,11 +6407,11 @@ impl HomeView {
         if let Some(leader) = state.leader {
             if live_send::chord_matches(leader, key) {
                 self.live_send_pending_leader = true;
-                return;
+                return None;
             }
         }
         if self.end_live_send_on_drift(&state) {
-            return;
+            return None;
         }
         // Ctrl+C here is forwarded to the agent rather than quitting aoe (the app-level
         // handler defers to live-send via `is_live_send_capturing`). Flash the footer so
@@ -6353,6 +6430,7 @@ impl HomeView {
                 self.stamp_last_accessed(&state.session_id);
             }
         }
+        None
     }
 
     /// Exit live-send before an activation hands the terminal to a tmux attach. With

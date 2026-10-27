@@ -307,6 +307,11 @@ pub(super) const CITYHALL_MUTATION_ALLOW: &[(&str, &str)] = &[
     ("POST", "/api/push/test"),
     ("POST", "/api/login"),
     ("POST", "/api/login/elevate"),
+    ("POST", "/api/login/passkey/start"),
+    ("POST", "/api/login/passkey/finish"),
+    ("POST", "/api/passkeys/register/start"),
+    ("POST", "/api/passkeys/register/finish"),
+    ("DELETE", "/api/passkeys/{id}"),
     ("POST", "/api/login/logout-all"),
     ("POST", "/api/logout"),
     ("DELETE", "/api/login/sessions/{id}"),
@@ -315,6 +320,10 @@ pub(super) const CITYHALL_MUTATION_ALLOW: &[(&str, &str)] = &[
 /// Mutating routes deliberately UNREACHABLE in CityHall.
 #[cfg(test)]
 pub(super) const CITYHALL_MUTATION_DENY: &[(&str, &str)] = &[
+    ("PATCH", "/api/sessions/{id}/tailored-history"),
+    ("POST", "/api/research"),
+    ("POST", "/api/workshop"),
+    ("POST", "/api/research/{id}/reply"),
     // Terminal surface.
     ("POST", "/api/sessions/{id}/ensure"),
     ("POST", "/api/sessions/{id}/send"),
@@ -334,6 +343,9 @@ pub(super) const CITYHALL_MUTATION_DENY: &[(&str, &str)] = &[
     ("PATCH", "/api/profiles/{name}/rename"),
     ("PATCH", "/api/default-profile"),
     // MCP mutations.
+    ("POST", "/api/mcp/servers"),
+    ("PUT", "/api/mcp/servers/{name}"),
+    ("DELETE", "/api/mcp/servers/{name}"),
     ("POST", "/api/mcp/servers/{name}/drop"),
     ("POST", "/api/mcp/servers/{name}/keep"),
     ("POST", "/api/mcp/servers/{name}/resolve"),

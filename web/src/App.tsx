@@ -15,6 +15,7 @@ import { IDLE_DECAY_WINDOW_MS } from "./lib/session";
 import { diffSelectionStale } from "./lib/diffSelection";
 import { useSessions } from "./hooks/useSessions";
 import { useAttentionCounts } from "./hooks/useAttentionCounts";
+import { useStatusSounds } from "./hooks/useStatusSounds";
 import { useDashboardPresence } from "./hooks/useDashboardPresence";
 import { clearAcpCache } from "./hooks/useAcpSession";
 import { clearDraft, sweepOrphanDrafts } from "./lib/acpDrafts";
@@ -57,6 +58,7 @@ import { usePaneLayout, dockTabs, dockGroups, dockOf, isActiveTab, isDockCollaps
 import { isPluginPaneId, resolvePaneIcon, usePluginPanes, type PluginPane } from "./lib/pluginPanes";
 import { PluginPaneBody } from "./components/plugin/PluginPane";
 import { PluginPageView } from "./components/plugin/PluginPageView";
+import { PluginSessionMenu } from "./components/plugin/PluginSessionMenu";
 import { TOUR_ANCHORS, tourAnchor } from "./lib/tourSteps";
 import {
   deleteWorkspaceSessions,
@@ -94,13 +96,14 @@ import {
   restoreSession,
   fetchPlugins,
 } from "./lib/api";
-import type { DeleteSessionOptions, ServerAbout } from "./lib/api";
+import type { DeleteSessionOptions, ServerAbout, SettingsResponse } from "./lib/api";
 import { getClientCapabilities } from "./lib/clientCapabilities";
 import { normalizeProjectPathKey } from "./lib/registeredProjects";
 import { IdleDecayWindowContext, parseIdleDecayWindowMs } from "./lib/idleDecay";
 import { parseUnreadIndicatorEnabled, UnreadIndicatorContext, useUnreadIndicatorEnabled } from "./lib/unreadIndicator";
 import { parseSessionRowTagMode, SessionRowTagContext, type SessionRowTagMode } from "./lib/sessionRowTag";
 import { parseSessionColorsEnabled, SessionColorsContext } from "./lib/sessionColors";
+import { HideEmptyGroupsContext, parseHideEmptyGroups } from "./lib/hideEmptyGroups";
 import { onSettingsChanged } from "./lib/settingsEvents";
 import { parseSystemHealthEnabled, SystemHealthEnabledContext } from "./lib/systemHealth";
 import { parseUsageOverlayEnabled, UsageOverlayEnabledContext } from "./lib/usage";
@@ -131,6 +134,7 @@ import { AppShellSkeleton, MainPaneSkeleton } from "./components/AppShellSkeleto
 import { ContentSplit } from "./components/ContentSplit";
 import { SessionInfo } from "./components/SessionInfo";
 import { TerminalSessionStack } from "./components/TerminalSessionStack";
+import { TailoredSessionsOverlay, type CaptureAccount } from "./components/TailoredSessionsOverlay";
 // Lazy-load the acp surface so non-acp users never download
 // the @assistant-ui/react, shiki, and in-house StringDiff/DiffLine
 // dependency tree. Cuts ~hundreds of KB off the cold-start bundle
@@ -177,11 +181,8 @@ import { TipsModal } from "./components/TipsModal";
 import { useTips, shouldAutoPopTips } from "./hooks/useTips";
 import { CommandPalette } from "./components/command-palette/CommandPalette";
 import { useConversationSearch } from "./hooks/useConversationSearch";
-import { DisconnectBanner } from "./components/DisconnectBanner";
+import { BannerStack } from "./components/BannerStack";
 import { ElevationPrompt } from "./components/ElevationPrompt";
-import { UpdateBanner } from "./components/UpdateBanner";
-import { DashboardUpdateBanner } from "./components/DashboardUpdateBanner";
-import { PushHealthBanner } from "./components/PushHealthBanner";
 
 // Pre-#1832 per-browser tour-seen flag. Read once on load to migrate users who
 // already dismissed the tour to the backend; no longer written.
@@ -202,16 +203,18 @@ export default function App() {
   const [unreadIndicatorEnabled, setUnreadIndicatorEnabled] = useState(true);
   const [sessionRowTagMode, setSessionRowTagMode] = useState<SessionRowTagMode>("branch");
   const [sessionColorsEnabled, setSessionColorsEnabled] = useState(true);
+  const [hideEmptyGroups, setHideEmptyGroups] = useState(true);
   const [systemHealthEnabled, setSystemHealthEnabled] = useState(false);
   const [usageOverlayEnabled, setUsageOverlayEnabled] = useState(true);
   const [ledgerOverlayEnabled, setLedgerOverlayEnabled] = useState(true);
   const [headroomOverlayEnabled, setHeadroomOverlayEnabled] = useState(true);
 
-  const applyAppSettings = useCallback((settings: Record<string, unknown> | null | undefined) => {
+  const applyAppSettings = useCallback((settings: SettingsResponse | null | undefined) => {
     setIdleDecayWindowMs(parseIdleDecayWindowMs(settings));
     setUnreadIndicatorEnabled(parseUnreadIndicatorEnabled(settings));
     setSessionRowTagMode(parseSessionRowTagMode(settings));
     setSessionColorsEnabled(parseSessionColorsEnabled(settings));
+    setHideEmptyGroups(parseHideEmptyGroups(settings));
     setSystemHealthEnabled(parseSystemHealthEnabled(settings));
     setUsageOverlayEnabled(parseUsageOverlayEnabled(settings));
     setLedgerOverlayEnabled(parseLedgerOverlayEnabled(settings));
@@ -306,23 +309,29 @@ export default function App() {
     <IdleDecayWindowContext.Provider value={idleDecayWindowMs}>
       <UnreadIndicatorContext.Provider value={unreadIndicatorEnabled}>
         <SessionRowTagContext.Provider value={sessionRowTagMode}>
-          <SessionColorsContext.Provider value={sessionColorsEnabled}>
-            <SystemHealthEnabledContext.Provider value={systemHealthEnabled}>
-              <UsageOverlayEnabledContext.Provider value={usageOverlayEnabled}>
-                <LedgerOverlayEnabledContext.Provider value={ledgerOverlayEnabled}>
-                  <HeadroomOverlayEnabledContext.Provider value={headroomOverlayEnabled}>
-                    {/* PluginUiProvider must sit above AppContent: AppContent itself reads
+          <HideEmptyGroupsContext.Provider value={hideEmptyGroups}>
+            <SessionColorsContext.Provider value={sessionColorsEnabled}>
+              <SystemHealthEnabledContext.Provider value={systemHealthEnabled}>
+                <UsageOverlayEnabledContext.Provider value={usageOverlayEnabled}>
+                  <LedgerOverlayEnabledContext.Provider value={ledgerOverlayEnabled}>
+                    <HeadroomOverlayEnabledContext.Provider value={headroomOverlayEnabled}>
+                      {/* PluginUiProvider must sit above AppContent: AppContent itself reads
                       the plugin UI snapshot (usePluginPanes), so the provider can't live
                       inside its own return. */}
-                    <PluginUiProvider>
-                      <AppContent loginRequired={loginRequired} onLogout={handleLogout} resolvedTheme={resolvedTheme} />
-                    </PluginUiProvider>
-                    <ElevationPrompt />
-                  </HeadroomOverlayEnabledContext.Provider>
-                </LedgerOverlayEnabledContext.Provider>
-              </UsageOverlayEnabledContext.Provider>
-            </SystemHealthEnabledContext.Provider>
-          </SessionColorsContext.Provider>
+                      <PluginUiProvider>
+                        <AppContent
+                          loginRequired={loginRequired}
+                          onLogout={handleLogout}
+                          resolvedTheme={resolvedTheme}
+                        />
+                      </PluginUiProvider>
+                      <ElevationPrompt />
+                    </HeadroomOverlayEnabledContext.Provider>
+                  </LedgerOverlayEnabledContext.Provider>
+                </UsageOverlayEnabledContext.Provider>
+              </SystemHealthEnabledContext.Provider>
+            </SessionColorsContext.Provider>
+          </HideEmptyGroupsContext.Provider>
         </SessionRowTagContext.Provider>
       </UnreadIndicatorContext.Provider>
     </IdleDecayWindowContext.Provider>
@@ -376,9 +385,29 @@ function AppContent({
   const settingsRootMatch = useMatch("/settings");
   const settingsTabMatch = useMatch("/settings/:tab");
   const profilesMatch = useMatch("/profiles");
-  const activeSessionId = sessionMatch?.params.sessionId ?? null;
-  const showSettings = settingsRootMatch !== null || settingsTabMatch !== null;
   const pluginPageMatch = useMatch("/plugins/:pluginId/:pageId");
+  // A plugin page's split pane shows `?session=` as the routed session, docks and all.
+  const activeSessionId = sessionMatch?.params.sessionId ?? (pluginPageMatch ? searchParams.get("session") : null);
+  const selectPluginPageSession = useCallback(
+    (id: string | null) =>
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (id) next.set("session", id);
+          else next.delete("session");
+          return next;
+        },
+        { replace: true },
+      ),
+    [setSearchParams],
+  );
+  // Off a removed session: back to the dashboard, or on a plugin page just out of its split pane.
+  const onPluginPage = pluginPageMatch !== null;
+  const leaveActiveSession = useCallback(
+    () => (onPluginPage ? selectPluginPageSession(null) : navigate("/")),
+    [onPluginPage, selectPluginPageSession, navigate],
+  );
+  const showSettings = settingsRootMatch !== null || settingsTabMatch !== null;
   // Settings and plugin pages take the full width, sidebar and session panels hidden.
   const fullPageView = showSettings || pluginPageMatch !== null;
   const settingsTab = settingsTabMatch?.params.tab ?? null;
@@ -419,6 +448,7 @@ function AppContent({
   const trashedWorkspaces = useMemo(() => workspaces.filter(workspaceIsTrashed), [workspaces]);
 
   const { unreadCount, waitingCount } = useAttentionCounts(sessions, activeSessionId);
+  useStatusSounds(sessions);
   const attentionBadgeColors = useMemo(() => getAttentionBadgeColors(resolvedTheme), [resolvedTheme]);
 
   // Remember the active session and restore it on a PWA relaunch (#2103).
@@ -580,6 +610,9 @@ function AppContent({
   // of tabs (diff, one-or-more terminals, plugin panes) with one active body.
   // The tab membership + active tab + terminal count are persisted per session;
   // dock sizes stay global (Dock/BottomDock own those localStorage keys).
+  // Null until the active Session's row loads, so nothing is seeded from a guess.
+  const activeRow = sessions.find((s) => s.id === activeSessionId);
+  const activeOutsideRepository = activeRow ? Boolean(activeRow.outside_repository) : null;
   const {
     layout: paneLayout,
     openTab,
@@ -592,7 +625,7 @@ function AppContent({
     togglePlugin,
     syncPlugins,
     setDockCollapsed,
-  } = usePaneLayout(activeSessionId);
+  } = usePaneLayout(activeSessionId, activeOutsideRepository);
   const pluginPanes = usePluginPanes(activeSessionId);
   const pluginPaneById = useMemo(() => {
     const m = new Map<string, PluginPane>();
@@ -601,16 +634,15 @@ function AppContent({
   }, [pluginPanes]);
 
   // Auto-add newly available plugin panes as tabs in their default dock; the
-  // layout suppresses any the user explicitly closed. When the user disabled
-  // plugin auto-open (#3035) pass an empty list rather than skipping the
-  // effect: syncPlugins still materializes the session's seeded layout on
-  // mount (pinning the diff/terminal defaults), it just adds no plugin panes.
-  // Manual activity-bar opens and already-open panes are unaffected.
+  // layout suppresses any the user explicitly closed. With plugin auto-open
+  // off (#3035) an empty list still pins the seeded diff/terminal defaults,
+  // which waits for the Session row so a non-git seed never keeps Diff (#4574).
   useEffect(() => {
+    if (activeOutsideRepository === null) return;
     syncPlugins(
       webSettings.autoOpenPluginPanes ? pluginPanes.map((p) => ({ id: p.id, defaultDock: p.defaultDock })) : [],
     );
-  }, [pluginPanes, syncPlugins, webSettings.autoOpenPluginPanes]);
+  }, [pluginPanes, syncPlugins, webSettings.autoOpenPluginPanes, activeOutsideRepository]);
 
   // One-shot lookup from plugin id to its manifest identity (icon name +
   // icon_asset URL), so a pane gets a real identity glyph, up to the plugin's
@@ -779,6 +811,8 @@ function AppContent({
   // session the user never opens the shell on.
   const [pairedMounted, setPairedMounted] = useState(false);
   const [showSessionWizard, setShowSessionWizard] = useState(false);
+  const [showTailored, setShowTailored] = useState(false);
+  const [captureAccount, setCaptureAccount] = useState<CaptureAccount>("personal");
   const [showHelp, setShowHelp] = useState(false);
   const tipsAutoPoppedRef = useRef(false);
   // Pending `requestAnimationFrame` id for the tips auto-pop, cancelled only on
@@ -1213,7 +1247,7 @@ function AppContent({
         clearDraft(id);
         clearStoredComments(id);
       },
-      navigateHome: () => navigate("/"),
+      navigateHome: leaveActiveSession,
       notify: toastBus.handler,
     });
   };
@@ -1260,7 +1294,7 @@ function AppContent({
               clearDraft(id);
               clearStoredComments(id);
             },
-            navigateHome: () => navigate("/"),
+            navigateHome: leaveActiveSession,
             notify,
           },
         );
@@ -1271,7 +1305,7 @@ function AppContent({
     toastBus.handler?.[anyFailed ? "error" : "info"](
       anyFailed ? "Some trashed sessions could not be deleted" : "Emptied trash",
     );
-  }, [trashedWorkspaces, activeSessionId, setSessionStatus, navigate]);
+  }, [trashedWorkspaces, activeSessionId, setSessionStatus, leaveActiveSession]);
 
   // Move-to-trash path (#2489): the safe default. Unlike permanent delete it
   // deliberately KEEPS the per-session acp cache, draft, and stored comments
@@ -1285,7 +1319,7 @@ function AppContent({
     setDeletingSessionIds(null);
     for (const id of ids) setSessionStatus(id, "Stopped");
     if (wasActive) {
-      navigate("/");
+      leaveActiveSession();
     }
 
     // The returned snapshot re-buckets each row into Trash immediately
@@ -1750,6 +1784,11 @@ function AppContent({
         onJumpToAttention: handleJumpToAttention,
         onFocusSidebar: handleFocusSidebar,
         onNewScratch: handleNewScratch,
+        onTailored: () => {
+          if (serverAbout?.read_only || !caps.canUseTerminal) return;
+          if (!showTailored && document.querySelector('[aria-modal="true"]')) return;
+          setShowTailored((open) => !open);
+        },
         onDiff: () => toggleDiff(),
         // Escape closes local UI surfaces only (dialogs, palette,
         // wizard, settings, help, file viewer). Never wire this to
@@ -1773,7 +1812,8 @@ function AppContent({
           }
           setShowSessionWizard(false);
           setShowHelp(false);
-          if (showSettings) handleCloseSettings();
+          // Settings dialogs handle Escape after this capture-phase shortcut.
+          if (showSettings && !document.querySelector('[aria-modal="true"]')) handleCloseSettings();
           setShowAbout(false);
           setSelectedFile(null);
         },
@@ -1801,6 +1841,9 @@ function AppContent({
         handleNewScratch,
         handleJumpToAttention,
         handleFocusSidebar,
+        serverAbout?.read_only,
+        caps.canUseTerminal,
+        showTailored,
       ],
     ),
   );
@@ -1877,6 +1920,181 @@ function AppContent({
     [conversationHits, sessions, activeSessionId, handleSelectSession],
   );
 
+  /** The routed session with its docks: the session route, or a plugin page's split pane. */
+  const renderSessionLayout = () => {
+    // Render a pane body by id. Passed to the docks as a callback (rather than
+    // building an array of {icon, body} objects here) so the per-session JSX is
+    // constructed inside the dock, not threaded through a prop object.
+    const renderPaneBody = (id: string): ReactNode => {
+      const plugin = pluginPaneById.get(id);
+      if (plugin) return <PluginPaneBody entry={plugin.entry} />;
+      if (id === "agents") {
+        return <BackgroundAgentsPanel sessionId={activeSessionId} />;
+      }
+      if (id === "files") {
+        // Remount on session switch so the selected file (and any in-flight
+        // read) resets instead of requesting the old path from the new
+        // session. See #3088 review.
+        return <FilesPane key={activeSessionId ?? "none"} sessionId={activeSessionId} />;
+      }
+      if (id === "diff") {
+        return (
+          <DiffPane
+            session={activeSession ?? null}
+            sessionId={activeSessionId}
+            files={diffFiles}
+            perRepoBases={perRepoBases}
+            warning={warning}
+            filesLoading={diffFilesLoading}
+            selectedFilePath={selectedFilePath}
+            selectedRepoName={selectedRepoName}
+            onSelectFile={handleSelectFile}
+            onDiffRefresh={refreshDiffFiles}
+            commentsEnabled={commentsEnabled}
+            commentsCount={diffComments.count}
+            commentsSendEnabled={commentSendEnabled}
+            commentsSendDisabledReason={commentSendDisabledReason}
+            onOpenSendDialog={() => setSendDialogOpen(true)}
+            onDiscardAllComments={diffComments.clearComments}
+          />
+        );
+      }
+      return (
+        <PairedShellPane
+          session={activeSession ?? null}
+          sessionId={activeSessionId}
+          terminalIndex={isTerminalTabId(id) ? terminalIndexOf(id) : 0}
+        />
+      );
+    };
+    return (
+      <div className="flex-1 flex flex-col min-h-0">
+        <PaneDndController groupsByDock={groupsByDock} descriptorFor={paneDescriptor} onPlaceTab={placeVisibleTab}>
+          <ContentSplit
+            collapsed={rightDockCollapsed}
+            onToggleCollapse={toggleRightDock}
+            left={
+              <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
+                {!caps.cityhall && activeSession && <SessionInfo session={activeSession} />}
+                <div className={selectedFilePath ? "hidden" : "flex-1 flex flex-col min-h-0 overflow-hidden"}>
+                  {activeSession?.view === "structured" ? (
+                    <Suspense fallback={<AcpLoadingFallback />}>
+                      <StructuredView
+                        key={activeSessionId}
+                        sessionId={activeSessionId!}
+                        acpWorkerState={activeSession.acp_worker_state ?? "absent"}
+                        rateLimitAutoResume={activeSession.rate_limit_auto_resume}
+                        tool={activeSession.tool}
+                        acpAgent={activeSession.acp_agent ?? null}
+                        acpProvider={activeSession.acp_provider ?? null}
+                        clearAliases={activeSession.clear_aliases}
+                        archivedAt={activeSession.archived_at ?? null}
+                        snoozedUntil={activeSession.snoozed_until ?? null}
+                        trashedAt={activeSession.trashed_at ?? null}
+                        onRestore={
+                          activeSession.trashed_at
+                            ? () => handleRestoreSession(trashedWorkspaceRestoreIds(workspaces, activeSessionId!))
+                            : undefined
+                        }
+                        onOpenFileRef={handleOpenFileRef}
+                        fileRefSession={activeSession}
+                        onOpenAgentsPane={openAgentsPane}
+                        isSandboxed={activeSession.is_sandboxed}
+                      />
+                    </Suspense>
+                  ) : (
+                    <TerminalSessionStack
+                      active={!showTailored}
+                      activeSessionId={activeSessionId!}
+                      sessions={sessions.filter((session) => session.view !== "structured")}
+                      persistent={webSettings.persistentTerminals}
+                      maxPersistentTerminals={webSettings.maxPersistentTerminals}
+                    />
+                  )}
+                </div>
+
+                {selectedFilePath &&
+                  activeSessionId &&
+                  (selectedFileExternal ? (
+                    <FileContentViewer
+                      sessionId={activeSessionId}
+                      filePath={selectedFilePath}
+                      onBack={handleCloseFile}
+                    />
+                  ) : (
+                    <DiffFileViewer
+                      sessionId={activeSessionId}
+                      filePath={selectedFilePath}
+                      repoName={selectedRepoName}
+                      targetLine={selectedFileLine}
+                      revision={revision}
+                      onClose={handleCloseFile}
+                      commentsEnabled={commentsEnabled}
+                      commentsStore={diffComments}
+                    />
+                  ))}
+              </div>
+            }
+            right={
+              <div {...tourAnchor(TOUR_ANCHORS.rightPanel)} className="flex min-h-0 min-w-0 flex-1">
+                <DockGroups
+                  location="right"
+                  groups={rightGroups}
+                  descriptorFor={paneDescriptor}
+                  renderBody={renderPaneBody}
+                  onActivate={(id) => activateTab("right", id)}
+                  onMove={movePaneAny}
+                  onClose={closePaneAny}
+                  onNewTerminal={serverAbout?.read_only ? undefined : () => addTerminal("right")}
+                />
+              </div>
+            }
+          />
+          {bottomGroups.length > 0 && (
+            <BottomDock
+              groups={bottomGroups}
+              descriptorFor={paneDescriptor}
+              renderBody={renderPaneBody}
+              onActivate={(id) => activateTab("bottom", id)}
+              onMove={movePaneAny}
+              onClose={closePaneAny}
+              onNewTerminal={serverAbout?.read_only ? undefined : () => addTerminal("bottom")}
+            />
+          )}
+        </PaneDndController>
+        {sendDialogOpen && commentsEnabled && activeSessionId && (
+          <SendCommentsDialog
+            sessionId={activeSessionId}
+            delivery={activeSession?.view === "structured" ? "structured" : "terminal"}
+            comments={diffComments.comments}
+            isMultiRepo={commentsIsMultiRepo}
+            sendEnabled={commentSendEnabled}
+            sendDisabledReason={commentSendDisabledReason}
+            introDraft={diffComments.introDraft}
+            outroDraft={diffComments.outroDraft}
+            clearAfterSend={diffComments.clearAfterSend}
+            onChangeIntro={diffComments.setIntroDraft}
+            onChangeOutro={diffComments.setOutroDraft}
+            onChangeClearAfterSend={diffComments.setClearAfterSend}
+            onClose={() => setSendDialogOpen(false)}
+            onSent={() => {
+              if (diffComments.clearAfterSend) {
+                diffComments.clearComments();
+                diffComments.setIntroDraft("");
+                diffComments.setOutroDraft("");
+              }
+              setSendDialogOpen(false);
+              // Close the diff viewer to show the agent transcript or terminal
+              // after dispatching feedback. The file remains in the diff list.
+              setSelectedFile(null);
+              toastBus.handler?.info("Comments sent to agent");
+            }}
+          />
+        )}
+      </div>
+    );
+  };
+
   const renderContent = () => {
     if (pluginPageMatch) {
       return (
@@ -1888,6 +2106,26 @@ function AppContent({
           readOnly={serverAbout?.read_only ?? false}
           cityhall={caps.cityhall}
           theme={resolvedTheme}
+          selectedSessionId={activeSessionId}
+          onSelectSession={selectPluginPageSession}
+          renderSession={() => {
+            if (!sessionsLoaded) return { title: "", view: <MainPaneSkeleton /> };
+            return activeSession ? { title: activeSession.title, view: renderSessionLayout() } : null;
+          }}
+          renderSessionMenu={(request) => (
+            <PluginSessionMenu
+              request={request}
+              workspaces={workspaces}
+              readOnly={serverAbout?.read_only ?? false}
+              handlers={{
+                onDelete: handleDeleteSession,
+                onStop: handleStopSession,
+                onStart: handleStartSession,
+                onSwitchView: handleSwitchView,
+                onCreateSession: handleCreateSession,
+              }}
+            />
+          )}
         />
       );
     }
@@ -1996,176 +2234,7 @@ function AppContent({
       );
     }
 
-    // Render a pane body by id. Passed to the docks as a callback (rather than
-    // building an array of {icon, body} objects here) so the per-session JSX is
-    // constructed inside the dock, not threaded through a prop object.
-    const renderPaneBody = (id: string): ReactNode => {
-      const plugin = pluginPaneById.get(id);
-      if (plugin) return <PluginPaneBody entry={plugin.entry} />;
-      if (id === "agents") {
-        return <BackgroundAgentsPanel sessionId={activeSessionId} />;
-      }
-      if (id === "files") {
-        // Remount on session switch so the selected file (and any in-flight
-        // read) resets instead of requesting the old path from the new
-        // session. See #3088 review.
-        return <FilesPane key={activeSessionId ?? "none"} sessionId={activeSessionId} />;
-      }
-      if (id === "diff") {
-        return (
-          <DiffPane
-            session={activeSession ?? null}
-            sessionId={activeSessionId}
-            files={diffFiles}
-            perRepoBases={perRepoBases}
-            warning={warning}
-            filesLoading={diffFilesLoading}
-            selectedFilePath={selectedFilePath}
-            selectedRepoName={selectedRepoName}
-            onSelectFile={handleSelectFile}
-            onDiffRefresh={refreshDiffFiles}
-            commentsEnabled={commentsEnabled}
-            commentsCount={diffComments.count}
-            commentsSendEnabled={commentSendEnabled}
-            commentsSendDisabledReason={commentSendDisabledReason}
-            onOpenSendDialog={() => setSendDialogOpen(true)}
-            onDiscardAllComments={diffComments.clearComments}
-          />
-        );
-      }
-      return (
-        <PairedShellPane
-          session={activeSession ?? null}
-          sessionId={activeSessionId}
-          terminalIndex={isTerminalTabId(id) ? terminalIndexOf(id) : 0}
-        />
-      );
-    };
-    return (
-      <div className="flex-1 flex flex-col min-h-0">
-        <PaneDndController groupsByDock={groupsByDock} descriptorFor={paneDescriptor} onPlaceTab={placeVisibleTab}>
-          <ContentSplit
-            collapsed={rightDockCollapsed}
-            onToggleCollapse={toggleRightDock}
-            left={
-              <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
-                {!caps.cityhall && <SessionInfo session={activeSession} />}
-                <div className={selectedFilePath ? "hidden" : "flex-1 flex flex-col min-h-0 overflow-hidden"}>
-                  {activeSession?.view === "structured" ? (
-                    <Suspense fallback={<AcpLoadingFallback />}>
-                      <StructuredView
-                        key={activeSessionId}
-                        sessionId={activeSessionId!}
-                        acpWorkerState={activeSession.acp_worker_state ?? "absent"}
-                        rateLimitAutoResume={activeSession.rate_limit_auto_resume}
-                        tool={activeSession.tool}
-                        acpAgent={activeSession.acp_agent ?? null}
-                        acpProvider={activeSession.acp_provider ?? null}
-                        clearAliases={activeSession.clear_aliases}
-                        archivedAt={activeSession.archived_at ?? null}
-                        snoozedUntil={activeSession.snoozed_until ?? null}
-                        trashedAt={activeSession.trashed_at ?? null}
-                        onRestore={
-                          activeSession.trashed_at
-                            ? () => handleRestoreSession(trashedWorkspaceRestoreIds(workspaces, activeSessionId!))
-                            : undefined
-                        }
-                        onOpenFileRef={handleOpenFileRef}
-                        fileRefSession={activeSession}
-                        onOpenAgentsPane={openAgentsPane}
-                        isSandboxed={activeSession.is_sandboxed}
-                      />
-                    </Suspense>
-                  ) : (
-                    <TerminalSessionStack
-                      activeSessionId={activeSessionId!}
-                      sessions={sessions.filter((session) => session.view !== "structured")}
-                      persistent={webSettings.persistentTerminals}
-                      maxPersistentTerminals={webSettings.maxPersistentTerminals}
-                    />
-                  )}
-                </div>
-
-                {selectedFilePath &&
-                  activeSessionId &&
-                  (selectedFileExternal ? (
-                    <FileContentViewer
-                      sessionId={activeSessionId}
-                      filePath={selectedFilePath}
-                      onBack={handleCloseFile}
-                    />
-                  ) : (
-                    <DiffFileViewer
-                      sessionId={activeSessionId}
-                      filePath={selectedFilePath}
-                      repoName={selectedRepoName}
-                      targetLine={selectedFileLine}
-                      revision={revision}
-                      onClose={handleCloseFile}
-                      commentsEnabled={commentsEnabled}
-                      commentsStore={diffComments}
-                    />
-                  ))}
-              </div>
-            }
-            right={
-              <div {...tourAnchor(TOUR_ANCHORS.rightPanel)} className="flex min-h-0 min-w-0 flex-1">
-                <DockGroups
-                  location="right"
-                  groups={rightGroups}
-                  descriptorFor={paneDescriptor}
-                  renderBody={renderPaneBody}
-                  onActivate={(id) => activateTab("right", id)}
-                  onMove={movePaneAny}
-                  onClose={closePaneAny}
-                  onNewTerminal={serverAbout?.read_only ? undefined : () => addTerminal("right")}
-                />
-              </div>
-            }
-          />
-          {bottomGroups.length > 0 && (
-            <BottomDock
-              groups={bottomGroups}
-              descriptorFor={paneDescriptor}
-              renderBody={renderPaneBody}
-              onActivate={(id) => activateTab("bottom", id)}
-              onMove={movePaneAny}
-              onClose={closePaneAny}
-              onNewTerminal={serverAbout?.read_only ? undefined : () => addTerminal("bottom")}
-            />
-          )}
-        </PaneDndController>
-        {sendDialogOpen && commentsEnabled && activeSessionId && (
-          <SendCommentsDialog
-            sessionId={activeSessionId}
-            delivery={activeSession?.view === "structured" ? "structured" : "terminal"}
-            comments={diffComments.comments}
-            isMultiRepo={commentsIsMultiRepo}
-            sendEnabled={commentSendEnabled}
-            sendDisabledReason={commentSendDisabledReason}
-            introDraft={diffComments.introDraft}
-            outroDraft={diffComments.outroDraft}
-            clearAfterSend={diffComments.clearAfterSend}
-            onChangeIntro={diffComments.setIntroDraft}
-            onChangeOutro={diffComments.setOutroDraft}
-            onChangeClearAfterSend={diffComments.setClearAfterSend}
-            onClose={() => setSendDialogOpen(false)}
-            onSent={() => {
-              if (diffComments.clearAfterSend) {
-                diffComments.clearComments();
-                diffComments.setIntroDraft("");
-                diffComments.setOutroDraft("");
-              }
-              setSendDialogOpen(false);
-              // Close the diff viewer to show the agent transcript or terminal
-              // after dispatching feedback. The file remains in the diff list.
-              setSelectedFile(null);
-              toastBus.handler?.info("Comments sent to agent");
-            }}
-          />
-        )}
-      </div>
-    );
+    return renderSessionLayout();
   };
 
   // No root-height pin remains: every mobile terminal surface (agent,
@@ -2250,6 +2319,7 @@ function AppContent({
     !activeSessionId &&
     !fullPageView &&
     !showSessionWizard &&
+    !showTailored &&
     !showHelp &&
     !showAbout &&
     !showPalette &&
@@ -2385,10 +2455,7 @@ function AppContent({
           />
         </CollapsibleRegion>
 
-        <DisconnectBanner />
-        <UpdateBanner />
-        <DashboardUpdateBanner />
-        <PushHealthBanner />
+        <BannerStack />
 
         {/* Below the banners, not directly under the bar: the handle is
             absolutely positioned at the top-right, and hanging it off the bar
@@ -2467,6 +2534,18 @@ function AppContent({
           </div>
         </div>
 
+        {showTailored && (
+          <TailoredSessionsOverlay
+            account={captureAccount}
+            onAccountChange={setCaptureAccount}
+            profile={serverAbout?.profile}
+            bootId={serverAbout?.create_boot_id}
+            readOnly={!!serverAbout?.read_only}
+            onCreated={injectSession}
+            onClose={() => setShowTailored(false)}
+          />
+        )}
+
         {showSessionWizard && (
           <SessionWizard
             onClose={() => {
@@ -2504,7 +2583,16 @@ function AppContent({
           <ScratchOverridesModal profile={serverAbout?.profile ?? ""} onClose={() => setScratchSettingsOpen(false)} />
         )}
 
-        {welcome.showWelcome && <ThemeIntro onDone={welcome.dismissWelcome} />}
+        {welcome.showWelcome && (
+          <ThemeIntro
+            onDone={welcome.dismissWelcome}
+            tourFollows={!isCoarse}
+            onSkipTour={() => {
+              handleTourSeen();
+              welcome.dismissWelcome();
+            }}
+          />
+        )}
 
         {tour.tourElement}
 

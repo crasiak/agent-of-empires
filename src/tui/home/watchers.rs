@@ -58,6 +58,9 @@ pub(in crate::tui) struct DiskWatchEntry {
 impl DiskWatchEntry {
     /// Whether the watched dir was deleted or recreated since install; notify watches don't reattach.
     fn invalidated(&self, current_dir: Option<PathBuf>) -> bool {
+        if self.handle.installation_retry_due() {
+            return true;
+        }
         match current_dir.and_then(|p| std::fs::canonicalize(p).ok()) {
             Some(canonical) => {
                 canonical != self.canonical_dir
@@ -66,6 +69,16 @@ impl DiskWatchEntry {
             }
             None => true,
         }
+    }
+
+    fn installation_failure(&self, profile: Option<String>) -> Option<WatcherInitError> {
+        self.handle
+            .installation_failure()
+            .map(|failure| WatcherInitError {
+                profile,
+                kind: WatcherInitErrorKind::Watch(failure.kind),
+                message: failure.message,
+            })
     }
 }
 
@@ -80,19 +93,21 @@ fn subscribe(
     file_watch: &Arc<FileWatchService>,
     spec: WatchSpec,
     capacity: usize,
-    dirty: &Arc<AtomicBool>,
+    latches: &[Arc<AtomicBool>],
     span: tracing::Span,
 ) -> Result<DiskWatchEntry, crate::file_watch::WatchError> {
     use tracing::Instrument;
     let dir = spec.dir.clone();
-    let (mut rx, handle) = file_watch.subscribe_channel(spec, capacity)?;
-    let dirty = Arc::clone(dirty);
+    let (mut rx, handle) = file_watch.subscribe_channel_deferred(spec, capacity)?;
+    let latches = latches.to_vec();
     let join = crate::task_util::spawn_supervised(
         task_name,
         crate::task_util::PanicPolicy::Log,
         async move {
             while rx.recv().await.is_some() {
-                dirty.store(true, Ordering::Release);
+                for latch in &latches {
+                    latch.store(true, Ordering::Release);
+                }
             }
         }
         .instrument(span),
@@ -166,6 +181,9 @@ pub(in crate::tui) struct DiskWatchState {
 /// Global and per-profile `config.toml` subscriptions and the latch their forwarders set.
 pub(in crate::tui) struct ConfigWatchState {
     pub(in crate::tui) dirty: Arc<AtomicBool>,
+    /// Set with `dirty` but taken even during live-send, which defers the full
+    /// reload: a removed `session.preview_link_prefixes` entry stops at once.
+    pub(in crate::tui) link_policy_dirty: Arc<AtomicBool>,
     pub(in crate::tui) handles: HashMap<ConfigWatchKey, DiskWatchEntry>,
 }
 
@@ -181,15 +199,21 @@ impl DiskWatchState {
             return;
         }
         let (to_remove, to_add, any_invalidated) = diff_profiles(self.handles.iter(), current);
+        let mut new_init_error = self
+            .handles
+            .iter()
+            .filter(|(name, _)| current.contains(name))
+            .find_map(|(name, entry)| entry.installation_failure(Some(name.clone())));
         if to_remove.is_empty()
             && to_add.is_empty()
+            && new_init_error.is_none()
+            && reload_failure.disk_watcher_init_error.is_none()
             && !reload_failure.disk_watcher_init_error_references_missing_profile(current)
         {
             return;
         }
 
         // Applied once per pass so a recurring identical failure doesn't re-arm the dialog.
-        let mut new_init_error = None;
         for name in &to_remove {
             if let Some(entry) = self.handles.remove(name) {
                 drop_disk_watch_entry(entry);
@@ -204,7 +228,14 @@ impl DiskWatchState {
             let span = tracing::debug_span!("tui.disk_watch.forwarder", profile = %name);
             let name_ = "tui.disk_watch.forwarder";
             let spec = watch_spec(&dir, matcher, 75);
-            match subscribe(name_, file_watch, spec, 16, &self.dirty, span) {
+            match subscribe(
+                name_,
+                file_watch,
+                spec,
+                16,
+                std::slice::from_ref(&self.dirty),
+                span,
+            ) {
                 Ok(entry) => {
                     self.handles.insert(name.clone(), entry);
                 }
@@ -223,7 +254,18 @@ impl DiskWatchState {
                 }
             }
         }
-        reload_failure.apply_disk_watcher_init_pass(new_init_error);
+        let stored_error_pending = reload_failure
+            .disk_watcher_init_error
+            .as_ref()
+            .and_then(|error| error.profile.as_ref())
+            .and_then(|profile| self.handles.get(profile))
+            .is_some_and(|entry| entry.handle.installation_pending());
+        if new_init_error.is_some()
+            || reload_failure.disk_watcher_init_error_references_missing_profile(current)
+            || !stored_error_pending
+        {
+            reload_failure.apply_disk_watcher_init_pass(new_init_error);
+        }
         tracing::debug!(
             target: "tui.file_watch",
             added = ?to_add,
@@ -238,6 +280,10 @@ impl DiskWatchState {
 }
 
 impl ConfigWatchState {
+    fn latches(&self) -> [Arc<AtomicBool>; 2] {
+        [Arc::clone(&self.dirty), Arc::clone(&self.link_policy_dirty)]
+    }
+
     /// Keep the global subscription (rebuilt only if the app dir was recreated) and set-diff the
     /// per-profile ones against `current`.
     pub(in crate::tui) fn rewire(
@@ -250,6 +296,14 @@ impl ConfigWatchState {
             return;
         }
 
+        let mut new_init_error = self.handles.iter().find_map(|(key, entry)| {
+            let profile = match key {
+                ConfigWatchKey::Global => None,
+                ConfigWatchKey::Profile(name) if !current.contains(name) => return None,
+                ConfigWatchKey::Profile(name) => Some(name.clone()),
+            };
+            entry.installation_failure(profile)
+        });
         let global_invalidated = self
             .handles
             .get(&ConfigWatchKey::Global)
@@ -272,12 +326,13 @@ impl ConfigWatchState {
         if !global_needs_install
             && to_remove.is_empty()
             && to_add.is_empty()
+            && new_init_error.is_none()
+            && reload_failure.config_watcher_init_error.is_none()
             && !reload_failure.config_watcher_init_error_references_missing_profile(current)
         {
             return;
         }
 
-        let mut new_init_error = None;
         if global_needs_install {
             match crate::session::get_app_dir() {
                 Ok(app_dir) => {
@@ -288,7 +343,7 @@ impl ConfigWatchState {
                     let span = tracing::debug_span!("tui.config_watch.global.forwarder");
                     let name_ = "tui.config_watch.global.forwarder";
                     let spec = watch_spec(&app_dir, matcher, 100);
-                    match subscribe(name_, file_watch, spec, 4, &self.dirty, span) {
+                    match subscribe(name_, file_watch, spec, 4, &self.latches(), span) {
                         Ok(entry) => {
                             self.handles.insert(ConfigWatchKey::Global, entry);
                         }
@@ -335,7 +390,7 @@ impl ConfigWatchState {
             let span = tracing::debug_span!("tui.config_watch.profile.forwarder", profile = %name);
             let name_ = "tui.config_watch.profile.forwarder";
             let spec = watch_spec(&dir, matcher, 100);
-            match subscribe(name_, file_watch, spec, 4, &self.dirty, span) {
+            match subscribe(name_, file_watch, spec, 4, &self.latches(), span) {
                 Ok(entry) => {
                     self.handles.insert(ConfigWatchKey::profile(name), entry);
                 }
@@ -355,7 +410,23 @@ impl ConfigWatchState {
                 }
             }
         }
-        reload_failure.apply_config_watcher_init_pass(new_init_error);
+        let stored_error_pending = reload_failure
+            .config_watcher_init_error
+            .as_ref()
+            .and_then(|error| {
+                let key = error
+                    .profile
+                    .as_deref()
+                    .map_or(ConfigWatchKey::Global, ConfigWatchKey::profile);
+                self.handles.get(&key)
+            })
+            .is_some_and(|entry| entry.handle.installation_pending());
+        if new_init_error.is_some()
+            || reload_failure.config_watcher_init_error_references_missing_profile(current)
+            || !stored_error_pending
+        {
+            reload_failure.apply_config_watcher_init_pass(new_init_error);
+        }
         if global_invalidated || any_invalidated {
             self.dirty.store(true, Ordering::Release);
         }
@@ -532,5 +603,139 @@ pub(in crate::tui) fn log_legacy_duplicates_once(reports: &[crate::session::Dupl
         }
         seen.push(report.id.clone());
         tracing::error!(target: "tui.home", "{}", report.actionable_message());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn recovered_disk_watch_error_clears_while_another_watch_is_pending() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let current = vec!["recovered".to_string(), "pending".to_string()];
+        for name in &current {
+            crate::session::get_profile_dir(name).unwrap();
+        }
+        let (service, backend) = crate::file_watch::test_support::manual_filewatch();
+        let mut watches = DiskWatchState {
+            dirty: Arc::new(AtomicBool::new(false)),
+            handles: HashMap::new(),
+        };
+        let mut failure = ReloadFailureState::default();
+        watches.rewire(&service, &current[..1], &mut failure);
+        let dir = backend.complete_watch(Err(notify::Error::generic("fixture native failure")));
+        watches.rewire(&service, &current[..1], &mut failure);
+        assert!(failure.disk_watcher_init_error.is_some());
+
+        backend.allow_retry(&dir);
+        watches.rewire(&service, &current, &mut failure);
+        assert!(watches.handles["recovered"].handle.installation_pending());
+        assert!(
+            failure.disk_watcher_init_error.is_some(),
+            "retain the error while its own retry is pending"
+        );
+        assert_eq!(backend.complete_watch(Ok(())), dir);
+        assert!(watches.handles["pending"].handle.installation_pending());
+        watches.rewire(&service, &current, &mut failure);
+        assert!(
+            failure.disk_watcher_init_error.is_none(),
+            "an unrelated pending watch must not retain a recovered error"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn recovered_config_watch_error_clears_while_another_watch_is_pending() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        for name in ["recovered", "pending"] {
+            crate::session::get_profile_dir(name).unwrap();
+        }
+        for profile_error in [true, false] {
+            let (service, backend) = crate::file_watch::test_support::manual_filewatch();
+            let mut watches = ConfigWatchState {
+                dirty: Arc::new(AtomicBool::new(false)),
+                link_policy_dirty: Arc::new(AtomicBool::new(false)),
+                handles: HashMap::new(),
+            };
+            let mut failure = ReloadFailureState::default();
+            let mut current = if profile_error {
+                vec!["recovered".to_string()]
+            } else {
+                vec![]
+            };
+            watches.rewire(&service, &current, &mut failure);
+            if profile_error {
+                backend.complete_watch(Ok(()));
+            }
+            let dir = backend.complete_watch(Err(notify::Error::generic("fixture native failure")));
+            watches.rewire(&service, &current, &mut failure);
+            assert!(failure.config_watcher_init_error.is_some());
+
+            backend.allow_retry(&dir);
+            current.push("pending".to_string());
+            watches.rewire(&service, &current, &mut failure);
+            let key = if profile_error {
+                ConfigWatchKey::profile("recovered")
+            } else {
+                ConfigWatchKey::Global
+            };
+            assert!(watches.handles[&key].handle.installation_pending());
+            assert!(
+                failure.config_watcher_init_error.is_some(),
+                "retain the error while its own retry is pending"
+            );
+            assert_eq!(backend.complete_watch(Ok(())), dir);
+            assert!(watches.handles[&ConfigWatchKey::profile("pending")]
+                .handle
+                .installation_pending());
+            watches.rewire(&service, &current, &mut failure);
+            assert!(failure.config_watcher_init_error.is_none(), "an unrelated pending watch must not retain a recovered error (profile_error={profile_error})");
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn deferred_config_watch_failure_retries_and_clears_only_after_success() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        for observe_before_backoff in [true, false] {
+            let (service, backend) = crate::file_watch::test_support::manual_filewatch();
+            let mut watches = ConfigWatchState {
+                dirty: Arc::new(AtomicBool::new(false)),
+                link_policy_dirty: Arc::new(AtomicBool::new(false)),
+                handles: HashMap::new(),
+            };
+            let mut failure = ReloadFailureState::default();
+            watches.rewire(&service, &[], &mut failure);
+            let dir = backend.complete_watch(Err(notify::Error::generic("fixture native failure")));
+            if observe_before_backoff {
+                watches.rewire(&service, &[], &mut failure);
+                assert!(
+                    failure.config_watcher_init_error.is_some(),
+                    "asynchronous failure must reach the warning state"
+                );
+                assert!(
+                    !watches.handles[&ConfigWatchKey::Global]
+                        .handle
+                        .installation_pending(),
+                    "backoff prevents an immediate retry loop"
+                );
+            }
+
+            backend.allow_retry(&dir);
+            watches.rewire(&service, &[], &mut failure);
+            assert!(watches.handles[&ConfigWatchKey::Global]
+                .handle
+                .installation_pending());
+            assert!(
+                failure.config_watcher_init_error.is_some(),
+                "queued retry is not a successful native installation"
+            );
+            backend.complete_watch(Ok(()));
+            watches.rewire(&service, &[], &mut failure);
+            assert!(failure.config_watcher_init_error.is_none());
+            assert_eq!(service.subscriber_count(), 1);
+        }
     }
 }

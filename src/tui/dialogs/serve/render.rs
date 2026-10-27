@@ -7,10 +7,9 @@ use ratatui::widgets::*;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::daemon::error_mentions_tailscale;
 use super::{
-    Flash, PendingConfirm, ServeMode, ServeMouse, ServeView, ServeViewState, TransportStatus,
-    TunnelTransport, FLASH_TTL,
+    funnel_reset_applies, Flash, PendingConfirm, ServeMode, ServeMouse, ServeView, ServeViewState,
+    TransportStatus, TunnelTransport, FLASH_TTL,
 };
 use crate::tui::components::hint_buttons::scan_spaced_hints;
 use crate::tui::components::hover::paint_hover_bg;
@@ -67,7 +66,18 @@ pub(super) fn render(view: &ServeView, frame: &mut Frame, area: Rect, theme: &Th
                 render_help_overlay(frame, area, theme, *mode);
             }
         }
-        ServeViewState::Error(msg) => render_error(frame, area, theme, &mut mouse, msg),
+        ServeViewState::Error {
+            message,
+            mode,
+            transport,
+        } => render_error(
+            frame,
+            area,
+            theme,
+            &mut mouse,
+            message,
+            &error_recovery_keys(message, *mode, *transport),
+        ),
     }
     if let Some(rect) = mouse.hover.current_in(&mouse.rects()) {
         paint_hover_bg(frame, rect, theme.selection);
@@ -88,6 +98,16 @@ fn card_key(selected: bool, select: KeyCode) -> KeyEvent {
 
 fn flash_text(flash: &Flash) -> &str {
     flash.as_ref().map_or("", |(m, _)| m.as_str())
+}
+
+/// The view's name, matching the footer's web entry. A build without the dashboard bundle
+/// serves the API only.
+fn view_title() -> &'static str {
+    if cfg!(feature = "web") {
+        "Web dashboard"
+    } else {
+        "Remote API access"
+    }
 }
 
 /// Clear `area`, draw a titled rounded border, and return the inner area.
@@ -177,7 +197,8 @@ fn render_mode_picker(
     (local_available, tunnel_available): (bool, bool),
     flash: &str,
 ) {
-    let inner = render_page(frame, area, " Remote Access ", theme.accent, theme.accent);
+    let title = format!(" {} ", view_title());
+    let inner = render_page(frame, area, &title, theme.accent, theme.accent);
     // The head is the question plus a spacer row.
     let (question, [local, tunnel], flash_area, keys) = card_page(inner, (72, 13), 2, 7);
     centered_line(
@@ -486,6 +507,7 @@ fn render_active(
             theme,
             mouse,
             "Daemon started but no URL available yet.",
+            &[],
         );
         return;
     };
@@ -514,11 +536,7 @@ fn render_active(
         theme.title
     };
     let mode_label = if is_tunnel { "tunnel" } else { "local" };
-    let title = if cfg!(feature = "web") {
-        format!(" Remote Access ({mode_label})")
-    } else {
-        format!(" Remote API Access ({mode_label})")
-    };
+    let title = format!(" {} ({mode_label})", view_title());
     let mut header_spans = vec![
         Span::styled(title, Style::default().fg(title_color).bold()),
         Span::styled(format!("  open {}", format_elapsed(elapsed)), dimmed),
@@ -687,7 +705,7 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, theme: &Theme, mode: Serve
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border))
-        .title(" Remote Access Help ")
+        .title(format!(" {} help ", view_title()))
         .title_style(heading);
     let inner = block.inner(dialog_area);
     frame.render_widget(block, dialog_area);
@@ -749,23 +767,62 @@ fn split_url_and_token(url: &str) -> (String, Option<&str>) {
     (url.to_string(), None)
 }
 
-fn render_error(frame: &mut Frame, area: Rect, theme: &Theme, mouse: &mut ServeMouse, msg: &str) {
+/// The keys `error_key` handles for this failure, shown before the way out.
+fn error_recovery_keys(
+    message: &str,
+    mode: ServeMode,
+    transport: Option<TunnelTransport>,
+) -> Vec<&'static str> {
+    let mut keys = Vec::new();
+    if mode == ServeMode::Tunnel {
+        keys.push("[P] Pick provider");
+    }
+    if funnel_reset_applies(message, mode, transport) {
+        keys.push("[R] Reset Funnel");
+    }
+    keys
+}
+
+fn render_error(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    mouse: &mut ServeMouse,
+    message: &str,
+    recovery: &[&str],
+) {
     let inner = render_page(frame, area, " Serve failed ", theme.error, theme.error);
-    let [body, keys] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
-        .margin(1)
-        .areas(inner);
+    let rest = ["[S] Force stop", "[Enter] Back to sessions"];
+    const GAP: &str = "    ";
+    let one_line = recovery
+        .iter()
+        .chain(&rest)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(GAP);
+    // Too wide for one row, recovery keys and the way out take a row each.
+    let rows: Vec<String> = if one_line.chars().count() <= inner.width.saturating_sub(2) as usize
+        || recovery.is_empty()
+    {
+        vec![one_line]
+    } else {
+        vec![recovery.join(GAP), rest.join(GAP)]
+    };
+    let [body, keys] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(rows.len() as u16)])
+            .margin(1)
+            .areas(inner);
     frame.render_widget(
-        Paragraph::new(msg)
+        Paragraph::new(message)
             .wrap(Wrap { trim: true })
             .style(Style::default().fg(theme.text)),
         body,
     );
-    let keybinds = if error_mentions_tailscale(msg) {
-        "[S] Force-stop daemon    [R] Reset tailscale funnel    [Enter] Close"
-    } else {
-        "[S] Force-stop daemon    [Enter] Close"
-    };
-    centered_line(frame, keys, keybinds, Style::default().fg(theme.dimmed));
+    let hint = Style::default().fg(theme.dimmed);
+    for (i, row) in rows.iter().enumerate() {
+        let line = Rect::new(keys.x, keys.y + i as u16, keys.width, 1);
+        centered_line(frame, line, row, hint);
+    }
     record_hints(frame, mouse, keys);
 }
 
@@ -861,13 +918,18 @@ mod tests {
             .chars()
             .any(|c| ['\u{2588}', '\u{2580}', '\u{2584}'].contains(&c));
         assert_eq!(qr_drawn, cfg!(feature = "web"), "{screen}");
-        for needle in ["Remote API Access", "No dashboard bundle in this build:"] {
+        for needle in ["Remote API access", "No dashboard bundle in this build:"] {
             assert_eq!(
                 screen.contains(needle),
                 !cfg!(feature = "web"),
                 "{needle:?}\n{screen}"
             );
         }
+        assert_eq!(
+            screen.contains("Web dashboard (local)"),
+            cfg!(feature = "web"),
+            "{screen}"
+        );
     }
 
     fn view(state: ServeViewState) -> ServeView {
@@ -982,5 +1044,95 @@ mod tests {
         let buf = draw(&view);
         let (x, y) = crate::tui::dialogs::test_render::find(&buf, "[Esc] cancel");
         assert_eq!(view.handle_click(x, y).map(|k| k.code), Some(KeyCode::Esc));
+    }
+
+    #[test]
+    fn the_error_footer_offers_recovery_keys_first_and_only_those_error_key_handles() {
+        use ServeMode::{Local, Tunnel};
+        use TunnelTransport::{Cloudflare, Tailscale};
+        let (p, r) = ("[P] Pick provider", "[R] Reset Funnel");
+        let rest = "[S] Force stop    [Enter] Back to sessions";
+        let funnel_msg = "Tailscale Funnel setup failed";
+        // (mode, transport, message, width, footer rows)
+        let cases = [
+            (
+                Tunnel,
+                Some(Tailscale),
+                "timed out",
+                120,
+                vec![format!("{p}    {r}    {rest}")],
+            ),
+            // Too wide at 80 columns: the recovery keys and the way out take a row each.
+            (
+                Tunnel,
+                Some(Tailscale),
+                "timed out",
+                80,
+                vec![format!("{p}    {r}"), rest.to_string()],
+            ),
+            (
+                Tunnel,
+                Some(Tailscale),
+                "timed out",
+                60,
+                vec![format!("{p}    {r}"), rest.to_string()],
+            ),
+            // At 60 columns the three hints no longer fit on one row.
+            (
+                Tunnel,
+                Some(Cloudflare),
+                funnel_msg,
+                60,
+                vec![p.to_string(), rest.to_string()],
+            ),
+            // A known Cloudflare failure gets no Funnel reset, whatever the message says.
+            (
+                Tunnel,
+                Some(Cloudflare),
+                funnel_msg,
+                80,
+                vec![format!("{p}    {rest}")],
+            ),
+            // A reattached daemon's transport is unknown, so the message decides.
+            (
+                Tunnel,
+                None,
+                funnel_msg,
+                120,
+                vec![format!("{p}    {r}    {rest}")],
+            ),
+            (Local, None, funnel_msg, 120, vec![rest.to_string()]),
+        ];
+        for (mode, transport, message, width, want) in cases {
+            let case = format!("{mode:?} {transport:?} {message:?} at {width}");
+            let mut view = view(ServeViewState::Error {
+                message: message.to_string(),
+                mode,
+                transport,
+            });
+            let buf = draw_at(&view, width);
+            let rows: Vec<String> = (0..buf.area.height)
+                .map(|y| {
+                    let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                    row.trim_matches(|c: char| c == '│' || c.is_whitespace())
+                        .to_string()
+                })
+                .filter(|row| row.contains("[S] ") || row.contains("[P] ") || row.contains("[R] "))
+                .collect();
+            assert_eq!(rows, want, "{case}");
+            // Every hint stays whole and clickable, on either row.
+            let mut hints = vec![("[S]", KeyCode::Char('S')), ("[Enter]", KeyCode::Enter)];
+            if mode == Tunnel {
+                hints.push(("[P]", KeyCode::Char('P')));
+            }
+            for (label, code) in hints {
+                let (x, y) = crate::tui::dialogs::test_render::find(&buf, label);
+                assert_eq!(
+                    view.handle_click(x, y).map(|k| k.code),
+                    Some(code),
+                    "{case}: {label}"
+                );
+            }
+        }
     }
 }

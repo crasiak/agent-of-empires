@@ -59,7 +59,11 @@ mod v046_afk_authority;
 mod v047_afk_batches;
 mod v048_afk_usage_guards;
 mod v049_afk_return_review;
-mod v050_work_arc_consent;
+mod v050_tailored_history;
+mod v051_research_requests;
+mod v052_document_conversations;
+mod v053_skill_workshop;
+mod v054_work_arc_consent;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -106,7 +110,7 @@ use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 50;
+const CURRENT_VERSION: u32 = 54;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -278,7 +282,15 @@ const MIGRATIONS: &[Migration] = &[
         "afk_return_review",
         v049_afk_return_review::run,
     ),
-    (50, "work_arc_consent", v050_work_arc_consent::run),
+    (50, "tailored_history", v050_tailored_history::run),
+    (51, "research_requests", v051_research_requests::run),
+    (
+        52,
+        "document_conversations",
+        v052_document_conversations::run,
+    ),
+    (53, "skill_workshop", v053_skill_workshop::run),
+    (54, "work_arc_consent", v054_work_arc_consent::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -359,11 +371,7 @@ fn run_migrations_inner(reporter: Option<progress::Reporter>, announce: bool) ->
     let current = afk_schema::read_cursor(&app)?;
     debug!("Current schema version: {}", current);
 
-    if current > CURRENT_VERSION {
-        anyhow::bail!(
-            "data schema version {current} is newer than this build supports ({CURRENT_VERSION}); refusing to downgrade"
-        );
-    }
+    ensure_supported_version(current, CURRENT_VERSION)?;
     afk_schema::ensure_mainline(&app, current)?;
     if current == CURRENT_VERSION {
         v027_isolate_sandbox_stores::reconcile_pending(announce)?;
@@ -401,6 +409,15 @@ fn run_migrations_inner(reporter: Option<progress::Reporter>, announce: bool) ->
     Ok(())
 }
 
+fn ensure_supported_version(current: u32, supported: u32) -> Result<()> {
+    if current > supported {
+        anyhow::bail!(
+            "data schema version {current} is newer than this build supports ({supported}); refusing to downgrade"
+        );
+    }
+    Ok(())
+}
+
 /// Get the schema version from the selected app directory.
 fn get_current_version() -> u32 {
     crate::session::get_app_dir()
@@ -422,6 +439,38 @@ fn set_version(version: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // CRA-1131: an app dir that is the user's own symlink (for example
+    // ~/.config/agent-of-empires -> ~/.agent-of-empires) must still run
+    // migrations; anchoring refused the symlinked leaf, so every command failed.
+    #[test]
+    #[serial_test::serial]
+    fn migrations_run_when_the_app_dir_is_a_symlink() {
+        let home = crate::session::test_support::isolate_app_dir();
+        let app = crate::session::get_app_dir().unwrap();
+        let real = home.path().join("real-app-dir");
+        fs::remove_dir_all(&app).unwrap();
+        fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &app).unwrap();
+        // Start just below the AFK schema: the runner lock and AFK migrations
+        // still anchor the symlinked app dir, but no historical host-hook
+        // migration (agent homes, /tmp/aoe-hooks) runs from this test.
+        fs::write(
+            real.join(VERSION_FILE),
+            (crate::session::afk::schema::CONTROL - 1).to_string(),
+        )
+        .unwrap();
+        run_migrations().expect("migrations through a symlinked app dir");
+        assert_eq!(get_current_version(), CURRENT_VERSION);
+        assert!(
+            real.join(".migration-runner.lock").exists(),
+            "lock lives in the resolved dir"
+        );
+        assert!(
+            fs::symlink_metadata(&app).unwrap().file_type().is_symlink(),
+            "the user's symlink is kept"
+        );
+    }
 
     #[test]
     #[serial_test::serial]
@@ -529,6 +578,78 @@ mod tests {
         let error = run_migrations().unwrap_err().to_string();
 
         assert!(error.contains("refusing to downgrade"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn document_schema_51_upgrade_preserves_rows_and_fences_old_readers() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let app = crate::session::get_app_dir().unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join(VERSION_FILE), "51").unwrap();
+        let mut instance = crate::session::Instance::new("Document", "/managed/scratch/document");
+        instance.tool = "pi".into();
+        instance.scratch = true;
+        instance.command = "ledger run pi --profile aoe-document-work --".into();
+        instance.extra_args = crate::session::tailored::document::restrictive_args();
+        let sid = "original-native-conversation";
+        let transcript = "/protected/ledger/runtime/sessions/document.jsonl";
+        instance.set_agent_conversation(
+            Some(sid.into()),
+            Some(crate::session::ConversationBinding {
+                session_id: sid.into(),
+                execution: Some(crate::session::ExecutionBinding {
+                    agent: "pi".into(),
+                    stores: vec!["/protected/ledger/runtime/sessions".into()],
+                    configuration: vec![crate::session::ExecutionLocation {
+                        filesystem: "host".into(),
+                        path: "/protected/ledger/runtime".into(),
+                    }],
+                    cwd: instance.project_path.clone().into(),
+                    cwd_filesystem: "host".into(),
+                    filesystem: "host".into(),
+                    exported_default_store: None,
+                }),
+                provenance: crate::session::ConversationProvenance::Observed,
+                transcript_path: Some(transcript.into()),
+            }),
+            Some(transcript.into()),
+        );
+        let storage = crate::session::Storage::new_unwatched("document-test").unwrap();
+        storage
+            .update(|rows, _| {
+                rows.push(instance.clone());
+                Ok(())
+            })
+            .unwrap();
+        let before = fs::read(storage.sessions_path()).unwrap();
+        let row: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        assert_eq!(row[0]["tool"], "pi");
+        assert_eq!(row[0]["scratch"], true);
+        assert_eq!(row[0]["command"], instance.command);
+        assert_eq!(row[0]["extra_args"], instance.extra_args);
+        assert_eq!(row[0]["agent_session_id"], "original-native-conversation");
+        assert!(
+            row[0].get("resume_intent").is_none(),
+            "default continuation uses existing fields"
+        );
+        assert_eq!(row[0]["agent_session_binding"]["session_id"], sid);
+        assert_eq!(
+            row[0]["agent_session_binding"]["execution"]["stores"][0],
+            "/protected/ledger/runtime/sessions"
+        );
+        assert_eq!(row[0]["pi_session_path"], transcript);
+        run_migrations().unwrap();
+        assert_eq!(get_current_version(), CURRENT_VERSION);
+        assert_eq!(fs::read(storage.sessions_path()).unwrap(), before);
+        run_migrations().unwrap();
+        assert_eq!(fs::read(storage.sessions_path()).unwrap(), before);
+        // Mirror the schema-51 startup fence against the newly published cursor.
+        let cursor = afk_schema::read_cursor(&app).unwrap();
+        assert!(ensure_supported_version(cursor, 51)
+            .unwrap_err()
+            .to_string()
+            .contains("refusing to downgrade"));
     }
 
     /// Upgrading preserves the sort order, and a second run leaves state untouched.

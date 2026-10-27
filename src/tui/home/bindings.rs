@@ -33,6 +33,7 @@ pub enum ActionId {
     ProjectContext,
     SearchNext,
     NewSession,
+    TailoredSessions,
     NewFromSelection,
     NewFromProject,
     AttachTerminal,
@@ -63,6 +64,7 @@ pub enum ActionId {
     ToggleUnread,
     ToggleContainer,
     TogglePreviewInfo,
+    ToggleSplitTerminal,
     ToggleHideStopped,
     /// Toggle the system diagnostics strip (CPU and memory pressure plus agent and
     /// process counts). Persisted via `session.show_diagnostics_pane`.
@@ -117,6 +119,12 @@ const fn ctrl(c: char) -> Chord {
         ctrl: true,
         alt: false,
     }
+}
+
+const TAILORED_CHORD: Chord = ctrl('y');
+
+pub(in crate::tui) fn is_tailored_shortcut(key: &KeyEvent) -> bool {
+    chord_matches(&TAILORED_CHORD, key)
 }
 
 const fn f(n: u8) -> Chord {
@@ -624,6 +632,21 @@ pub static BINDINGS: &[Binding] = &[
         palette: None,
     },
     Binding {
+        id: ActionId::TailoredSessions,
+        non_strict: &[TAILORED_CHORD],
+        strict: &[TAILORED_CHORD],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Tailored Sessions",
+        }),
+        palette: Some(PaletteMeta {
+            title: "Tailored Sessions",
+            keywords: &["capture", "idea", "preset"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
         id: ActionId::NewSession,
         non_strict: &[k('n')],
         strict: &[k('N')],
@@ -829,11 +852,30 @@ pub static BINDINGS: &[Binding] = &[
         context: Context::Always,
         help: Some(HelpMeta {
             section: HelpSection::Other,
-            desc: "Serve (LAN / Tunnel)",
+            desc: if cfg!(feature = "web") {
+                "Web dashboard (browser / phone)"
+            } else {
+                "Remote API access (LAN / Tunnel)"
+            },
         }),
         palette: Some(PaletteMeta {
-            title: "Open serve (LAN / Tunnel)",
-            keywords: &["web", "remote", "phone", "tunnel"],
+            title: if cfg!(feature = "web") {
+                "Open web dashboard (browser / phone)"
+            } else {
+                "Open remote API access (LAN / Tunnel)"
+            },
+            keywords: &[
+                "serve",
+                "web",
+                "dashboard",
+                "browser",
+                "remote",
+                "phone",
+                "mobile",
+                "qr",
+                "tunnel",
+                "lan",
+            ],
             group: PaletteGroup::Settings,
         }),
     },
@@ -970,6 +1012,21 @@ pub static BINDINGS: &[Binding] = &[
         palette: Some(PaletteMeta {
             title: "Toggle preview info header",
             keywords: &["hide", "show", "info", "header", "preview"],
+            group: PaletteGroup::Views,
+        }),
+    },
+    Binding {
+        id: ActionId::ToggleSplitTerminal,
+        non_strict: &[k('|')],
+        strict: &[k('|')],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Views,
+            desc: "Split preview: agent above terminal",
+        }),
+        palette: Some(PaletteMeta {
+            title: "Toggle split terminal preview",
+            keywords: &["split", "terminal", "shell", "pane", "preview"],
             group: PaletteGroup::Views,
         }),
     },
@@ -1129,6 +1186,7 @@ pub static BINDINGS: &[Binding] = &[
 pub fn palette_id(id: ActionId) -> &'static str {
     match id {
         ActionId::NewSession => "new-session",
+        ActionId::TailoredSessions => "tailored-sessions",
         ActionId::NewFromSelection => "new-from-selection",
         ActionId::NewFromProject => "new-from-project",
         ActionId::AttachTerminal => "attach-terminal",
@@ -1155,6 +1213,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::ToggleSnooze => "snooze",
         ActionId::ToggleUnread => "toggle-unread",
         ActionId::TogglePreviewInfo => "toggle-preview-info",
+        ActionId::ToggleSplitTerminal => "toggle-split-terminal",
         ActionId::ToggleHideStopped => "toggle-hide-stopped",
         ActionId::ToggleDiagnostics => "toggle-diagnostics",
         ActionId::OpenSystemHealth => "open-system-health",

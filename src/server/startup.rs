@@ -200,25 +200,35 @@ fn check_auth_gate(
     )
 }
 
+/// A daemon started without a passphrase must not inherit a dead predecessor's.
+async fn sync_passphrase_file(path: &std::path::Path, passphrase: Option<&str>) {
+    match passphrase {
+        Some(pp) => write_secret_file(path, pp).await,
+        None => {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+}
+
 /// systemd `Type=notify` readiness. No-op unless `NOTIFY_SOCKET` is set.
 #[cfg(unix)]
-fn notify_ready(status: &str) {
-    use sd_notify::NotifyState;
-    if let Err(e) = sd_notify::notify(&[NotifyState::Ready, NotifyState::Status(status)]) {
+async fn notify_ready(addr: &str) {
+    let message = format!("READY=1\nSTATUS=listening on {addr}\n");
+    if let Err(e) = crate::process::systemd::notify::send(message).await {
         tracing::warn!(target: "serve.lifecycle", "sd_notify READY failed: {e}");
     }
 }
 
 #[cfg(not(unix))]
-fn notify_ready(_status: &str) {}
+async fn notify_ready(_status: &str) {}
 
 #[cfg(unix)]
-fn notify_stopping() {
-    let _ = sd_notify::notify(&[sd_notify::NotifyState::Stopping]);
+async fn notify_stopping() {
+    let _ = crate::process::systemd::notify::send(b"STOPPING=1\n").await;
 }
 
 #[cfg(not(unix))]
-fn notify_stopping() {}
+async fn notify_stopping() {}
 
 pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
     let ServerConfig {
@@ -253,7 +263,7 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
         FileWatchService::noop()
     });
 
-    let instances = load_all_instances(&file_watch)?;
+    let loaded = load_all_instances(&file_watch);
 
     // Only `--auth=token` issues a URL token.
     let auth_token = match auth_mode {
@@ -304,6 +314,10 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
     } else {
         login::LoginManager::new(passphrase)
     });
+    let passkey_manager = Arc::new(match crate::session::get_app_dir() {
+        Ok(app_dir) => super::passkeys::PasskeyManager::with_persistence(&app_dir, passphrase),
+        Err(_) => super::passkeys::PasskeyManager::in_memory(),
+    });
     let rate_limiter = Arc::new(RateLimiter::new());
 
     // Fail closed before anything binds.
@@ -322,10 +336,8 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
 
     // Persist the plaintext passphrase so the TUI can display it on reopen, including after
     // a TUI restart or when the daemon was started from the CLI.
-    if let Some(pp) = passphrase {
-        if let Ok(app_dir) = crate::session::get_app_dir() {
-            write_secret_file(&app_dir.join("serve.passphrase"), pp).await;
-        }
+    if let Ok(app_dir) = crate::session::get_app_dir() {
+        sync_passphrase_file(&app_dir.join("serve.passphrase"), passphrase).await;
     }
 
     // Push notifications.
@@ -383,7 +395,7 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
     let cityhall_mode = std::env::var_os("AOE_CITYHALL_MODE").is_some();
     let status_tx = broadcast::channel(STATUS_CHANNEL_CAPACITY).0;
     // The Tier 1 plugin worker host.
-    let instances = Arc::new(RwLock::new(instances));
+    let instances = Arc::new(RwLock::new(loaded.instances));
     let instance_locks = Arc::new(RwLock::new(std::collections::HashMap::new()));
     let idempotency_locks = Arc::new(RwLock::new(std::collections::HashMap::new()));
     let telemetry_session_creates = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -656,9 +668,11 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
         read_only,
         cityhall_mode,
         instances,
+        runtime_read_cache: std::sync::RwLock::new(loaded.cache),
         session_service,
         token_manager: Arc::clone(&token_manager),
         login_manager: Arc::clone(&login_manager),
+        passkey_manager,
         rate_limiter: Arc::clone(&rate_limiter),
         behind_tunnel: remote || behind_proxy,
         auth_mode,
@@ -678,6 +692,9 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
         summary_semaphore: tokio::sync::Semaphore::new(
             crate::session::conversation_summary::MAX_CONCURRENT,
         ),
+        runtime_read_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            crate::server::runtime_ws::RUNTIME_READ_CONCURRENCY,
+        )),
         recently_restarted: crate::session::recovery::new_recently_restarted(),
         mutation_epoch: Arc::clone(&mutation_epoch),
         recovery_pending: crate::session::recovery::new_recovery_pending(),
@@ -728,6 +745,11 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
 
     // Periodic opt-in `usage_snapshot` loop.
     spawn_serve_snapshot_loop(state.clone());
+
+    // The local runtime read shares this AppState: one producer, two
+    // transports. A daemon that cannot own the namespace simply does not
+    // offer it, and the HTTP route is unaffected either way.
+    let runtime_uds = publish_runtime_uds(&state);
 
     // GC the recently_restarted suppression map periodically; the TTL check on read filters
     // but does not remove entries.
@@ -959,7 +981,7 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!(target: "serve.shutdown", "received ctrl-c, shutting down");
         }
-        notify_stopping();
+        notify_stopping().await;
         let plugin_host = shutdown_state.plugin_host.clone();
         run_shutdown_sequence(
             &shutdown_state.shutdown,
@@ -974,8 +996,8 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
         .await;
     };
 
-    notify_ready(&format!("listening on {addr}"));
-    // Replaces the readiness text, and runs after it so the reconcile task's first push cannot be overwritten.
+    notify_ready(&addr).await;
+    // Publish counts after readiness so its initial status cannot overwrite them.
     super::systemd_reconcile::push_status(&state).await;
 
     axum::serve(
@@ -984,6 +1006,11 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
     )
     .with_graceful_shutdown(shutdown_signal)
     .await?;
+
+    // Await the cancelled local publisher task, including its retraction attempt.
+    if let Some(runtime_uds) = runtime_uds {
+        let _ = runtime_uds.await;
+    }
 
     // Detach (but do NOT kill) every acp ACP worker.
     acp_supervisor.detach_all().await;
@@ -998,6 +1025,34 @@ pub async fn start_server(config: ServerConfig<'_>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Publish only when local admission is available and CityHall is disabled.
+#[cfg(target_os = "linux")]
+fn publish_runtime_uds(state: &Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
+    if state.cityhall_mode {
+        return None;
+    }
+    let state = state.clone();
+    Some(crate::task_util::spawn_supervised(
+        "runtime.uds.serve",
+        crate::task_util::PanicPolicy::Log,
+        async move {
+            match super::runtime_uds::publish_when_available(&state.shutdown).await {
+                Ok(Some(published)) => {
+                    info!(target: "runtime.uds", namespace = super::runtime_ws::NAMESPACE, "local runtime read published");
+                    super::runtime_uds::serve(state, published).await;
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(target: "runtime.uds", code = error.code(), %error,
+                    "local runtime read not published; the HTTP route is unaffected"),
+            }
+        },
+    ))
+}
+#[cfg(not(target_os = "linux"))]
+fn publish_runtime_uds(_: &Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
+    None
 }
 
 /// Best-effort launch of `url` in the user's default browser.
@@ -1090,25 +1145,180 @@ async fn remote_rotation_loop(
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn cityhall_mode_publishes_no_local_runtime_read() {
+        use crate::server::runtime_uds::{LOCK_FILE, POSTBIND_FILE, PREBIND_FILE, SOCKET_FILE};
+
+        let (base, _env) = crate::server::test_support::trusted_namespace()
+            .expect("a private ancestor chain exists on this host");
+        let app_dir = base.path().join(crate::session::APP_DIR_NAME_XDG);
+        std::fs::create_dir_all(&app_dir).expect("app dir");
+        let state = crate::server::test_support::build_test_app_state_cityhall(Vec::new());
+
+        assert!(
+            publish_runtime_uds(&state).is_none(),
+            "the mode must not offer a local read it refuses to serve"
+        );
+        for name in [LOCK_FILE, PREBIND_FILE, POSTBIND_FILE, SOCKET_FILE] {
+            assert!(
+                !app_dir.join(name).exists(),
+                "{name} exists: the mode published what it will not serve"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_successor_waits_for_a_retained_reader_then_serves_the_cached_row() {
+        use crate::cli::definition::Cli;
+        use crate::cli::runtime_read::{attempt, classify, ReadRequestSource, ScopedRead};
+        use crate::server::runtime_uds::{LOCK_FILE, POSTBIND_FILE, PREBIND_FILE, SOCKET_FILE};
+        use clap::Parser;
+        use std::fs::OpenOptions;
+
+        let (_base, _env) = crate::server::test_support::trusted_namespace().unwrap();
+        let mut row = crate::session::Instance::new("successor read", "/repo");
+        row.id = "successor-read".into();
+        row.source_profile = "main".into();
+        row.tool = "claude".into();
+        crate::server::test_support::seed_instances_on_disk_for_test("main", vec![row.clone()]);
+        let state = crate::server::test_support::build_test_app_state(vec![row]);
+        crate::server::test_support::accept_runtime_read_cache_for_test(&state).await;
+        let app = crate::session::get_app_dir().unwrap();
+        let reader = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(app.join(LOCK_FILE))
+            .unwrap();
+        fs2::FileExt::try_lock_shared(&reader).unwrap();
+
+        let cli = Cli::parse_from(["aoe", "session", "show", "successor-read", "--json"]);
+        let source = ReadRequestSource {
+            explicit_url: None,
+            env_url: None,
+            token: None,
+            explicit_profile: Some("main".into()),
+            env_profile: None,
+        };
+
+        let successor = publish_runtime_uds(&state)
+            .expect("a transient client lock must not permanently disable local reads");
+        let owner_probe = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(owner) = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(app.join("publisher.lock"))
+                {
+                    match fs2::FileExt::try_lock_shared(&owner) {
+                        Ok(()) => break owner,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) => panic!("owner probe: {error}"),
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a waiting successor leaves the publisher role available");
+        for name in [PREBIND_FILE, POSTBIND_FILE, SOCKET_FILE] {
+            assert!(
+                !app.join(name).exists(),
+                "publication must wait for reader release: {name}"
+            );
+        }
+        let local = tokio::time::timeout(
+            Duration::from_secs(2),
+            attempt(classify(cli.command.as_ref()).unwrap(), &source),
+        )
+        .await
+        .expect("a retained reader must not stall local discovery");
+        assert!(matches!(local, ScopedRead::NoLocalPublication(None)));
+        drop(owner_probe);
+        drop(reader);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !app.join(POSTBIND_FILE).exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the successor publishes after the retained reader leaves");
+
+        let outcome = match attempt(classify(cli.command.as_ref()).unwrap(), &source).await {
+            ScopedRead::Answered(outcome) => outcome,
+            ScopedRead::NoLocalPublication(_) => {
+                panic!("the waiting successor must serve, not fall back")
+            }
+        };
+        assert_eq!(outcome.exit, 0, "{:?}", outcome.stderr);
+        let value: serde_json::Value = serde_json::from_str(&outcome.stdout.unwrap()).unwrap();
+        assert_eq!(value["id"], "successor-read");
+        assert_eq!(value["title"], "successor read");
+        assert_eq!(value["tool"], "claude");
+        state.shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(5), successor)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn passphraseless_start_retires_a_predecessors_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("serve.passphrase");
+
+        sync_passphrase_file(&path, Some("hunter2")).await;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hunter2");
+
+        sync_passphrase_file(&path, None).await;
+        assert!(!path.exists());
+    }
+
     #[cfg(unix)]
-    #[test]
-    fn notify_ready_sends_ready_and_status_to_notify_socket() {
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::parallel]
+    async fn notifications_send_ready_status_and_stopping_to_notify_socket() {
+        use std::os::unix::net::UnixDatagram;
+        let _exclusion = crate::session::test_support::EnvGuard::read_lock();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notify.sock");
-        let socket = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        std::env::set_var("NOTIFY_SOCKET", &path);
-
-        notify_ready("listening on 127.0.0.1:1");
-
-        let mut buf = [0u8; 256];
-        let n = socket.recv(&mut buf).unwrap();
-        assert_eq!(
-            std::str::from_utf8(&buf[..n]).unwrap(),
-            "READY=1\nSTATUS=listening on 127.0.0.1:1\n"
-        );
+        let destinations = vec![(
+            path.clone().into_os_string(),
+            UnixDatagram::bind(&path).unwrap(),
+        )];
+        #[cfg(target_os = "linux")]
+        let destinations = {
+            use std::os::linux::net::SocketAddrExt;
+            let mut destinations = destinations;
+            let name = format!("aoe-notify-{}", uuid::Uuid::new_v4());
+            let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+            destinations.push((
+                std::ffi::OsString::from(format!("@{name}")),
+                UnixDatagram::bind_addr(&addr).unwrap(),
+            ));
+            destinations
+        };
+        for (destination, socket) in destinations {
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let _env = crate::session::test_support::EnvGuard::set(&[(
+                "NOTIFY_SOCKET",
+                destination.as_os_str(),
+            )]);
+            notify_ready("127.0.0.1:1").await;
+            let mut buf = [0u8; 256];
+            let n = socket.recv(&mut buf).unwrap();
+            assert_eq!(&buf[..n], b"READY=1\nSTATUS=listening on 127.0.0.1:1\n");
+            notify_stopping().await;
+            let n = socket.recv(&mut buf).unwrap();
+            assert_eq!(&buf[..n], b"STOPPING=1\n");
+        }
     }
 
     /// The sweep fires at its interval, not the next recheck, and a window

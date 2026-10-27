@@ -19,7 +19,8 @@ impl HomeView {
     pub fn tick_dialog(&mut self) -> bool {
         use crate::session::config::repo_config::HookProgress;
 
-        let mut changed = self.afk_dialog.as_mut().is_some_and(|dialog| dialog.tick());
+        let mut changed = self.tick_tailored();
+        changed |= self.afk_dialog.as_mut().is_some_and(|dialog| dialog.tick());
         changed |= self
             .afk_overview_dialog
             .as_mut()
@@ -92,7 +93,8 @@ impl HomeView {
     /// mode (to switch the live target), and the preview-only fast path is
     /// exactly what live-send wants, so both gate on this instead.
     pub(in crate::tui) fn has_non_live_send_overlay(&self) -> bool {
-        self.show_help
+        self.tailored_window.is_some()
+            || self.show_help
             || self.search_active
             || self.new_dialog.is_some()
             || self.confirm_dialog.is_some()
@@ -137,7 +139,8 @@ impl HomeView {
     /// True when live-send owns the keyboard, so app-level bindings like
     /// Ctrl+C defer to it instead of quitting.
     pub(in crate::tui) fn is_live_send_capturing(&self) -> bool {
-        self.live_send.is_some() && !self.has_non_live_send_overlay()
+        self.tailored_window.is_some()
+            || (self.live_send.is_some() && !self.has_non_live_send_overlay())
     }
 
     pub(in crate::tui) fn flash_ctrl_c_hint(&mut self) {
@@ -154,10 +157,26 @@ impl HomeView {
         self.status_flash = Some((text.into(), Instant::now() + FLASH_WINDOW));
     }
 
-    /// Open `url` in the browser. aoe captures the mouse, so the host terminal
-    /// can't; over SSH no browser opens, so the URL is copied via OSC 52 instead.
+    /// Open `url` in the browser, or with its scheme's app when
+    /// `session.preview_link_prefixes` allows it. aoe captures the mouse, so the
+    /// host terminal can't; over SSH nothing opens, so the URL is copied via
+    /// OSC 52 instead.
     pub(in crate::tui) fn open_link(&mut self, url: &str) {
-        let status = match crate::tui::open_url::open_url(url) {
+        let opened = if crate::util::is_http_url(url) {
+            crate::tui::open_url::open_url(url)
+        } else if crate::util::is_openable_link(url, &self.preview_link_prefixes) {
+            crate::tui::open_url::open_with_system(url).map(|exit| {
+                if let Some(rx) = exit {
+                    self.opener_exits.push((url.to_string(), rx));
+                }
+            })
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "not an allowed link prefix",
+            ))
+        };
+        let status = match opened {
             Ok(()) => format!("opened {url}"),
             Err(e) => {
                 crate::tui::clipboard::copy_to_clipboard(url);
@@ -165,6 +184,34 @@ impl HomeView {
             }
         };
         self.flash_status(status);
+    }
+
+    /// Report system openers that exited unsuccessfully, which is how a scheme
+    /// with no registered app fails; true when the flash changed.
+    pub fn tick_opener(&mut self) -> bool {
+        let failed = self.take_failed_openers();
+        let Some((copied, flash)) = opener_failure_feedback(&failed) else {
+            return false;
+        };
+        crate::tui::clipboard::copy_to_clipboard(&copied);
+        self.flash_status(flash);
+        true
+    }
+
+    /// Drop every finished opener and return the failures in launch order.
+    pub(super) fn take_failed_openers(&mut self) -> Vec<(String, std::process::ExitStatus)> {
+        let mut failed = Vec::new();
+        self.opener_exits.retain(|(url, rx)| match rx.try_recv() {
+            Ok(status) => {
+                if !status.success() {
+                    failed.push((url.clone(), status));
+                }
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        });
+        failed
     }
 
     pub(in crate::tui) fn status_flash_text(&self) -> Option<&str> {
@@ -196,10 +243,35 @@ impl HomeView {
     /// bursts are limited to no dialog or the paste-routed surfaces.
     pub fn wants_paste_burst(&self) -> bool {
         !self.has_dialog()
+            || self.tailored_window.is_some()
             || self.live_send.is_some()
             || self.rename_dialog.is_some()
             || self.send_message_dialog.is_some()
             || self.new_dialog.is_some()
             || self.settings_view.is_some()
+    }
+}
+
+/// Clipboard text and flash for failed openers; several are grouped so no URL is lost.
+pub(super) fn opener_failure_feedback(
+    failed: &[(String, std::process::ExitStatus)],
+) -> Option<(String, String)> {
+    match failed {
+        [] => None,
+        [(url, status)] => Some((
+            url.clone(),
+            format!("nothing opened it ({status}); copied {url}"),
+        )),
+        _ => {
+            let urls: Vec<&str> = failed.iter().map(|(url, _)| url.as_str()).collect();
+            Some((
+                urls.join("\n"),
+                format!(
+                    "nothing opened {} links; copied {}",
+                    urls.len(),
+                    urls.join(" ")
+                ),
+            ))
+        }
     }
 }

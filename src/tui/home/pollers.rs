@@ -523,12 +523,22 @@ impl HomeView {
         }
     }
 
-    /// True when the badge changed.
-    pub fn apply_serve_probe(&mut self) -> bool {
+    /// Applies before requesting so a queued result frees the in-flight slot
+    /// for a due probe. True when the running state changed.
+    pub fn tick_serve_probe(&mut self, due: bool) -> bool {
+        let changed = self.apply_serve_probe();
+        if due {
+            self.request_serve_probe();
+        }
+        changed
+    }
+
+    /// True when the running state changed.
+    fn apply_serve_probe(&mut self) -> bool {
         match self.serve_probe.try_recv() {
-            Ok(badge) => {
+            Ok(running) => {
                 self.serve_probe_in_flight = false;
-                std::mem::replace(&mut self.serve_badge, badge) != badge
+                std::mem::replace(&mut self.serve_running, running) != running
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {

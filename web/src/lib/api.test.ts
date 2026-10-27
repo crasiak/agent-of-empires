@@ -99,9 +99,17 @@ const requestCases: RequestCase[] = [
   ["GET /api/settings", () => api.fetchSettings()],
   ["GET /api/settings?profile=my%20profile", () => api.fetchSettings("my profile")],
   ["GET /api/settings?layer=machine", () => api.fetchMachineSettings()],
-  ["PATCH /api/settings", () => api.updateSettings({ a: 1 }), { body: { a: 1 }, result: true }],
-  ["PATCH /api/settings?profile=my%20p", () => api.updateSettings({ a: 1 }, "my p"), { body: { a: 1 }, result: true }],
-  ["PATCH /api/settings?layer=machine", () => api.updateMachineSettings({ a: 1 }), { body: { a: 1 }, result: true }],
+  ["PATCH /api/settings", () => api.updateSettings({ a: 1 }), { body: { a: 1 }, result: "committed" }],
+  [
+    "PATCH /api/settings?profile=my%20p",
+    () => api.updateSettings({ a: 1 }, "my p"),
+    { body: { a: 1 }, result: "committed" },
+  ],
+  [
+    "PATCH /api/settings?layer=machine",
+    () => api.updateMachineSettings({ a: 1 }),
+    { body: { a: 1 }, result: "committed" },
+  ],
   ["PATCH /api/theme", () => api.updateTheme({ name: "dracula" }), { body: { name: "dracula" }, result: true }],
   ["GET /api/app-state/web-ui-state", () => api.getWebUiState(), { respond: json({ k: "v" }), result: { k: "v" } }],
   [
@@ -171,6 +179,7 @@ const requestCases: RequestCase[] = [
   ["POST /api/app-state/web-tour-seen", () => api.markWebTourSeen(), { result: true }],
   ["GET /api/git/branches?path=%2Frepo", () => api.fetchBranches("/repo")],
   ["GET /api/git/branches?path=%2Frepo&include_remote=true", () => api.fetchBranches("/repo", true)],
+  ["GET /api/git/worktrees?path=%2Frepo", () => api.fetchWorktrees("/repo")],
   [
     "GET /api/git/is-repo?path=%2Fr",
     () => api.fetchIsGitRepo("/r"),
@@ -251,7 +260,17 @@ const requestCases: RequestCase[] = [
   ["GET /api/devices", () => api.fetchDevices()],
   ["DELETE /api/login/sessions/sess%2F1", () => api.revokeDevice("sess/1"), { result: true }],
   ["POST /api/login/logout-all", () => api.signOutAllDevices(), { result: true }],
-  ["GET /api/login/status", () => api.loginStatus(), { respond: json({ required: true }), result: { required: true } }],
+  [
+    `GET /api/login/status?origin=${encodeURIComponent(window.location.origin)}`,
+    () => api.loginStatus(),
+    { respond: json({ required: true }), result: { required: true } },
+  ],
+  [
+    "GET /api/passkeys",
+    () => api.fetchPasskeys(),
+    { respond: json([{ credential_id: "c1" }]), result: [{ credential_id: "c1" }] },
+  ],
+  ["DELETE /api/passkeys/a%2Fb", () => api.removePasskey("a/b"), { result: true }],
   ["GET /api/login/status", () => api.verifyToken(), { result: true }],
   ["GET /api/agents", () => api.fetchAgents(), { respond: json([{ id: "claude" }]), result: [{ id: "claude" }] }],
   ["GET /api/profiles", () => api.fetchProfiles()],
@@ -378,6 +397,12 @@ const requestCases: RequestCase[] = [
     () => api.trashSession("s1"),
     { body: { kill_pane: true }, respond: json(session), result: session },
   ],
+  // A hostile id stays inside its path segment.
+  [
+    "POST /api/sessions/..%2Fplugins%2Fx%2Funinstall%23/trash",
+    () => api.trashSession("../plugins/x/uninstall#"),
+    { body: { kill_pane: true } },
+  ],
   ["POST /api/sessions/s1/restore", () => api.restoreSession("s1"), { respond: json(session), result: session }],
   ["POST /api/sessions/s1/stop", () => api.stopSession("s1"), { respond: json(session), result: session }],
   [
@@ -436,6 +461,25 @@ const requestCases: RequestCase[] = [
     () => api.dropMcpServer("fs", "claude"),
     { body: { agent: "claude" }, result: true },
   ],
+  [
+    "POST /api/mcp/servers",
+    () => api.createMcpServer("fs", { transport: "stdio", command: "c", args: [], env: [{ name: "T", value: "v" }] }),
+    {
+      body: { name: "fs", transport: "stdio", command: "c", args: [], env: [{ name: "T", value: "v" }] },
+      respond: json({}, 201),
+      result: { ok: true, status: 201 },
+    },
+  ],
+  [
+    "PUT /api/mcp/servers/a%2Fb",
+    () => api.updateMcpServer("a/b", { transport: "http", url: "https://e", headers: [{ name: "Authorization" }] }),
+    {
+      body: { transport: "http", url: "https://e", headers: [{ name: "Authorization" }] },
+      respond: json({}),
+      result: { ok: true, status: 200 },
+    },
+  ],
+  ["DELETE /api/mcp/servers/fs", () => api.deleteMcpServer("fs"), { result: { ok: true, status: 200 } }],
   [
     "GET /api/skills",
     () => api.fetchSkills(),
@@ -586,21 +630,64 @@ describe("request shapes", () => {
 });
 
 describe("settings saves", () => {
-  it.each([
+  const typed = [
     ["updateSettings", () => api.updateSettings({ a: 1 }, "p")],
     ["updateMachineSettings", () => api.updateMachineSettings({ a: 1 })],
     ["updateProfileSettings", () => api.updateProfileSettings("p", { a: 1 })],
-    ["setDefaultProfile", () => api.setDefaultProfile("p")],
-  ])("%s announces a landed save and stays quiet on a rejected one", async (_name, save) => {
+  ] as const;
+
+  it.each(typed)("%s tells a rejected, an uncertain and a committed save apart", async (_name, save) => {
+    const listener = vi.fn();
+    const off = onSettingsChanged(listener);
+    const errorBody = (status: number, error: string) =>
+      ({ ok: false, status, json: async () => ({ error, message: "" }) }) as unknown as Response;
+    try {
+      fetchSpy.mockImplementation(async () => errorBody(400, "update_failed"));
+      expect(await save()).toBe("rejected");
+      expect(listener).not.toHaveBeenCalled();
+
+      for (const failure of [errorBody(500, "load_failed"), errorBody(500, "partially_saved"), empty(502)]) {
+        fetchSpy.mockImplementation(async () => failure);
+        expect(await save()).toBe("uncertain");
+      }
+      fetchSpy.mockImplementation(async () => {
+        throw new Error("offline");
+      });
+      expect(await save()).toBe("uncertain");
+      expect(listener).toHaveBeenCalledTimes(4);
+
+      fetchSpy.mockImplementation(async () => empty());
+      expect(await save()).toBe("committed");
+      expect(listener).toHaveBeenCalledTimes(5);
+    } finally {
+      off();
+    }
+  });
+
+  it("stamps each settings PATCH with an increasing per-tab sequence and treats a stale write as rejected", async () => {
+    const stamp = () => (lastCall().init?.headers as Record<string, string>)["X-Aoe-Write-Stamp"]!;
+    fetchSpy.mockImplementation(async () => empty());
+    await api.updateSettings({ a: 1 });
+    const [tab, first] = stamp().split(/\.(?=\d+$)/);
+    await api.updateProfileSettings("p", { a: 1 });
+    expect(stamp()).toBe(`${tab}.${Number(first) + 1}`);
+
+    fetchSpy.mockImplementation(
+      async () => ({ ok: false, status: 409, json: async () => ({ error: "stale_write" }) }) as unknown as Response,
+    );
+    expect(await api.updateSettings({ a: 1 })).toBe("rejected");
+  });
+
+  it("setDefaultProfile announces a landed save and stays quiet on a rejected one", async () => {
     const listener = vi.fn();
     const off = onSettingsChanged(listener);
     try {
       fetchSpy.mockImplementation(async () => empty(500));
-      expect(await save()).toBe(false);
+      expect(await api.setDefaultProfile("p")).toBe(false);
       expect(listener).not.toHaveBeenCalled();
 
       fetchSpy.mockImplementation(async () => empty());
-      expect(await save()).toBe(true);
+      expect(await api.setDefaultProfile("p")).toBe(true);
       expect(listener).toHaveBeenCalledTimes(1);
     } finally {
       off();
@@ -784,6 +871,25 @@ describe("fetchCityHallBundle", () => {
   });
 });
 
+describe("fetchLogs", () => {
+  it("requests the line count and returns the snapshot", async () => {
+    const snapshot = { status: "available", content: "a\n", lineCount: 1, truncated: false };
+    fetchSpy.mockResolvedValueOnce(json(snapshot));
+    const signal = new AbortController().signal;
+    await expect(api.fetchLogs(200, signal)).resolves.toEqual(snapshot);
+    expect(lastCall().url).toBe("/api/system/logs?lines=200");
+    expect(lastCall().init).toEqual({ signal });
+  });
+
+  it.each([
+    [json({ message: "Server is in read-only mode" }, 403), "Server is in read-only mode"],
+    [new Response("<html>502</html>", { status: 502 }), "Could not load logs (HTTP 502)"],
+  ])("throws the server message or status", async (response, message) => {
+    fetchSpy.mockResolvedValueOnce(response);
+    await expect(api.fetchLogs(500)).rejects.toThrow(message);
+  });
+});
+
 describe("installAcpAgent", () => {
   it("POSTs and returns the parsed body", async () => {
     const body = { session_id: "s-1", package: "p", success: true, exit_code: 0, stdout: "", stderr: "" };
@@ -895,6 +1001,80 @@ it("cloneRepo maps server and network errors", async () => {
   expect(await api.cloneRepo("u")).toEqual({ ok: false, error: "Network error: offline" });
 });
 
+describe("passkey ceremonies", () => {
+  const getOptions = { publicKey: { challenge: "c" } };
+  let get: ReturnType<typeof vi.fn>;
+  let create: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    get = vi.fn();
+    create = vi.fn();
+    const parse = vi.fn((o: unknown) => ({ parsed: o }));
+    vi.stubGlobal("PublicKeyCredential", {
+      parseRequestOptionsFromJSON: parse,
+      parseCreationOptionsFromJSON: parse,
+    });
+    vi.stubGlobal("navigator", { credentials: { get, create } });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("passkeysSupported needs both JSON parsers", () => {
+    expect(api.passkeysSupported()).toBe(true);
+    vi.stubGlobal("PublicKeyCredential", { parseRequestOptionsFromJSON: () => {} });
+    expect(api.passkeysSupported()).toBe(false);
+    vi.stubGlobal("PublicKeyCredential", undefined);
+    expect(api.passkeysSupported()).toBe(false);
+  });
+
+  it("loginWithPasskey runs start, the browser prompt, then finish with the binding secret", async () => {
+    fetchSpy.mockResolvedValueOnce(json({ transaction_id: "t1", options: getOptions }));
+    get.mockResolvedValueOnce({ toJSON: () => ({ id: "cred" }) });
+    fetchSpy.mockResolvedValueOnce(empty());
+
+    expect(await api.loginWithPasskey()).toEqual({ ok: true });
+    expect(get).toHaveBeenCalledWith({ publicKey: { parsed: { challenge: "c" } } });
+    const calls = fetchSpy.mock.calls;
+    expect(calls[0][0]).toBe("/api/login/passkey/start");
+    expect(calls[1][0]).toBe("/api/login/passkey/finish");
+    const sent = bodyOf(calls[1][1]);
+    expect(sent.transaction_id).toBe("t1");
+    expect(sent.credential).toEqual({ id: "cred" });
+    expect(sent.device_binding_secret).toMatch(/.+/);
+  });
+
+  it("a dismissed prompt is cancelled and never reaches finish", async () => {
+    fetchSpy.mockResolvedValueOnce(json({ transaction_id: "t1", options: getOptions }));
+    get.mockRejectedValueOnce(new DOMException("denied", "NotAllowedError"));
+    expect(await api.loginWithPasskey()).toEqual({ ok: false, cancelled: true });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps start, finish and network failures", async () => {
+    fetchSpy.mockResolvedValueOnce(json({ message: "no passkey" }, 404));
+    expect(await api.loginWithPasskey()).toEqual({ ok: false, error: "no passkey" });
+
+    fetchSpy.mockResolvedValueOnce(json({ transaction_id: "t1", options: getOptions }));
+    get.mockResolvedValueOnce({ toJSON: () => ({}) });
+    fetchSpy.mockResolvedValueOnce(empty(401));
+    expect(await api.loginWithPasskey()).toEqual({ ok: false, error: "Passkey sign-in failed (401)" });
+
+    offline();
+    expect(await api.loginWithPasskey()).toEqual({ ok: false, error: "Network error" });
+  });
+
+  it("registerPasskey sends the label and the created credential", async () => {
+    fetchSpy.mockResolvedValueOnce(json({ transaction_id: "t2", options: { publicKey: { challenge: "c" } } }));
+    create.mockResolvedValueOnce({ toJSON: () => ({ id: "new" }) });
+    fetchSpy.mockResolvedValueOnce(json({ ok: true }));
+
+    expect(await api.registerPasskey("Phone")).toEqual({ ok: true });
+    expect(fetchSpy.mock.calls[0][0]).toBe("/api/passkeys/register/start");
+    expect(bodyOf(fetchSpy.mock.calls[0][1])).toEqual({ label: "Phone" });
+    expect(fetchSpy.mock.calls[1][0]).toBe("/api/passkeys/register/finish");
+    expect(bodyOf(fetchSpy.mock.calls[1][1])).toEqual({ transaction_id: "t2", credential: { id: "new" } });
+  });
+});
+
 describe("login", () => {
   it("login sends the passphrase with a device-binding secret", async () => {
     fetchSpy.mockResolvedValueOnce(empty());
@@ -992,6 +1172,17 @@ describe("deleteWorkspace errors", () => {
 it("resolveMcpConflict maps 409 to stale", async () => {
   fetchSpy.mockResolvedValueOnce(empty(409));
   expect(await api.resolveMcpConflict("n", "a", "native", "fp")).toBe("stale");
+});
+
+it("mcp mutations keep the status and message", async () => {
+  fetchSpy.mockResolvedValueOnce(json({ message: "already exists" }, 409));
+  expect(await api.createMcpServer("fs", { transport: "sse", url: "u", headers: [] })).toEqual({
+    ok: false,
+    error: "already exists",
+    status: 409,
+  });
+  offline();
+  expect(await api.deleteMcpServer("fs")).toEqual({ ok: false, error: "Network error: offline" });
 });
 
 it("skill mutations keep the status and message", async () => {
@@ -1131,7 +1322,7 @@ describe("profile settings write guard", () => {
   ])("refuses %s without sending", async (_name, updates) => {
     fetchSpy.mockResolvedValueOnce(json(schema));
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    expect(await api.updateProfileSettings("work", updates)).toBe(false);
+    expect(await api.updateProfileSettings("work", updates)).toBe("rejected");
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(errSpy).toHaveBeenCalled();
     errSpy.mockRestore();
@@ -1139,15 +1330,96 @@ describe("profile settings write guard", () => {
 
   it("PATCHes an allowed section", async () => {
     fetchSpy.mockResolvedValueOnce(json(schema)).mockResolvedValueOnce(empty());
-    expect(await api.updateProfileSettings("work", { description: "mine" })).toBe(true);
+    expect(await api.updateProfileSettings("work", { description: "mine" })).toBe("committed");
     expect(lastCall()).toMatchObject({ url: "/api/profiles/work/settings", init: { method: "PATCH" } });
     expect(bodyOf(lastCall().init)).toEqual({ description: "mine" });
   });
 
   it("defers to the server when the schema is unavailable", async () => {
     fetchSpy.mockResolvedValueOnce(empty(503)).mockResolvedValueOnce(empty());
-    expect(await api.updateProfileSettings("work", { hooks: {} })).toBe(true);
+    expect(await api.updateProfileSettings("work", { hooks: {} })).toBe("committed");
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(lastCall().url).toBe("/api/profiles/work/settings");
   });
+});
+
+it("research operations preserve revision and never retry ambiguous submissions", async () => {
+  offline();
+  const body = { operation: "run" as const, id: "research-id", revision: 7 };
+  expect(await api.researchOperation(body)).toMatchObject({ uncertain: true });
+  expect(fetchSpy).toHaveBeenCalledTimes(1);
+  expect(bodyOf(lastCall().init)).toEqual(body);
+  fetchSpy.mockResolvedValueOnce(json({ message: "Revision changed" }, 409));
+  expect(await api.researchOperation(body)).toMatchObject({ error: "Revision changed", uncertain: false });
+  fetchSpy.mockResolvedValueOnce(json({ draft: { id: "research-id" } }));
+  expect(await api.researchOperation({ operation: "recover-development", id: "research-id", revision: 3 })).toEqual({
+    draft: { id: "research-id" },
+  });
+  fetchSpy.mockResolvedValueOnce(json({ draft: { id: "a/b" } }));
+  await api.getResearch("a/b");
+  expect(lastCall().url).toBe("/api/research/a%2Fb");
+  fetchSpy.mockResolvedValueOnce(json({ output: "Literal output" }));
+  expect(await api.getResearchOutput("a/b")).toEqual({ output: "Literal output" });
+  fetchSpy.mockResolvedValueOnce(json({ ok: true }));
+  expect(await api.replyResearch("a/b", "target; $(literal)")).toEqual({ ok: true });
+  expect(bodyOf(lastCall().init)).toEqual({ answer: "target; $(literal)" });
+});
+
+it("workshop treats HTTP success with an unreadable body as unknown, never as a definite refusal", async () => {
+  for (const body of [
+    {
+      operation: "create" as const,
+      id: "workshop-id",
+      envelope: {
+        account: "work" as const,
+        idea: "literal",
+        repository: "/fixture",
+        slug: "example",
+        source_scope: "public",
+      },
+    },
+    { operation: "refine" as const, id: "workshop-id", revision: 2, message: "literal" },
+    { operation: "commit" as const, id: "workshop-id", revision: 4, review_digest: "exact" },
+  ]) {
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new Error("body truncated after commit")),
+    } as unknown as Response);
+    expect(await api.workshopOperation(body)).toMatchObject({ uncertain: true });
+    expect(bodyOf(lastCall().init)).toEqual(body);
+  }
+  fetchSpy.mockResolvedValueOnce(json({ message: "stale revision" }, 409));
+  expect(await api.workshopOperation({ operation: "review", id: "workshop-id", revision: 2 })).toMatchObject({
+    uncertain: false,
+    error: "stale revision",
+  });
+});
+
+it("workshop post-effect persistence failures keep exact keyed operations uncertain", async () => {
+  for (const operation of [
+    { operation: "commit" as const, id: "same-id", revision: 4, review_digest: "review" },
+    {
+      operation: "publish" as const,
+      id: "same-id",
+      revision: 8,
+      preview_digest: "preview",
+      disclosure_confirmed: true,
+    },
+    {
+      operation: "land" as const,
+      id: "same-id",
+      revision: 12,
+      policy_digest: "policy",
+      current_base_and_rules: true,
+      exclusive_pr_custody: true,
+    },
+    { operation: "deploy" as const, id: "same-id", revision: 20, candidate_digest: "candidate" },
+  ]) {
+    fetchSpy.mockResolvedValueOnce(
+      json({ code: "workshop_operation_uncertain", message: "Effect outcome unknown; reopen same UUID" }, 500),
+    );
+    expect(await api.workshopOperation(operation)).toMatchObject({ uncertain: true });
+    expect(bodyOf(lastCall().init)).toEqual(operation);
+  }
 });

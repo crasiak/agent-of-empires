@@ -236,9 +236,31 @@ pub(crate) fn host_hook_disclosure(
             if event.usage {
                 effects.push("runs aoe __usage-event".to_string());
             }
+            // Any status but `waiting` ends the wait, so its writer also deletes
+            // the question the wait recorded.
             if let Some(status) = event.status {
                 status_events += 1;
-                effects.push(format!("writes \"{status}\""));
+                effects.push(if status == crate::agents::HookStatus::Waiting {
+                    format!("writes \"{status}\"")
+                } else if event.waiting_tools.is_empty() {
+                    format!("writes \"{status}\" and deletes the attention file")
+                } else {
+                    format!(
+                        "writes \"{status}\" (\"waiting\" for {}) and deletes the attention file \
+                         unless it wrote \"waiting\"",
+                        event.waiting_tools.join("/"),
+                    )
+                });
+            }
+            if event.attention {
+                effects.push(format!(
+                    "runs aoe __hook-attention{} (records a short summary in \
+                     {}/$AOE_INSTANCE_ID/attention: an AskUserQuestion question, a notification \
+                     message, or the permission's tool name; no other tool input; its output is \
+                     discarded, so it never makes or alters a permission decision)",
+                    crate::hooks::identity_publisher_arg(event.publisher),
+                    crate::hooks::hook_base_path().display(),
+                ));
             }
             if !effects.is_empty() {
                 // The matcher is part of what the installed entry contains, and
@@ -747,6 +769,7 @@ fn resolved_host_hook_events(
         events.retain(|e| e.identity_field.is_some() || (identity && e.usage));
         for event in &mut events {
             event.status = None;
+            event.attention = false;
         }
     }
     Some(events)
@@ -1395,7 +1418,14 @@ mod tests {
                 |needle: &str| written.iter().filter(|c| c.contains(needle)).count();
             let identity_written = count_written("__extract-session-id");
             let usage_written = count_written("__usage-event");
-            let status_written = written.len() - identity_written - usage_written;
+            let attention_written = count_written("__hook-attention");
+            let status_written =
+                written.len() - identity_written - usage_written - attention_written;
+            assert_eq!(
+                attention_written > 0,
+                tool == "claude",
+                "{tool}: only Claude records attention text"
+            );
             let count_disclosed = |needle: &str| {
                 disclosed
                     .iter()
@@ -1406,9 +1436,15 @@ mod tests {
                 (
                     count_disclosed("__extract-session-id"),
                     count_disclosed("__usage-event"),
+                    count_disclosed("__hook-attention"),
                     count_disclosed("writes \""),
                 ),
-                (identity_written, usage_written, status_written),
+                (
+                    identity_written,
+                    usage_written,
+                    attention_written,
+                    status_written
+                ),
                 "{tool}: the disclosure must account for every installed command"
             );
             assert_eq!(
@@ -1416,6 +1452,33 @@ mod tests {
                 written.len(),
                 "{tool}: one disclosed effect per installed command"
             );
+
+            // The consent names what each command records and removes, not just its name.
+            for effect in &disclosed {
+                if effect.contains("__hook-attention") {
+                    for needle in [
+                        "records a short summary",
+                        "an AskUserQuestion question",
+                        "a notification message",
+                        "the permission's tool name",
+                        "/$AOE_INSTANCE_ID/attention",
+                        "no other tool input",
+                        "never makes or alters a permission decision",
+                    ] {
+                        assert!(
+                            effect.contains(needle),
+                            "{tool}: {effect:?} lacks {needle:?}"
+                        );
+                    }
+                } else if effect.starts_with("writes \"waiting\"") {
+                    assert!(!effect.contains("deletes"), "{tool}: {effect:?}");
+                } else if effect.starts_with("writes \"") {
+                    assert!(
+                        effect.contains("deletes the attention file"),
+                        "{tool}: a non-waiting writer must disclose the delete: {effect:?}"
+                    );
+                }
+            }
         }
     }
 

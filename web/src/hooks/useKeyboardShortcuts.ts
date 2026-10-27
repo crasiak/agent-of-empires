@@ -17,6 +17,8 @@ export function useKeyboardShortcuts(getActions: () => ShortcutActions) {
       );
       const matched = matchShortcut(e, { mac: IS_MAC, isInput, isSessionInput });
       if (!matched) return;
+      // Modal terminal keys belong to the overlay, not the underlying Session.
+      if (document.querySelector("[data-tailored-overlay]") && matched.shortcut.id !== "tailored") return;
 
       if (matched.preventDefault) e.preventDefault();
       if (matched.stopPropagation) e.stopPropagation();
@@ -25,6 +27,8 @@ export function useKeyboardShortcuts(getActions: () => ShortcutActions) {
 
     // Capture phase: xterm.js stops propagation of Cmd/Ctrl combos.
     document.addEventListener("keydown", handler, true);
+    // Lets browser tests wait for the listener instead of racing the effect flush.
+    document.documentElement.dataset.shortcutsReady = "true";
     return () => document.removeEventListener("keydown", handler, true);
   }, [getActions]);
 }

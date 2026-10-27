@@ -137,8 +137,8 @@ fn index_at(store: &Store, budget: &mut usize) -> Result<Index> {
 pub(crate) fn initialize(app: &Path) -> Result<()> {
     let schema = cursor::read_cursor(app)?;
     ensure!(
-        cursor::includes_migration(schema, cursor::USAGE),
-        "review migration requires a supported global schema >= {}",
+        cursor::supports_stage(schema, cursor::USAGE),
+        "review migration requires a supported global schema at or after {}",
         cursor::USAGE
     );
     authority::ready(app)?;
@@ -170,8 +170,8 @@ pub(crate) fn initialize(app: &Path) -> Result<()> {
 
 pub(super) fn read_index(app: &Path, budget: &mut usize) -> Result<(Store, Index)> {
     ensure!(
-        cursor::includes_migration(cursor::read_cursor(app)?, cursor::REVIEW),
-        "review annotations require a supported global schema >= {}; run aoe migrate explicitly",
+        cursor::supports_stage(cursor::read_cursor(app)?, cursor::REVIEW),
+        "review annotations require a supported global schema at or after {}; run aoe migrate explicitly",
         cursor::REVIEW
     );
     let store = namespace(app, false)?;
@@ -315,8 +315,8 @@ pub(in crate::session::afk) fn append_at(
     let store = namespace(app, false)?;
     let _lock = store.lock_existing(TIMEOUT)?;
     ensure!(
-        cursor::includes_migration(cursor::read_cursor(app)?, cursor::REVIEW),
-        "annotation writes require a supported global schema >= {}",
+        cursor::supports_stage(cursor::read_cursor(app)?, cursor::REVIEW),
+        "annotation writes require a supported global schema at or after {}",
         cursor::REVIEW
     );
     let mut index = index_at(&store, &mut budget)?;

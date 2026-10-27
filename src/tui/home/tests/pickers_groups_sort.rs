@@ -257,7 +257,9 @@ fn test_delete_selected_group_updates_groups_field() {
         .group_exists("work"));
 
     // Delete the group (this moves sessions to default)
-    env.view.delete_selected_group().unwrap();
+    env.view
+        .delete_selected_group(&crate::tui::dialogs::GroupDeleteOptions::default())
+        .unwrap();
 
     // Verify the group is removed from group_tree
     assert!(!env
@@ -268,19 +270,14 @@ fn test_delete_selected_group_updates_groups_field() {
         .group_exists("work"));
 
     // Verify self.groups is updated (this is the bug fix)
-    let all_groups = env.view.all_groups();
-    let group_paths: Vec<_> = all_groups.iter().map(|g| g.path.as_str()).collect();
+    let all_groups = env.view.all_group_paths();
+    let group_paths: Vec<_> = all_groups.iter().map(String::as_str).collect();
     assert!(!group_paths.contains(&"work"));
     assert!(!group_paths.contains(&"work/projects"));
 
     // A reload from storage agrees with the in-memory tree.
     env.view.reload().unwrap();
-    let reloaded_groups: Vec<_> = env
-        .view
-        .all_groups()
-        .iter()
-        .map(|g| g.path.clone())
-        .collect();
+    let reloaded_groups = env.view.all_group_paths();
     let tree_groups: Vec<_> = env
         .view
         .group_trees
@@ -291,6 +288,93 @@ fn test_delete_selected_group_updates_groups_field() {
         .map(|g| g.path.clone())
         .collect();
     assert_eq!(reloaded_groups, tree_groups);
+}
+
+#[test]
+#[serial]
+fn deleting_subgroups_moves_members_to_the_selected_destination() {
+    for (group_path, choose_default, target) in [
+        ("work/projects", false, "work"),
+        ("work/projects/topic", false, "work/projects"),
+        ("work/projects", true, ""),
+    ] {
+        let (_temp, _guard) = test_home();
+        let parent = group_path.rsplit_once('/').unwrap().0;
+        let nested_path = format!("{group_path}/nested");
+        let near_prefix = format!("{group_path}-other");
+        let mut archived = instance_in("archived", "/tmp/archived", &nested_path);
+        archived.archive();
+        let mut trashed = instance_in("trashed", "/tmp/trashed", group_path);
+        trashed.trash();
+        let instances = [
+            instance_in("direct", "/tmp/direct", group_path),
+            instance_in("nested", "/tmp/nested", &nested_path),
+            archived,
+            trashed,
+            instance_in("near-prefix", "/tmp/near-prefix", &near_prefix),
+            instance_in("parent", "/tmp/parent", parent),
+        ];
+        seed_profile("alpha", &instances);
+        seed_profile(
+            "beta",
+            &[instance_in("other-profile", "/tmp/other", group_path)],
+        );
+        let mut view = test_view(Some("alpha"));
+        view.group_by = crate::session::config::GroupByMode::Manual;
+        view.flat_items = view.build_flat_items();
+        view.cursor = view
+            .flat_items
+            .iter()
+            .position(|item| matches!(item, Item::Group { path, .. } if path == group_path))
+            .expect("subgroup in alpha");
+        view.update_selected();
+        view.open_delete_for_selected();
+        assert!(view.group_delete_options_dialog.is_some());
+        if choose_default {
+            view.handle_key(key(KeyCode::Tab), None);
+            view.handle_key(key(KeyCode::Char(' ')), None);
+        }
+        view.handle_key(key(KeyCode::Enter), None);
+        assert!(view.group_delete_options_dialog.is_none());
+        view.reload().unwrap();
+
+        let (persisted, groups) = Storage::open_unwatched("alpha")
+            .unwrap()
+            .load_with_groups()
+            .unwrap();
+        assert_eq!(persisted.len(), instances.len());
+        for original in &instances {
+            let moved = original.group_path == group_path || original.group_path == nested_path;
+            let expected = if moved { target } else { &original.group_path };
+            let stored = persisted.iter().find(|i| i.id == original.id).unwrap();
+            assert_eq!(
+                stored.group_path, expected,
+                "{}: {group_path}",
+                stored.title
+            );
+            assert_eq!(stored.archived_at, original.archived_at);
+            assert_eq!(stored.trashed_at, original.trashed_at);
+            assert_eq!(
+                view.get_instance(&original.id).unwrap().group_path,
+                expected
+            );
+        }
+        assert!(groups.iter().any(|g| g.path == parent));
+        assert!(groups.iter().any(|g| g.path == near_prefix));
+        assert!(!groups
+            .iter()
+            .any(|g| g.path == group_path || g.path == nested_path));
+        let tree = view.group_trees.get("alpha").unwrap();
+        assert!(!tree.group_exists(group_path));
+        assert!(!tree.group_exists(&nested_path));
+
+        let (other_instances, other_groups) = Storage::open_unwatched("beta")
+            .unwrap()
+            .load_with_groups()
+            .unwrap();
+        assert_eq!(other_instances[0].group_path, group_path);
+        assert!(other_groups.iter().any(|g| g.path == group_path));
+    }
 }
 
 /// Archiving a manual group archives every session under it, including
@@ -513,6 +597,7 @@ fn test_delete_group_with_sessions_updates_groups_field() {
         crate::file_watch::FileWatchService::noop(),
     )
     .unwrap();
+    view.hide_empty_groups = false;
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
     view.update_selected();
@@ -536,7 +621,7 @@ fn test_delete_group_with_sessions_updates_groups_field() {
     assert_eq!(view.selected_group_profile.as_deref(), Some("test"));
 
     let options = GroupDeleteOptions {
-        delete_sessions: true,
+        action: crate::tui::dialogs::GroupDeleteAction::DeleteSessions,
         delete_worktrees: false,
         delete_branches: false,
         delete_containers: false,
@@ -2224,12 +2309,9 @@ fn test_moving_a_group_does_not_resurrect_a_peer_deleted_one() {
     assert_eq!(paths, ["beta", "alpha"], "and the move still landed");
 }
 
-/// Two profiles can hold the same group path. Restoring the cursor by path alone lands it on
-/// whichever comes first, leaving `selected_group_profile` naming the other profile, so the
-/// next move would reorder a profile the cursor is not on.
 #[test]
 #[serial]
-fn test_cursor_restore_keeps_the_group_profile() {
+fn unified_group_mutations_require_a_profile_filter() {
     let temp = TempDir::new().unwrap();
     let _guard = setup_test_home(&temp);
 
@@ -2246,28 +2328,56 @@ fn test_cursor_restore_keeps_the_group_profile() {
     .unwrap();
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
-    // Deliberately the header that is not first: a path-only restore would land on the
-    // other profile's row, which is what this pins.
-    let target = view
+    view.cursor = view
         .flat_items
         .iter()
-        .position(|i| {
-            matches!(i, Item::Group { path, profile, .. }
-            if path == "work" && profile.as_deref() == Some("first"))
-        })
-        .expect("first profile's work header");
-    assert!(target > 0, "the other profile's header comes earlier");
-    view.cursor = target;
+        .position(|i| matches!(i, Item::Group { path, .. } if path == "work"))
+        .unwrap();
+    view.update_selected();
+    assert!(view.selected_group_profile.is_none());
+    let stored = |profile| {
+        Storage::open_unwatched(profile)
+            .unwrap()
+            .load_with_groups()
+            .unwrap()
+    };
+    let before: Vec<_> = ["first", "second"]
+        .into_iter()
+        .map(|p| serde_json::to_value(stored(p)).unwrap())
+        .collect();
+
+    view.open_rename_for_selected();
+    assert!(view.rename_dialog.is_none());
+    assert!(view.info_dialog.take().is_some());
+    view.open_delete_for_selected();
+    assert!(view.group_delete_options_dialog.is_none());
+    assert!(view.confirm_dialog.is_none());
+    assert!(view.info_dialog.take().is_some());
+    view.prompt_archive_selected_group();
+    assert!(view.confirm_dialog.is_none());
+    assert!(view.info_dialog.take().is_some());
+    view.sort_order = crate::session::config::SortOrder::Custom;
+    view.move_row_at_cursor(1).unwrap();
+    assert!(view.info_dialog.take().is_some());
+    view.delete_selected_group(&crate::tui::dialogs::GroupDeleteOptions::default())
+        .unwrap();
+    assert!(view.info_dialog.take().is_some());
+    view.archive_selected_group().unwrap();
+    assert!(view.info_dialog.take().is_some());
+    for (p, before) in ["first", "second"].into_iter().zip(before) {
+        assert_eq!(serde_json::to_value(stored(p)).unwrap(), before);
+    }
+
+    view.switch_profile(Some("first".to_string())).unwrap();
+    view.cursor = view
+        .flat_items
+        .iter()
+        .position(|i| matches!(i, Item::Group { path, .. } if path == "work"))
+        .unwrap();
     view.update_selected();
     assert_eq!(view.selected_group_profile.as_deref(), Some("first"));
-
-    view.rebuild_flat_items_keeping_cursor();
-
-    assert!(
-        matches!(view.flat_items.get(view.cursor), Some(Item::Group { path, profile, .. })
-            if path == "work" && profile.as_deref() == Some("first")),
-        "cursor stayed on the first profile's header"
-    );
+    view.open_rename_for_selected();
+    assert!(view.rename_dialog.is_some());
 }
 
 /// A single-profile view leaves a header's profile unset. An empty or collapsed neighbour is
@@ -2282,6 +2392,7 @@ fn test_cross_group_move_lands_in_an_empty_neighbour() {
         instance_in("c1", "/tmp/c1", "gamma"),
     ];
     let mut env = seeded_env(test_home(), &instances, true);
+    env.view.hide_empty_groups = false;
     // "beta" sits between them with no sessions of its own.
     Storage::open_unwatched("test")
         .unwrap()
@@ -2725,6 +2836,7 @@ fn test_an_empty_group_moves_in_a_unified_single_profile_view() {
         .unwrap();
 
     let mut view = test_view(None);
+    view.hide_empty_groups = false;
     assert!(view.active_profile.is_none(), "a unified view");
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.apply_sort_order(SortOrder::Custom);
@@ -2958,12 +3070,10 @@ fn test_a_session_moves_up_into_an_implicit_parent_group() {
     );
 }
 
-/// Two profiles can hold groups with the same path. When the expansion write fails and the
-/// selection falls back to the destination's header, that has to be the header in the moving
-/// row's own profile: matching the path alone picks whichever profile is drawn first.
+/// A failed expansion after a committed move leaves selection on the destination header.
 #[test]
 #[serial]
-fn test_a_hidden_destination_falls_back_to_the_header_in_its_own_profile() {
+fn test_a_hidden_destination_falls_back_to_the_filtered_profile_header() {
     use crate::session::config::SortOrder;
 
     let (temp, guard) = test_home();
@@ -2976,22 +3086,13 @@ fn test_a_hidden_destination_falls_back_to_the_header_in_its_own_profile() {
             instance_in("b2", "/tmp/b2", "bbb"),
         ],
     );
-    let mut view = test_view(None);
+    let mut view = test_view(Some("beta"));
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.apply_sort_order(SortOrder::Custom);
     view.flat_items = view.build_flat_items();
     view.update_selected();
 
     let b1 = custom_order_id_of(&view, "b1");
-    let first_bbb = view.flat_items.iter().find_map(|i| match i {
-        Item::Group { path, profile, .. } if path == "bbb" => Some(profile.clone()),
-        _ => None,
-    });
-    assert_eq!(
-        first_bbb,
-        Some(Some("alpha".to_string())),
-        "alpha's bbb is drawn first, so matching the path alone would land there"
-    );
 
     // What a committed move of b1 into beta's bbb leaves behind when the write that would have
     // opened the folded group failed.
@@ -3028,5 +3129,157 @@ fn test_a_hidden_destination_falls_back_to_the_header_in_its_own_profile() {
         view.selected_group_profile.as_deref(),
         Some("beta"),
         "the header the selection lands on is in the moving row's own profile"
+    );
+}
+
+#[test]
+#[serial]
+fn unified_nested_groups_reveal_and_collapse_without_losing_selection() {
+    let (_temp, _guard) = test_home();
+    for profile in ["alpha", "beta"] {
+        seed_profile(
+            profile,
+            &[
+                instance_in(profile, "/tmp/repo", "work/sub"),
+                instance_in("tail", "/tmp/other", "zzz"),
+            ],
+        );
+    }
+    let mut view = test_view(None);
+    view.group_by = crate::session::config::GroupByMode::Manual;
+    view.sort_order = crate::session::config::SortOrder::AZ;
+    view.unified_group_collapsed = std::collections::HashMap::from([
+        ("work".to_string(), true),
+        ("work/sub".to_string(), true),
+    ]);
+    view.rebuild_flat_items();
+    let target = view
+        .instances()
+        .find(|i| i.title == "beta")
+        .unwrap()
+        .id
+        .clone();
+    view.select_and_reveal_session(&target);
+    assert_eq!(view.selected_session.as_deref(), Some(target.as_str()));
+    assert!(matches!(&view.flat_items[view.cursor], Item::Session { id, .. } if id == &target));
+    view.list_inner_area = ratatui::layout::Rect::new(1, 1, 40, 20);
+    let header = view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { path, .. } if path == "work"))
+        .unwrap();
+    view.handle_click(5, 1 + header as u16);
+    assert_eq!(view.selected_group.as_deref(), Some("work"));
+    assert!(
+        matches!(&view.flat_items[view.cursor], Item::Group { path, collapsed: true, .. } if path == "work")
+    );
+    view.select_and_reveal_session(&target);
+    assert_eq!(view.selected_session.as_deref(), Some(target.as_str()));
+    for profile in ["alpha", "beta"] {
+        assert!(Storage::open_unwatched(profile)
+            .unwrap()
+            .load_with_groups()
+            .unwrap()
+            .1
+            .iter()
+            .all(|g| !g.collapsed));
+    }
+}
+
+#[test]
+#[serial]
+fn same_named_groups_across_profiles_share_one_heading_and_picker_entry() {
+    use crate::session::{GroupTree, Item};
+
+    let temp = TempDir::new().unwrap();
+    let _guard = setup_test_home(&temp);
+
+    for (profile, groups) in [("alpha", &["work", "solo"][..]), ("beta", &["work"][..])] {
+        let insts: Vec<Instance> = groups
+            .iter()
+            .map(|g| {
+                let mut i = Instance::new(&format!("{profile}-{g}"), "/tmp/x");
+                i.group_path = g.to_string();
+                i
+            })
+            .collect();
+        let tree = GroupTree::new_with_groups(&insts, &[]);
+        Storage::new_unwatched(profile)
+            .unwrap()
+            .update(|i, g| {
+                *i = insts.clone();
+                *g = tree.get_all_groups();
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let mut view =
+        HomeView::new_for_test(None, tools, crate::file_watch::FileWatchService::noop()).unwrap();
+    view.group_by = crate::session::config::GroupByMode::Manual;
+    view.flat_items = view.build_flat_items();
+
+    assert_eq!(view.all_group_paths(), vec!["solo", "work"]);
+
+    view.open_new_session_dialog();
+    let dialog = view.new_dialog.as_mut().expect("new session dialog");
+    dialog.focus_group();
+    dialog.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    assert_eq!(dialog.group_picker_items(), vec!["solo", "work"]);
+    view.new_dialog = None;
+
+    let beta_work = view
+        .instances()
+        .find(|i| i.title == "beta-work")
+        .unwrap()
+        .id
+        .clone();
+    view.select_and_reveal_session(&beta_work);
+    assert_eq!(
+        view.profile_for_cursor(view.cursor).as_deref(),
+        Some("beta")
+    );
+    view.toggle_favorite_at_cursor().unwrap();
+    for profile in ["alpha", "beta"] {
+        let rows = Storage::open_unwatched(profile)
+            .unwrap()
+            .load_with_groups()
+            .unwrap()
+            .0;
+        assert!(rows.iter().all(|i| i.source_profile == profile));
+        assert_eq!(
+            rows.iter()
+                .find(|i| i.group_path == "work")
+                .unwrap()
+                .is_favorited(),
+            profile == "beta"
+        );
+    }
+
+    let theme = crate::tui::styles::Theme::default();
+    let labels: Vec<String> = view
+        .flat_items
+        .iter()
+        .filter(|item| matches!(item, Item::Group { .. }))
+        .map(|item| {
+            view.render_item_line(item, false, false, &theme, 200, false)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert_eq!(
+        labels.iter().filter(|l| l.contains("work (2)")).count(),
+        1,
+        "{labels:?}"
+    );
+    assert!(labels.iter().all(|l| !l.contains('[')), "{labels:?}");
+    assert!(
+        labels
+            .iter()
+            .any(|l| l.contains("solo (1)") && !l.contains('[')),
+        "{labels:?}"
     );
 }

@@ -28,6 +28,7 @@ mod selection;
 mod send;
 mod status;
 mod store_move;
+mod tailored;
 #[cfg(test)]
 mod tests;
 mod user_action;
@@ -67,8 +68,8 @@ use super::stop_poller::StopPoller;
 use self::creation::SessionMutationGuards;
 use self::icons::{
     ICON_ARCHIVED_SECTION, ICON_COLLAPSED, ICON_DELETING, ICON_DORMANT, ICON_ERROR, ICON_EXPANDED,
-    ICON_FAVORITE, ICON_IDLE, ICON_PINNED, ICON_STOPPED, ICON_TRASH_SECTION, ICON_UNKNOWN,
-    ICON_UNREAD, UNREAD_DWELL,
+    ICON_FAVORITE, ICON_IDLE, ICON_PINNED, ICON_STOPPED, ICON_TERMINAL, ICON_TRASH_SECTION,
+    ICON_UNKNOWN, ICON_UNREAD, UNREAD_DWELL,
 };
 use self::preview::{PreviewCache, PreviewSelection, PreviewTextView, PreviewTimings};
 use self::rows::project_group_key;
@@ -176,6 +177,8 @@ pub struct HomeView {
     pub(super) hyperlink_cells: crate::tui::hyperlink::SharedHyperlinks,
     pub(super) vt_live_enabled: bool,
     pub(super) profile_default_attach_mode: crate::session::AttachMode,
+    /// All-profiles Manual collapse is local to this view, not a profile's group metadata.
+    pub(super) unified_group_collapsed: HashMap<String, bool>,
     pub(super) project_group_collapsed: HashMap<String, bool>,
     pub(super) org_group_collapsed: HashMap<String, bool>,
     pub(super) remote_owner_cache: std::cell::RefCell<HashMap<String, Option<(String, String)>>>,
@@ -184,6 +187,8 @@ pub struct HomeView {
     pub(super) show_help: bool,
     pub(super) help_scroll: u16,
     pub(super) new_dialog: Option<NewSessionDialog>,
+    pub(super) tailored_window: Option<tailored::TailoredWindow>,
+    pub(super) tailored_account: crate::session::tailored::CaptureAccount,
     pub(super) confirm_dialog: Option<ConfirmDialog>,
     pub(super) unified_delete_dialog: Option<UnifiedDeleteDialog>,
     pub(super) group_delete_options_dialog: Option<GroupDeleteOptionsDialog>,
@@ -287,6 +292,7 @@ pub struct HomeView {
 
     pub(super) show_diagnostics: bool,
     pub(super) show_shortcut_bar: bool,
+    pub(super) preview_link_prefixes: Vec<String>,
     pub(super) metrics_poller: super::metrics_poller::MetricsPoller,
     pub(super) pending_metrics_refresh: bool,
     pub(super) metrics: crate::process::metrics::MetricsSnapshot,
@@ -401,8 +407,8 @@ pub struct HomeView {
     pub(super) host_tab_title: bool,
 
     pub(super) active_tui_count: usize,
-    pub(super) serve_badge: Option<Option<&'static str>>,
-    pub(super) serve_probe: crate::tui::worker::Worker<(), Option<Option<&'static str>>>,
+    pub(super) serve_running: bool,
+    pub(super) serve_probe: crate::tui::worker::Worker<(), bool>,
     pub(super) serve_probe_in_flight: bool,
 
     pub(super) settings_view: Option<SettingsView>,
@@ -433,10 +439,18 @@ pub struct HomeView {
 
     pub(super) show_preview_info: bool,
 
+    /// Preview the agent above its paired terminal; `view_mode` picks the focused half.
+    pub(super) split_terminal: bool,
+    /// Captures whichever split half is not focused; the focused half uses
+    /// `preview_capture_worker` like a single preview.
+    pub(super) split_capture_worker: Option<live_send::LiveCaptureWorker>,
+    pub(super) split_capture_target: Option<String>,
+
     pub(super) archived_section_collapsed: bool,
 
     /// Stopped sessions inside groups are left out of the sidebar, for this run only.
     pub(super) hide_stopped_in_groups: bool,
+    pub(super) hide_empty_groups: bool,
     /// While stopped sessions are hidden, each group header's full count, keyed by path and
     /// profile, so the header can show `visible/total`.
     pub(super) group_totals: HashMap<(String, Option<String>), usize>,
@@ -444,6 +458,8 @@ pub struct HomeView {
     pub(super) trashed_section_collapsed: bool,
 
     recovery_rx: Option<std::sync::mpsc::Receiver<RecoveryUpdate>>,
+    /// Non-web links handed to the system opener, until each exit status arrives.
+    pub(super) opener_exits: Vec<(String, std::sync::mpsc::Receiver<std::process::ExitStatus>)>,
     /// Held while recovery workers run so a later daemon cannot duplicate cascades.
     recovery_lock: Option<crate::session::recovery::RecoveryLock>,
 

@@ -644,10 +644,17 @@ impl NativeLaunchInputs {
     fn read_native_file(&self, path: &std::path::Path) -> Result<Option<Vec<u8>>> {
         let native = self.canonical_path(path)?;
         let location = self.physical_location(&native);
-        anyhow::ensure!(
-            location.filesystem == "host",
-            "native configuration requires a local filesystem projection"
-        );
+        if location.filesystem != "host" {
+            let container = self
+                .container
+                .as_ref()
+                .context("native configuration requires a local filesystem projection")?;
+            anyhow::ensure!(
+                !container.runtime.path_exists(&container.id, &native)?,
+                "native configuration exists inside the container and requires a local filesystem projection"
+            );
+            return Ok(None);
+        }
         match std::fs::symlink_metadata(&location.path) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1686,6 +1693,9 @@ impl Instance {
     ) -> Result<&'static AgentDef> {
         anyhow::ensure!(!Self::contains_active_shell_syntax(command),
             "managed conversation requires a direct native command or an explicitly declared wrapper");
+        if crate::session::tailored::document::command_account(tool, command).is_some() {
+            return crate::agents::get_agent("pi").context("Pi agent is unavailable");
+        }
         let words = shell_words::split(command)?;
         let program = words.first().context("empty agent command")?;
         let direct = AGENTS.iter().find(|agent| agent.binary == program);
@@ -1733,6 +1743,14 @@ impl Instance {
             !Self::contains_active_shell_syntax(&extra),
             "managed conversation cannot use active shell syntax in arguments"
         );
+        let document = crate::session::tailored::document::account(self).is_some();
+        if document {
+            anyhow::ensure!(
+                extra == crate::session::tailored::document::restrictive_args(),
+                "Document launch policy changed"
+            );
+            return Ok(None);
+        }
         let mut words = shell_words::split(self.get_tool_command())?;
         words.extend(shell_words::split(&extra)?);
         validate_managed_arguments(agent, &words[1..])
@@ -1752,7 +1770,25 @@ impl Instance {
         )?;
         let agent =
             Self::execution_agent_for(&self.tool, self.get_tool_command(), &config.session)?;
-        let session_dir = self.managed_user_argv(agent)?;
+        let mut session_dir = self.managed_user_argv(agent)?;
+        let document_runtime = crate::session::tailored::document::account(self)
+            .map(|account| {
+                crate::session::tailored::document::native::qualify(
+                    account,
+                    std::path::Path::new(&self.project_path),
+                )
+            })
+            .transpose()?;
+        if let Some(runtime) = &document_runtime {
+            anyhow::ensure!(!self.is_sandboxed(), "Document chat requires a host launch");
+            session_dir = Some(
+                runtime
+                    .sessions
+                    .to_str()
+                    .context("Ledger native store is not UTF-8")?
+                    .to_owned(),
+            );
+        }
         let direct_capture = self.launch_invokes_resolved_agent_directly(agent);
         let target_session_id = target.map(|(sid, _, _)| sid.to_owned());
         let mut resolved_target_session_id = None;
@@ -1936,7 +1972,7 @@ impl Instance {
                 let auth: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&bytes)?;
                 anyhow::ensure!(["tokens", "agent_identity", "personal_access_token"].iter().all(|key| auth.get(*key).is_none_or(serde_json::Value::is_null))
                     && auth.get("auth_mode").is_none_or(|mode| mode.is_null() || mode.as_str() == Some("apikey"))
-                    && auth.get("OPENAI_API_KEY").and_then(serde_json::Value::as_str).is_some_and(|key| !key.trim().is_empty()), "Codex is not authenticated with a local OpenAI API key; set OPENAI_API_KEY in the auth.json of its resolved configuration directory (session.agent_config_dir on a host launch, else CODEX_HOME, else ~/.codex) and re-run");
+                    && auth.get("OPENAI_API_KEY").and_then(serde_json::Value::as_str).is_some_and(|key| !key.trim().is_empty()), "Codex is not authenticated with a local OpenAI API key (a ChatGPT login cannot be attested, because it may select cloud-managed requirements); replace the credentials with an OpenAI API key (OPENAI_API_KEY, no ChatGPT tokens) in the auth.json of its resolved configuration directory (session.agent_config_dir on a host launch, else CODEX_HOME, else ~/.codex) and re-run");
                 configuration.push(auth_file);
                 let sqlite = inputs.canonical_path(&sqlite)?;
                 routing.push(("CODEX_HOME".into(), Some(root.to_str().context("Codex home is not UTF-8")?.into())));
@@ -1975,10 +2011,12 @@ impl Instance {
                 let expand = |raw: &str| absolute(if raw == "~" { home.clone() }
                     else if let Some(relative) = raw.strip_prefix("~/") { home.join(relative) }
                     else { PathBuf::from(raw) });
-                let agent_dir = inputs.canonical_path(&declared.clone().or_else(|| value("PI_CODING_AGENT_DIR").filter(|value| !value.is_empty()).map(|value| expand(&value)))
+                let agent_dir = inputs.canonical_path(&document_runtime.as_ref().map(|r| r.agent_dir.clone()).or_else(|| declared.clone()).or_else(|| value("PI_CODING_AGENT_DIR").filter(|value| !value.is_empty()).map(|value| expand(&value)))
                     .unwrap_or_else(|| home.join(".pi/agent")))?;
-                routing.push(("PI_CODING_AGENT_DIR".into(), Some(agent_dir.to_str().context("Pi agent directory is not UTF-8")?.into())));
-                routing.push(("PI_CODING_AGENT_SESSION_DIR".into(), value("PI_CODING_AGENT_SESSION_DIR")));
+                if document_runtime.is_none() {
+                    routing.push(("PI_CODING_AGENT_DIR".into(), Some(agent_dir.to_str().context("Pi agent directory is not UTF-8")?.into())));
+                    routing.push(("PI_CODING_AGENT_SESSION_DIR".into(), value("PI_CODING_AGENT_SESSION_DIR")));
+                }
                 configuration.push(agent_dir.clone());
                 let mut selected = session_dir.clone().or_else(|| value("PI_CODING_AGENT_SESSION_DIR"));
                 if selected.is_none() {
@@ -2027,6 +2065,9 @@ impl Instance {
                                 "Pi resume requires its exact transcript path; rebind with aoe session set-session-id and --store pointing to the transcript");
                         }
                     }
+                }
+                if document_runtime.is_some() && namespace_arguments.is_empty() {
+                    namespace_arguments.extend(["--session-dir".into(), store.to_str().context("Ledger native store is not UTF-8")?.to_owned()]);
                 }
                 pi_root = Some(if namespace_arguments.is_empty() { root } else { store.clone() });
                 vec![store]
@@ -2350,9 +2391,10 @@ impl Instance {
         } else {
             None
         };
-        let pi_pinnable = agent.name == "pi"
-            && inputs.runs_host_path_binary("pi", &program)
-            && crate::agents::pi_supports_session_id_flag();
+        let pi_pinnable = document_runtime.is_some()
+            || (agent.name == "pi"
+                && inputs.runs_host_path_binary("pi", &program)
+                && crate::agents::pi_supports_session_id_flag());
         let opencode_preassign = agent.name == "opencode"
             && inputs.container.is_none()
             && config.session.opencode_preassign_session_id
@@ -2763,6 +2805,7 @@ impl Instance {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConversationState {
+    pub(crate) tool: String,
     pub(crate) session_id: Option<String>,
     pub(crate) binding: Option<ConversationBinding>,
     pub(crate) intent: ResumeIntent,
@@ -2773,7 +2816,8 @@ pub(crate) struct ConversationState {
 
 impl ConversationState {
     pub(crate) fn matches(&self, instance: &Instance) -> bool {
-        self.session_id == instance.agent_session_id
+        self.tool == instance.tool
+            && self.session_id == instance.agent_session_id
             && self.binding == instance.agent_session_binding
             && self.intent == instance.resume_intent
             && self.resume_binding == instance.resume_binding
@@ -2785,6 +2829,7 @@ impl ConversationState {
 impl Instance {
     pub(crate) fn conversation_state(&self) -> ConversationState {
         ConversationState {
+            tool: self.tool.clone(),
             session_id: self.agent_session_id.clone(),
             binding: self.agent_session_binding.clone(),
             intent: self.resume_intent.clone(),
@@ -2986,6 +3031,123 @@ impl Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn document_persisted_shape_resolves_through_real_lock_describe_and_pinned_help() {
+        use crate::session::tailored::{document, CaptureAccount};
+        use crate::session::test_support::{
+            install_login_shell_path_command, isolate_app_dir_at, EnvGuard,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let _home = isolate_app_dir_at(root.path());
+        let _ambient = EnvGuard::unset(&["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"]);
+        let root = root.path().canonicalize().unwrap();
+        let cwd = root.join("scratch");
+        let store_root = root.join("immutable-fixture");
+        let core = store_root.join("pi-core");
+        let runtime = root.join("ledger-profile/runtime");
+        for path in [&cwd, &core.join("bin"), &runtime.join("sessions")] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let help_calls = root.join("pinned-help-calls");
+        let calls = root.join("ledger-calls");
+        let quote =
+            |path: &std::path::Path| shell_words::quote(path.to_str().unwrap()).into_owned();
+        std::fs::write(core.join("bin/pi"), "pinned CLI fixture").unwrap();
+        std::fs::write(core.join("bin/node"), format!("#!/bin/sh\ntest \"$PI_CODING_AGENT_DIR\" != {} || exit 91\ntest ! -e \"$PI_CODING_AGENT_DIR/auth.json\" || exit 92\nprintf '%s\\n' \"$*\" >> {}\nprintf '%s\\n' '--session-id --session --extension --no-tools --no-mcp --no-context-files --no-skills --no-prompt-templates --no-extensions'\n", quote(&runtime), quote(&help_calls))).unwrap();
+        std::fs::set_permissions(
+            core.join("bin/node"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        std::fs::write(runtime.join("auth.json"), "fixture only, must not read").unwrap();
+        let lock = serde_json::json!({"schema":"ledger-profile-lock-v4", "profile":{"name":document::profile(CaptureAccount::Work)}, "binding":{"harness":"pi", "account_class":"pi-home", "launcher":"direct", "core":{"mode":"immutable", "path":core}, "launch":{"share":["conversation"]}}, "resources":[{"key":"models/document-work"}]});
+        let description = serde_json::json!({"profile":document::profile(CaptureAccount::Work), "harness":"pi", "target":"direct", "cwd":cwd, "ready":true, "state":"current", "prerequisites":[], "executable":core.join("bin/node"), "arguments":[core.join("bin/pi")], "environment":{"PI_CODING_AGENT_DIR":runtime, "PI_CODING_AGENT_SESSION_DIR":"", "NODE_OPTIONS":"", "PI_SKIP_VERSION_CHECK":"1"}});
+        std::fs::write(root.join("lock.json"), serde_json::to_vec(&lock).unwrap()).unwrap();
+        std::fs::write(
+            root.join("describe.json"),
+            serde_json::to_vec(&description).unwrap(),
+        )
+        .unwrap();
+        let _ledger = install_login_shell_path_command(&root, "ledger", &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncase \"$1\" in lock) /bin/cat {} ;; launch) /bin/cat {} ;; *) exit 93 ;; esac\n", quote(&calls), quote(&root.join("lock.json")), quote(&root.join("describe.json"))));
+        let _core_root = document::native::test_support::CoreRootFixture::new(&cwd, &store_root);
+        // All document fields exist in the durable row before native resolution begins.
+        let mut instance = Instance::new("Document", cwd.to_str().unwrap());
+        instance.tool = "pi".into();
+        instance.scratch = true;
+        instance.command = "ledger run pi --profile aoe-document-work --".into();
+        instance.extra_args = document::restrictive_args();
+        let storage = crate::session::Storage::new_unwatched("test").unwrap();
+        storage
+            .update(|rows, _| {
+                rows.push(instance);
+                Ok(())
+            })
+            .unwrap();
+        let mut instance = storage.load().unwrap().remove(0);
+        for _ in 0..2 {
+            let execution = instance
+                .resolve_native_execution(None)
+                .expect("exact document policy must reach real positive qualification");
+            assert_eq!(execution.agent.name, "pi");
+            assert!(execution.pi_pinnable);
+            assert_eq!(execution.program, root.join("bin/ledger"));
+            assert_eq!(execution.binding.stores, vec![runtime.join("sessions")]);
+            assert!(execution
+                .binding
+                .configuration
+                .iter()
+                .any(|location| location.path == runtime));
+            assert_eq!(
+                execution.namespace_arguments,
+                ["--session-dir", runtime.join("sessions").to_str().unwrap()]
+            );
+            assert!(execution
+                .routing
+                .iter()
+                .all(|(key, _)| !key.starts_with("PI_CODING_AGENT_")));
+            let command = execution.host_command();
+            assert!(command.get_envs().all(
+                |(key, _)| key != "PI_CODING_AGENT_DIR" && key != "PI_CODING_AGENT_SESSION_DIR"
+            ));
+        }
+        let ledger_calls = std::fs::read_to_string(&calls).unwrap();
+        assert_eq!(
+            ledger_calls
+                .matches("lock show --profile aoe-document-work --harness pi")
+                .count(),
+            2
+        );
+        assert_eq!(ledger_calls.matches("launch describe --profile aoe-document-work --harness pi --target direct --cwd").count(), 2);
+        let probes = std::fs::read_to_string(&help_calls).unwrap();
+        assert_eq!(
+            probes.lines().count(),
+            2,
+            "every resolution requalifies pinned help"
+        );
+        assert!(probes.lines().all(
+            |line| line.starts_with(core.join("bin/pi").to_str().unwrap())
+                && line.ends_with("--no-session --help")
+        ));
+        for suffix in [
+            "--session victim",
+            "--session-dir /other",
+            "--tools all",
+            "--extension /other",
+            "--model other",
+            "--no-tools",
+        ] {
+            instance.extra_args = format!("{} {suffix}", document::restrictive_args());
+            assert!(instance.resolve_native_execution(None).is_err(), "{suffix}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&calls).unwrap(),
+            ledger_calls,
+            "mutated policy refuses before qualification"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -3233,6 +3395,63 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("local database projection"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn container_native_file_is_absent_only_when_the_container_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let transport = root.join("transport");
+        std::fs::write(&transport, "#!/bin/sh\n[ \"$1\" = exec ] && [ \"$2\" = -w ] && [ \"$3\" = / ] && [ \"$4\" = fixture-id ] || exit 2\nshift 4\nexec \"$@\"\n").unwrap();
+        std::fs::set_permissions(&transport, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let present = root.join("present.toml");
+        std::fs::write(&present, "x").unwrap();
+        let inputs = NativeLaunchInputs {
+            usage_tracking: false,
+            launch_id: "review".into(),
+            environment: std::collections::HashMap::new(),
+            raw_environment: Vec::new(),
+            cwd: root.clone(),
+            profile: "default".into(),
+            container: Some(crate::containers::ContainerExecutionSnapshot {
+                runtime: crate::containers::RuntimeExecutionSnapshot {
+                    kind: crate::session::ContainerRuntimeName::Docker,
+                    program: transport,
+                    cwd: root.clone(),
+                    endpoint: String::new(),
+                    local_mounts: true,
+                    routing: Vec::new(),
+                    global_arguments: Vec::new(),
+                },
+                name: "fixture".into(),
+                id: "fixture-id".into(),
+                mounts: Vec::new(),
+                shadow_mounts: Vec::new(),
+            }),
+            docker_env: None,
+            pane_env: Vec::new(),
+            identity_extension: None,
+        };
+        assert!(inputs
+            .read_native_file(&root.join("absent.toml"))
+            .unwrap()
+            .is_none());
+        let error = inputs.read_native_file(&present).unwrap_err().to_string();
+        assert!(error.contains("exists inside the container"), "{error}");
+        // Root bypasses directory permissions, so only a non-root run can lock the parent.
+        let locked = root.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("hidden.toml"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = std::fs::read(locked.join("hidden.toml")).is_err();
+        if unreadable {
+            assert!(inputs
+                .read_native_file(&locked.join("hidden.toml"))
+                .is_err());
+        }
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]
@@ -3903,7 +4122,8 @@ mod tests {
         assert!(matches!(
             crate::session::fork::terminal_fork_seed(
                 instance.fork_parent_ref().unwrap(),
-                "child-uuid".into()
+                "child-uuid".into(),
+                false
             ),
             Ok(crate::session::ForkSeed::Terminal { .. })
         ));
@@ -3912,7 +4132,8 @@ mod tests {
         assert_eq!(
             crate::session::fork::terminal_fork_seed(
                 instance.fork_parent_ref().unwrap(),
-                "child-uuid".into()
+                "child-uuid".into(),
+                false
             ),
             Err(crate::session::ForkDenied::UnqualifiedParent {
                 preallocated: false,
@@ -3948,7 +4169,8 @@ mod tests {
         assert_eq!(
             crate::session::fork::terminal_fork_seed(
                 instance.fork_parent_ref().unwrap(),
-                "child-uuid".into()
+                "child-uuid".into(),
+                false
             ),
             Err(crate::session::ForkDenied::UnlaunchedFork)
         );

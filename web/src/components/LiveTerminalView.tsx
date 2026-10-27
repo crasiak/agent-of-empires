@@ -22,6 +22,7 @@ import {
   setPendingTerminalFocus,
   type FocusTerminalDetail,
 } from "../lib/terminalFocus";
+import { isSessionActive } from "../lib/session";
 import { StrokeIcon } from "./icons";
 
 interface Props {
@@ -158,18 +159,18 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
 
   const focusSelf = useCallback(() => {
     const ta = inputRef.current;
-    if (ta) {
+    if (active && ta) {
       ta.focus();
       return true;
     }
     return false;
-  }, []);
+  }, [active]);
 
   // A refused ensure re-runs once the session is unarchived or restored.
   const shelved = !!session.archived_at || !!session.trashed_at;
   useEffect(() => {
     if (lastEnsuredSessionIdRef.current === session.id) {
-      if (consumePendingTerminalFocus(focusTarget)) focusSelf();
+      if (active && consumePendingTerminalFocus(focusTarget)) focusSelf();
       return;
     }
     const controller = new AbortController();
@@ -190,25 +191,25 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
       }
     });
     return () => controller.abort();
-  }, [session.id, shelved, focusSelf, surface, focusTarget, terminalIndex]);
+  }, [session.id, shelved, focusSelf, surface, focusTarget, terminalIndex, active]);
 
   // Drain a pending focus latch once the pane is mounted.
   useEffect(() => {
     // eslint-disable-next-line react-you-might-not-need-an-effect/no-event-handler
-    if (ensureState !== "ready") return;
+    if (!active || ensureState !== "ready") return;
     if (consumePendingTerminalFocus(focusTarget)) focusSelf();
-  }, [ensureState, focusSelf, focusTarget]);
+  }, [ensureState, focusSelf, focusTarget, active]);
 
   // Cmd+` shortcut focuses this terminal when it is the dispatched target.
   useEffect(() => {
     const onFocusEvent = (e: Event) => {
       const detail = (e as CustomEvent<FocusTerminalDetail>).detail;
-      if (detail?.target !== focusTarget) return;
+      if (!active || detail?.target !== focusTarget) return;
       if (!focusSelf()) setPendingTerminalFocus(focusTarget);
     };
     window.addEventListener(FOCUS_TERMINAL_EVENT, onFocusEvent);
     return () => window.removeEventListener(FOCUS_TERMINAL_EVENT, onFocusEvent);
-  }, [focusSelf, focusTarget]);
+  }, [focusSelf, focusTarget, active]);
 
   const retryEnsure = useCallback(() => {
     setEnsureState((prev) => {
@@ -234,6 +235,29 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
       return "pending";
     });
   }, [session.id, surface, terminalIndex]);
+
+  // Stop then Start leaves a dead pane's closed socket behind. Latch the Start edge until the 4001 close
+  // arrives (either order), consume it once so a crash-looping agent cannot retrigger it, and drop it
+  // once a healthy replacement socket connects, so a later exit is not auto-restarted. The old socket may still be
+  // open when Start lands, so only a false to true edge clears it.
+  const prevStatusRef = useRef({ id: session.id, status: session.status });
+  const startedRef = useRef(false);
+  const wasConnectedRef = useRef(false);
+  const sessionActive = isSessionActive(session.status);
+  const { paneDead, connected } = live.state;
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = { id: session.id, status: session.status };
+    if (prev.id !== session.id) startedRef.current = false;
+    else if (prev.status === "Stopped" && sessionActive) startedRef.current = true;
+    if (connected && !wasConnectedRef.current) startedRef.current = false;
+    wasConnectedRef.current = connected;
+    // eslint-disable-next-line react-you-might-not-need-an-effect/no-event-handler
+    if (surface === "agent" && paneDead && startedRef.current) {
+      startedRef.current = false;
+      retryEnsure();
+    }
+  }, [session.id, session.status, sessionActive, paneDead, connected, surface, retryEnsure]);
 
   // Focus/blur MUST be first in the handler so iOS keeps the user-gesture
   // chain and actually shows the keyboard.
@@ -285,8 +309,9 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
          is obvious which box keystrokes go to. */}
       <div
         aria-hidden="true"
+        data-pane-frame
         className={`pointer-events-none absolute inset-0 z-10 ring-inset transition-shadow ${
-          coarse ? "" : inputFocused ? "ring-2 ring-terminal-active" : "ring-1 ring-surface-700/40"
+          coarse ? "" : `ring-1 ${inputFocused ? "ring-terminal-active" : "ring-surface-700/40"}`
         }`}
       />
 
@@ -297,6 +322,8 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
         retryCountdown={live.state.retryCountdown}
         maxRetries={live.maxRetries}
         onRetry={live.manualReconnect}
+        paneDead={live.state.paneDead}
+        onRestart={retryEnsure}
       />
 
       {ensureWarning && (
