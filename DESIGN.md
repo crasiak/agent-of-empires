@@ -83,6 +83,7 @@ theme.
 - While live-send is on, frame the live session's list row in a rounded box
   drawn in the theme's text color.
 - Dialogs remain boxed and manage their own internal spacing.
+  Exception: the session search overlay is full-screen and unboxed, like fzf.
 - Prefer geometric text symbols over emoji where column width must be stable.
 
 ## Web dashboard

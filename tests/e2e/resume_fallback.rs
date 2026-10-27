@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
@@ -57,13 +56,7 @@ fn sh_quote(path: &Path) -> String {
 }
 
 fn disable_restart_wake_message(h: &TuiTestHarness) {
-    let config_path = crate::harness::app_dir_in(h.home_path()).join("config.toml");
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .open(&config_path)
-        .unwrap_or_else(|e| panic!("failed to open {}: {}", config_path.display(), e));
-    file.write_all(b"\n[session]\nrestart_wake_message = \"\"\n")
-        .expect("disable restart wake message");
+    h.append_config("[session]\nrestart_wake_message = \"\"");
 }
 
 fn read_log_lines(path: &Path) -> Vec<String> {

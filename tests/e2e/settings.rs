@@ -61,11 +61,7 @@ fn settings_shortcut_bar_hides_the_row_and_survives_restart() {
 fn shortcut_bar_hidden_live_still_relays_input_and_exits() {
     require_tmux!();
     let mut h = TuiTestHarness::new("shortcut_bar_live");
-    let config_path = app_dir_in(h.home_path()).join("config.toml");
-    let mut config = std::fs::read_to_string(&config_path).unwrap();
-    config
-        .push_str("\n[session]\nshow_shortcut_bar = false\ndefault_attach_mode = \"live_send\"\n");
-    std::fs::write(&config_path, config).unwrap();
+    h.append_config("[session]\nshow_shortcut_bar = false\ndefault_attach_mode = \"live_send\"");
     let bin = h.install_path_command("claude");
     std::fs::write(
         bin.join("claude"),

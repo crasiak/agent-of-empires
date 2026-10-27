@@ -356,6 +356,9 @@ impl TuiTestHarness {
 update_check_mode = "off"
 
 {SYSTEMD_OFF}
+[session]
+session_search_supervise = false
+
 [app_state]
 has_seen_welcome = true
 has_responded_to_telemetry = true
@@ -647,11 +650,14 @@ last_seen_version = "{}"
         }
     }
 
-    /// Append TOML to the seeded `config.toml`.
+    /// Merge TOML into the seeded `config.toml`, extending tables the seed already has.
     pub fn append_config(&self, toml: &str) {
         let path = app_dir_in(self.home_path()).join("config.toml");
         let seeded = std::fs::read_to_string(&path).expect("read seeded config");
-        std::fs::write(&path, format!("{seeded}\n{toml}\n")).expect("write config.toml");
+        let mut doc: toml_edit::DocumentMut = seeded.parse().expect("parse seeded config");
+        let extra: toml_edit::DocumentMut = toml.parse().expect("parse appended config");
+        merge_toml(doc.as_table_mut(), extra.as_table());
+        std::fs::write(&path, doc.to_string()).expect("write config.toml");
     }
 
     pub fn sessions_path(&self) -> PathBuf {
@@ -1224,4 +1230,18 @@ fn tui_input_barrier_handles_shell_metacharacters_in_home() {
     harness.wait_for("Quit Agent of Empires");
     harness.send_keys("y");
     harness.wait_for_exit(Duration::from_secs(5));
+}
+
+fn merge_toml(into: &mut toml_edit::Table, from: &toml_edit::Table) {
+    for (key, item) in from.iter() {
+        match (
+            into.get_mut(key).and_then(|i| i.as_table_mut()),
+            item.as_table(),
+        ) {
+            (Some(dst), Some(src)) => merge_toml(dst, src),
+            _ => {
+                into.insert(key, item.clone());
+            }
+        }
+    }
 }

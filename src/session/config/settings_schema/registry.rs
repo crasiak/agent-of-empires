@@ -137,6 +137,13 @@ mod tests {
     }
 
     #[test]
+    fn session_search_supervise_is_global_and_local_only() {
+        let d = descriptor("session", "session_search_supervise").expect("descriptor");
+        assert!(!d.profile_overridable, "the daemon reads one global value");
+        assert!(matches!(d.web_write, WebWritePolicy::LocalOnly { .. }));
+    }
+
+    #[test]
     fn systemd_section_is_a_global_only_schema_section() {
         use super::super::ValidationKind;
         // (field, widget, validation, advanced)

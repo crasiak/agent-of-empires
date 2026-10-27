@@ -26,6 +26,7 @@ mod reorder;
 mod rows;
 mod selection;
 mod send;
+mod session_search;
 mod status;
 mod store_move;
 mod tailored;
@@ -224,6 +225,7 @@ pub struct HomeView {
     pub(super) plugin_manager_dialog: Option<crate::tui::dialogs::PluginManagerDialog>,
     pub(super) skills_manager_dialog: Option<crate::tui::dialogs::SkillsManagerDialog>,
     pub(super) command_palette: Option<CommandPaletteDialog>,
+    pub(super) session_search: Option<super::dialogs::SessionSearchDialog>,
     pub(super) serve_view: Option<ServeView>,
     pub(super) update_confirm_dialog: Option<UpdateConfirmDialog>,
     pub(super) telemetry_consent_dialog: Option<super::dialogs::TelemetryConsentDialog>,

@@ -1343,6 +1343,7 @@ impl App {
                 last_ledger_refresh = Some(std::time::Instant::now());
             }
             refresh_needed |= self.home.apply_ledger_updates();
+            refresh_needed |= self.home.tick_session_search(std::time::Instant::now());
 
             if last_session_feed_refresh.elapsed() >= SESSION_FEED_REFRESH_INTERVAL {
                 self.home.request_session_feed_refresh();
@@ -2704,6 +2705,10 @@ impl App {
             Action::SetTransientStatus(text) => {
                 self.set_status(text);
             }
+            Action::CopyToClipboard { text, status } => {
+                crate::tui::clipboard::copy_to_clipboard(&text);
+                self.set_status(status);
+            }
             Action::SpawnImagePull(image) => {
                 if self.image_pull_rx.is_some() {
                     self.set_status("image pull already in progress");
@@ -3364,6 +3369,11 @@ pub enum Action {
     SetTheme(String),
     SpawnUpdate(crate::update::install::InstallMethod, String),
     SetTransientStatus(String),
+    /// Copy `text`, then show `status`.
+    CopyToClipboard {
+        text: String,
+        status: String,
+    },
     /// Deferred so the loop can show "pulling…" first.
     SpawnImagePull(String),
     /// Deferred so the loop can show "Reviving..." before `ensure_pane_ready`.

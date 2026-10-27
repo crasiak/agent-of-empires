@@ -2028,6 +2028,20 @@ impl HomeView {
             return None;
         }
 
+        if let Some(dialog) = &mut self.session_search {
+            match dialog.handle_key(key) {
+                DialogResult::Continue => return None,
+                DialogResult::Cancel => {
+                    self.session_search = None;
+                    return None;
+                }
+                DialogResult::Submit(outcome) => {
+                    self.session_search = None;
+                    return self.apply_search_outcome(outcome);
+                }
+            }
+        }
+
         // Command palette captures input ahead of the help overlay so its own
         // Esc/Enter/text keys reach it without going through the action match.
         if let Some(palette) = &mut self.command_palette {
@@ -2829,6 +2843,7 @@ impl HomeView {
                     crate::tui::highlight::HighlightFilterDialog::new(&self.highlight_filters),
                 );
             }
+            ActionId::SessionSearch => self.open_session_search(),
             ActionId::ProjectContext => self.open_project_context_menu((2, 2)),
             ActionId::SearchStart => {
                 self.search_active = true;
@@ -6131,6 +6146,10 @@ impl HomeView {
             dialog.handle_paste(text);
             return;
         }
+        if let Some(ref mut dialog) = self.session_search {
+            dialog.handle_paste(text);
+            return;
+        }
         if let Some(ref mut dialog) = self.rename_dialog {
             dialog.handle_paste(text);
             return;
@@ -6464,7 +6483,7 @@ impl HomeView {
     /// live-send's resize loop forces manual sizing, which would leave the next attach
     /// from a full-size terminal cramped at the preview dimensions. Re-setting
     /// `window-size latest` is best-effort, so a stuck pane never blocks the exit.
-    fn exit_live_send_and_restore_sizing(&mut self, state: &live_send::LiveSendState) {
+    pub(super) fn exit_live_send_and_restore_sizing(&mut self, state: &live_send::LiveSendState) {
         let session = crate::tmux::Session::from_name(&state.tmux_name);
         session.reset_size_to_latest_client();
         self.teardown_live_send();
