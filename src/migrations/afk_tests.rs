@@ -213,10 +213,15 @@ fn work_arc_upgrade_from_review_preserves_authority_and_registry() {
     afk::review::annotations::initialize(&app).unwrap();
     let mut after = tree(&app);
     after.remove(&app.join(VERSION_FILE));
-    // Stores created by the tailored-session migrations 51 and 53.
-    after.retain(|path, _| {
-        !path.starts_with(app.join("research.json")) && !path.starts_with(app.join("workshop.json"))
-    });
+    // Stores and locks created by the tailored-session migrations 51 and 53.
+    for name in [
+        "research.json",
+        ".research.json.lock",
+        "workshop.json",
+        ".workshop.json.lock",
+    ] {
+        after.remove(&app.join(name));
+    }
     assert_eq!(
         after, before,
         "consent upgrade leaves AFK and legacy rows intact"
