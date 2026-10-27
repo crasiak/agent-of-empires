@@ -18,6 +18,7 @@ aoe
 | `\|` | Split the preview: agent above its paired terminal |
 | `D` | Open the [diff view](guides/diff-view.md) |
 | `/` | Search sessions |
+| `Ctrl+F` | Search past Claude and Pi sessions with `session-search`; Enter jumps or resumes |
 | `F4` | Filter by session and project highlights |
 | `F6` | Project context menu (project header selected) |
 | `?` | Full keymap |
