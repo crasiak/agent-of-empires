@@ -102,7 +102,8 @@ impl Instance {
         if !self.is_sandboxed() {
             if backend != SessionCaptureBackend::Pi
                 || launch_command::environment_defines_path(&self.resolved_host_environment())
-                || !crate::agents::pi_supports_extension_flag()
+                || (crate::session::tailored::document::account(self).is_none()
+                    && !crate::agents::pi_supports_extension_flag())
             {
                 return None;
             }

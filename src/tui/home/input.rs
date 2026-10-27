@@ -1153,6 +1153,9 @@ impl HomeView {
         let Some(group_path) = self.selected_group.clone() else {
             return;
         };
+        if self.require_manual_group_profile() {
+            return;
+        }
         let count = self.active_sessions_in_selected_group().len();
         if count == 0 {
             return;
@@ -1194,6 +1197,10 @@ impl HomeView {
     }
 
     pub fn handle_dialog_click(&mut self, col: u16, row: u16) -> bool {
+        if self.tailored_window.is_some() {
+            self.handle_tailored_click(col, row);
+            return true;
+        }
         if self.afk_dialog.is_some()
             || self.afk_overview_dialog.is_some()
             || self.afk_batch_dialog.is_some()
@@ -1758,6 +1765,14 @@ impl HomeView {
         // coords, so once the user does anything else the cells underneath can change and
         // it would point at unrelated content. Covers the live-send branch below too.
         self.clear_preview_selection();
+        if self.tailored_window.is_some() {
+            self.handle_tailored_key(key);
+            return None;
+        }
+        if super::bindings::is_tailored_shortcut(&key) && !self.has_non_live_send_overlay() {
+            self.open_tailored();
+            return None;
+        }
 
         // Live-send capture normally wins over every other key handler: the home view is
         // a thin relay to the target pane, so dialog hotkeys, search and navigation
@@ -2848,6 +2863,7 @@ impl HomeView {
                 self.update_selected();
             }
             ActionId::NewSession => self.open_new_session_dialog(),
+            ActionId::TailoredSessions => self.open_tailored(),
             ActionId::NewFromSelection => self.open_new_from_selection(),
             ActionId::NewFromProject => self.open_project_session_picker(),
             ActionId::AttachTerminal => return self.attach_terminal_for_selected(),
@@ -4410,14 +4426,22 @@ impl HomeView {
         ))
     }
 
+    pub(super) fn require_manual_group_profile(&mut self) -> bool {
+        if !self.unified_manual_groups() {
+            return false;
+        }
+        self.info_dialog = Some(InfoDialog::new(
+            "Select a Profile",
+            "Filter to one profile before modifying or reordering Manual groups. Session actions still use each session's own profile.",
+        ));
+        true
+    }
+
     fn toggle_group_collapsed(&mut self, path: &str) {
         self.toggle_group_collapsed_at(self.cursor, path);
     }
 
-    /// `row` is the `flat_items` index of the header being toggled. In the
-    /// all-profiles view the same group path can exist in several profiles,
-    /// so the owning GroupTree comes from that row, not from wherever the
-    /// cursor sits (a group click toggles without moving the cursor).
+    /// A group click toggles the clicked row without moving the cursor.
     fn toggle_group_collapsed_at(&mut self, row: usize, path: &str) {
         // The synthetic Archived section is not in any GroupTree; its collapsed state
         // lives on HomeView. Route here before either branch mutates a nonexistent group.
@@ -4449,7 +4473,34 @@ impl HomeView {
             self.save_org_group_collapsed();
             return;
         }
-        // Route to the correct profile's GroupTree
+        if self.unified_manual_groups() {
+            let Some(Item::Group { collapsed, .. }) = self.flat_items.get(row) else {
+                return;
+            };
+            let collapsing = !collapsed;
+            let hides_selection = collapsing
+                && self
+                    .selected_session
+                    .as_deref()
+                    .and_then(|id| self.get_instance(id))
+                    .is_some_and(|inst| {
+                        inst.group_path == path || inst.group_path.starts_with(&format!("{path}/"))
+                    });
+            self.unified_group_collapsed
+                .insert(path.to_string(), collapsing);
+            self.rebuild_flat_items_keeping_cursor();
+            if hides_selection {
+                if let Some(at) = self
+                    .flat_items
+                    .iter()
+                    .position(|item| matches!(item, Item::Group { path: p, .. } if p == path))
+                {
+                    self.cursor = at;
+                    self.update_selected();
+                }
+            }
+            return;
+        }
         let profile = self.profile_for_cursor(row);
         if let Some(profile) = profile {
             if let Some(tree) = self.group_trees.get_mut(&profile) {
@@ -4631,6 +4682,9 @@ impl HomeView {
     }
 
     pub fn handle_scroll_up(&mut self, col: u16, row: u16) -> bool {
+        if self.tailored_window.is_some() {
+            return true;
+        }
         const STEP: u16 = 3;
         // Settings is a full-screen takeover with its own scrollable fields panel, so the
         // wheel drives it wherever the now-hidden list/preview rects were. Checked before
@@ -5381,12 +5435,14 @@ impl HomeView {
                 }
             }
             self.rename_dialog = Some(dialog);
-        } else if let Some(group_path) = &self.selected_group {
+        } else if let Some(group_path) = self.selected_group.clone() {
+            if self.require_manual_group_profile() {
+                return;
+            }
             if let Some((title, hint)) = self.automatic_group_hint() {
                 self.info_dialog = Some(InfoDialog::new(&title, &hint));
                 return;
             }
-            let group_path = group_path.clone();
             let current_profile = self
                 .selected_group_profile
                 .clone()
@@ -5570,21 +5626,21 @@ impl HomeView {
                     &profile,
                 ));
             }
-        } else if let Some(group_path) = &self.selected_group {
+        } else if let Some(group_path) = self.selected_group.clone() {
+            if self.require_manual_group_profile() {
+                return;
+            }
             if let Some((title, hint)) = self.automatic_group_hint() {
                 self.info_dialog = Some(InfoDialog::new(&title, &hint));
                 return;
             }
-            // Scope the count to the selected group's profile: two profiles can share a
-            // group path, and counting by path alone would pop the "delete N sessions"
-            // dialog for an empty group whose same-named twin still has rows.
             let owning_profile = self.selected_group_profile.clone();
             let prefix = format!("{}/", group_path);
             let session_count = self
                 .instances
                 .values()
                 .filter(|i| {
-                    (i.group_path == *group_path || i.group_path.starts_with(&prefix))
+                    (i.group_path == group_path || i.group_path.starts_with(&prefix))
                         && owning_profile
                             .as_ref()
                             .is_none_or(|p| &i.source_profile == p)
@@ -5593,12 +5649,12 @@ impl HomeView {
 
             if session_count > 0 {
                 let has_managed_worktrees = self.group_has_managed_worktrees(
-                    group_path,
+                    &group_path,
                     &prefix,
                     owning_profile.as_deref(),
                 );
                 let has_containers =
-                    self.group_has_containers(group_path, &prefix, owning_profile.as_deref());
+                    self.group_has_containers(&group_path, &prefix, owning_profile.as_deref());
                 self.group_delete_options_dialog = Some(GroupDeleteOptionsDialog::new(
                     group_path.clone(),
                     session_count,
@@ -5984,6 +6040,9 @@ impl HomeView {
 
     /// Route a mouse-wheel-down at (col, row); see handle_scroll_up.
     pub fn handle_scroll_down(&mut self, col: u16, row: u16) -> bool {
+        if self.tailored_window.is_some() {
+            return true;
+        }
         const STEP: u16 = 3;
         // Settings takeover owns the wheel; see handle_scroll_up.
         if let Some(view) = &mut self.settings_view {
@@ -6053,6 +6112,10 @@ impl HomeView {
     /// dialogs come next so multi-line dictation lands where the user is typing. The
     /// settings view is last: its paste handler strips newlines.
     pub fn handle_paste(&mut self, text: &str) {
+        if let Some(window) = &mut self.tailored_window {
+            window.handle_paste(text);
+            return;
+        }
         // Right-click pastes also invalidate preview selection coordinates.
         self.clear_preview_selection();
         if self.afk_batch_dialog.is_some() {

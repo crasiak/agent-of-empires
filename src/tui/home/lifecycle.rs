@@ -233,6 +233,7 @@ impl HomeView {
             hyperlink_cells: crate::tui::hyperlink::SharedHyperlinks::default(),
             vt_live_enabled: resolved.tmux.vt_live,
             profile_default_attach_mode: resolved.session.default_attach_mode,
+            unified_group_collapsed: HashMap::new(),
             project_group_collapsed: user_config
                 .as_ref()
                 .map(|c| {
@@ -258,6 +259,8 @@ impl HomeView {
             show_help: false,
             help_scroll: 0,
             new_dialog: None,
+            tailored_window: None,
+            tailored_account: crate::session::tailored::CaptureAccount::Personal,
             confirm_dialog: None,
             unified_delete_dialog: None,
             group_delete_options_dialog: None,
@@ -487,6 +490,7 @@ impl HomeView {
                 .unwrap_or(true),
             trashed_section_collapsed: true,
             hide_stopped_in_groups: false,
+            hide_empty_groups: resolved.session.hide_empty_groups,
             group_totals: HashMap::new(),
             recovery_rx: None,
             opener_exits: Vec::new(),

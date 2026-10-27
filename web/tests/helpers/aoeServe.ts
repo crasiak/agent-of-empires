@@ -553,9 +553,13 @@ export async function spawnAoeServe(opts: SpawnOptions): Promise<ServeHandle> {
   }
   const appDir = appDirFor(home, xdg, aoeBinary);
   mkdirSync(appDir, { recursive: true, mode: 0o700 });
+  // Skip historical host-hook migrations that can write outside the isolated HOME.
+  // The runner lock and AFK migrations still execute from the pre-AFK schema.
+  writeFileSync(join(appDir, ".schema_version"), "41");
   // General live tests exercise launches, not the one-time TUI approval flow.
   // Scopes stay off so specs never reach the host's systemd user manager.
-  writeFileSync(join(appDir, "config.toml"), `[app_state]\nhas_acknowledged_agent_hooks = true\n\n${SYSTEMD_OFF}`);
+  writeFileSync(join(appDir, "config.toml"), SYSTEMD_OFF);
+  writeFileSync(join(appDir, "state.toml"), "has_acknowledged_agent_hooks = true\n");
   const fakeAcpDebugLog = join(home, "fake-acp.log");
   if (opts.acp) {
     let script = opts.fakeAcpScript;

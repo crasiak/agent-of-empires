@@ -798,12 +798,12 @@ impl App {
                                             "paste-burst: routed {} chars via handle_paste (chars={:?})",
                                             paste_text.len(), paste_text
                                         );
-                                        // Only an ACTIVE structured view owns text input.
+                                        let tailored_open = self.home.tailored_window.is_some();
                                         if let Some(view) = self
                                             .home
                                             .structured_preview
                                             .as_mut()
-                                            .filter(|v| v.is_active())
+                                            .filter(|v| v.is_active() && !tailored_open)
                                         {
                                             if let Err(e) = view
                                                 .handle_event(Event::Paste(paste_text.clone()))
@@ -903,6 +903,13 @@ impl App {
                             continue;
                         }
                         Some(Ok(Event::Mouse(mouse))) => {
+                            if self.home.tailored_window.is_some() {
+                                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                                    self.home.handle_dialog_click(mouse.column, mouse.row);
+                                    self.draw(terminal)?;
+                                }
+                                continue;
+                            }
                             if !matches!(mouse.kind, MouseEventKind::Moved) {
                                 crate::session::write_tui_activity();
                             }
@@ -1173,12 +1180,13 @@ impl App {
                         }
                         Some(Ok(Event::Paste(text))) => {
                             crate::session::write_tui_activity();
-                            // Only an ACTIVE structured view owns pasted text.
+                            // Modal input takes priority over an active embedded Session.
+                            let tailored_open = self.home.tailored_window.is_some();
                             if let Some(view) = self
                                 .home
                                 .structured_preview
                                 .as_mut()
-                                .filter(|v| v.is_active())
+                                .filter(|v| v.is_active() && !tailored_open)
                             {
                                 if let Err(e) = view.handle_event(Event::Paste(text)).await {
                                     self.close_embedded_structured();
@@ -2153,6 +2161,10 @@ impl App {
         if key.code == KeyCode::F(12) && std::env::var_os("AOE_E2E_INPUT_BARRIER").is_some() {
             self.draw(terminal)?;
             e2e_render_ack(false)?;
+            return Ok(());
+        }
+        if self.home.routes_tailored_key(&key) {
+            self.home.handle_key(key, self.update_info.as_ref());
             return Ok(());
         }
         // An ACTIVE embedded view owns the keyboard; a mere preview does not.

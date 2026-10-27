@@ -42,6 +42,8 @@ pub mod smart_rename;
 pub mod stop;
 mod storage;
 pub(crate) mod sync;
+pub mod tailored;
+mod tailored_surface;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod trash;
@@ -176,9 +178,9 @@ pub use scope::SessionScope;
 pub(crate) use storage::migration_backups;
 pub(crate) use storage::{
     acquire_session_title_lock, acquire_storage_flock, acquire_storage_shared_flock, atomic_write,
-    backup_before_migration, locked_update, read_file_no_follow, replace_file_no_follow,
-    resolve_symlink_chain, try_acquire_storage_flock, GroupMovePlan, StorageFlock,
-    STORAGE_LOCK_FILENAME,
+    backup_before_migration, locked_update, locked_update_if_changed, read_file_no_follow,
+    replace_file_no_follow, resolve_symlink_chain, try_acquire_storage_flock, GroupMovePlan,
+    StorageFlock, STORAGE_LOCK_FILENAME,
 };
 pub use storage::{
     load_recent_projects, load_workspace_ordering, recent_project_entry_for, record_recent_project,

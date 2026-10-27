@@ -17,6 +17,7 @@ import type {
   DockerStatusResponse,
   CreateProgress,
   CreateSessionRequest,
+  TailoredHistoryEntry,
   ImportableSession,
   SettingsFieldDescriptor,
 } from "./types";
@@ -114,6 +115,14 @@ export interface SessionsEnvelope {
 
 export function fetchSessions(): Promise<SessionsEnvelope | null> {
   return fetchJson<SessionsEnvelope>("/api/sessions");
+}
+
+export function fetchTailoredHistory(signal?: AbortSignal): Promise<{ entries: TailoredHistoryEntry[] } | null> {
+  return fetchJson("/api/tailored-sessions", { signal });
+}
+
+export function setTailoredHistoryHidden(id: string, hidden: boolean): Promise<{ ok: boolean; message?: string }> {
+  return okWithMessage(`/api/sessions/${encodeURIComponent(id)}/tailored-history`, jsonInit("PATCH", { hidden }));
 }
 
 export interface ConversationSearchHit {
@@ -2222,4 +2231,30 @@ export function importRepoAppearances(
   appearances: Record<string, import("./repoAppearance").RepoAppearance>,
 ): Promise<Record<string, import("./repoAppearance").RepoAppearance> | null> {
   return fetchJson("/api/app-state/repo-appearances/import", jsonInit("POST", { appearances }));
+}
+
+export async function researchOperation(
+  body: import("./types").ResearchOperation,
+): Promise<{ draft?: import("./types").ResearchDraft; error?: string; uncertain?: boolean }> {
+  const result = await send("/api/research", jsonInit("POST", body)).catch(() => null);
+  if (!result)
+    return {
+      error: "Outcome not confirmed. Reopen this request from history; do not start another run.",
+      uncertain: true,
+    };
+  if (!result.ok || !result.payload?.draft)
+    return {
+      error: stringField(result.payload, "message") ?? "Research operation failed. Reopen to check its state.",
+      uncertain: result.status >= 500,
+    };
+  return { draft: result.payload.draft as import("./types").ResearchDraft };
+}
+export function getResearch(id: string): Promise<{ draft: import("./types").ResearchDraft } | null> {
+  return fetchJson(`/api/research/${encodeURIComponent(id)}`);
+}
+export function getResearchOutput(id: string): Promise<{ output: string } | null> {
+  return fetchJson(`/api/research/${encodeURIComponent(id)}/output`);
+}
+export function replyResearch(id: string, answer: string): Promise<{ ok: boolean; message?: string }> {
+  return okWithMessage(`/api/research/${encodeURIComponent(id)}/reply`, jsonInit("POST", { answer }));
 }

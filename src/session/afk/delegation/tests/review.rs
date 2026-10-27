@@ -54,6 +54,32 @@ fn claims(w: &mut Window, human: bool) -> String {
 }
 
 #[test]
+fn known_app_schema_advances_preserve_afk_stores_but_unknown_schema_refuses() {
+    let (app, _root, _store, _w) = setup(2);
+    initialize(app.path());
+    fs::write(
+        app.path().join(".schema_version"),
+        crate::migrations::current_schema_version().to_string(),
+    )
+    .unwrap();
+    let before = tree(app.path());
+    assert!(authority::ready(app.path()).is_ok());
+    assert!(authority::migration_v3::run_at(app.path()).is_ok());
+    assert!(annotations::initialize(app.path()).is_ok());
+    assert_eq!(before, tree(app.path()));
+    fs::write(
+        app.path().join(".schema_version"),
+        (crate::migrations::current_schema_version() + 1).to_string(),
+    )
+    .unwrap();
+    let before = tree(app.path());
+    assert!(authority::ready(app.path()).is_err());
+    assert!(authority::migration_v3::run_at(app.path()).is_err());
+    assert!(annotations::initialize(app.path()).is_err());
+    assert_eq!(before, tree(app.path()));
+}
+
+#[test]
 fn review_physical_profile_and_cumulative_read_limits_preserve_all_input() {
     let (app, _root, store, w) = setup(2);
     initialize(app.path());
@@ -380,7 +406,7 @@ fn review_errors_and_exports_are_bounded_private_and_non_mutating() {
     assert_eq!(before, tree(app.path()));
     fs::write(
         app.path().join(".schema_version"),
-        (crate::session::afk::schema::REVIEW + 1).to_string(),
+        (crate::migrations::current_schema_version() + 1).to_string(),
     )
     .unwrap();
     let before = tree(app.path());
