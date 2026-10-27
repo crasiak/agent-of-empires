@@ -401,6 +401,49 @@ os._exit(0)
 
 
 class PureTests(unittest.TestCase):
+    def test_forwarded_managed_identity_and_afk_extensions_are_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            app, source = root / "config/app", root / "source/assets/session"
+            extensions = app / "agent-extensions"
+            extensions.mkdir(mode=0o700, parents=True)
+            source.mkdir(parents=True)
+            for name in ["aoe-afk.mjs", "aoe-afk-runtime.mjs", "aoe-afk-wake.mjs", "aoe-afk-usage.mjs",
+                         "aoe-afk-usage-guard.mjs", "aoe-afk-questions.mjs"]:
+                (source / name).write_text(name)
+                (extensions / name).write_text(name)
+            identity = extensions / "pi-aoe-session-id.js"
+            identity.write_text("fixed identity source")
+            (source / "aoe-session-id.js").write_text("fixed identity source")
+            native_id = "00000000-0000-4000-8000-000000000001"
+            launch_id = "00000000-0000-4000-8000-000000000002"
+            binding = {"instance_id": "session", "profile": "default", "native_id": native_id, "launch_id": launch_id}
+            bootstrap = {"version": 6, "binding": binding, "app_dir": str(app), "aoe_bin": "/fixed/aoe"}
+            registry = app / "profiles/default"
+            registry.mkdir(mode=0o700, parents=True)
+            adapter.publish(registry / "sessions.json", [{"id": "session", "tool": "pi", "command": "",
+                "agent_session_id": native_id, "active_execution": {"launch_id": launch_id,
+                "binding": {"agent": "pi", "stores": [str(root / "sessions")], "cwd": str(root / "work"), "filesystem": "host"}}}])
+            manifest = {"tools": {"aoe": {"path": "/fixed/aoe"}}, "sources": {"aoe": {"path": str(root / "source")}}}
+            args = ["-e", str(identity), "--session-id", native_id, "-e", str(extensions / "aoe-afk-runtime.mjs"),
+                    "--aoe-afk-binding", json.dumps(bootstrap)]
+            with patch.object(adapter, "HERE", source):
+                self.assertEqual(adapter.validate_forwarded(args, manifest, {"app": str(app)}), bootstrap)
+                invalid = [args[2:], args + ["--extra"], args[2:4] + args[:2] + args[4:]]
+                for index, value in [(0, "--extension"), (1, "/foreign/identity.js"), (3, launch_id),
+                                     (4, "--extension"), (5, "/foreign/runtime.mjs"), (6, "--unknown")]:
+                    changed = list(args); changed[index] = value; invalid.append(changed)
+                for changed in invalid:
+                    with self.subTest(args=changed), self.assertRaises(ValueError):
+                        adapter.validate_forwarded(changed, manifest, {"app": str(app)})
+                identity.write_text("changed identity")
+                with self.assertRaises(ValueError):
+                    adapter.validate_forwarded(args, manifest, {"app": str(app)})
+                identity.unlink()
+                identity.symlink_to(source / "aoe-session-id.js")
+                with self.assertRaises(ValueError):
+                    adapter.validate_forwarded(args, manifest, {"app": str(app)})
+
     def test_private_artifacts_and_exclusive_admission(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
