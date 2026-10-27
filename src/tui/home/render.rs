@@ -1284,6 +1284,7 @@ impl HomeView {
             plugin_manager_dialog,
             skills_manager_dialog,
             command_palette,
+            session_search,
             tool_picker_dialog,
             send_message_dialog,
             permission_response_dialog,
@@ -1751,6 +1752,7 @@ impl HomeView {
             || self.afk_overview_dialog.is_some()
             || self.afk_batch_dialog.is_some()
             || self.command_palette.is_some()
+            || self.session_search.is_some()
             || self.send_message_dialog.is_some()
             || self.update_confirm_dialog.is_some()
             || serve_open

@@ -23,6 +23,7 @@ pub mod process;
 mod public_network;
 pub mod server;
 pub mod session;
+pub mod session_search;
 pub mod sound;
 mod status_hooks;
 pub mod task_util;

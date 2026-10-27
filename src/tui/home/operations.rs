@@ -266,6 +266,13 @@ impl HomeView {
         if structured {
             builder::structured::apply_structured_choice(&mut instance);
         }
+        self.insert_new_session(instance)
+    }
+
+    /// Persist a freshly built instance, the shared tail of `create_session` and a
+    /// session search resume, and select it.
+    pub(super) fn insert_new_session(&mut self, instance: Instance) -> anyhow::Result<String> {
+        let target_profile = instance.source_profile.clone();
         let session_id = instance.id.clone();
 
         // Ensure target profile storage exists

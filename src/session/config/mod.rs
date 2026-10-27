@@ -1110,6 +1110,16 @@ pub struct SessionConfig {
     #[setting(label = "Show Headroom savings in session info", widget = "toggle")]
     pub show_headroom_overlay: bool,
 
+    /// Keep session-search's `serve` and `sync` running from the `aoe serve` daemon.
+    #[serde(default = "default_true")]
+    #[setting(
+        label = "Keep session search running",
+        widget = "toggle",
+        web = "local_only:starts host processes",
+        global_only
+    )]
+    pub session_search_supervise: bool,
+
     /// Side of the TUI session list. Narrow terminals keep the list above the preview.
     #[serde(default)]
     #[setting(
@@ -2051,6 +2061,7 @@ impl Default for SessionConfig {
             show_usage_overlay: true,
             show_ledger_overlay: true,
             show_headroom_overlay: true,
+            session_search_supervise: true,
             sidebar_position: SidebarPosition::default(),
             daemon_sidebar: true,
             inherit_host_environment: false,
@@ -4904,6 +4915,14 @@ mod tests {
                 "{name} missing from schema"
             );
         }
+    }
+
+    #[test]
+    fn session_search_supervise_defaults_on_and_is_in_the_schema() {
+        assert!(SessionConfig::default().session_search_supervise);
+        assert!(crate::session::config::settings_schema::schema()
+            .into_iter()
+            .any(|field| field.section == "session" && field.field == "session_search_supervise"));
     }
 
     #[test]

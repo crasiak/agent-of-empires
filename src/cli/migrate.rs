@@ -81,10 +81,17 @@ impl StderrRenderer {
 }
 
 pub fn stderr_reporter() -> Reporter {
-    let tty = std::io::stderr().is_terminal();
+    stderr_reporter_with_size(std::io::stderr().is_terminal(), crate::terminal::get_size)
+}
+
+fn stderr_reporter_with_size(tty: bool, size: fn() -> Option<(u16, u16)>) -> Reporter {
     let renderer = Arc::new(Mutex::new(StderrRenderer::new(tty)));
     Arc::new(move |event: Event| {
-        let width = crate::terminal::get_size().map_or(FALLBACK_WIDTH, |(w, _)| w as usize);
+        let width = if tty {
+            size().map_or(FALLBACK_WIDTH, |(w, _)| w as usize)
+        } else {
+            FALLBACK_WIDTH
+        };
         let out =
             renderer
                 .lock()
@@ -151,6 +158,19 @@ mod tests {
         let err = refuse_while_daemon_runs(DaemonStatus::Verified(4242)).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("PID 4242") && msg.contains("aoe serve --stop"));
+    }
+
+    #[test]
+    fn piped_reporter_does_not_query_terminal_size() {
+        let reporter = stderr_reporter_with_size(false, || {
+            panic!("piped progress must not probe a terminal or spawn tput")
+        });
+        reporter(started());
+        reporter(Event::Step("reading session registries".into()));
+        reporter(Event::Finished {
+            version: 27,
+            elapsed: Duration::from_millis(1),
+        });
     }
 
     #[test]
