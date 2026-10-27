@@ -63,9 +63,24 @@ fn native_resume(
         s.cwd.as_deref()?,
         s.profile.as_deref()?,
     );
-    // Way-back fields name the resume target, so a subagent hit carries its
-    // parent's transcript; the launch checks the header id against it.
-    let transcript_path = s.transcript_path.as_deref().map(PathBuf::from);
+    if !crate::session::capture::is_valid_session_id(session_id) {
+        return None;
+    }
+    // An empty or multi-part profile would own every Ledger home.
+    let mut parts = Path::new(profile).components();
+    if !matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) {
+        return None;
+    }
+    // A ledger-parent hit's own transcript_path is the run's file, not the parent's.
+    let transcript_path = match (&resume.transcript_path, resume.kind.as_str()) {
+        (Some(path), _) => Some(path),
+        (None, "ledger-parent") => return None,
+        (None, _) => s.transcript_path.as_ref(),
+    }
+    .map(PathBuf::from);
     // Pi resumes only from its exact transcript.
     if tool == "pi" && transcript_path.is_none() {
         return None;
@@ -176,27 +191,27 @@ mod tests {
             resolve(&pi, &|_| false, &profiles, home),
             Target::CopyOnly(_)
         ));
-        // A subagent hit resumes its parent, natively only with the parent's transcript.
-        assert!(matches!(
-            resolve(&hits[2].session, &|_| false, &profiles, home),
-            Target::CopyOnly(c) if c.contains("--session p-222")
-        ));
+        // A subagent hit resumes its parent; its own transcript_path is the run's file.
         let mut run = crate::session_search::query::parse(include_bytes!("testdata/query_v1.json"))
             .unwrap()
             .remove(2)
             .session;
-        run.transcript_path = hits[1].session.transcript_path.clone();
-        assert_eq!(run.harness_session_id.as_deref(), Some("r-333"));
+        run.transcript_path = Some("/home/u/.ledger/homes/personal/pi/runs/r-333.jsonl".into());
         match resolve(&run, &|_| false, &profiles, home) {
             Target::Resume(r) => {
                 assert_eq!(r.session_id, "p-222");
                 assert_eq!(
                     r.transcript_path.as_deref(),
-                    run.transcript_path.as_deref().map(Path::new)
+                    hits[1].session.transcript_path.as_deref().map(Path::new)
                 );
             }
             _ => panic!("expected the parent's resume"),
         }
+        run.resume.as_mut().unwrap().transcript_path = None;
+        assert!(matches!(
+            resolve(&run, &|_| false, &profiles, home),
+            Target::CopyOnly(c) if c.contains("--session p-222")
+        ));
         let mut bare =
             crate::session_search::query::parse(include_bytes!("testdata/query_v1.json"))
                 .unwrap()
@@ -207,5 +222,54 @@ mod tests {
             resolve(&bare, &|_| false, &profiles, home),
             Target::Nothing
         ));
+    }
+
+    #[test]
+    fn native_resume_needs_a_plain_profile_and_a_valid_id() {
+        let home = Path::new("/home/u/.ledger");
+        let profiles = vec![ProfileHomes {
+            profile: "oss".into(),
+            tool_dirs: vec![
+                (
+                    "claude".into(),
+                    home.join("homes/personal-oss/claude-code/runtime"),
+                ),
+                ("pi".into(), home.join("homes/personal-oss/pi/runtime")),
+            ],
+        }];
+        let hit = || {
+            crate::session_search::query::parse(include_bytes!("testdata/query_v1.json"))
+                .unwrap()
+                .remove(0)
+                .session
+        };
+        for profile in ["personal", "", ".", "..", "personal-oss/claude-code"] {
+            let mut s = hit();
+            s.profile = Some(profile.into());
+            assert!(
+                matches!(
+                    resolve(&s, &|_| false, &profiles, home),
+                    Target::CopyOnly(_)
+                ),
+                "profile {profile:?}"
+            );
+        }
+        for tool in ["claude", "pi"] {
+            let mut s = hit();
+            s.profile = Some("personal-oss".into());
+            s.harness = tool.into();
+            assert!(
+                matches!(resolve(&s, &|_| false, &profiles, home), Target::Resume(_)),
+                "{tool}"
+            );
+            s.resume.as_mut().unwrap().session_id = Some("-rf".into());
+            assert!(
+                matches!(
+                    resolve(&s, &|_| false, &profiles, home),
+                    Target::CopyOnly(_)
+                ),
+                "{tool}"
+            );
+        }
     }
 }

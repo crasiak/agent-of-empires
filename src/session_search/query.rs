@@ -52,6 +52,9 @@ pub struct Resume {
     pub session_id: Option<String>,
     #[serde(default)]
     pub jump: Option<String>,
+    /// The transcript of the document the resume opens: a subagent hit's parent.
+    #[serde(default)]
+    pub transcript_path: Option<String>,
 }
 
 pub struct Snippet {

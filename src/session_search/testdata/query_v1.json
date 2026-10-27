@@ -11,6 +11,7 @@
   "chunks":[{"id":"e#1.0","doc_id":"e","snippet":"…parent words…","role":"user","ts":"2026-10-24T09:00:00Z","span":{"start":0,"end":5},"redactions":0,"score":2.0}]},
  {"rank":3,"session":{"session_key":"L2b","session_ref":{"ledger_session_id":"L2b","harness_session_id":"r-333","run_id":"run_b"},
   "title":"subagent task","harness":"pi","repo":"aoe","live":false,"last_ts":"2026-10-24T08:00:00Z","cwd":"/home/u/code/aoe","profile":"personal",
-  "resume":{"kind":"ledger-parent","command":"cd /home/u/code/aoe && ledger run pi --profile personal -- --session p-222","session_id":"p-222"}},
+  "resume":{"kind":"ledger-parent","command":"cd /home/u/code/aoe && ledger run pi --profile personal -- --session p-222","session_id":"p-222",
+   "transcript_path":"/home/u/.ledger/homes/personal/pi/state/protected/sessions/--x--/t_p-222.jsonl"}},
   "chunks":[{"id":"f#1.0","doc_id":"f","snippet":"…run words…","role":"tool","ts":"2026-10-24T08:00:00Z","span":{"start":0,"end":5},"redactions":1,"score":1.5}]}
 ]}
