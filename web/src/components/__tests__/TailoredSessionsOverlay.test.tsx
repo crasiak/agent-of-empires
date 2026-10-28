@@ -44,9 +44,9 @@ vi.mock("../../lib/pendingCreates", () => ({
 
 const onCreated = vi.fn();
 const onClose = vi.fn();
-function Harness({ readOnly = false }: { readOnly?: boolean }) {
+function Harness({ readOnly = false, initiallyOpen = true }: { readOnly?: boolean; initiallyOpen?: boolean }) {
   const [account, setAccount] = useState<CaptureAccount>("personal");
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(initiallyOpen);
   const [boot, setBoot] = useState("boot-1");
   return (
     <>
@@ -101,6 +101,29 @@ function savedCapture(): TailoredHistoryEntry {
 }
 
 describe("Tailored Sessions", () => {
+  it("detaches closed modal chrome without unmounting retained editors", () => {
+    render(
+      <>
+        <header>Dashboard</header>
+        <Harness initiallyOpen={false} />
+      </>,
+    );
+    expect(document.querySelectorAll("header")).toHaveLength(1);
+    expect(fetchTailoredHistory).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Reopen tailored" }));
+    expect(document.querySelectorAll("header")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: /Capture an idea/ }));
+    const editor = screen.getByRole("textbox", { name: "Idea" });
+    fireEvent.change(editor, { target: { value: "retained input" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close Tailored Sessions" }));
+    expect(document.querySelectorAll("header")).toHaveLength(1);
+    expect(editor.isConnected).toBe(true);
+    expect((editor as HTMLTextAreaElement).value).toBe("retained input");
+    fireEvent.click(screen.getByRole("button", { name: "Reopen tailored" }));
+    expect(screen.getByRole("textbox", { name: "Idea" })).toBe(editor);
+    expect(document.querySelectorAll("header")).toHaveLength(2);
+  });
+
   it("contains every modal key at the bubble boundary without cancelling native editing", () => {
     compose();
     const outside = vi.fn();

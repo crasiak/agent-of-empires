@@ -157,28 +157,32 @@ export function TailoredSessionsOverlay({
         onKeyDown={key}
         className={`flex min-h-0 w-full flex-col rounded-lg border border-surface-700 bg-surface-900 shadow-xl ${session ? "h-[85dvh] max-w-6xl" : "max-w-2xl"}`}
       >
-        <header className="flex items-center justify-between border-b border-surface-700 px-4 py-3">
-          <h2 className="text-sm font-semibold text-text-primary">{session?.title ?? `Tailored Sessions${heading}`}</h2>
-          <div className="flex items-center gap-2">
-            {(selected || session) && (
+        {open && (
+          <header className="flex items-center justify-between border-b border-surface-700 px-4 py-3">
+            <h2 className="text-sm font-semibold text-text-primary">
+              {session?.title ?? `Tailored Sessions${heading}`}
+            </h2>
+            <div className="flex items-center gap-2">
+              {(selected || session) && (
+                <button
+                  type="button"
+                  onClick={showHistory}
+                  className="h-8 rounded-md px-2 text-xs text-text-secondary hover:bg-surface-800"
+                >
+                  Back to history · F2
+                </button>
+              )}
               <button
                 type="button"
-                onClick={showHistory}
-                className="h-8 rounded-md px-2 text-xs text-text-secondary hover:bg-surface-800"
+                aria-label="Close Tailored Sessions"
+                onClick={onClose}
+                className="h-8 rounded-md px-2 text-sm text-text-secondary hover:bg-surface-800"
               >
-                Back to history · F2
+                Close · Ctrl+Y outside editors
               </button>
-            )}
-            <button
-              type="button"
-              aria-label="Close Tailored Sessions"
-              onClick={onClose}
-              className="h-8 rounded-md px-2 text-sm text-text-secondary hover:bg-surface-800"
-            >
-              Close · Ctrl+Y outside editors
-            </button>
-          </div>
-        </header>
+            </div>
+          </header>
+        )}
         {open && session && (
           <>
             <div className="flex min-h-0 flex-1 flex-col p-2">
