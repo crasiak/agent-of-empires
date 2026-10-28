@@ -4276,6 +4276,7 @@ mod tests {
             aoe_profile: profile.into(),
             store: agent_dir.clone(),
             title: "pi hit".into(),
+            when: "10-25".into(),
             transcript_path: Some(transcript.clone()),
             command: String::new(),
         };

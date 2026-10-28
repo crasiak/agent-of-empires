@@ -57,6 +57,7 @@ mod tests {
             aoe_profile: "work".into(),
             store: PathBuf::from(store),
             title: "fix the parser".into(),
+            when: "10-25".into(),
             transcript_path: None,
             command: String::new(),
         }

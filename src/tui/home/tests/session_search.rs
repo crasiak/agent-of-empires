@@ -58,6 +58,7 @@ fn resume_spec(tool: &str, cwd: &str) -> ResumeSpec {
         aoe_profile: "test".into(),
         store: PathBuf::from("/nonexistent/store"),
         title: "fix the deploy".into(),
+        when: "10-25".into(),
         transcript_path: None,
         command: "ledger run claude -- --resume c-111".into(),
     }
@@ -135,6 +136,33 @@ fn enter_on_a_resume_adds_one_resuming_instance_and_selects_it() {
         Some(added.id.as_str())
     );
     assert_eq!(action, Some(Action::AttachSession(added.id.clone())));
+}
+
+#[test]
+#[serial]
+fn a_resume_takes_the_name_and_group_of_the_pane_in_its_folder() {
+    let mut env = create_test_env_with_sessions(1);
+    let cwd = TempDir::new().unwrap();
+    let cwd_path = cwd.path().to_string_lossy().into_owned();
+    let pane = id_of(&env.view, "session0");
+    let path = cwd_path.clone();
+    env.view.mutate_instance(&pane, |i| {
+        i.title = "sshca-last-mile".into();
+        i.project_path = path;
+        i.group_path = "sshca".into();
+    });
+    open_stub(&mut env.view, move |_| {
+        Target::Resume(resume_spec("claude", &cwd_path))
+    });
+    load(&mut env.view);
+
+    env.view.handle_key(key(KeyCode::Enter), None);
+    let added = env
+        .view
+        .instances()
+        .find(|i| i.title == "sshca-last-mile 10-25")
+        .unwrap();
+    assert_eq!(added.group_path, "sshca");
 }
 
 #[test]
