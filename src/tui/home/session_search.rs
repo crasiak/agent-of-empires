@@ -1,6 +1,6 @@
 //! The session search overlay: opening it and acting on a pick.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -23,15 +23,26 @@ impl HomeView {
                     .unwrap_or_else(|| crate::session::projects::repo_label(&inst.project_path))
             });
         // An instance AoE still lists can be jumped to: Enter on a stopped one restarts it as usual.
-        let live: HashSet<String> = self
+        let listed: Vec<_> = self
             .instances()
             .filter(|i| !i.is_trashed() && !i.is_archived() && i.status != Status::Deleting)
-            .map(|i| i.id.clone())
+            .collect();
+        let live: HashSet<String> = listed.iter().map(|i| i.id.clone()).collect();
+        // The conversation each pane runs, which hits for Pi do not carry.
+        let bound: HashMap<String, String> = listed
+            .iter()
+            .filter_map(|i| Some((i.agent_session_id.clone()?, i.id.clone())))
             .collect();
         let profiles = crate::session_search::profile_homes();
         let ledger_home = dirs::home_dir().unwrap_or_default().join(".ledger");
         let resolver = Box::new(move |s: &Session| {
-            crate::session_search::resolve(s, &|id| live.contains(id), &profiles, &ledger_home)
+            crate::session_search::resolve(
+                s,
+                &|id| live.contains(id),
+                &|sid| bound.get(sid).cloned(),
+                &profiles,
+                &ledger_home,
+            )
         });
         let client = crate::session_search::Client::new();
         self.session_search = Some(SessionSearchDialog::new(
@@ -82,7 +93,20 @@ impl HomeView {
             &spec.aoe_profile,
             Path::new(&spec.cwd),
         );
+        // Named and grouped after the pane already in that folder, if there is one.
+        let sibling = self
+            .instances()
+            .filter(|i| !i.is_trashed() && !i.is_archived() && same_dir(&i.project_path, &spec.cwd))
+            .max_by_key(|i| i.tool == spec.tool)
+            .map(|i| (i.title.clone(), i.group_path.clone()));
         let added = crate::session_search::instance(&spec, &config.session)
+            .map(|mut inst| {
+                if let Some((title, group)) = sibling {
+                    inst.title = format!("{title} {}", spec.when).trim_end().to_string();
+                    inst.group_path = group;
+                }
+                inst
+            })
             .and_then(|inst| self.insert_new_session(inst));
         match added {
             Ok(id) => self.activate_session_by_id(&id),
@@ -104,4 +128,9 @@ impl HomeView {
         }
         self.activate_selected_session()
     }
+}
+
+fn same_dir(a: &str, b: &str) -> bool {
+    crate::session::capture::canonicalize_or_raw(a)
+        == crate::session::capture::canonicalize_or_raw(b)
 }

@@ -16,7 +16,11 @@ pub struct ResumeSpec {
     pub session_id: String,
     pub aoe_profile: String,
     pub store: PathBuf,
+    /// The folder's name and the conversation's last day; the caller may swap
+    /// the folder for the title of a pane already there.
     pub title: String,
+    /// The conversation's last day, `MM-DD` local, for that swap.
+    pub when: String,
     pub transcript_path: Option<PathBuf>,
     /// The hit's resume command, copied when the native resume cannot be built.
     pub command: String,
@@ -29,14 +33,26 @@ pub enum Target {
     Nothing,
 }
 
+/// `live` says whether an AoE instance id is still listed; `bound` names the
+/// listed instance running a conversation id, which catches panes the hit
+/// carries no AoE link for (Pi conversations, notably).
 pub fn resolve(
     s: &Session,
     live: &dyn Fn(&str) -> bool,
+    bound: &dyn Fn(&str) -> Option<String>,
     profiles: &[ProfileHomes],
     ledger_home: &Path,
 ) -> Target {
     if let Some(id) = s.aoe_instance_id.as_deref().filter(|id| live(id)) {
         return Target::Jump(id.to_string());
+    }
+    let resume_id = s.resume.as_ref().and_then(|r| r.session_id.as_deref());
+    if let Some(id) = [s.harness_session_id.as_deref(), resume_id]
+        .into_iter()
+        .flatten()
+        .find_map(bound)
+    {
+        return Target::Jump(id);
     }
     let Some(resume) = &s.resume else {
         return Target::Nothing;
@@ -93,10 +109,15 @@ fn native_resume(
             .find(|(t, d)| t == tool && d.starts_with(&owned))?;
         Some((p.profile.clone(), dir.clone()))
     })?;
-    let title = s
-        .title
-        .clone()
-        .unwrap_or_else(|| format!("Resumed {}", session_id.chars().take(8).collect::<String>()));
+    // A first prompt makes a poor pane name; the folder is what AoE names panes by.
+    let when = chrono::DateTime::parse_from_rfc3339(&s.last_ts)
+        .map(|t| t.with_timezone(&chrono::Local).format("%m-%d").to_string())
+        .unwrap_or_default();
+    let folder = Path::new(cwd)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| format!("resumed {}", session_id.chars().take(8).collect::<String>()));
+    let title = format!("{folder} {when}").trim_end().to_string();
     Some(ResumeSpec {
         tool: tool.to_string(),
         cwd: cwd.to_string(),
@@ -104,6 +125,7 @@ fn native_resume(
         aoe_profile,
         store,
         title,
+        when,
         transcript_path,
         command: resume.command.clone(),
     })
@@ -151,9 +173,9 @@ mod tests {
             ],
         }];
         assert!(
-            matches!(resolve(&hits[0].session, &|id| id == "aoe1", &profiles, home), Target::Jump(id) if id == "aoe1")
+            matches!(resolve(&hits[0].session, &|id| id == "aoe1", &|_| None, &profiles, home), Target::Jump(id) if id == "aoe1")
         );
-        match resolve(&hits[0].session, &|_| false, &profiles, home) {
+        match resolve(&hits[0].session, &|_| false, &|_| None, &profiles, home) {
             Target::Resume(r) => {
                 assert_eq!(
                     (
@@ -165,14 +187,25 @@ mod tests {
                 );
                 assert_eq!(r.store, home.join("homes/personal/claude-code/runtime"));
                 assert!(r.command.ends_with("--resume c-111"));
+                // Named by its folder and day, not its first prompt.
+                assert!(r.title.starts_with("deploy 10-2"), "{}", r.title);
+                assert_eq!(r.when.len(), 5);
             }
             _ => panic!("expected resume"),
         }
         assert!(
-            matches!(resolve(&hits[0].session, &|_| false, &[], home), Target::CopyOnly(c) if c.contains("--resume c-111"))
+            matches!(resolve(&hits[0].session, &|_| false, &|_| None, &[], home), Target::CopyOnly(c) if c.contains("--resume c-111"))
         );
+        // A pane AoE runs the conversation in is jumped to, even with no AoE link
+        // on the hit; a subagent hit jumps to its parent's pane.
+        let bound = |id: &str| (id == "p-222").then(|| "pane9".to_string());
+        for hit in &hits[1..] {
+            assert!(
+                matches!(resolve(&hit.session, &|_| false, &bound, &profiles, home), Target::Jump(id) if id == "pane9")
+            );
+        }
         // Pi resumes only from its exact transcript.
-        match resolve(&hits[1].session, &|_| false, &profiles, home) {
+        match resolve(&hits[1].session, &|_| false, &|_| None, &profiles, home) {
             Target::Resume(r) => {
                 assert_eq!((r.tool.as_str(), r.session_id.as_str()), ("pi", "p-222"));
                 assert_eq!(
@@ -188,7 +221,7 @@ mod tests {
             .session;
         pi.transcript_path = None;
         assert!(matches!(
-            resolve(&pi, &|_| false, &profiles, home),
+            resolve(&pi, &|_| false, &|_| None, &profiles, home),
             Target::CopyOnly(_)
         ));
         // A subagent hit resumes its parent; its own transcript_path is the run's file.
@@ -197,7 +230,7 @@ mod tests {
             .remove(2)
             .session;
         run.transcript_path = Some("/home/u/.ledger/homes/personal/pi/runs/r-333.jsonl".into());
-        match resolve(&run, &|_| false, &profiles, home) {
+        match resolve(&run, &|_| false, &|_| None, &profiles, home) {
             Target::Resume(r) => {
                 assert_eq!(r.session_id, "p-222");
                 assert_eq!(
@@ -209,7 +242,7 @@ mod tests {
         }
         run.resume.as_mut().unwrap().transcript_path = None;
         assert!(matches!(
-            resolve(&run, &|_| false, &profiles, home),
+            resolve(&run, &|_| false, &|_| None, &profiles, home),
             Target::CopyOnly(c) if c.contains("--session p-222")
         ));
         let mut bare =
@@ -219,7 +252,7 @@ mod tests {
                 .session;
         bare.resume = None;
         assert!(matches!(
-            resolve(&bare, &|_| false, &profiles, home),
+            resolve(&bare, &|_| false, &|_| None, &profiles, home),
             Target::Nothing
         ));
     }
@@ -248,7 +281,7 @@ mod tests {
             s.profile = Some(profile.into());
             assert!(
                 matches!(
-                    resolve(&s, &|_| false, &profiles, home),
+                    resolve(&s, &|_| false, &|_| None, &profiles, home),
                     Target::CopyOnly(_)
                 ),
                 "profile {profile:?}"
@@ -259,13 +292,16 @@ mod tests {
             s.profile = Some("personal-oss".into());
             s.harness = tool.into();
             assert!(
-                matches!(resolve(&s, &|_| false, &profiles, home), Target::Resume(_)),
+                matches!(
+                    resolve(&s, &|_| false, &|_| None, &profiles, home),
+                    Target::Resume(_)
+                ),
                 "{tool}"
             );
             s.resume.as_mut().unwrap().session_id = Some("-rf".into());
             assert!(
                 matches!(
-                    resolve(&s, &|_| false, &profiles, home),
+                    resolve(&s, &|_| false, &|_| None, &profiles, home),
                     Target::CopyOnly(_)
                 ),
                 "{tool}"
