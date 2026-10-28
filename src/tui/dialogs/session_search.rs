@@ -1,8 +1,9 @@
-//! fzf-style session search overlay: one line per hit with the best hit nearest
-//! the prompt, an info line, and a preview pane on wide terminals that shows
-//! the exchange around the hit, read from its transcript.
+//! fzf-style session search overlay: one line per thread with the best hit
+//! nearest the prompt, an info line, and a preview pane on wide terminals with
+//! three views (Ctrl+P): the exchange around the hit, read from its
+//! transcript; the pane's thread of conversations; and where the hits fall.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::TryRecvError;
@@ -19,7 +20,7 @@ use tui_input::Input;
 use super::{paste_into_input, DialogResult};
 use crate::session_search::context::{self, Role, Turn};
 use crate::session_search::{
-    group, supervisor, Hit, QueryError, Request, Row, Scope, Session, Target,
+    group, supervisor, Hit, QueryError, Request, Row, Scope, Session, Target, Threads,
 };
 use crate::tui::components::{fixed_width, set_prefixed_input_cursor_position, truncate_to_width};
 use crate::tui::styles::Theme;
@@ -46,6 +47,8 @@ const GUTTER: usize = 11;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 pub enum SearchOutcome {
+    /// Enter goes to the thread's pane; Alt+Enter reopens the hit's own
+    /// conversation, an earlier iteration of the thread.
     Open(Target),
     Copy(String),
     OpenTranscript(PathBuf),
@@ -53,7 +56,8 @@ pub enum SearchOutcome {
 
 type Reply = (u64, Result<Vec<Hit>, QueryError>);
 type Runner = Box<dyn FnMut(Request) -> Reply + Send>;
-type Resolver = Box<dyn Fn(&Session) -> Target + Send>;
+/// Resolves a hit; `true` asks for its exact conversation (Alt+Enter).
+type Resolver = Box<dyn Fn(&Session, bool) -> Target + Send>;
 
 /// A visible list entry: a row index, plus a child index when expanded.
 type Entry = (usize, Option<usize>);
@@ -88,12 +92,47 @@ pub struct SessionSearchDialog {
     spin: usize,
     worker: Worker<Request, Reply>,
     resolver: Resolver,
+    threads: Arc<Threads>,
+    view: View,
     /// Turns around the selected hit, keyed by transcript and offset.
     context: Option<((String, u64), Vec<Turn>)>,
+    /// Transcript sizes, for placing hits along a session.
+    sizes: HashMap<String, u64>,
+}
+
+/// What the preview shows of the selected thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum View {
+    Exchange,
+    Thread,
+    Matches,
+}
+
+impl View {
+    fn next(self) -> Self {
+        match self {
+            View::Exchange => View::Thread,
+            View::Thread => View::Matches,
+            View::Matches => View::Exchange,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            View::Exchange => "exchange",
+            View::Thread => "thread",
+            View::Matches => "matches",
+        }
+    }
 }
 
 impl SessionSearchDialog {
-    pub fn new(here_repo: Option<String>, mut runner: Runner, resolver: Resolver) -> Self {
+    pub fn new(
+        here_repo: Option<String>,
+        mut runner: Runner,
+        resolver: Resolver,
+        threads: Arc<Threads>,
+    ) -> Self {
         let latest = Arc::new(AtomicU64::new(0));
         let seen = Arc::clone(&latest);
         // The worker runs one request at a time; anything superseded while it
@@ -121,7 +160,10 @@ impl SessionSearchDialog {
             spin: 0,
             worker,
             resolver,
+            threads,
+            view: View::Exchange,
             context: None,
+            sizes: HashMap::new(),
         }
     }
 
@@ -140,10 +182,13 @@ impl SessionSearchDialog {
             KeyCode::Char('/') | KeyCode::Char('7') if ctrl => {
                 self.preview_on = Some(!self.preview_on.unwrap_or(false));
             }
+            KeyCode::Char('p') if ctrl => self.view = self.view.next(),
             KeyCode::Enter => {
+                let exact = key.modifiers.contains(KeyModifiers::ALT);
                 if let Some(hit) = self.selected() {
                     return DialogResult::Submit(SearchOutcome::Open((self.resolver)(
                         &hit.session,
+                        exact,
                     )));
                 }
             }
@@ -264,12 +309,13 @@ impl SessionSearchDialog {
         self.cursor = 0;
         match result {
             Ok(hits) => {
-                self.rows = group(hits, MAX_ROWS);
+                let threads = Arc::clone(&self.threads);
+                self.rows = group(hits, MAX_ROWS, &|s| thread_key(&threads, s));
                 self.jumps = self
                     .rows
                     .iter()
                     .flat_map(|row| std::iter::once(&row.best).chain(&row.others))
-                    .filter(|hit| matches!((self.resolver)(&hit.session), Target::Jump(_)))
+                    .filter(|hit| matches!((self.resolver)(&hit.session, false), Target::Jump(_)))
                     .map(|hit| hit.session.session_key.clone())
                     .collect();
                 self.error = None;
@@ -411,6 +457,7 @@ impl SessionSearchDialog {
 
         if let Some(preview) = preview {
             self.load_context();
+            self.load_sizes();
             self.render_preview(frame, preview, theme);
         } else if let Some(e) = &self.error {
             let bottom = Rect {
@@ -542,6 +589,32 @@ impl SessionSearchDialog {
         self.context = Some((key, turns));
     }
 
+    /// Sizes of the selected thread's transcripts, for the matches view.
+    fn load_sizes(&mut self) {
+        if self.view != View::Matches {
+            return;
+        }
+        let paths: Vec<String> = self
+            .selected_row()
+            .map(|row| {
+                std::iter::once(&row.best)
+                    .chain(&row.others)
+                    .filter_map(|h| h.session.transcript_path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for path in paths {
+            self.sizes
+                .entry(path)
+                .or_insert_with_key(|p| std::fs::metadata(p).map_or(0, |m| m.len()));
+        }
+    }
+
+    fn selected_row(&self) -> Option<&Row> {
+        let &(r, _) = self.visible().get(self.cursor)?;
+        self.rows.get(r)
+    }
+
     fn render_preview(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let block = Block::default().padding(Padding::horizontal(1));
         let inner = block.inner(area);
@@ -581,7 +654,21 @@ impl SessionSearchDialog {
         .flatten()
         .collect();
         lines.push(Line::styled(fixed_width(&place.join(" · "), width), dim));
-        lines.push(Line::styled("─".repeat(width), dim));
+        lines.push(rule(self.view, width, theme));
+        let room = (inner.height as usize).saturating_sub(lines.len());
+        match self.view {
+            View::Exchange => {}
+            View::Thread => {
+                lines.extend(self.thread_lines(hit, width, room, today, theme));
+                frame.render_widget(Paragraph::new(lines).block(block), area);
+                return;
+            }
+            View::Matches => {
+                lines.extend(self.match_lines(width, room, &terms, theme));
+                frame.render_widget(Paragraph::new(lines).block(block), area);
+                return;
+            }
+        }
 
         let also: Vec<_> = hit.snippets.iter().skip(1).take(ALSO).collect();
         let room = (inner.height as usize).saturating_sub(lines.len() + also.len());
@@ -621,12 +708,206 @@ impl SessionSearchDialog {
         frame.render_widget(Paragraph::new(lines).block(block), area);
     }
 
+    /// The thread of conversations the hit's pane has run, one line each:
+    /// how it began, when, how many prompts, and its title when a hit has one.
+    /// `▌` marks the hit's conversation, `●` the one the pane runs now.
+    fn thread_lines(
+        &self,
+        hit: &Hit,
+        width: usize,
+        room: usize,
+        today: chrono::NaiveDate,
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
+        let dim = Style::default().fg(theme.dimmed);
+        let parent = hit
+            .session
+            .resume
+            .as_ref()
+            .and_then(|r| r.session_id.as_deref());
+        let (sid, pane) = [hit.session.harness_session_id.as_deref(), parent]
+            .into_iter()
+            .flatten()
+            .find_map(|sid| Some((Some(sid), self.threads.pane_of(sid)?)))
+            .map_or((None, hit.session.aoe_instance_id.as_deref()), |(s, p)| {
+                (s, Some(p))
+            });
+        let thread = pane.map_or(&[][..], |p| self.threads.iterations(p));
+        if thread.is_empty() {
+            return vec![Line::styled(
+                "no AoE thread recorded for this conversation",
+                dim,
+            )];
+        }
+        let titles: HashMap<&str, &str> = self
+            .rows
+            .iter()
+            .flat_map(|row| std::iter::once(&row.best).chain(&row.others))
+            .filter_map(|h| {
+                Some((
+                    h.session.harness_session_id.as_deref()?,
+                    h.session.title.as_deref()?,
+                ))
+            })
+            .collect();
+        let count = |start: &str| thread.iter().filter(|i| i.start == start).count();
+        let mut lines = vec![Line::styled(
+            fixed_width(
+                &format!(
+                    "{} conversations · {} clear · {} compact · {} resume",
+                    thread.len(),
+                    count("clear"),
+                    count("compact"),
+                    count("resume"),
+                ),
+                width,
+            ),
+            dim,
+        )];
+        let rows = room.saturating_sub(1);
+        let at = thread
+            .iter()
+            .position(|i| Some(i.session_id.as_str()) == sid)
+            .unwrap_or(thread.len() - 1);
+        let start = at
+            .saturating_sub(rows / 2)
+            .min(thread.len().saturating_sub(rows));
+        let last = thread.len() - 1;
+        for (n, it) in thread.iter().enumerate().skip(start).take(rows) {
+            let is_hit = n == at && sid.is_some();
+            let bar = if is_hit {
+                Span::styled("▌", Style::default().fg(theme.accent))
+            } else {
+                Span::raw(" ")
+            };
+            let live = if n == last { "●" } else { " " };
+            let when = |t: &chrono::DateTime<chrono::Utc>| short_date(&t.to_rfc3339(), today);
+            let head = format!(
+                "{live}#{:<3} {:<7} {}–{} {:>4}p  ",
+                n + 1,
+                it.start,
+                when(&it.started),
+                when(&it.last),
+                it.prompts
+            );
+            let title = titles.get(it.session_id.as_str()).copied().unwrap_or("");
+            let text = fixed_width(title, width.saturating_sub(head.chars().count() + 1));
+            let style = if is_hit {
+                Style::default().fg(theme.text)
+            } else {
+                dim
+            };
+            lines.push(Line::from(vec![
+                bar,
+                Span::styled(head, style),
+                Span::styled(text, style),
+            ]));
+        }
+        lines
+    }
+
+    /// Where the hits fall: per transcript in the thread, a strip with a mark
+    /// at each hit's place in the file, then its snippets.
+    fn match_lines(
+        &self,
+        width: usize,
+        room: usize,
+        terms: &[String],
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
+        let dim = Style::default().fg(theme.dimmed);
+        let Some(row) = self.selected_row() else {
+            return Vec::new();
+        };
+        let mut hits: Vec<&Hit> = std::iter::once(&row.best).chain(&row.others).collect();
+        hits.sort_by(|a, b| a.session.last_ts.cmp(&b.session.last_ts));
+        let today = Local::now().date_naive();
+        let mut lines = Vec::new();
+        for hit in hits {
+            if lines.len() >= room {
+                break;
+            }
+            let label = format!(
+                "{} ",
+                fixed_width(&short_date(&hit.session.last_ts, today), DATE_COLS)
+            );
+            let cols = width.saturating_sub(label.chars().count()).max(1);
+            let size = hit
+                .session
+                .transcript_path
+                .as_ref()
+                .and_then(|p| self.sizes.get(p))
+                .copied()
+                .unwrap_or(0);
+            let mut strip = vec!['·'; cols];
+            for offset in hit.snippets.iter().filter_map(|s| s.offset) {
+                if size > 0 {
+                    let at = ((offset as f64 / size as f64) * cols as f64) as usize;
+                    strip[at.min(cols - 1)] = '█';
+                }
+            }
+            lines.push(Line::from(vec![
+                Span::styled(label, dim),
+                Span::styled(
+                    strip.into_iter().collect::<String>(),
+                    Style::default().fg(theme.accent),
+                ),
+            ]));
+            for snippet in &hit.snippets {
+                if lines.len() >= room {
+                    break;
+                }
+                let head = format!(
+                    "  {} {:<4} ",
+                    stamp(&snippet.ts),
+                    fixed_width(&snippet.role, 4)
+                );
+                let text = fixed_width(
+                    &one_line(&snippet.text),
+                    width.saturating_sub(head.chars().count()),
+                );
+                let mut spans = vec![Span::styled(head, dim)];
+                spans.extend(highlight(&text, terms, Style::default().fg(theme.text)));
+                lines.push(Line::from(spans));
+            }
+        }
+        lines
+    }
+
     fn terms(&self) -> Vec<String> {
         self.query()
             .split_whitespace()
             .map(|t| t.to_ascii_lowercase())
             .collect()
     }
+}
+
+/// Hits group by the pane whose thread ran their conversation (a subagent's
+/// being its parent's), else by run.
+fn thread_key(threads: &Threads, s: &Session) -> Option<String> {
+    let parent = s.resume.as_ref().and_then(|r| r.session_id.as_deref());
+    let pane = [s.harness_session_id.as_deref(), parent]
+        .into_iter()
+        .flatten()
+        .find_map(|sid| threads.pane_of(sid))
+        .or(s.aoe_instance_id.as_deref());
+    match (pane, &s.run_id) {
+        (Some(pane), _) => Some(format!("pane:{pane}")),
+        (None, Some(run)) => Some(format!("run:{run}")),
+        (None, None) => None,
+    }
+}
+
+/// The preview's rule, naming the view and the key that changes it.
+fn rule(view: View, width: usize, theme: &Theme) -> Line<'static> {
+    let label = format!(" {} · ^P ", view.label());
+    let left = 2.min(width);
+    let right = width.saturating_sub(left + label.chars().count());
+    Line::from(vec![
+        Span::styled("─".repeat(left), Style::default().fg(theme.dimmed)),
+        Span::styled(label, Style::default().fg(theme.accent)),
+        Span::styled("─".repeat(right), Style::default().fg(theme.dimmed)),
+    ])
 }
 
 /// The overlay's window and its inner area: a bordered window with a margin
@@ -945,7 +1226,7 @@ fn error_line(e: &QueryError, theme: &Theme) -> Paragraph<'static> {
 mod tests {
     use super::*;
     use crate::session_search::parse;
-    use crate::tui::dialogs::test_keys::{ctrl_key, key};
+    use crate::tui::dialogs::test_keys::{alt_key, ctrl_key, key};
     use crate::tui::dialogs::test_render::draw;
     use crossterm::event::KeyCode;
     use std::sync::{Arc, Mutex};
@@ -975,12 +1256,13 @@ mod tests {
             reply(&req)
         });
         // A live pane jumps; anything else copies its key, so tests can tell rows apart.
-        let resolver: Resolver = Box::new(|s: &Session| match &s.aoe_instance_id {
+        let resolver: Resolver = Box::new(|s: &Session, exact| match &s.aoe_instance_id {
+            _ if exact => Target::CopyOnly(format!("exact:{}", s.session_key)),
             Some(id) => Target::Jump(id.clone()),
             None => Target::CopyOnly(s.session_key.clone()),
         });
         (
-            SessionSearchDialog::new(here.map(String::from), runner, resolver),
+            SessionSearchDialog::new(here.map(String::from), runner, resolver, Arc::default()),
             sent,
         )
     }
@@ -1339,5 +1621,91 @@ mod tests {
         assert_eq!(wrap("aa bb cc", 5), ["aa bb", "cc"]);
         assert_eq!(wrap("abcdefg", 3), ["abc", "def", "g"]);
         assert_eq!(clamp(wrap("aa bb cc dd", 2), 2), ["aa", "bb…"]);
+    }
+
+    #[test]
+    fn alt_enter_asks_for_the_exact_conversation() {
+        let mut d = loaded();
+        match d.handle_key(alt_key(KeyCode::Enter)) {
+            DialogResult::Submit(SearchOutcome::Open(Target::CopyOnly(k))) => {
+                assert_eq!(k, "exact:L1")
+            }
+            _ => panic!("expected the exact target"),
+        }
+    }
+
+    #[test]
+    fn ctrl_p_cycles_the_preview_views() {
+        let mut d = loaded();
+        let rule = |d: &mut SessionSearchDialog| {
+            screen(d, 150, 24)
+                .into_iter()
+                .find(|l| l.contains("· ^P"))
+                .unwrap_or_default()
+        };
+        assert!(rule(&mut d).contains("exchange"));
+        d.handle_key(ctrl_key(KeyCode::Char('p')));
+        let lines = screen(&mut d, 150, 24);
+        assert!(lines.iter().any(|l| l.contains("thread · ^P")));
+        // The fixture's hits have no recorded AoE thread.
+        assert!(lines.iter().any(|l| l.contains("no AoE thread recorded")));
+        d.handle_key(ctrl_key(KeyCode::Char('p')));
+        let lines = screen(&mut d, 150, 24);
+        assert!(lines.iter().any(|l| l.contains("matches · ^P")));
+        assert!(lines.iter().any(|l| l.contains("kickstart the daemon")));
+        d.handle_key(ctrl_key(KeyCode::Char('p')));
+        assert!(rule(&mut d).contains("exchange"));
+    }
+
+    #[test]
+    fn hits_group_by_the_pane_whose_thread_ran_them() {
+        use crate::usage::{UsageEvent, UsageKind};
+        let at = |n| chrono::DateTime::from_timestamp(1_700_000_000 + n * 60, 0).unwrap();
+        let event = |n, sid: &str, kind, detail: &str| UsageEvent {
+            id: n,
+            occurred_at: at(n),
+            instance_id: "pane1".into(),
+            profile: None,
+            agent: Some("claude".into()),
+            kind,
+            detail: Some(detail.into()),
+            agent_session_id: Some(sid.into()),
+        };
+        // L1 (c-111) and L2 (p-222) are two iterations of one pane's thread.
+        let threads = Threads::from_events(
+            &[
+                event(1, "c-111", UsageKind::ContextStart, "startup"),
+                event(2, "c-111", UsageKind::Prompt, ""),
+                event(3, "p-222", UsageKind::ContextStart, "clear"),
+            ],
+            &|_| true,
+        );
+        let runner: Runner = Box::new(|req: Request| (req.generation, Ok(fixture())));
+        let resolver: Resolver = Box::new(|_, _| Target::Nothing);
+        let mut d = SessionSearchDialog::new(None, runner, resolver, Arc::new(threads));
+        let t = Instant::now();
+        type_text(&mut d, "abc");
+        d.tick(t);
+        d.tick(t + ms(301));
+        settle(&mut d, t + ms(301));
+        assert_eq!(d.rows.len(), 1, "one thread, one row");
+        assert_eq!(d.rows[0].others.len(), 2);
+
+        d.handle_key(ctrl_key(KeyCode::Char('p')));
+        let lines = screen(&mut d, 150, 24);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("2 conversations · 1 clear")),
+            "{lines:#?}"
+        );
+        let hit = lines.iter().find(|l| l.contains("#1")).unwrap();
+        assert!(
+            hit.contains("▌") && hit.contains("startup") && hit.contains("1p"),
+            "{hit}"
+        );
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("●#2") && l.contains("clear")));
     }
 }

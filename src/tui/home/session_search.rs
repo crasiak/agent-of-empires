@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use super::HomeView;
 use crate::session::Status;
-use crate::session_search::{ResumeSpec, Session, Target};
+use crate::session_search::{Panes, ResumeSpec, Session, Target, Threads};
 use crate::tui::app::Action;
 use crate::tui::dialogs::{SearchOutcome, SessionSearchDialog};
 
@@ -28,6 +28,8 @@ impl HomeView {
             .filter(|i| !i.is_trashed() && !i.is_archived() && i.status != Status::Deleting)
             .collect();
         let live: HashSet<String> = listed.iter().map(|i| i.id.clone()).collect();
+        // Every conversation each pane has run, from the usage log.
+        let threads = std::sync::Arc::new(Threads::load(&|id| live.contains(id)));
         // The conversation each pane runs, which hits for Pi do not carry.
         let bound: HashMap<String, String> = listed
             .iter()
@@ -35,20 +37,21 @@ impl HomeView {
             .collect();
         let profiles = crate::session_search::profile_homes();
         let ledger_home = dirs::home_dir().unwrap_or_default().join(".ledger");
-        let resolver = Box::new(move |s: &Session| {
-            crate::session_search::resolve(
-                s,
-                &|id| live.contains(id),
-                &|sid| bound.get(sid).cloned(),
-                &profiles,
-                &ledger_home,
-            )
+        let hosted = std::sync::Arc::clone(&threads);
+        let resolver = Box::new(move |s: &Session, exact: bool| {
+            let panes = Panes {
+                live: &|id| live.contains(id),
+                current: &|sid| bound.get(sid).cloned(),
+                hosted: &|sid| hosted.pane_of(sid).map(str::to_string),
+            };
+            crate::session_search::resolve(s, &panes, exact, &profiles, &ledger_home)
         });
         let client = crate::session_search::Client::new();
         self.session_search = Some(SessionSearchDialog::new(
             here_repo,
             Box::new(move |req| (req.generation, client.run(&req))),
             resolver,
+            threads,
         ));
     }
 

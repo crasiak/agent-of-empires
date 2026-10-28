@@ -1,30 +1,32 @@
-//! Collapses search hits that belong to the same pane into one row.
+//! Collapses search hits that belong to the same thread into one row.
 
 use std::collections::HashMap;
 
-use super::query::Hit;
+use super::query::{Hit, Session};
 
 pub struct Row {
     pub best: Hit,
-    /// Remaining hits of the same run, in rank order.
+    /// Remaining hits of the same thread, in rank order.
     pub others: Vec<Hit>,
 }
 
-/// Groups hits by `run_id`; a row sits where its best-ranked hit was.
-pub fn group(hits: Vec<Hit>, max_rows: usize) -> Vec<Row> {
+/// Groups hits by `thread` (a key such as the hosting pane; hits it gives
+/// `None` stay alone); a row sits where its best-ranked hit was.
+pub fn group(
+    hits: Vec<Hit>,
+    max_rows: usize,
+    thread: &dyn Fn(&Session) -> Option<String>,
+) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
-    let mut by_run: HashMap<String, usize> = HashMap::new();
+    let mut by_thread: HashMap<String, usize> = HashMap::new();
     for hit in hits {
-        let existing = hit
-            .session
-            .run_id
-            .as_ref()
-            .and_then(|run| by_run.get(run).copied());
+        let key = thread(&hit.session);
+        let existing = key.as_ref().and_then(|k| by_thread.get(k).copied());
         match existing {
             Some(idx) => rows[idx].others.push(hit),
             None if rows.len() < max_rows => {
-                if let Some(run) = &hit.session.run_id {
-                    by_run.insert(run.clone(), rows.len());
+                if let Some(key) = key {
+                    by_thread.insert(key, rows.len());
                 }
                 rows.push(Row {
                     best: hit,
@@ -46,9 +48,13 @@ mod tests {
         parse(include_bytes!("testdata/query_v1.json")).unwrap()
     }
 
+    fn by_run(s: &Session) -> Option<String> {
+        s.run_id.clone()
+    }
+
     #[test]
-    fn groups_by_run_keeping_rank_order() {
-        let rows = group(fixture(), 20);
+    fn groups_by_thread_keeping_rank_order() {
+        let rows = group(fixture(), 20, &by_run);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].best.session.session_key, "L1");
         assert_eq!(rows[1].best.session.session_key, "L2");
@@ -60,7 +66,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["L2b"]
         );
-        assert_eq!(group(fixture(), 1).len(), 1);
+        assert_eq!(group(fixture(), 1, &by_run).len(), 1);
+        // Another key, such as the hosting pane, regroups the same hits.
+        assert_eq!(group(fixture(), 20, &|_| Some("pane".into())).len(), 1);
     }
 
     #[test]
@@ -69,7 +77,7 @@ mod tests {
         for hit in &mut hits {
             hit.session.run_id = None;
         }
-        let rows = group(hits, 20);
+        let rows = group(hits, 20, &by_run);
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|r| r.others.is_empty()));
     }
