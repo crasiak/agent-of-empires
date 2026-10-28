@@ -2534,8 +2534,9 @@ function AppContent({
           </div>
         </div>
 
-        {showTailored && (
+        {
           <TailoredSessionsOverlay
+            open={showTailored}
             account={captureAccount}
             onAccountChange={setCaptureAccount}
             profile={serverAbout?.profile}
@@ -2544,7 +2545,7 @@ function AppContent({
             onCreated={injectSession}
             onClose={() => setShowTailored(false)}
           />
-        )}
+        }
 
         {showSessionWizard && (
           <SessionWizard

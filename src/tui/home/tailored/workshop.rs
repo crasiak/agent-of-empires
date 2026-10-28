@@ -8,7 +8,7 @@ use crate::{
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{prelude::*, widgets::*};
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{TextArea, WrapMode};
 use std::sync::mpsc;
 
 const LABELS: [&str; 13] = [
@@ -17,7 +17,7 @@ const LABELS: [&str; 13] = [
     "Skill slug",
     "Explicit account/source suitability",
     "Refinement message",
-    "Proposed bundle JSON (Ctrl+B saves)",
+    "Proposed bundle JSON (Ctrl+Alt+B saves)",
     "Canonical GitHub HTTPS remote",
     "GitHub repository ID",
     "Destination base branch",
@@ -31,7 +31,8 @@ struct TaskError {
     uncertain: bool,
 }
 pub(super) struct WorkshopWindow {
-    id: String,
+    pub(super) id: String,
+    pub(super) new_draft: bool,
     request: Option<Request>,
     account: CaptureAccount,
     fields: Vec<TextArea<'static>>,
@@ -50,12 +51,19 @@ pub(super) struct WorkshopWindow {
 impl WorkshopWindow {
     pub fn new(account: CaptureAccount, request: Option<Request>) -> Self {
         let mut window = Self {
+            new_draft: request.is_none(),
             id: request
                 .as_ref()
                 .map_or_else(|| uuid::Uuid::new_v4().to_string(), |d| d.id.clone()),
             request: None,
             account,
-            fields: (0..13).map(|_| TextArea::default()).collect(),
+            fields: (0..13)
+                .map(|_| {
+                    let mut field = TextArea::default();
+                    field.set_wrap_mode(WrapMode::WordOrGlyph);
+                    field
+                })
+                .collect(),
             focus: 0,
             pending: None,
             create: None,
@@ -80,10 +88,12 @@ impl WorkshopWindow {
     pub fn load(account: CaptureAccount, id: String) -> Self {
         let mut window = Self::new(account, None);
         window.id = id.clone();
+        window.new_draft = false;
         window.start(move || Store::open()?.get(&id));
         window
     }
     fn accept(&mut self, request: Request) {
+        self.new_draft = false;
         self.account = request.envelope.account;
         for (index, value) in [
             &request.envelope.idea,
@@ -94,7 +104,8 @@ impl WorkshopWindow {
         .into_iter()
         .enumerate()
         {
-            self.fields[index] = TextArea::from(value.lines());
+            self.fields[index] = TextArea::from(value.split('\n'));
+            self.fields[index].set_wrap_mode(WrapMode::WordOrGlyph);
         }
         self.fields[5] = TextArea::from(
             serde_json::to_string_pretty(&request.bundle.clone().unwrap_or(
@@ -105,6 +116,7 @@ impl WorkshopWindow {
             .expect("bundle")
             .lines(),
         );
+        self.fields[5].set_wrap_mode(WrapMode::WordOrGlyph);
         self.disclosure = false;
         self.current_rules = false;
         self.custody = false;
@@ -163,6 +175,23 @@ impl WorkshopWindow {
     }
     fn operate(&mut self, operation: Operation) {
         self.start(move || Store::open()?.operate(operation));
+    }
+    pub(super) fn account(&self) -> CaptureAccount {
+        self.account
+    }
+    pub(super) fn can_switch_account(&self) -> bool {
+        self.request.is_none() && self.create.is_none() && self.pending.is_none()
+    }
+    pub(super) fn repeat(&mut self, key: KeyEvent) {
+        if !self.show_review
+            && self.pending.is_none()
+            && !self.uncertain
+            && (self.workflow || self.editable())
+            && (self.request.is_none() && self.create.is_none() || self.focus >= 4)
+            && !(key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL))
+        {
+            self.fields[self.focus].input(key);
+        }
     }
     pub fn key(&mut self, key: KeyEvent) {
         if self.pending.is_some() {
@@ -257,7 +286,7 @@ impl WorkshopWindow {
             }
             _ => {}
         }
-        if self.workflow && key.modifiers.contains(KeyModifiers::ALT) {
+        if self.workflow && key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) {
             if !self.uncertain {
                 if let Some(operation) = self.workflow_operation(key.code) {
                     self.operate(operation);
@@ -265,7 +294,7 @@ impl WorkshopWindow {
             }
             return;
         }
-        if self.show_review && !key.modifiers.contains(KeyModifiers::CONTROL) {
+        if self.show_review && key.modifiers != (KeyModifiers::CONTROL | KeyModifiers::ALT) {
             match key.code {
                 KeyCode::Up | KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(5),
                 KeyCode::Down | KeyCode::PageDown => self.scroll = self.scroll.saturating_add(5),
@@ -273,7 +302,7 @@ impl WorkshopWindow {
             }
             return;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) {
             if self.uncertain
                 && !(key.code == KeyCode::Char('s')
                     && self.request.is_none()
@@ -587,9 +616,9 @@ impl WorkshopWindow {
         }
         frame.render_widget(Paragraph::new(self.error.as_deref().unwrap_or(if self.pending.is_some() { "Host operation pending; close safely and reopen this UUID from history." } else { "Static checks only; scripts never execute. F11 shows actual destination/policy/all consumers/full config/native receipts. Empty target sessions = publish-only, never all. Missing current companion or existing daemon blocks; no install/bootstrap." })).style(Style::default().fg(if self.error.is_some() { theme.error } else { theme.dimmed })).wrap(Wrap { trim: true }), rows[2]);
         let footer = if self.workflow {
-            format!("Alt+P destination preview · F4 disclosure [{}] · Alt+U Publish/confirmed next · Alt+L current policy\nF5 current rules [{}] · F6 exclusive custody [{}] · Alt+G Land · Alt+I import preview · Alt+J APPROVE import\nAlt+V config preview · Alt+O APPROVE Deploy · Alt+M materialize · Alt+N native preview · Alt+A APPROVE limit 1 · F8 fields · F11 evidence · F9 readonly reconcile", self.disclosure, self.current_rules, self.custody)
+            format!("Ctrl+Alt actions: P destination preview · F4 disclosure [{}] · U Publish/confirmed next · L current policy\nF5 current rules [{}] · F6 exclusive custody [{}] · G Land · I import preview · J APPROVE import\nV config preview · O APPROVE Deploy · M materialize · N native preview · A APPROVE limit 1 · F8 fields · F11 evidence · F9 readonly reconcile", self.disclosure, self.current_rules, self.custody)
         } else {
-            "Ctrl+S create/retry SAME envelope · F6 account before create · Ctrl+D tool-free refinement\nCtrl+B save files · Ctrl+R Review exact source · Ctrl+K APPROVE reviewed LOCAL commit\nF11 chat/diff · F10 reopen · F9 reconcile (no replay) · F12 abandon refinement · F8 publication/deploy fields · F2 history".into()
+            "Ctrl+Alt+S create/retry SAME envelope · F6 account before create · Ctrl+Alt+D tool-free refinement\nCtrl+Alt+B save files · Ctrl+Alt+R Review exact source · Ctrl+Alt+K APPROVE reviewed LOCAL commit\nF11 chat/diff · F10 reopen · F9 reconcile (no replay) · F12 abandon refinement · F8 publication/deploy fields · F2 history".into()
         };
         frame.render_widget(
             Paragraph::new(footer)
@@ -602,6 +631,67 @@ impl WorkshopWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[serial_test::serial]
+    fn saved_completion_retires_only_new_slot_and_reentry_keeps_editor() {
+        use crate::tui::home::tailored::{history::HistoryAction, HomeView, WindowAction};
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+        let mut view = HomeView::new_for_test(
+            Some("test".into()),
+            crate::tmux::AvailableTools::with_tools(&["pi"]),
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .unwrap();
+        view.open_tailored();
+        let overlay = view.tailored_window.as_mut().unwrap();
+        overlay.picker_action(HistoryAction::Workshop);
+        let form = overlay.workshop.as_mut().unwrap();
+        let id = form.id.clone();
+        let request = Request {
+            id: id.clone(),
+            envelope: CreateEnvelope {
+                account: CaptureAccount::Personal,
+                idea: "saved idea".into(),
+                repository: root.path().into(),
+                slug: "fixture".into(),
+                source_scope: "personal".into(),
+            },
+            revision: 1,
+            state: State::Draft,
+            created_at: chrono::Utc::now(),
+            hidden: false,
+            turns: vec![],
+            bundle: None,
+            review: None,
+            commit_intent: None,
+            commit: None,
+            publication: None,
+            deployment: None,
+            error: None,
+        };
+        let (tx, rx) = mpsc::channel();
+        form.pending = Some(rx);
+        tx.send(Ok(request)).ok().unwrap();
+        assert!(form.tick());
+        form.focus = 4;
+        overlay.handle_paste("unsaved refinement");
+        overlay.handle_key(KeyEvent::from(KeyCode::F(2)));
+        overlay.picker_action(HistoryAction::Workshop);
+        let fresh = overlay.workshop.as_ref().unwrap();
+        assert_ne!(fresh.id, id);
+        assert_eq!(fresh.value(0), "");
+        overlay.handle_key(KeyEvent::from(KeyCode::F(2)));
+        view.apply_tailored_action(WindowAction::Open(id));
+        let overlay = view.tailored_window.as_mut().unwrap();
+        assert_eq!(
+            overlay.workshop.as_ref().unwrap().value(4),
+            "unsaved refinement"
+        );
+        overlay.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(overlay.workshop.as_ref().unwrap().value(4), "");
+    }
+
     #[test]
     #[serial_test::serial]
     fn typed_settlement_uncertainty_survives_task_and_tick_without_discarding_exact_create() {
@@ -653,6 +743,71 @@ mod tests {
         assert!(window.uncertain);
         assert!(window.create.is_some());
     }
+    #[test]
+    #[serial_test::serial]
+    fn unknown_create_history_roundtrip_keeps_uuid_envelope_and_invalid_json() {
+        use crate::tui::home::tailored::{history::HistoryAction, TailoredWindow};
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(dir.path());
+        let mut overlay = TailoredWindow::new(CaptureAccount::Personal);
+        overlay.picker_action(HistoryAction::Workshop);
+        let form = overlay.workshop.as_mut().unwrap();
+        let id = form.id.clone();
+        let create = Operation::Create {
+            id: id.clone(),
+            envelope: CreateEnvelope {
+                account: CaptureAccount::Personal,
+                idea: "private\n\n".into(),
+                repository: dir.path().into(),
+                slug: "fixture".into(),
+                source_scope: "personal".into(),
+            },
+        };
+        form.create = Some(create.clone());
+        form.uncertain = true;
+        form.fields[5].insert_str("{invalid 🌱\n");
+        overlay.handle_key(KeyEvent::from(KeyCode::F(2)));
+        overlay.picker_action(HistoryAction::Research);
+        overlay.handle_key(KeyEvent::from(KeyCode::F(2)));
+        overlay.picker_action(HistoryAction::Workshop);
+        let form = overlay.workshop.as_ref().unwrap();
+        assert_eq!(form.id, id);
+        assert_eq!(
+            serde_json::to_value(form.create.as_ref().unwrap()).unwrap(),
+            serde_json::to_value(create).unwrap()
+        );
+        assert!(form.uncertain);
+        assert_eq!(form.value(5), "{invalid 🌱\n");
+        assert!(form.pending.is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn multiline_editing_chords_never_create_or_approve() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(dir.path());
+        let mut window = WorkshopWindow::new(CaptureAccount::Personal, None);
+        window.paste("leftRIGHT");
+        window.key(KeyEvent::from(KeyCode::Home));
+        for _ in 0..4 {
+            window.key(KeyEvent::from(KeyCode::Right));
+        }
+        let paste = format!("🌱日本語{}\n\nlast\n", "long".repeat(500));
+        window.paste(&paste);
+        let exact = format!("left{paste}RIGHT");
+        assert_eq!(window.value(0), exact);
+        window.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(window.value(0), "leftRIGHT");
+        window.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(window.value(0), exact);
+        window.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert_eq!(window.fields[0].cursor(), (2, 4));
+        window.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        window.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(window.pending.is_none());
+        assert!(window.create.is_none());
+    }
+
     #[test]
     #[serial_test::serial]
     fn toolkit_keeps_creation_identity_and_does_not_treat_model_text_as_approval() {

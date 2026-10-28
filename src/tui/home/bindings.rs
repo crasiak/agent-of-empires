@@ -125,7 +125,7 @@ const fn ctrl(c: char) -> Chord {
 const TAILORED_CHORD: Chord = ctrl('y');
 
 pub(in crate::tui) fn is_tailored_shortcut(key: &KeyEvent) -> bool {
-    chord_matches(&TAILORED_CHORD, key)
+    key.kind == crossterm::event::KeyEventKind::Press && chord_matches(&TAILORED_CHORD, key)
 }
 
 const fn f(n: u8) -> Chord {
@@ -242,6 +242,9 @@ fn context_holds(context: Context, ctx: &Ctx) -> bool {
 /// entries sharing their chord.
 pub fn resolve(key: &KeyEvent, strict: bool, ctx: &Ctx) -> Option<ActionId> {
     for b in BINDINGS {
+        if b.id == ActionId::TailoredSessions && key.kind != crossterm::event::KeyEventKind::Press {
+            continue;
+        }
         let chords = if strict { b.strict } else { b.non_strict };
         if context_holds(b.context, ctx) && chords.iter().any(|c| chord_matches(c, key)) {
             return Some(b.id);

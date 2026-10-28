@@ -189,6 +189,7 @@ pub struct HomeView {
     pub(super) help_scroll: u16,
     pub(super) new_dialog: Option<NewSessionDialog>,
     pub(super) tailored_window: Option<tailored::TailoredWindow>,
+    pub(super) retained_tailored_windows: Vec<tailored::TailoredWindow>,
     pub(super) tailored_account: crate::session::tailored::CaptureAccount,
     pub(super) confirm_dialog: Option<ConfirmDialog>,
     pub(super) unified_delete_dialog: Option<UnifiedDeleteDialog>,

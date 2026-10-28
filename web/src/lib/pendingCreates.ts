@@ -52,6 +52,28 @@ const claimed = new Set<string>();
 const reconciling = new Set<string>();
 const reportedUnsaved = new Set<string>();
 
+export type PendingCreateOutcome =
+  | { status: "created"; session?: SessionResponse }
+  | { status: "failed" | "unknown"; message: string };
+const observers = new Map<string, Set<(outcome: PendingCreateOutcome) => void>>();
+
+/** A retained editor observes only its own background settlement, without replaying app callbacks. */
+export function observePendingCreate(key: string, observer: (outcome: PendingCreateOutcome) => void): () => void {
+  const listeners = observers.get(key) ?? new Set();
+  listeners.add(observer);
+  observers.set(key, listeners);
+  return () => {
+    listeners.delete(observer);
+    if (!listeners.size && observers.get(key) === listeners) observers.delete(key);
+  };
+}
+
+function notifySettled(key: string, outcome: PendingCreateOutcome): void {
+  const listeners = observers.get(key);
+  observers.delete(key);
+  for (const observer of listeners ?? []) observer(outcome);
+}
+
 /** Past the server's replay window, a retry could re-run a create that already failed. */
 export const isPendingCreateExpired = (since: number) => Date.now() - since >= PENDING_CREATE_MAX_AGE_MS;
 const isExpired = (p: PendingCreate) => isPendingCreateExpired(p.since);
@@ -126,6 +148,7 @@ async function reconcile(pending: PendingCreate): Promise<void> {
       if (!isOwned(key)) return;
       if (isExpired(pending)) {
         resolvePendingCreate(key);
+        notifySettled(key, { status: "failed", message: PENDING_CREATE_EXPIRED_MESSAGE });
         handlers?.onFailed(PENDING_CREATE_EXPIRED_MESSAGE, pending);
         return;
       }
@@ -134,9 +157,18 @@ async function reconcile(pending: PendingCreate): Promise<void> {
       if (result.network) continue;
       if (!isOwned(key)) return;
       resolvePendingCreate(key);
-      if (result.ok) handlers?.onCreated(result.session, pending);
-      else if (result.outcomeUnknown) handlers?.onUnknown(result.error || "Unknown outcome", pending);
-      else handlers?.onFailed(result.error || "Unknown error", pending);
+      if (result.ok) {
+        notifySettled(key, { status: "created", session: result.session });
+        handlers?.onCreated(result.session, pending);
+      } else if (result.outcomeUnknown) {
+        const message = result.error || "Unknown outcome";
+        notifySettled(key, { status: "unknown", message });
+        handlers?.onUnknown(message, pending);
+      } else {
+        const message = result.error || "Unknown error";
+        notifySettled(key, { status: "failed", message });
+        handlers?.onFailed(message, pending);
+      }
       return;
     }
   } finally {

@@ -114,7 +114,15 @@ export function TailoredHistoryPanel({
         value={query}
         onChange={(event) => setQuery(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && !readOnly) {
+          if (event.nativeEvent.isComposing || event.keyCode === 229 || event.repeat) return;
+          if (
+            event.key === "Enter" &&
+            !event.ctrlKey &&
+            !event.metaKey &&
+            !event.altKey &&
+            !event.shiftKey &&
+            !readOnly
+          ) {
             event.preventDefault();
             if (matchesPreset) onNew();
             else if (!hidden && "document chat".includes(normalized)) onDocument();

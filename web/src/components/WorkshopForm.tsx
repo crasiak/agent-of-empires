@@ -8,12 +8,15 @@ interface Props {
   account: "personal" | "work";
   readOnly: boolean;
   initial?: WorkshopRequest;
+  active?: boolean;
+  onAccountChange?: (account: "personal" | "work") => void;
+  onIdentity?: (id: string, persisted: boolean) => void;
 }
 const control =
   "w-full rounded-md border border-surface-700 bg-surface-950 p-2 text-sm text-text-primary disabled:opacity-50";
 const button =
   "h-9 rounded-md border border-surface-700 px-3 text-xs text-text-primary hover:bg-surface-800 disabled:opacity-50";
-export function WorkshopForm({ account, readOnly, initial }: Props) {
+export function WorkshopForm({ account, readOnly, initial, active = true, onAccountChange, onIdentity }: Props) {
   const [id] = useState(() => initial?.id ?? crypto.randomUUID());
   const [request, setRequest] = useState(initial);
   const [envelope, setEnvelope] = useState<WorkshopEnvelope>(
@@ -27,6 +30,19 @@ export function WorkshopForm({ account, readOnly, initial }: Props) {
   const [pendingCreate, setPendingCreate] = useState<Extract<WorkshopOperation, { operation: "create" }> | null>(null);
   const inFlight = useRef(false);
   const mounted = useRef(false);
+  const form = useRef<HTMLElement>(null);
+  const focus = useRef<HTMLElement | null>(null);
+  const identity = useRef(onIdentity);
+  useEffect(() => {
+    identity.current?.(id, false);
+  }, [id]);
+  useEffect(() => {
+    if (form.current && !form.current.closest("[hidden]"))
+      (
+        focus.current ??
+        form.current?.querySelector<HTMLElement>("input:not(:disabled), textarea:not(:disabled), button:not(:disabled)")
+      )?.focus();
+  }, [active]);
   useEffect(() => {
     mounted.current = true;
     if (!initial)
@@ -46,6 +62,7 @@ export function WorkshopForm({ account, readOnly, initial }: Props) {
       );
       return;
     }
+    onIdentity?.(value.id, true);
     setRequest(value);
     setEnvelope(value.envelope);
     setFiles(JSON.stringify(value.bundle ?? { files: {} }, null, 2));
@@ -101,7 +118,22 @@ export function WorkshopForm({ account, readOnly, initial }: Props) {
     }
   };
   return (
-    <section aria-label="Skill workshop" className="max-h-[75dvh] space-y-3 overflow-auto p-4">
+    <section
+      ref={form}
+      onFocusCapture={(event) => {
+        focus.current = event.target;
+      }}
+      aria-label="Skill workshop"
+      onKeyDown={(event) => {
+        if (
+          event.key === "Enter" &&
+          (event.nativeEvent.isComposing || event.keyCode === 229 || event.repeat) &&
+          event.target instanceof HTMLButtonElement
+        )
+          event.preventDefault();
+      }}
+      className="max-h-[75dvh] space-y-3 overflow-auto p-4"
+    >
       <p className="text-xs text-text-secondary">
         Model output is data, never approval. Review, local Commit, destination Publish, Land and Deploy are separate. A
         local commit or pending merge is not landed or deployed.
@@ -117,7 +149,11 @@ export function WorkshopForm({ account, readOnly, initial }: Props) {
             className={control}
             value={envelope.account}
             disabled={!!request || locked || !!pendingCreate}
-            onChange={(e) => setEnvelope({ ...envelope, account: e.target.value as WorkshopEnvelope["account"] })}
+            onChange={(e) =>
+              onAccountChange
+                ? onAccountChange(e.target.value as WorkshopEnvelope["account"])
+                : setEnvelope({ ...envelope, account: e.target.value as WorkshopEnvelope["account"] })
+            }
           >
             <option value="personal">Personal</option>
             <option value="work">Work</option>

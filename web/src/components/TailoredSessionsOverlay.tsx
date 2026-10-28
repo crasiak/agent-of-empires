@@ -1,23 +1,17 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { createPortal, flushSync } from "react-dom";
-import { createSession } from "../lib/api";
-import {
-  registerPendingCreate,
-  releasePendingCreate,
-  resolvePendingCreate,
-  retryBody,
-  type PendingCreate,
-} from "../lib/pendingCreates";
-import type { CreateSessionRequest, ResearchDraft, SessionResponse, WorkshopRequest } from "../lib/types";
+import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useLatestRef } from "../hooks/useLatestRef";
+import { createPortal } from "react-dom";
+import type { ResearchDraft, SessionResponse, WorkshopRequest } from "../lib/types";
 import { WorkshopForm } from "./WorkshopForm";
 import { ResearchForm } from "./ResearchForm";
+import { TailoredCaptureForm } from "./TailoredCaptureForm";
 import { TerminalView } from "./TerminalView";
 import { TailoredHistoryPanel } from "./TailoredHistoryPanel";
 import { setPendingTerminalFocus } from "../lib/terminalFocus";
 
 export type CaptureAccount = "personal" | "work";
-
 interface Props {
+  open?: boolean;
   account: CaptureAccount;
   onAccountChange: (account: CaptureAccount) => void;
   profile?: string;
@@ -26,8 +20,14 @@ interface Props {
   onCreated: (session: SessionResponse) => void;
   onClose: () => void;
 }
+type Editor = { scope: string; requestId?: string; newSlot?: boolean } & (
+  | { key: string; kind: "capture" | "document"; account: CaptureAccount }
+  | { key: string; kind: "research"; account: CaptureAccount; initial?: ResearchDraft }
+  | { key: string; kind: "workshop"; account: CaptureAccount; initial?: WorkshopRequest }
+);
 
 export function TailoredSessionsOverlay({
+  open = true,
   account,
   onAccountChange,
   profile,
@@ -36,169 +36,135 @@ export function TailoredSessionsOverlay({
   onCreated,
   onClose,
 }: Props) {
-  const [workshop, setWorkshop] = useState<WorkshopRequest | "new" | null>(null);
-  const [research, setResearch] = useState<ResearchDraft | "new" | null>(null);
-  const [composing, setComposing] = useState(false);
-  const [documentChat, setDocumentChat] = useState(false);
-  const [url, setUrl] = useState("");
-  const [question, setQuestion] = useState("");
-  const [idea, setIdea] = useState("");
-  const [immediately, setImmediately] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [uncertain, setUncertain] = useState(false);
-  const [blocked, setBlocked] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [session, setSession] = useState<SessionResponse | null>(null);
+  const [editors, setEditors] = useState<Editor[]>([]);
+  const [selections, setSelections] = useState<Record<string, string | null>>({});
+  const [sessions, setSessions] = useState<Record<string, SessionResponse | null>>({});
+  const [accounts, setAccounts] = useState<Record<string, CaptureAccount>>({});
+  const scope = profile ?? "";
+  const selected = selections[scope] ?? null;
+  const session = sessions[scope] ?? null;
+  const preset = editors.find((editor) => editor.key === selected)?.kind;
+  const heading = preset === "capture" ? " · Capture an idea" : preset === "document" ? " · Document chat" : "";
+  const setSelected = (value: string | null) => setSelections((old) => ({ ...old, [scope]: value }));
+  const setSession = (value: SessionResponse | null) => setSessions((old) => ({ ...old, [scope]: value }));
+  const selection = useLatestRef(selected);
   const panel = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
-  const focusIdea = useCallback((element: HTMLTextAreaElement | null) => element?.focus(), []);
-  const pending = useRef<PendingCreate | null>(null);
-  const inFlight = useRef(false);
-  const draftCommitted = useRef(false);
-  const mounted = useRef(false);
-  const showHistory = () => {
-    flushSync(() => {
-      setSession(null);
-      setResearch(null);
-      setWorkshop(null);
-      setComposing(false);
-    });
-    search.current?.focus();
+  const lastFocus = useRef<HTMLElement | null>(null);
+  const choose = (editor: Editor) => {
+    const id = editor.kind === "research" || editor.kind === "workshop" ? editor.initial?.id : undefined;
+    const retained = editors.find((e) => e.scope === scope && e.kind === editor.kind && id && e.requestId === id);
+    setEditors((old) =>
+      retained || old.some((e) => e.key === editor.key) ? old : [...old, { ...editor, requestId: id }],
+    );
+    setSelected(retained?.key ?? editor.key);
+    setSession(null);
   };
-  const startNew = (document = false) => {
+  const newEditor = (kind: Editor["kind"], choice?: CaptureAccount) => {
     if (readOnly) return;
-    if (draftCommitted.current) {
-      setIdea("");
-      setUrl("");
-      setQuestion("");
-      setImmediately(false);
-      draftCommitted.current = false;
-    }
-    setDocumentChat(document);
-    setError(null);
-    setComposing(true);
+    const accountKey = JSON.stringify([scope, kind]);
+    const nextAccount = choice ?? accounts[accountKey] ?? account;
+    setAccounts((old) => ({ ...old, [accountKey]: nextAccount }));
+    onAccountChange(nextAccount);
+    const retained = editors.find(
+      (e) => e.scope === scope && e.kind === kind && e.account === nextAccount && e.newSlot,
+    );
+    choose(retained ?? { scope, key: crypto.randomUUID(), kind, account: nextAccount, newSlot: true });
   };
-
-  useEffect(() => {
-    mounted.current = true;
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const previousAgentInput = !!previousFocus?.closest('[data-term="agent"]');
+  const showHistory = () => {
+    setSelected(null);
+    setSession(null);
+  };
+  useLayoutEffect(() => {
+    if (!open) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousAgentInput = !!previous?.closest('[data-term="agent"]');
     const root = document.getElementById("root");
     const wasInert = root?.inert ?? false;
     if (root) root.inert = true;
-    search.current?.focus();
+    if (lastFocus.current?.isConnected && !lastFocus.current.closest("[hidden]")) lastFocus.current.focus();
+    else
+      panel.current
+        ?.querySelector<HTMLElement>(
+          "[data-editor]:not([hidden]) textarea:not(:disabled), input:not(:disabled), button:not(:disabled)",
+        )
+        ?.focus();
     return () => {
-      mounted.current = false;
+      lastFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       if (root) root.inert = wasInert;
-      if (pending.current) releasePendingCreate(pending.current.body.idempotency_key);
-      if (previousFocus?.isConnected) previousFocus.focus();
+      if (previous?.isConnected) previous.focus();
       else if (previousAgentInput) root?.querySelector<HTMLElement>('[data-term="agent"] textarea')?.focus();
     };
-  }, []);
-
-  const capture = async (event: FormEvent) => {
-    event.preventDefault();
-    if (readOnly || inFlight.current || (!pending.current && !(documentChat ? url : idea).trim())) return;
-    inFlight.current = true;
-    setBusy(true);
-    setError(null);
-    const retry = pending.current !== null;
-    const tailored: CreateSessionRequest["tailored"] = documentChat
-      ? { preset: "document-chat", account, document: { url, opening_question: question } }
-      : { preset: "capture-idea", account, idea, immediately };
-    const attempt = pending.current ?? {
-      body: {
-        path: "",
-        tool: "pi",
-        scratch: true,
-        view: "terminal" as const,
-        title: documentChat ? "Document chat" : "Capture an idea",
-        group: "Tailored",
-        profile,
-        tailored,
-        idempotency_key: crypto.randomUUID(),
-      },
-      tool: "pi",
-      since: Date.now(),
-      origin: bootId ?? null,
-    };
-    pending.current = attempt;
-    registerPendingCreate(attempt, { claimed: true });
-    const result = await createSession(retry ? retryBody(attempt) : attempt.body);
-    inFlight.current = false;
-    if (!result.network) {
-      resolvePendingCreate(attempt.body.idempotency_key);
-      pending.current = null;
-    }
-    if (result.ok && result.session) onCreated(result.session);
-    if (!mounted.current) {
-      if (result.network) releasePendingCreate(attempt.body.idempotency_key);
+  }, [open]);
+  useLayoutEffect(() => {
+    if (open && !selected && !session) search.current?.focus();
+  }, [open, selected, session]);
+  const key = (event: KeyboardEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    if (event.nativeEvent.isComposing || event.keyCode === 229) {
+      if (event.key === "Enter") event.preventDefault();
       return;
     }
-    setBusy(false);
-    setUncertain(!!result.network || !!result.outcomeUnknown);
-    setBlocked(!!result.outcomeUnknown);
-    if (result.ok && result.session) {
-      draftCommitted.current = true;
-      setPendingTerminalFocus("agent");
-      setSession(result.session);
-    } else setError(result.error ?? "Capture could not be created.");
-  };
-
-  const handleKey = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape" && !session) {
+    if (
+      event.key === "Enter" &&
+      event.target instanceof HTMLButtonElement &&
+      (event.repeat ||
+        (!event.target.closest("form") && (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)))
+    ) {
+      event.preventDefault();
+      return;
+    }
+    if (!event.repeat && event.key === "Escape" && !session) {
       event.preventDefault();
       event.stopPropagation();
       onClose();
       return;
     }
+    if (!event.repeat && event.key === "F2") {
+      event.preventDefault();
+      event.stopPropagation();
+      showHistory();
+      return;
+    }
     if (event.key !== "Tab") return;
-    const controls = panel.current?.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
-    );
-    if (!controls?.length) return;
-    const first = controls[0];
-    const last = controls[controls.length - 1];
-    if (!first || !last) return;
+    const controls = Array.from(
+      panel.current?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
+      ) ?? [],
+    ).filter((element) => !element.closest("[hidden], [inert]"));
+    const first = controls[0],
+      last = controls[controls.length - 1];
     if (event.shiftKey && document.activeElement === first) {
       event.preventDefault();
-      last.focus();
+      last?.focus();
     } else if (!event.shiftKey && document.activeElement === last) {
       event.preventDefault();
-      first.focus();
+      first?.focus();
     }
   };
-
   return createPortal(
-    <div data-tailored-overlay className="fixed inset-0 z-[80] flex items-center justify-center bg-surface-950/70 p-3">
+    <div
+      hidden={!open}
+      inert={!open}
+      data-tailored-overlay={open ? "" : undefined}
+      className={open ? "fixed inset-0 z-[80] flex items-center justify-center bg-surface-950/70 p-3" : "hidden"}
+    >
       <div
         ref={panel}
-        role="dialog"
-        aria-modal="true"
+        role={open ? "dialog" : undefined}
+        aria-modal={open ? true : undefined}
         aria-label="Tailored Sessions"
-        onKeyDown={handleKey}
-        onKeyDownCapture={(event) => {
-          if (event.key === "F2" && !busy && !uncertain) {
-            event.preventDefault();
-            event.stopPropagation();
-            showHistory();
-          }
-        }}
+        onKeyDown={key}
         className={`flex min-h-0 w-full flex-col rounded-lg border border-surface-700 bg-surface-900 shadow-xl ${session ? "h-[85dvh] max-w-6xl" : "max-w-2xl"}`}
       >
         <header className="flex items-center justify-between border-b border-surface-700 px-4 py-3">
-          <h2 className="text-sm font-semibold text-text-primary">
-            {session
-              ? session.title
-              : `Tailored Sessions${composing ? (documentChat ? " · Document chat" : " · Capture an idea") : ""}`}
-          </h2>
+          <h2 className="text-sm font-semibold text-text-primary">{session?.title ?? `Tailored Sessions${heading}`}</h2>
           <div className="flex items-center gap-2">
-            {(session || composing || research || workshop) && (
+            {(selected || session) && (
               <button
                 type="button"
-                disabled={busy || uncertain}
                 onClick={showHistory}
-                className="h-8 rounded-md px-2 text-xs text-text-secondary hover:bg-surface-800 disabled:opacity-50"
+                className="h-8 rounded-md px-2 text-xs text-text-secondary hover:bg-surface-800"
               >
                 Back to history · F2
               </button>
@@ -209,11 +175,11 @@ export function TailoredSessionsOverlay({
               onClick={onClose}
               className="h-8 rounded-md px-2 text-sm text-text-secondary hover:bg-surface-800"
             >
-              Close · Ctrl+Y
+              Close · Ctrl+Y outside editors
             </button>
           </div>
         </header>
-        {session ? (
+        {open && session && (
           <>
             <div className="flex min-h-0 flex-1 flex-col p-2">
               <TerminalView session={session} />
@@ -222,156 +188,93 @@ export function TailoredSessionsOverlay({
               F2 returns to history. Closing leaves the Session running. Escape goes to the agent.
             </p>
           </>
-        ) : workshop ? (
-          <WorkshopForm
-            key={workshop === "new" ? "new-workshop" : workshop.id}
-            account={account}
-            readOnly={readOnly}
-            initial={workshop === "new" ? undefined : workshop}
-          />
-        ) : research ? (
-          <ResearchForm
-            key={research === "new" ? "new" : research.id}
-            account={account}
-            readOnly={readOnly}
-            initial={research === "new" ? undefined : research}
-          />
-        ) : !composing ? (
+        )}
+        {open && !session && !selected && (
           <TailoredHistoryPanel
             searchRef={search}
             readOnly={readOnly}
-            onNew={() => startNew()}
-            onDocument={() => startNew(true)}
-            onWorkshop={(request) => {
-              if (!readOnly || request) setWorkshop(request ?? "new");
-            }}
-            onResearch={(draft) => {
-              if (!readOnly || draft) setResearch(draft ?? "new");
-            }}
+            onNew={() => newEditor("capture")}
+            onDocument={() => newEditor("document")}
+            onWorkshop={(initial) =>
+              initial
+                ? choose({
+                    scope,
+                    key: JSON.stringify([scope, "workshop", initial.id]),
+                    kind: "workshop",
+                    account: initial.envelope.account,
+                    initial,
+                  })
+                : newEditor("workshop")
+            }
+            onResearch={(initial) =>
+              initial
+                ? choose({
+                    scope,
+                    key: JSON.stringify([scope, "research", initial.id]),
+                    kind: "research",
+                    account: initial.inputs.account,
+                    initial,
+                  })
+                : newEditor("research")
+            }
             onOpen={(existing) => {
-              if (readOnly) return;
-              setError(null);
-              setComposing(false);
-              setPendingTerminalFocus("agent");
-              setSession(existing);
+              if (!readOnly) {
+                setPendingTerminalFocus("agent");
+                setSession(existing);
+              }
             }}
           />
-        ) : (
-          <form onSubmit={(event) => void capture(event)} className="space-y-4 p-4">
-            <div className="flex flex-wrap items-center gap-4">
-              <label className="flex items-center gap-2 text-sm text-text-secondary">
-                Account
-                <select
-                  aria-label={documentChat ? "Document account" : "Capture account"}
-                  value={account}
-                  disabled={busy || uncertain}
-                  onChange={(event) => onAccountChange(event.target.value as CaptureAccount)}
-                  className="h-9 rounded-md border border-surface-700 bg-surface-950 px-2 text-text-primary"
-                >
-                  <option value="personal">Personal</option>
-                  <option value="work">Work</option>
-                </select>
-              </label>
-              {!documentChat && (
-                <label className="flex items-center gap-2 text-sm text-text-primary">
-                  <input
-                    type="checkbox"
-                    checked={immediately}
-                    disabled={busy || uncertain}
-                    onChange={(event) => setImmediately(event.target.checked)}
-                  />
-                  Immediately
-                </label>
-              )}
-            </div>
-            <p className="text-xs text-text-secondary">
-              {documentChat
-                ? "Public direct Markdown/PDF only. Source is downloaded and extracted before a tool-free conversation starts. No credentials, redirects or OCR. 10 MiB raw / 256 KiB text; oversize documents are refused."
-                : immediately
-                  ? "Apply inferred ticket, Atlas, and KB changes without a review step."
-                  : "Save the idea, then review inferred destinations before writing."}
-            </p>
-            {documentChat ? (
-              <>
-                <label className="block text-sm text-text-secondary" htmlFor="document-url">
-                  Public document URL
-                </label>
-                <textarea
-                  id="document-url"
-                  ref={focusIdea}
-                  value={url}
-                  disabled={busy || uncertain}
-                  maxLength={8192}
-                  rows={3}
-                  onChange={(event) => setUrl(event.target.value)}
-                  className="w-full resize-y whitespace-pre-wrap rounded-md border border-surface-700 bg-surface-950 p-3 text-sm text-text-primary [overflow-wrap:anywhere]"
+        )}
+        {editors.map((editor) => {
+          const active = open && scope === editor.scope && selected === editor.key && !session;
+          const changeAccount = (next: CaptureAccount) => newEditor(editor.kind, next);
+          const identify = (id: string, persisted: boolean) =>
+            setEditors((old) =>
+              old.map((e) =>
+                e.key === editor.key ? { ...e, requestId: id, ...(persisted ? { newSlot: false } : {}) } : e,
+              ),
+            );
+          return (
+            <div key={editor.key} data-editor hidden={!active} inert={!active}>
+              {editor.kind === "research" ? (
+                <ResearchForm
+                  account={editor.account}
+                  initial={editor.initial}
+                  onIdentity={identify}
+                  active={active}
+                  onAccountChange={changeAccount}
+                  readOnly={readOnly}
                 />
-                <label className="block text-sm text-text-secondary" htmlFor="document-question">
-                  Opening question (optional)
-                </label>
-                <textarea
-                  id="document-question"
-                  value={question}
-                  disabled={busy || uncertain}
-                  maxLength={4096}
-                  rows={3}
-                  onChange={(event) => setQuestion(event.target.value)}
-                  className="w-full resize-y whitespace-pre-wrap rounded-md border border-surface-700 bg-surface-950 p-3 text-sm text-text-primary [overflow-wrap:anywhere]"
+              ) : editor.kind === "workshop" ? (
+                <WorkshopForm
+                  account={editor.account}
+                  initial={editor.initial}
+                  onIdentity={identify}
+                  active={active}
+                  onAccountChange={changeAccount}
+                  readOnly={readOnly}
                 />
-              </>
-            ) : (
-              <div className="text-sm text-text-secondary">
-                <label htmlFor="tailored-idea">Idea</label>
-                <textarea
-                  id="tailored-idea"
-                  ref={focusIdea}
-                  value={idea}
-                  disabled={busy || uncertain}
-                  maxLength={16384}
-                  onChange={(event) => setIdea(event.target.value)}
-                  rows={6}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      event.currentTarget.form?.requestSubmit();
+              ) : (
+                <TailoredCaptureForm
+                  account={editor.account}
+                  documentChat={editor.kind === "document"}
+                  active={active}
+                  onAccountChange={changeAccount}
+                  profile={editor.scope || undefined}
+                  bootId={bootId}
+                  readOnly={readOnly}
+                  onCreated={(created) => {
+                    onCreated(created);
+                    if (selection.current === editor.key) {
+                      setPendingTerminalFocus("agent");
+                      setSessions((old) => ({ ...old, [editor.scope]: created }));
                     }
                   }}
-                  placeholder="What's the idea?"
-                  className="mt-1 w-full resize-y rounded-md border border-surface-700 bg-surface-950 p-3 text-sm text-text-primary"
                 />
-              </div>
-            )}
-            {error && (
-              <p role="alert" className="text-sm text-status-error">
-                {error}
-              </p>
-            )}
-            {uncertain && (
-              <p className="text-xs text-text-secondary">
-                The outcome is not confirmed. Retry uses the same create key. If you close, pending creation
-                reconciliation continues in the background; check the Session list before launching again.
-              </p>
-            )}
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-xs text-text-secondary">
-                {documentChat ? "Select Start to load the source and begin" : "Enter capture · Shift+Enter newline"}
-              </span>
-              <button
-                type="submit"
-                disabled={readOnly || busy || !(documentChat ? url : idea).trim() || blocked}
-                className="h-9 rounded-md border border-surface-600 bg-surface-800 px-4 text-sm font-medium text-text-primary hover:bg-surface-700 disabled:opacity-50"
-              >
-                {busy
-                  ? "Checking and launching…"
-                  : uncertain
-                    ? "Retry same capture"
-                    : documentChat
-                      ? "Start"
-                      : "Capture idea"}
-              </button>
+              )}
             </div>
-          </form>
-        )}
+          );
+        })}
       </div>
     </div>,
     document.body,

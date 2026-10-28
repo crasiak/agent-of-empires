@@ -11,6 +11,16 @@ fn tailored_shortcut_and_modal_input_preserve_the_underlying_selection() {
     let previous = env.view.selected_session.clone();
     let shortcut = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
     assert!(env.view.routes_tailored_key(&shortcut));
+    for kind in [
+        crossterm::event::KeyEventKind::Repeat,
+        crossterm::event::KeyEventKind::Release,
+    ] {
+        env.view.handle_key(
+            KeyEvent::new_with_kind(KeyCode::Char('y'), KeyModifiers::CONTROL, kind),
+            None,
+        );
+        assert!(env.view.tailored_window.is_none());
+    }
     assert!(!env
         .view
         .routes_tailored_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
@@ -27,6 +37,14 @@ fn tailored_shortcut_and_modal_input_preserve_the_underlying_selection() {
     assert!(env.view.send_message_dialog.is_none());
     assert_eq!(env.view.selected_session, previous);
     env.view.handle_key(shortcut, None);
+    assert!(
+        env.view.tailored_window.is_some(),
+        "Ctrl+Y belongs to the form editor"
+    );
+    env.view.handle_key(
+        KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+        None,
+    );
     assert!(env.view.tailored_window.is_none());
     assert_eq!(env.view.selected_session, previous);
 }
