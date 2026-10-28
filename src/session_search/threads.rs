@@ -3,6 +3,7 @@
 //! search hits name a conversation, and this maps it back to the pane.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
@@ -20,10 +21,20 @@ pub struct Iteration {
     pub start: String,
 }
 
+/// A listed pane, for finding the live session in a folder.
+#[derive(Debug, Clone)]
+pub struct Pane {
+    pub id: String,
+    pub cwd: String,
+    pub tool: String,
+}
+
 #[derive(Debug, Default)]
 pub struct Threads {
     hosted: HashMap<String, String>,
     iterations: HashMap<String, Vec<Iteration>>,
+    /// Listed panes by canonical folder.
+    folders: HashMap<PathBuf, Vec<Pane>>,
 }
 
 impl Threads {
@@ -76,6 +87,27 @@ impl Threads {
             .and_then(|store| store.events_after(0, usize::MAX >> 1))
             .unwrap_or_default();
         Self::from_events(&events, listed)
+    }
+
+    /// Adds the listed panes, so a hit can find the live session in its folder.
+    pub fn with_panes(mut self, panes: impl IntoIterator<Item = Pane>) -> Self {
+        for pane in panes {
+            let dir = crate::session::capture::canonicalize_or_raw(&pane.cwd);
+            self.folders.entry(dir).or_default().push(pane);
+        }
+        self
+    }
+
+    /// The live session for work in `cwd`: a listed pane there, preferring
+    /// `tool`, then the one whose thread was active last.
+    pub fn pane_in_folder(&self, cwd: &str, tool: &str) -> Option<&str> {
+        let dir = crate::session::capture::canonicalize_or_raw(cwd);
+        let active = |p: &Pane| self.iterations(&p.id).last().map(|i| i.last);
+        self.folders
+            .get(&dir)?
+            .iter()
+            .max_by_key(|p| (p.tool == tool, active(p)))
+            .map(|p| p.id.as_str())
     }
 
     /// The pane whose thread includes conversation `session_id`.
@@ -132,5 +164,34 @@ mod tests {
         assert_eq!(threads.pane_of("a"), Some("p2"));
         assert_eq!(threads.pane_of("z"), None);
         assert!(threads.iterations("gone").is_empty());
+    }
+
+    #[test]
+    fn the_live_session_in_a_folder_prefers_the_tool_then_recent_work() {
+        use UsageKind::*;
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let pane = |id: &str, tool: &str| Pane {
+            id: id.into(),
+            cwd: cwd.clone(),
+            tool: tool.into(),
+        };
+        let events = [
+            event(1, "old", ContextStart, "startup", "a"),
+            event(2, "new", ContextStart, "startup", "b"),
+        ];
+        let threads = Threads::from_events(&events, &|_| true).with_panes([
+            pane("old", "pi"),
+            pane("new", "pi"),
+            pane("shell", "claude"),
+        ]);
+        assert_eq!(threads.pane_in_folder(&cwd, "pi"), Some("new"));
+        assert_eq!(threads.pane_in_folder(&cwd, "claude"), Some("shell"));
+        // The same folder spelled through a trailing slash still matches.
+        assert_eq!(
+            threads.pane_in_folder(&format!("{cwd}/"), "pi"),
+            Some("new")
+        );
+        assert_eq!(threads.pane_in_folder("/nowhere", "pi"), None);
     }
 }

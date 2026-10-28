@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use super::HomeView;
 use crate::session::Status;
-use crate::session_search::{Panes, ResumeSpec, Session, Target, Threads};
+use crate::session_search::{Pane, Panes, ResumeSpec, Session, Target, Threads};
 use crate::tui::app::Action;
 use crate::tui::dialogs::{SearchOutcome, SessionSearchDialog};
 
@@ -29,7 +29,12 @@ impl HomeView {
             .collect();
         let live: HashSet<String> = listed.iter().map(|i| i.id.clone()).collect();
         // Every conversation each pane has run, from the usage log.
-        let threads = std::sync::Arc::new(Threads::load(&|id| live.contains(id)));
+        let panes = listed.iter().map(|i| Pane {
+            id: i.id.clone(),
+            cwd: i.project_path.clone(),
+            tool: i.tool.clone(),
+        });
+        let threads = std::sync::Arc::new(Threads::load(&|id| live.contains(id)).with_panes(panes));
         // The conversation each pane runs, which hits for Pi do not carry.
         let bound: HashMap<String, String> = listed
             .iter()
@@ -43,6 +48,7 @@ impl HomeView {
                 live: &|id| live.contains(id),
                 current: &|sid| bound.get(sid).cloned(),
                 hosted: &|sid| hosted.pane_of(sid).map(str::to_string),
+                folder: &|cwd, tool| hosted.pane_in_folder(cwd, tool).map(str::to_string),
             };
             crate::session_search::resolve(s, &panes, exact, &profiles, &ledger_home)
         });

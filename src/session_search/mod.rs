@@ -12,4 +12,4 @@ pub use group::{group, Row};
 pub use query::{parse, Client, Hit, QueryError, Request, Resume, Scope, Session, Snippet};
 pub use resume::instance;
 pub use target::{profile_homes, resolve, Panes, ProfileHomes, ResumeSpec, Target};
-pub use threads::{Iteration, Threads};
+pub use threads::{Iteration, Pane, Threads};
