@@ -82,14 +82,17 @@ test("capture overlays sidebar and Session, owns input, and restores the origina
   await expect(page.getByLabel("Find a tailored preset")).toBeFocused();
   await page.getByLabel("Find a tailored preset").fill("idea");
   await page.getByLabel("Find a tailored preset").press("Enter");
-  await expect(overlay.getByLabel("Idea", { exact: true })).toBeFocused();
-  await overlay.getByLabel("Capture account").selectOption("work");
-  await overlay.getByLabel("Immediately", { exact: true }).check();
-  await overlay.getByLabel("Idea", { exact: true }).fill("Make Atlas ownership clearer");
+  await expect(overlay.locator("[data-editor]:visible").getByLabel("Idea", { exact: true })).toBeFocused();
+  await overlay.locator("[data-editor]:visible").getByLabel("Capture account").selectOption("work");
+  await overlay.locator("[data-editor]:visible").getByLabel("Immediately", { exact: true }).check();
+  await overlay
+    .locator("[data-editor]:visible")
+    .getByLabel("Idea", { exact: true })
+    .fill("Make Atlas ownership clearer");
   await overlay.getByRole("button", { name: "Capture idea", exact: true }).focus();
   await page.keyboard.press("Tab");
   await expect(overlay.getByRole("button", { name: "Back to history · F2" })).toBeFocused();
-  await overlay.getByLabel("Idea", { exact: true }).press("Enter");
+  await overlay.locator("[data-editor]:visible").getByLabel("Idea", { exact: true }).press("Control+Enter");
   const captureInput = overlay.locator('[data-term="agent"] textarea');
   await expect(captureInput).toBeFocused();
   expect(submitted).toMatchObject({
@@ -229,17 +232,20 @@ test("workshop keeps account-scoped edits through resize and returns focus witho
   const search = dialog.getByLabel("Find a tailored preset");
   await search.fill("workshop");
   await search.press("Enter");
-  await expect(dialog.getByLabel("Source repository")).toHaveValue("/tmp/skills");
-  await dialog.getByLabel("Workshop account").selectOption("work");
-  await dialog.getByLabel("Skill slug").fill("review-evidence");
-  await dialog.getByLabel("Account/source suitability").fill("Work-only source repository");
-  const idea = dialog.getByLabel("Skill idea", { exact: true });
+  await expect(dialog.locator("[data-editor]:visible").getByLabel("Source repository")).toHaveValue("/tmp/skills");
+  await dialog.locator("[data-editor]:visible").getByLabel("Workshop account").selectOption("work");
+  await dialog.locator("[data-editor]:visible").getByLabel("Skill slug").fill("review-evidence");
+  await dialog
+    .locator("[data-editor]:visible")
+    .getByLabel("Account/source suitability")
+    .fill("Work-only source repository");
+  const idea = dialog.locator("[data-editor]:visible").getByLabel("Skill idea", { exact: true });
   const exactIdea = "Check evidence and preserve account boundaries. ".repeat(20);
   await idea.fill(exactIdea);
   await page.setViewportSize({ width: 520, height: 720 });
   await expect(idea).toHaveValue(exactIdea);
   expect(await idea.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await expect(dialog.getByLabel("Workshop account")).toHaveValue("work");
+  await expect(dialog.locator("[data-editor]:visible").getByLabel("Workshop account")).toHaveValue("work");
   const screenshot = test.info().outputPath("skill-workshop-form.png");
   await dialog.screenshot({ path: screenshot });
   await test.info().attach("Skill Workshop form", {
@@ -256,4 +262,82 @@ test("workshop keeps account-scoped edits through resize and returns focus witho
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(underlying).toBeFocused();
+});
+
+test("native multiline paste, undo, composition and retained focus never write accidentally", async ({
+  page,
+  context,
+}) => {
+  const sent: string[] = [];
+  const terminal = await mockTerminalApis(page, {
+    onLiveMessage: (_url, message) => {
+      if (message[0] !== 123) sent.push(message.toString());
+    },
+  });
+  await page.route("**/api/tailored-sessions", (route) => route.fulfill({ json: { entries: [] } }));
+  let writes = 0;
+  await page.route("**/api/sessions", (route) => {
+    if (route.request().method() === "POST") {
+      writes++;
+      return route.fulfill({ status: 400, json: { error: "fixture_refusal", message: "fixture refuses writes" } });
+    }
+    return route.fulfill({ json: { sessions: [sessionResponse({ id: "pinch-test" })], workspace_ordering: [] } });
+  });
+  await page.goto("/session/pinch-test");
+  await terminal.waitForLiveReady();
+  await pressShortcut(page, "Control+y");
+  const dialog = page.getByRole("dialog", { name: "Tailored Sessions", exact: true });
+  await dialog.getByRole("button", { name: /Capture an idea/ }).click();
+  const idea = dialog.getByRole("textbox", { name: "Idea", exact: true });
+  await expect(idea).toBeFocused();
+  await idea.fill("leftRIGHT");
+  await idea.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(4, 4));
+  const paste = `🌱日本語${"long".repeat(1000)}\n\nlast\n`;
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.evaluate((value) => navigator.clipboard.writeText(value), paste);
+  const command = process.platform === "darwin" ? "Meta" : "Control";
+  await idea.press(`${command}+v`);
+  await expect(idea).toHaveValue(`left${paste}RIGHT`);
+  await idea.press(`${command}+z`);
+  await expect(idea).toHaveValue("leftRIGHT");
+  await idea.press(`${command}+Shift+z`);
+  await expect(idea).toHaveValue(`left${paste}RIGHT`);
+  await idea.press("Enter");
+  await expect(idea).toHaveValue(`left${paste}\nRIGHT`);
+  await idea.press("Control+y");
+  await expect(dialog).toBeVisible();
+  await idea.dispatchEvent("compositionstart", { data: "あ" });
+  for (const key of ["Escape", "F2", "Enter", "y"]) {
+    await idea.dispatchEvent("keydown", {
+      key,
+      ctrlKey: key === "Enter" || key === "y",
+      isComposing: true,
+      bubbles: true,
+    });
+    await idea.dispatchEvent("keydown", { key, keyCode: 229, ctrlKey: key === "Enter", bubbles: true });
+  }
+  await idea.dispatchEvent("compositionend", { data: "あ" });
+  await expect(idea).toBeFocused();
+  await expect(dialog).toBeVisible();
+  await idea.dispatchEvent("keydown", { key: "Enter", ctrlKey: true, repeat: true, bubbles: true });
+  await idea.press("F2");
+  await dialog.getByRole("button", { name: /Capture an idea/ }).click();
+  await expect(idea).toHaveValue(`left${paste}\nRIGHT`);
+  await expect(idea).toBeFocused();
+  await idea.press("Escape");
+  await expect(dialog).toBeHidden();
+  await pressShortcut(page, "Control+y");
+  await expect(idea).toBeFocused();
+  await idea.press(`${command}+z`);
+  await expect(idea).toHaveValue(`left${paste}RIGHT`);
+  const screenshot = test.info().outputPath("tailored-retained-multiline-input.png");
+  await dialog.screenshot({ path: screenshot });
+  await test
+    .info()
+    .attach("Retained multiline editor and deliberate submit hint", { path: screenshot, contentType: "image/png" });
+  expect(writes).toBe(0);
+  expect(sent).toEqual([]);
+  await idea.press("Control+Enter");
+  await expect(dialog.getByRole("alert")).toHaveText("fixture refuses writes");
+  expect(writes).toBe(1);
 });

@@ -32,7 +32,7 @@ function mount() {
 type ActionName = keyof ShortcutActions;
 
 describe("useKeyboardShortcuts", () => {
-  it("opens Tailored Sessions from inputs and leaves other modal terminal shortcuts alone", () => {
+  it("leaves form editing shortcuts and composition alone but permits terminal overlay close", () => {
     const { actions, unmount } = mount();
     const overlay = document.createElement("div");
     overlay.dataset.tailoredOverlay = "";
@@ -41,7 +41,14 @@ describe("useKeyboardShortcuts", () => {
     document.body.append(overlay);
     try {
       const open = dispatch(input, { key: "y", code: "KeyY", ctrlKey: true });
-      expect(open.defaultPrevented).toBe(true);
+      expect(open.defaultPrevented).toBe(false);
+      expect(actions.onTailored).not.toHaveBeenCalled();
+      input.dataset.term = "agent";
+      dispatch(input, { key: "y", code: "KeyY", ctrlKey: true, isComposing: true });
+      dispatch(input, { key: "y", code: "KeyY", ctrlKey: true, keyCode: 229 });
+      dispatch(input, { key: "y", code: "KeyY", ctrlKey: true, repeat: true });
+      expect(actions.onTailored).not.toHaveBeenCalled();
+      dispatch(input, { key: "y", code: "KeyY", ctrlKey: true });
       expect(actions.onTailored).toHaveBeenCalledOnce();
       dispatch(input, { key: "k", code: "KeyK", ctrlKey: true });
       dispatch(input, { key: "Escape", code: "Escape" });

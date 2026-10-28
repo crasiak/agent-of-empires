@@ -260,6 +260,7 @@ impl HomeView {
             help_scroll: 0,
             new_dialog: None,
             tailored_window: None,
+            retained_tailored_windows: Vec::new(),
             tailored_account: crate::session::tailored::CaptureAccount::Personal,
             confirm_dialog: None,
             unified_delete_dialog: None,

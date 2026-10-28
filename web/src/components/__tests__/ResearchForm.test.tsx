@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ResearchForm } from "../ResearchForm";
 import { getResearch, getResearchOutput, replyResearch, researchOperation } from "../../lib/api";
 import type { ResearchDraft } from "../../lib/types";
@@ -194,7 +194,7 @@ it("prevents overlapping operations and treats failed refresh as uncertain inspe
     resolve({ error: "Lost response", uncertain: true });
   });
   fireEvent.click(screen.getByRole("button", { name: "Refresh existing request" }));
-  expect((await screen.findByRole("alert")).textContent).toContain("Request unavailable");
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Request unavailable"));
 });
 it("reopens owned discovery output and sends only an explicit literal answer", async () => {
   vi.mocked(getResearchOutput).mockResolvedValue({ output: "Which evaluation target?" });

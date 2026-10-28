@@ -8,7 +8,7 @@ use crate::{
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{prelude::*, widgets::*};
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{TextArea, WrapMode};
 use std::{
     sync::mpsc,
     time::{Duration, Instant},
@@ -31,7 +31,8 @@ enum ResultMessage {
     Reply,
 }
 pub(super) struct ResearchWindow {
-    id: String,
+    pub(super) id: String,
+    pub(super) new_draft: bool,
     draft: Option<Draft>,
     inputs: Inputs,
     fields: Vec<TextArea<'static>>,
@@ -47,12 +48,19 @@ pub(super) struct ResearchWindow {
 impl ResearchWindow {
     pub fn new(account: CaptureAccount, draft: Option<Draft>) -> Self {
         let mut window = Self {
+            new_draft: draft.is_none(),
             id: draft
                 .as_ref()
                 .map_or_else(|| uuid::Uuid::new_v4().to_string(), |d| d.id.clone()),
             draft: None,
             inputs: Inputs::new(account),
-            fields: (0..10).map(|_| TextArea::default()).collect(),
+            fields: (0..10)
+                .map(|_| {
+                    let mut field = TextArea::default();
+                    field.set_wrap_mode(WrapMode::WordOrGlyph);
+                    field
+                })
+                .collect(),
             focus: 0,
             checking: None,
             output_check: None,
@@ -69,6 +77,7 @@ impl ResearchWindow {
         window
     }
     fn accept(&mut self, draft: Draft) {
+        self.new_draft = false;
         self.inputs = draft.inputs.clone();
         let sources = draft
             .inputs
@@ -97,7 +106,8 @@ impl ResearchWindow {
         .into_iter()
         .enumerate()
         {
-            self.fields[index] = TextArea::from(value.lines());
+            self.fields[index] = TextArea::from(value.split('\n'));
+            self.fields[index].set_wrap_mode(WrapMode::WordOrGlyph);
         }
         self.draft = Some(draft);
     }
@@ -142,6 +152,28 @@ impl ResearchWindow {
             .collect::<Result<_>>()?;
         inputs.validate()?;
         Ok(inputs)
+    }
+    pub(super) fn account(&self) -> CaptureAccount {
+        self.inputs.account
+    }
+    pub(super) fn can_switch_account(&self) -> bool {
+        self.draft.is_none() && self.checking.is_none()
+    }
+    fn can_edit(&self) -> bool {
+        self.checking.is_none()
+            && !self.show_output
+            && ((!self.locked() && (self.focus != 0 || self.draft.is_none())) || self.focus == 9)
+    }
+    fn edit_key(&mut self, key: KeyEvent) {
+        if self.can_edit() {
+            self.fields[self.focus].input(key);
+            self.inputs.consequences_reviewed = false;
+        }
+    }
+    pub(super) fn repeat(&mut self, key: KeyEvent) {
+        if !(key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL)) {
+            self.edit_key(key);
+        }
     }
     pub fn key(&mut self, key: KeyEvent) {
         if self.checking.is_some() {
@@ -208,14 +240,11 @@ impl ResearchWindow {
                 KeyCode::BackTab => {
                     self.focus = (self.focus + self.fields.len() - 1) % self.fields.len()
                 }
-                _ if self.focus == 9 => {
-                    self.fields[9].input(key);
-                }
-                _ => {}
+                _ => self.edit_key(key),
             }
             return;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) {
             let operation = match key.code {
                 KeyCode::Char('d') => Some("develop"),
                 KeyCode::Char('s') => Some("save"),
@@ -232,7 +261,7 @@ impl ResearchWindow {
             KeyCode::BackTab => {
                 self.focus = (self.focus + self.fields.len() - 1) % self.fields.len()
             }
-            KeyCode::F(6) => {
+            KeyCode::F(6) if self.draft.is_none() => {
                 self.inputs.account = match self.inputs.account {
                     CaptureAccount::Personal => CaptureAccount::Work,
                     CaptureAccount::Work => CaptureAccount::Personal,
@@ -248,17 +277,11 @@ impl ResearchWindow {
                 self.inputs.consequences_reviewed = false;
             }
             KeyCode::F(8) => self.inputs.consequences_reviewed = !self.inputs.consequences_reviewed,
-            _ if self.focus != 0 || self.draft.is_none() => {
-                self.fields[self.focus].input(key);
-                self.inputs.consequences_reviewed = false;
-            }
-            _ => {}
+            _ => self.edit_key(key),
         }
     }
     pub fn paste(&mut self, text: &str) {
-        if self.checking.is_none()
-            && ((!self.locked() && (self.focus != 0 || self.draft.is_none())) || self.focus == 9)
-        {
+        if self.can_edit() {
             self.fields[self.focus].insert_str(text);
             self.inputs.consequences_reviewed = false;
         }
@@ -312,7 +335,7 @@ impl ResearchWindow {
             }
         });
     }
-    pub fn tick(&mut self) -> bool {
+    pub fn tick(&mut self, visible: bool) -> bool {
         let mut changed = false;
         if let Some(rx) = &self.checking {
             match rx.try_recv() {
@@ -344,7 +367,10 @@ impl ResearchWindow {
                 _ => {}
             }
         }
-        if self.output_check.is_none() && self.output_at.elapsed() >= Duration::from_secs(2) {
+        if visible
+            && self.output_check.is_none()
+            && self.output_at.elapsed() >= Duration::from_secs(2)
+        {
             if let Some(draft) = self
                 .draft
                 .as_ref()
@@ -445,7 +471,7 @@ impl ResearchWindow {
             .as_deref()
             .or_else(|| self.draft.as_ref().and_then(|d| d.error.as_deref()))
             .unwrap_or("");
-        frame.render_widget(Paragraph::new(format!("{}\n{}", if self.checking.is_some() { "Working; no second submission" } else { "Ctrl+S save · Ctrl+D develop · Ctrl+R RUN · F9 send literal answer · F10 refresh · F11 output · F12 abandon development · F2 history" }, error)).wrap(Wrap { trim: true }).style(Style::default().fg(if error.is_empty() { theme.dimmed } else { theme.error })), rows[5]);
+        frame.render_widget(Paragraph::new(format!("{}\n{}", if self.checking.is_some() { "Working; no second submission" } else { "Ctrl+Alt+S save · Ctrl+Alt+D develop · Ctrl+Alt+R RUN · F9 send literal answer · F10 refresh · F11 output · F12 abandon development · F2 history" }, error)).wrap(Wrap { trim: true }).style(Style::default().fg(if error.is_empty() { theme.dimmed } else { theme.error })), rows[5]);
     }
 }
 
@@ -455,6 +481,107 @@ mod tests {
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
+    #[test]
+    #[serial_test::serial]
+    fn saved_completion_retires_only_new_slot_and_reentry_keeps_editor() {
+        use crate::tui::home::tailored::{history::HistoryAction, HomeView, WindowAction};
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+        let mut view = HomeView::new_for_test(
+            Some("test".into()),
+            crate::tmux::AvailableTools::with_tools(&["pi"]),
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .unwrap();
+        view.open_tailored();
+        let overlay = view.tailored_window.as_mut().unwrap();
+        overlay.picker_action(HistoryAction::Research);
+        let form = overlay.research.as_mut().unwrap();
+        let id = form.id.clone();
+        let draft = Draft::new(id.clone(), "saved original".into(), form.inputs.clone()).unwrap();
+        let (tx, rx) = mpsc::channel();
+        form.checking = Some(rx);
+        tx.send(Ok(ResultMessage::Draft(Box::new(draft)))).unwrap();
+        assert!(form.tick(false));
+        overlay.handle_key(key(KeyCode::Tab));
+        overlay.handle_paste("unsaved context");
+        overlay.handle_key(key(KeyCode::F(2)));
+        overlay.picker_action(HistoryAction::Research);
+        let fresh = overlay.research.as_ref().unwrap();
+        assert_ne!(fresh.id, id);
+        assert_eq!(fresh.fields[0].lines().join("\n"), "");
+        overlay.handle_key(key(KeyCode::F(2)));
+        view.apply_tailored_action(WindowAction::Open(id));
+        let overlay = view.tailored_window.as_mut().unwrap();
+        let retained = overlay.research.as_ref().unwrap();
+        assert_eq!(retained.fields[1].lines().join("\n"), "unsaved context");
+        overlay.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(
+            overlay.research.as_ref().unwrap().fields[1]
+                .lines()
+                .join("\n"),
+            ""
+        );
+    }
+
+    #[test]
+    fn repeat_press_and_paste_share_research_edit_fences() {
+        use crate::tui::home::tailored::{history::HistoryAction, TailoredWindow};
+        let mut overlay = TailoredWindow::new(CaptureAccount::Personal);
+        overlay.picker_action(HistoryAction::Research);
+        let form = overlay.research.as_mut().unwrap();
+        form.accept(Draft::new(form.id.clone(), "immutable".into(), form.inputs.clone()).unwrap());
+        let repeat = KeyEvent::new_with_kind(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+            crossterm::event::KeyEventKind::Repeat,
+        );
+        overlay.handle_key(repeat);
+        assert_eq!(
+            overlay.research.as_ref().unwrap().fields[0]
+                .lines()
+                .join("\n"),
+            "immutable"
+        );
+        overlay.handle_key(key(KeyCode::Tab));
+        overlay.handle_key(key(KeyCode::F(8)));
+        overlay.handle_key(repeat);
+        let form = overlay.research.as_ref().unwrap();
+        assert_eq!(form.fields[1].lines().join("\n"), "x");
+        assert!(!form.inputs.consequences_reviewed);
+        overlay.handle_key(key(KeyCode::F(8)));
+        overlay.handle_key(key(KeyCode::F(11)));
+        overlay.handle_key(repeat);
+        overlay.handle_key(key(KeyCode::Char('p')));
+        overlay.handle_paste("hidden");
+        let form = overlay.research.as_ref().unwrap();
+        assert_eq!(form.fields[1].lines().join("\n"), "x");
+        assert!(form.inputs.consequences_reviewed);
+        assert!(form.checking.is_none());
+    }
+
+    #[test]
+    fn multiline_paste_undo_redo_and_delete_remain_editor_commands() {
+        let mut window = ResearchWindow::new(CaptureAccount::Personal, None);
+        window.paste("leftRIGHT");
+        window.key(key(KeyCode::Home));
+        for _ in 0..4 {
+            window.key(key(KeyCode::Right));
+        }
+        let paste = format!("🌱日本語{}\n\nlast\n", "long".repeat(500));
+        window.paste(&paste);
+        let exact = format!("left{paste}RIGHT");
+        assert_eq!(window.fields[0].lines().join("\n"), exact);
+        window.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(window.fields[0].lines().join("\n"), "leftRIGHT");
+        window.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(window.fields[0].lines().join("\n"), exact);
+        window.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(window.fields[0].lines().join("\n").ends_with("IGHT"));
+        window.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(window.checking.is_none());
+    }
+
     #[test]
     fn review_controls_do_not_launch_and_edits_invalidate_acknowledgement() {
         let mut window = ResearchWindow::new(CaptureAccount::Work, None);

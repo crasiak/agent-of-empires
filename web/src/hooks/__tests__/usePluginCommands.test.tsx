@@ -62,6 +62,25 @@ describe("usePluginCommands keybinds", () => {
     expect(result.current.overlay).toBeNull();
   });
 
+  it("does not invoke host commands from modal buttons, composition or held chords", async () => {
+    fetchMock.mockResolvedValue({ commands: [refresh] });
+    const { result } = renderHook(() => usePluginCommands([], "s1"));
+    await waitFor(() => expect(result.current.actions.length).toBe(1));
+    for (const modifiers of [{ isComposing: true }, { keyCode: 229 }, { repeat: true }]) {
+      fireEvent.keyDown(document, { ...ctrl("r"), ...modifiers });
+    }
+    const dialog = render(
+      <div role="dialog" aria-modal="true">
+        <button>Workshop control</button>
+      </div>,
+    );
+    fireEvent.keyDown(screen.getByRole("button", { name: "Workshop control" }), ctrl("r"));
+    expect(invokeMock).not.toHaveBeenCalled();
+    dialog.unmount();
+    fireEvent.keyDown(document, ctrl("r"));
+    expect(invokeMock).toHaveBeenCalledOnce();
+  });
+
   it("invokes the worker on an action-less chord", async () => {
     fetchMock.mockResolvedValue({ commands: [refresh] });
     const { result } = renderHook(() => usePluginCommands([], "s1"));

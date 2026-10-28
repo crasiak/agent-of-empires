@@ -3,8 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { TailoredSessionsOverlay, type CaptureAccount } from "../TailoredSessionsOverlay";
-import { createSession, fetchTailoredHistory, setTailoredHistoryHidden, researchOperation } from "../../lib/api";
-import type { TailoredHistoryEntry } from "../../lib/types";
+import {
+  createSession,
+  fetchTailoredHistory,
+  setTailoredHistoryHidden,
+  researchOperation,
+  workshopOperation,
+  getWorkshop,
+} from "../../lib/api";
+import type { ResearchDraft, TailoredHistoryEntry, WorkshopRequest } from "../../lib/types";
 import { registerPendingCreate, releasePendingCreate, resolvePendingCreate } from "../../lib/pendingCreates";
 import { makeSession } from "./fixtures";
 
@@ -23,8 +30,12 @@ vi.mock("../../lib/api", () => ({
 vi.mock("../TerminalView", () => ({ TerminalView: () => <textarea aria-label="Capture terminal" /> }));
 vi.mock("../../lib/pendingCreates", () => ({
   registerPendingCreate: vi.fn(),
+  claimPendingCreate: vi.fn(),
+  observePendingCreate: vi.fn(() => vi.fn()),
   releasePendingCreate: vi.fn(),
   resolvePendingCreate: vi.fn(),
+  isPendingCreateExpired: vi.fn().mockReturnValue(false),
+  PENDING_CREATE_EXPIRED_MESSAGE: "Create replay window expired; inspect history.",
   retryBody: (pending: { body: object; origin: string | null }) => ({
     ...pending.body,
     retry_origin: pending.origin ?? "unknown",
@@ -33,18 +44,28 @@ vi.mock("../../lib/pendingCreates", () => ({
 
 const onCreated = vi.fn();
 const onClose = vi.fn();
-function Harness({ readOnly = false }: { readOnly?: boolean }) {
+function Harness({ readOnly = false, initiallyOpen = true }: { readOnly?: boolean; initiallyOpen?: boolean }) {
   const [account, setAccount] = useState<CaptureAccount>("personal");
+  const [open, setOpen] = useState(initiallyOpen);
+  const [boot, setBoot] = useState("boot-1");
   return (
-    <TailoredSessionsOverlay
-      account={account}
-      onAccountChange={setAccount}
-      profile="main"
-      bootId="boot-1"
-      readOnly={readOnly}
-      onCreated={onCreated}
-      onClose={onClose}
-    />
+    <>
+      <button onClick={() => setOpen(true)}>Reopen tailored</button>
+      <button onClick={() => setBoot("boot-2")}>Daemon restart</button>
+      <TailoredSessionsOverlay
+        open={open}
+        account={account}
+        onAccountChange={setAccount}
+        profile="main"
+        bootId={boot}
+        readOnly={readOnly}
+        onCreated={onCreated}
+        onClose={() => {
+          onClose();
+          setOpen(false);
+        }}
+      />
+    </>
   );
 }
 function compose() {
@@ -55,6 +76,7 @@ const submit = () => fireEvent.click(screen.getByRole("button", { name: /Capture
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(createSession).mockResolvedValue({ ok: false, error: "refused" });
   vi.mocked(fetchTailoredHistory).mockResolvedValue({ entries: [] });
   vi.mocked(setTailoredHistoryHidden).mockResolvedValue({ ok: true });
 });
@@ -79,6 +101,411 @@ function savedCapture(): TailoredHistoryEntry {
 }
 
 describe("Tailored Sessions", () => {
+  it("detaches closed modal chrome without unmounting retained editors", () => {
+    render(
+      <>
+        <header>Dashboard</header>
+        <Harness initiallyOpen={false} />
+      </>,
+    );
+    expect(document.querySelectorAll("header")).toHaveLength(1);
+    expect(fetchTailoredHistory).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Reopen tailored" }));
+    expect(document.querySelectorAll("header")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: /Capture an idea/ }));
+    const editor = screen.getByRole("textbox", { name: "Idea" });
+    fireEvent.change(editor, { target: { value: "retained input" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close Tailored Sessions" }));
+    expect(document.querySelectorAll("header")).toHaveLength(1);
+    expect(editor.isConnected).toBe(true);
+    expect((editor as HTMLTextAreaElement).value).toBe("retained input");
+    fireEvent.click(screen.getByRole("button", { name: "Reopen tailored" }));
+    expect(screen.getByRole("textbox", { name: "Idea" })).toBe(editor);
+    expect(document.querySelectorAll("header")).toHaveLength(2);
+  });
+
+  it("contains every modal key at the bubble boundary without cancelling native editing", () => {
+    compose();
+    const outside = vi.fn();
+    window.addEventListener("keydown", outside);
+    try {
+      const button = screen.getByRole("button", { name: "Capture idea" });
+      for (const init of [{ key: "S", ctrlKey: true, shiftKey: true }, { key: "x", isComposing: true }, { key: "a" }]) {
+        expect(fireEvent.keyDown(button, init)).toBe(true);
+      }
+      expect(fireEvent.keyDown(screen.getByRole("combobox", { name: "Capture account" }), { key: "ArrowDown" })).toBe(
+        true,
+      );
+      expect(fireEvent.keyDown(screen.getByRole("textbox", { name: "Idea" }), { key: "Enter" })).toBe(true);
+      expect(outside).not.toHaveBeenCalled();
+      expect(createSession).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("keydown", outside);
+    }
+  });
+
+  it.each(["research", "workshop"] as const)(
+    "retires saved %s new slot but reopens the original editor from history",
+    async (kind) => {
+      render(<Harness />);
+      const preset = kind === "research" ? /Tailored research/ : /Skill workshop/;
+      const label = kind === "research" ? "Original quick prompt" : "Skill idea";
+      fireEvent.click(screen.getByRole("button", { name: preset }));
+      const original = screen.getByRole("textbox", { name: label });
+      fireEvent.change(original, { target: { value: "first saved" } });
+      let entry!: TailoredHistoryEntry;
+      if (kind === "research") {
+        vi.mocked(researchOperation).mockImplementation(async (body) => {
+          if (body.operation !== "create") throw new Error("expected create");
+          const draft: ResearchDraft = {
+            id: body.id,
+            original_prompt: body.original_prompt!,
+            inputs: body.inputs!,
+            revision: 1,
+            state: "draft",
+            created_at: "2026-01-01T00:00:00Z",
+            hidden: false,
+            receipt: null,
+            error: null,
+            reason: "",
+            unknowns: [],
+          };
+          entry = {
+            id: draft.id,
+            title: "Saved request",
+            profile: "main",
+            account: "personal",
+            input_preview: "first saved",
+            status: "draft",
+            created_at: draft.created_at,
+            hidden: false,
+            research: draft,
+          };
+          return { draft };
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+        await waitFor(() => expect(researchOperation).toHaveBeenCalledOnce());
+      } else {
+        vi.mocked(workshopOperation).mockImplementation(async (body) => {
+          if (body.operation !== "create") throw new Error("expected create");
+          const request: WorkshopRequest = {
+            id: body.id,
+            envelope: body.envelope,
+            revision: 1,
+            state: "draft",
+            created_at: "2026-01-01T00:00:00Z",
+            hidden: false,
+            turns: [],
+            bundle: null,
+            review: null,
+            commit_intent: null,
+            commit: null,
+            error: null,
+          };
+          entry = {
+            id: request.id,
+            title: "Saved request",
+            profile: "main",
+            account: "personal",
+            input_preview: "first saved",
+            status: "draft",
+            created_at: request.created_at,
+            hidden: false,
+            workshop: request,
+          };
+          return { request };
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Create Workshop" }));
+        await waitFor(() => expect(workshopOperation).toHaveBeenCalledOnce());
+      }
+      const savedId = entry.id;
+      const editLabel = kind === "research" ? "Explicit context" : "Refinement message";
+      const edited = screen.getByRole("textbox", { name: editLabel });
+      fireEvent.change(edited, { target: { value: "unsaved 🌱\n\n" } });
+      vi.mocked(fetchTailoredHistory).mockResolvedValue({ entries: [entry] });
+      fireEvent.keyDown(edited, { key: "F2" });
+      fireEvent.click(screen.getByRole("button", { name: preset }));
+      const fresh = screen.getByRole("textbox", { name: label });
+      expect(fresh).not.toBe(original);
+      expect((fresh as HTMLTextAreaElement).value).toBe("");
+      fireEvent.change(fresh, { target: { value: "second request" } });
+      // A second create must have a fresh request identity.
+      if (kind === "research") {
+        fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+        await waitFor(() => expect(researchOperation).toHaveBeenCalledTimes(2));
+        expect(vi.mocked(researchOperation).mock.calls[1]![0].id).not.toBe(savedId);
+      } else {
+        fireEvent.click(screen.getByRole("button", { name: "Create Workshop" }));
+        await waitFor(() => expect(workshopOperation).toHaveBeenCalledTimes(2));
+        expect(vi.mocked(workshopOperation).mock.calls[1]![0].id).not.toBe(savedId);
+      }
+      fireEvent.keyDown(fresh, { key: "F2" });
+      fireEvent.click(await screen.findByRole("button", { name: "Open Saved request" }));
+      expect(screen.getByRole("textbox", { name: label })).toBe(original);
+      expect(screen.getByRole("textbox", { name: editLabel })).toBe(edited);
+      expect((edited as HTMLTextAreaElement).value).toBe("unsaved 🌱\n\n");
+    },
+  );
+  it.each(["research", "workshop"] as const)(
+    "reopens an uncertain %s creation from history on its original owner",
+    async (kind) => {
+      let entry!: TailoredHistoryEntry;
+      if (kind === "research") {
+        vi.mocked(researchOperation).mockImplementation(async (body) => {
+          if (body.operation !== "create") throw new Error("expected create");
+          const draft: ResearchDraft = {
+            id: body.id,
+            original_prompt: body.original_prompt!,
+            inputs: body.inputs!,
+            revision: 1,
+            state: "draft",
+            created_at: "2026-01-01T00:00:00Z",
+            hidden: false,
+            reason: "",
+            unknowns: [],
+          };
+          entry = {
+            id: draft.id,
+            title: "Unconfirmed request",
+            profile: "main",
+            account: "personal",
+            input_preview: "",
+            status: "draft",
+            created_at: draft.created_at,
+            hidden: false,
+            research: draft,
+          };
+          return { uncertain: true, error: "unconfirmed create" };
+        });
+      } else {
+        vi.mocked(workshopOperation).mockImplementation(async (body) => {
+          if (body.operation !== "create") throw new Error("expected create");
+          const request: WorkshopRequest = {
+            id: body.id,
+            envelope: body.envelope,
+            revision: 1,
+            state: "draft",
+            created_at: "2026-01-01T00:00:00Z",
+            hidden: false,
+            turns: [],
+            bundle: null,
+            review: null,
+            commit_intent: null,
+            commit: null,
+            error: null,
+          };
+          entry = {
+            id: request.id,
+            title: "Unconfirmed request",
+            profile: "main",
+            account: "personal",
+            input_preview: "",
+            status: "draft",
+            created_at: request.created_at,
+            hidden: false,
+            workshop: request,
+          };
+          return { uncertain: true, error: "unconfirmed create" };
+        });
+      }
+      render(<Harness />);
+      const preset = kind === "research" ? /Tailored research/ : /Skill workshop/;
+      const label = kind === "research" ? "Original quick prompt" : "Skill idea";
+      fireEvent.click(screen.getByRole("button", { name: preset }));
+      const original = screen.getByRole("textbox", { name: label });
+      fireEvent.change(original, { target: { value: "private exact 🌱\n\n" } });
+      fireEvent.click(screen.getByRole("button", { name: kind === "research" ? "Save draft" : "Create Workshop" }));
+      await screen.findByText("unconfirmed create");
+      vi.mocked(fetchTailoredHistory).mockResolvedValue({ entries: [entry] });
+      fireEvent.keyDown(original, { key: "F2" });
+      fireEvent.click(await screen.findByRole("button", { name: "Open Unconfirmed request" }));
+      expect(screen.getByRole("textbox", { name: label })).toBe(original);
+      expect((original as HTMLTextAreaElement).value).toBe("private exact 🌱\n\n");
+      expect(screen.getByRole("alert").textContent).toBe("unconfirmed create");
+      fireEvent.keyDown(original, { key: "F2" });
+      fireEvent.click(screen.getByRole("button", { name: preset }));
+      expect(screen.getByRole("textbox", { name: label })).toBe(original);
+      expect(kind === "research" ? researchOperation : workshopOperation).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("retains editor and unknown capture identity across actual close and reopen", async () => {
+    vi.mocked(createSession).mockResolvedValue({ ok: false, network: true, error: "Unknown" });
+    compose();
+    const editor = screen.getByRole("textbox", { name: "Idea" }) as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: "exact 🌱\n\n" } });
+    submit();
+    await screen.findByText("Unknown");
+    const original = vi.mocked(createSession).mock.calls[0]![0];
+    fireEvent.click(screen.getByRole("button", { name: "Close Tailored Sessions" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Daemon restart" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reopen tailored" }));
+    expect(screen.getByRole("textbox", { name: "Idea" })).toBe(editor);
+    expect(editor.value).toBe("exact 🌱\n\n");
+    submit();
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(createSession).mock.calls[1]![0]).toEqual({ ...original, retry_origin: "boot-1" });
+  });
+
+  it("retains Workshop unknown UUID/envelope across F2, preset switch, close and reopen", async () => {
+    vi.mocked(workshopOperation).mockResolvedValue({ uncertain: true, error: "Workshop outcome unknown" });
+    vi.mocked(getWorkshop).mockResolvedValue(null);
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: /Skill workshop/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Skill idea" }), {
+      target: { value: "exact private 🌱\n\n" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Skill slug" }), { target: { value: "fixture" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create Workshop" }));
+    await screen.findByText("Workshop outcome unknown");
+    const body = vi.mocked(workshopOperation).mock.calls[0]![0];
+    fireEvent.keyDown(screen.getByRole("button", { name: "Reopen same request" }), { key: "F2" });
+    fireEvent.click(screen.getByRole("button", { name: /Tailored research/ }));
+    const research = screen.getByRole("textbox", { name: "Original quick prompt" });
+    fireEvent.change(research, { target: { value: "different draft" } });
+    fireEvent.keyDown(research, { key: "F2" });
+    fireEvent.click(screen.getByRole("button", { name: /Skill workshop/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Close Tailored Sessions" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Reopen tailored" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry exact keyed create" }));
+    await waitFor(() => expect(workshopOperation).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(workshopOperation).mock.calls[1]![0]).toEqual(body);
+    expect((screen.getByRole("textbox", { name: "Skill idea" }) as HTMLTextAreaElement).value).toBe(
+      "exact private 🌱\n\n",
+    );
+  });
+
+  it("settles a hidden Workshop only on its owner and retains invalid JSON and refinement edits", async () => {
+    let finish!: (result: { request: WorkshopRequest }) => void;
+    vi.mocked(workshopOperation).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: /Skill workshop/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Workshop" }));
+    await waitFor(() => expect(workshopOperation).toHaveBeenCalledOnce());
+    const body = vi.mocked(workshopOperation).mock.calls[0]![0];
+    if (body.operation !== "create") throw new Error("expected create");
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "F2" });
+    fireEvent.click(screen.getByRole("button", { name: /Tailored research/ }));
+    const original = screen.getByRole("textbox", { name: "Original quick prompt" });
+    fireEvent.change(original, { target: { value: "research untouched" } });
+    await act(async () =>
+      finish({
+        request: {
+          id: body.id,
+          envelope: body.envelope,
+          revision: 1,
+          state: "draft",
+          created_at: "2026-01-01T00:00:00Z",
+          hidden: false,
+          turns: [],
+          bundle: null,
+          review: null,
+          commit_intent: null,
+          commit: null,
+          error: null,
+        },
+      }),
+    );
+    expect(screen.getByRole("textbox", { name: "Original quick prompt" })).toBe(original);
+    vi.mocked(fetchTailoredHistory).mockResolvedValue({
+      entries: [
+        {
+          id: body.id,
+          title: "Retained Workshop",
+          profile: "main",
+          account: "personal",
+          input_preview: "",
+          status: "draft",
+          created_at: "2026-01-01T00:00:00Z",
+          hidden: false,
+          workshop: {
+            id: body.id,
+            envelope: body.envelope,
+            revision: 1,
+            state: "draft",
+            created_at: "2026-01-01T00:00:00Z",
+            hidden: false,
+            turns: [],
+            bundle: null,
+            review: null,
+            commit_intent: null,
+            commit: null,
+            error: null,
+          },
+        },
+      ],
+    });
+    fireEvent.keyDown(original, { key: "F2" });
+    fireEvent.click(await screen.findByRole("button", { name: "Open Retained Workshop" }));
+    const json = screen.getByRole("textbox", { name: "Proposed bundle JSON" });
+    fireEvent.change(json, { target: { value: "{ invalid 🌱\n\n" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Refinement message" }), {
+      target: { value: "literal refinement\n" },
+    });
+    fireEvent.keyDown(json, { key: "F2" });
+    fireEvent.click(await screen.findByRole("button", { name: "Open Retained Workshop" }));
+    expect(screen.getByRole("textbox", { name: "Proposed bundle JSON" })).toBe(json);
+    expect((json as HTMLTextAreaElement).value).toBe("{ invalid 🌱\n\n");
+    expect((screen.getByRole("textbox", { name: "Refinement message" }) as HTMLTextAreaElement).value).toBe(
+      "literal refinement\n",
+    );
+    expect(workshopOperation).toHaveBeenCalledOnce();
+  });
+
+  it("never submits plain, modified, repeated or composing Enter", () => {
+    compose();
+    const idea = screen.getByRole("textbox", { name: "Idea" });
+    fireEvent.change(idea, { target: { value: "private 🌱\n\n" } });
+    for (const modifiers of [
+      {},
+      { shiftKey: true },
+      { altKey: true },
+      { ctrlKey: true, repeat: true },
+      { ctrlKey: true, isComposing: true },
+      { ctrlKey: true, keyCode: 229 },
+    ]) {
+      fireEvent.keyDown(idea, { key: "Enter", ...modifiers });
+    }
+    expect(createSession).not.toHaveBeenCalled();
+    fireEvent.keyDown(idea, { key: "Escape", isComposing: true });
+    fireEvent.keyDown(idea, { key: "F2", keyCode: 229 });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "Idea" })).toBe(idea);
+  });
+
+  it("retains separate profile contexts without copying drafts across daemon reconnects", () => {
+    const props = { account: "personal" as const, onAccountChange: vi.fn(), onCreated, onClose };
+    const view = render(<TailoredSessionsOverlay {...props} profile="first" bootId="old" />);
+    fireEvent.click(screen.getByRole("button", { name: /Capture an idea/ }));
+    const first = screen.getByRole("textbox", { name: "Idea" });
+    fireEvent.change(first, { target: { value: "first profile private" } });
+    view.rerender(<TailoredSessionsOverlay {...props} profile="second" bootId="new" />);
+    expect(screen.queryByRole("textbox", { name: "Idea" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Capture an idea/ }));
+    expect((screen.getByRole("textbox", { name: "Idea" }) as HTMLTextAreaElement).value).toBe("");
+    view.rerender(<TailoredSessionsOverlay {...props} profile="first" bootId="new" />);
+    expect(screen.getByRole("textbox", { name: "Idea" })).toBe(first);
+    expect((first as HTMLTextAreaElement).value).toBe("first profile private");
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("keeps private capture text separate on account switches", () => {
+    compose();
+    fireEvent.change(screen.getByRole("textbox", { name: "Idea" }), { target: { value: "personal private\n" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Capture account" }), { target: { value: "work" } });
+    expect((screen.getByRole("textbox", { name: "Idea" }) as HTMLTextAreaElement).value).toBe("");
+    fireEvent.change(screen.getByRole("textbox", { name: "Idea" }), { target: { value: "work private" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Capture account" }), { target: { value: "personal" } });
+    expect((screen.getByRole("textbox", { name: "Idea" }) as HTMLTextAreaElement).value).toBe("personal private\n");
+  });
+
   it("opens source Workshop without creating or replacing the underlying Session", async () => {
     render(<Harness />);
     fireEvent.click(screen.getByRole("button", { name: /Skill workshop/ }));
@@ -99,10 +526,12 @@ describe("Tailored Sessions", () => {
     fireEvent.click(screen.getByRole("button", { name: /Document chat/ }));
     const url = `https://example.org/${"long".repeat(100)}.md?chapter=2`;
     const question = "Explain 'quotes' and 🌱\nwithout actions";
-    fireEvent.change(screen.getByLabelText("Public document URL"), { target: { value: url } });
-    fireEvent.change(screen.getByLabelText("Opening question (optional)"), { target: { value: question } });
     fireEvent.change(screen.getByLabelText("Document account"), { target: { value: "work" } });
-    fireEvent.keyDown(screen.getByLabelText("Public document URL"), { key: "Enter" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Public document URL" }), { target: { value: url } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Opening question (optional)" }), {
+      target: { value: question },
+    });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Public document URL" }), { key: "Enter" });
     expect(createSession).not.toHaveBeenCalled();
     expect(screen.queryByRole("checkbox", { name: "Immediately" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Start", exact: true }));
@@ -123,11 +552,13 @@ describe("Tailored Sessions", () => {
     vi.mocked(createSession).mockResolvedValue({ ok: false, error: "Document host is not public" });
     render(<Harness />);
     fireEvent.click(screen.getByRole("button", { name: /Document chat/ }));
-    fireEvent.change(screen.getByLabelText("Public document URL"), { target: { value: "http://localhost/a.md" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Public document URL" }), {
+      target: { value: "http://localhost/a.md" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Start", exact: true }));
     await screen.findByText("Document host is not public");
     expect(screen.queryByLabelText("Capture terminal")).toBeNull();
-    expect((screen.getByLabelText("Public document URL") as HTMLTextAreaElement).disabled).toBe(false);
+    expect((screen.getByRole("textbox", { name: "Public document URL" }) as HTMLTextAreaElement).disabled).toBe(false);
     cleanup();
     render(<Harness readOnly />);
     const preset = screen.getByRole("button", { name: /Document chat/ });
@@ -225,20 +656,20 @@ describe("Tailored Sessions", () => {
     render(<Harness />);
     await screen.findByText("Capture history is unavailable. Existing Sessions are unchanged.");
     fireEvent.click(screen.getByRole("button", { name: /Capture an idea/ }));
-    expect(screen.getByLabelText("Idea")).toBeDefined();
+    expect(screen.getByRole("textbox", { name: "Idea" })).toBeDefined();
     expect(createSession).not.toHaveBeenCalled();
   });
 
   it("starts a new draft with Immediately off after a completed capture", async () => {
     vi.mocked(createSession).mockResolvedValue({ ok: true, session: makeSession({ id: "finished" }) });
     compose();
-    fireEvent.change(screen.getByLabelText("Idea"), { target: { value: "First idea" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Idea" }), { target: { value: "First idea" } });
     fireEvent.click(screen.getByRole("checkbox", { name: "Immediately" }));
     submit();
     await screen.findByLabelText("Capture terminal");
     fireEvent.click(screen.getByRole("button", { name: "Back to history · F2" }));
     fireEvent.click(screen.getByRole("button", { name: /Capture an idea/ }));
-    expect((screen.getByLabelText("Idea") as HTMLTextAreaElement).value).toBe("");
+    expect((screen.getByRole("textbox", { name: "Idea" }) as HTMLTextAreaElement).value).toBe("");
     expect((screen.getByRole("checkbox", { name: "Immediately" }) as HTMLInputElement).checked).toBe(false);
     expect(createSession).toHaveBeenCalledOnce();
   });
@@ -254,7 +685,7 @@ describe("Tailored Sessions", () => {
     fireEvent.click(screen.getByRole("button", { name: /Capture an idea/ }));
     fireEvent.submit(screen.getByRole("button", { name: "Capture idea" }).closest("form")!);
     expect(createSession).not.toHaveBeenCalled();
-    fireEvent.keyDown(screen.getByLabelText("Idea"), { key: "Escape" });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Idea" }), { key: "Escape" });
     expect(onClose).toHaveBeenCalledOnce();
   });
 
@@ -267,9 +698,9 @@ describe("Tailored Sessions", () => {
       const session = makeSession({ id: "capture-1", scratch: true });
       vi.mocked(createSession).mockResolvedValue({ ok: true, session });
       compose();
-      fireEvent.change(screen.getByLabelText("Capture account"), { target: { value: account } });
+      fireEvent.change(screen.getByRole("combobox", { name: "Capture account" }), { target: { value: account } });
       if (immediately) fireEvent.click(screen.getByRole("checkbox", { name: "Immediately" }));
-      fireEvent.change(screen.getByLabelText("Idea"), { target: { value: "quoted 'idea'; $x\nnext" } });
+      fireEvent.change(screen.getByRole("textbox", { name: "Idea" }), { target: { value: "quoted 'idea'; $x\nnext" } });
       submit();
       await screen.findByLabelText("Capture terminal");
       expect(createSession).toHaveBeenCalledOnce();
@@ -297,11 +728,11 @@ describe("Tailored Sessions", () => {
       .mockResolvedValueOnce({ ok: false, network: true, error: "No answer" })
       .mockResolvedValueOnce({ ok: true, session: makeSession({ id: "capture-retry" }) });
     compose();
-    fireEvent.change(screen.getByLabelText("Idea"), { target: { value: "Keep this idea" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Idea" }), { target: { value: "Keep this idea" } });
     submit();
     await screen.findByRole("button", { name: "Retry same capture" });
     const first = vi.mocked(createSession).mock.calls[0]![0];
-    expect((screen.getByLabelText("Idea") as HTMLTextAreaElement).disabled).toBe(true);
+    expect((screen.getByRole("textbox", { name: "Idea" }) as HTMLTextAreaElement).disabled).toBe(true);
     submit();
     await screen.findByLabelText("Capture terminal");
     expect(vi.mocked(createSession).mock.calls[1]![0]).toEqual({ ...first, retry_origin: "boot-1" });
@@ -315,7 +746,7 @@ describe("Tailored Sessions", () => {
       }),
     );
     compose();
-    fireEvent.change(screen.getByLabelText("Idea"), { target: { value: "One capture" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Idea" }), { target: { value: "One capture" } });
     const form = screen.getByRole("button", { name: "Capture idea" }).closest("form")!;
     fireEvent.submit(form);
     fireEvent.submit(form);
@@ -333,10 +764,10 @@ describe("Tailored Sessions", () => {
       .mockResolvedValueOnce({ ok: false, error: "Capture profile missing" })
       .mockResolvedValueOnce({ ok: false, outcomeUnknown: true, error: "Server restarted" });
     compose();
-    fireEvent.change(screen.getByLabelText("Idea"), { target: { value: "A draft" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Idea" }), { target: { value: "A draft" } });
     submit();
     await screen.findByText("Capture profile missing");
-    expect((screen.getByLabelText("Idea") as HTMLTextAreaElement).disabled).toBe(false);
+    expect((screen.getByRole("textbox", { name: "Idea" }) as HTMLTextAreaElement).disabled).toBe(false);
     submit();
     await screen.findByText("Server restarted");
     await waitFor(() =>

@@ -3,6 +3,31 @@
   "description": "Surface/flow coverage matrix for the agent-of-empires web dashboard. Every component file under web/src/components/** must appear in at least one entry's `components` list (covered, deferred, or out-of-scope), or in coverage-matrix.exempt.json. CI validates this on every PR via tests/validate-coverage-matrix.mjs.",
   "surfaces": [
     {
+      "id": "sessions.tailored-input-resilience",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": [
+        "src/components/__tests__/TailoredSessionsOverlay.test.tsx",
+        "src/components/__tests__/TailoredCaptureForm.pending.test.tsx",
+        "src/hooks/useKeyboardShortcuts.test.ts"
+      ],
+      "components": [
+        "web/src/components/TailoredCaptureForm.tsx",
+        "web/src/components/TailoredSessionsOverlay.tsx",
+        "web/src/components/ResearchForm.tsx",
+        "web/src/components/WorkshopForm.tsx"
+      ],
+      "notes": "Retained App-lifetime editor instances across actual close/reopen, F2 and preset/account changes. Confirmed Research/Workshop saves retire only the new slot; saved history restores the original editor. Real pendingCreates background success/refusal/unknown and expiry settle only the keyed account/preset/profile owner without re-registration or duplicate app callbacks. Unknown capture and Workshop retain exact keyed envelopes across daemon restart/navigation. Invalid JSON/refinement and private account drafts remain separate. Modal key bubbling is contained without cancelling native editing. No draft persistence or provider effects."
+    },
+    {
+      "id": "sessions.tailored-input-resilience.browser",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/tailored-sessions.spec.ts"],
+      "components": ["web/src/components/TailoredCaptureForm.tsx", "web/src/components/TailoredSessionsOverlay.tsx"],
+      "notes": "Native clipboard multiline Unicode insertion at middle cursor, blank/trailing lines, browser undo/redo across actual F2 and close/reopen, useful focus, IME/229/repeat isolation and no accidental Session/terminal writes. Screenshot records deliberate submit hint."
+    },
+    {
       "id": "sessions.skill-workshop",
       "kind": "vitest",
       "risk": "high",

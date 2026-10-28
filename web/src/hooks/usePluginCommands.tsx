@@ -38,7 +38,15 @@ export function usePluginCommands(
   const live = useLatestRef({ commands, entries, activeSessionId });
   useEffect(() => {
     const handler = (e: Event) => {
-      if (e.defaultPrevented) return;
+      const key = e as KeyboardEvent;
+      if (
+        e.defaultPrevented ||
+        key.isComposing ||
+        key.keyCode === 229 ||
+        key.repeat ||
+        Array.from(document.querySelectorAll('[aria-modal="true"]')).some((modal) => !modal.closest("[hidden]"))
+      )
+        return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       const { commands, entries, activeSessionId } = live.current;

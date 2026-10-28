@@ -3,7 +3,7 @@ use crate::session::{
     tailored::{document::DocumentRequest, CaptureAccount, TailoredRequest},
 };
 use crate::tui::{dialogs::NewSessionData, styles::Theme};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{prelude::*, widgets::*};
 use ratatui_textarea::{TextArea, WrapMode};
 use std::sync::mpsc;
@@ -44,6 +44,13 @@ pub(super) struct StartWorker {
 }
 
 impl StartWorker {
+    #[cfg(test)]
+    pub(super) fn from_receiver_for_test(
+        pending: mpsc::Receiver<(String, Result<(), String>)>,
+    ) -> Self {
+        Self { pending }
+    }
+
     pub fn spawn(mut instance: crate::session::Instance) -> Self {
         let (tx, pending) = mpsc::channel();
         std::thread::spawn(move || {
@@ -76,12 +83,12 @@ impl StartWorker {
 pub(super) struct DocumentWindow {
     url: TextArea<'static>,
     question: TextArea<'static>,
-    account: CaptureAccount,
-    focus: usize,
+    pub(super) account: CaptureAccount,
+    pub(super) focus: usize,
     error: Option<String>,
     pending: Option<mpsc::Receiver<Prepared>>,
     start_rect: Rect,
-    account_rect: Rect,
+    pub(super) account_rect: Rect,
     url_rect: Rect,
     question_rect: Rect,
 }
@@ -115,6 +122,10 @@ impl DocumentWindow {
         window.pending = Some(rx);
         window
     }
+    #[cfg(test)]
+    pub(super) fn url_text_for_test(&self) -> String {
+        self.url.lines().join("\n")
+    }
     pub fn busy(&self) -> bool {
         self.pending.is_some()
     }
@@ -132,6 +143,21 @@ impl DocumentWindow {
             _ => {}
         }
     }
+    pub(super) fn repeat(&mut self, key: KeyEvent) {
+        if !self.busy()
+            && !(key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL))
+        {
+            match self.focus {
+                0 => {
+                    self.url.input(key);
+                }
+                1 => {
+                    self.question.input(key);
+                }
+                _ => {}
+            }
+        }
+    }
     pub fn key(&mut self, key: KeyEvent, profile: &str) {
         if self.busy() {
             return;
@@ -139,9 +165,14 @@ impl DocumentWindow {
         match key.code {
             KeyCode::Tab => self.focus = (self.focus + 1) % 4,
             KeyCode::BackTab => self.focus = (self.focus + 3) % 4,
-            KeyCode::Enter if self.focus == 3 => self.start(profile),
+            KeyCode::Enter
+                if key.modifiers == KeyModifiers::CONTROL
+                    || self.focus == 3 && key.modifiers.is_empty() =>
+            {
+                self.start(profile)
+            }
             KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right
-                if self.focus == 2 =>
+                if self.focus == 2 && key.modifiers.is_empty() =>
             {
                 self.account = match self.account {
                     CaptureAccount::Personal => CaptureAccount::Work,
@@ -353,6 +384,27 @@ mod tests {
             assert_eq!(window.url.lines().join("\n"), url);
         }
         window.key(KeyEvent::from(KeyCode::Enter), "default");
+        assert!(!window.busy());
+        window.key(KeyEvent::from(KeyCode::Tab), "default");
+        window.paste("leftRIGHT");
+        window.key(KeyEvent::from(KeyCode::Home), "default");
+        for _ in 0..4 {
+            window.key(KeyEvent::from(KeyCode::Right), "default");
+        }
+        let paste = format!("🌱日本語{}\n\nlast\n", "long".repeat(500));
+        window.paste(&paste);
+        let exact = format!("left{paste}RIGHT");
+        assert_eq!(window.question.lines().join("\n"), exact);
+        window.key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            "default",
+        );
+        assert_eq!(window.question.lines().join("\n"), "leftRIGHT");
+        window.key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            "default",
+        );
+        assert_eq!(window.question.lines().join("\n"), exact);
         assert!(!window.busy());
     }
 }

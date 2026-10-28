@@ -2,8 +2,20 @@
 
 Press **Ctrl+Y** in the TUI or Web dashboard to open the Tailored Sessions picker,
 including while a Session owns keyboard input. Choose **Capture an idea**, select
-Personal or Work, and enter the idea. Enter captures; Shift+Enter inserts a newline.
+Personal or Work, and enter the idea. Enter and Shift+Enter insert newlines in text
+editors. Select the capture button or press **Ctrl+Enter** (**Meta+Enter** also works
+on web) to submit deliberately. Composition and held submit keys do not submit.
 Long text and unbroken URLs soft-wrap in the TUI without adding saved newlines.
+
+Unsent editors remain in memory for the current Home/dashboard lifetime, including
+cursor and undo history, across close/reopen, F2/history and preset navigation.
+Personal and Work have separate new drafts; switching accounts never transfers
+private input. Profile changes also keep separate editor banks. Saved requests keep
+their own account and identity. A daemon reconnect does not replace an unknown create key. Closing the app
+or reloading the page does not save these unsent drafts. No draft autosave is added.
+Pending/unknown operations retain their original request identity and exact envelope;
+navigation does not approve, restart or replace them. Hidden forms stop history/output
+polling and detach terminal views while accepted operations finish on their owner.
 
 **Immediately** is unchecked by default. The capture skill saves the original idea
 and proposes project-ticket, Atlas, or KB destinations before making destination
@@ -12,8 +24,8 @@ Missing access or ambiguous destinations still require clarification. Immediatel
 does not waive a destination skill's scope, provenance, or review requirements.
 
 Capture opens a new scratch Session in an overlay above the sidebar and current
-Session. Ctrl+Y closes the overlay without stopping capture or changing the current
-Session. Escape closes the picker/form; inside the capture terminal it goes to the
+Session. Ctrl+Y closes the overlay outside form editors without stopping capture or
+changing the current Session. Inside editors, Ctrl+Y remains an editor command. Escape closes the picker/form; inside the capture terminal it goes to the
 agent. The TUI also accepts Ctrl+Q to close the overlay.
 
 ## Check previous captures
@@ -142,6 +154,7 @@ Choose **Document chat**, select Personal or Work, paste a public direct Markdow
 or PDF URL, optionally enter an opening question, then select **Start**. This is a
 direct Pi conversation, not the research development/review flow. The TUI form
 uses Tab to move between URL, question, account and Start; Enter on Start confirms.
+Ctrl+Enter (web also Meta+Enter) also explicitly starts document chat.
 Both text fields soft-wrap without changing the retained bytes.
 
 AoE downloads and extracts the source before starting any model turn. Only public
@@ -232,7 +245,8 @@ Choose the backend explicitly, review the developed text, existing absolute
 workspace, permitted scope, consequential unknowns and execution effects, then
 acknowledge the review and select **Run reviewed revision**. In the TUI, Tab and
 Shift+Tab move between fields, F6 switches account, F7 chooses/overrides backend,
-F8 acknowledges review, Ctrl+S saves, Ctrl+D develops and **Ctrl+R runs**. Run freezes
+F8 acknowledges review, Ctrl+Alt+S saves, Ctrl+Alt+D develops and **Ctrl+Alt+R runs**.
+Ordinary editor Ctrl/Alt chords are not workflow actions; Ctrl+Enter never runs research. Run freezes
 the saved revision; another client's stale revision cannot dispatch.
 
 Run may start a managed backend. Installed Ledger launchers must support the
@@ -353,13 +367,13 @@ Unsupported MCP/codemode, Claude/Codex refresh, ACP, sandbox and old cores remai
 visible. No active-terminal injection, force, restart-all, fresh conversation or
 local-grant discard is a fallback.
 
-The TUI uses Ctrl+S to create, Ctrl+D to refine, Ctrl+B to save proposed files,
-Ctrl+R to review, Ctrl+K to approve local Commit and F11 for complete evidence.
-F8 switches to publication/deploy fields. Alt+P previews the destination; F4
-confirms disclosure and Alt+U approves Publish. Alt+L previews Land policy;
-F5 confirms current rules, F6 exclusive custody and Alt+G approves Land.
-Alt+I/Alt+J preview/approve import, Alt+V previews complete config, Alt+O
-approves Deploy, Alt+M materializes, and Alt+N/Alt+A preview/approve the native plan.
+The TUI uses Ctrl+Alt+S to create, Ctrl+Alt+D to refine, Ctrl+Alt+B to save proposed
+files, Ctrl+Alt+R to review, Ctrl+Alt+K to approve local Commit and F11 for complete
+evidence. Ctrl+Enter never approves Workshop effects. F8 switches to publication/deploy
+fields. Workflow letter actions also require **Ctrl+Alt**: P previews the destination,
+U approves Publish, L previews Land policy, G approves Land, I/J preview/approve import,
+V previews complete config, O approves Deploy, M materializes, and N/A preview/approve
+the native plan. F4 confirms disclosure, F5 current rules and F6 exclusive custody.
 
 F10 reopens the same UUID; F9 inspects retained receipts without replaying uncertain
 writes. A lost response requires this same-request recovery, not a replacement
