@@ -42,11 +42,14 @@ pub struct Panes<'a> {
     /// The listed pane whose thread ever ran a conversation id; it catches
     /// earlier iterations, before a `/clear` or compaction.
     pub hosted: &'a dyn Fn(&str) -> Option<String>,
+    /// The live pane for work in a folder, given the folder and harness.
+    pub folder: &'a dyn Fn(&str, &str) -> Option<String>,
 }
 
-/// A hit goes to the pane its thread lives in. With `exact`, it reopens the
-/// conversation itself instead, unless a pane is running it already: one
-/// conversation never runs twice.
+/// A hit goes to the live session for its work: the pane whose thread ran
+/// it, else a pane open in its folder. Only with no live pane does it resume.
+/// With `exact`, it reopens the conversation itself instead, unless a pane is
+/// running it already: one conversation never runs twice.
 pub fn resolve(
     s: &Session,
     panes: &Panes,
@@ -64,6 +67,13 @@ pub fn resolve(
             return Target::Jump(id.to_string());
         }
         if let Some(id) = ids.into_iter().flatten().find_map(panes.hosted) {
+            return Target::Jump(id);
+        }
+        if let Some(id) = s
+            .cwd
+            .as_deref()
+            .and_then(|cwd| (panes.folder)(cwd, &s.harness))
+        {
             return Target::Jump(id);
         }
     }
@@ -174,10 +184,15 @@ mod tests {
         None
     }
 
+    fn no_folder(_: &str, _: &str) -> Option<String> {
+        None
+    }
+
     const NO_PANES: Panes<'static> = Panes {
         live: &|_| false,
         current: &none,
         hosted: &none,
+        folder: &no_folder,
     };
 
     fn panes<'a>(
@@ -189,6 +204,7 @@ mod tests {
             live,
             current,
             hosted,
+            folder: &no_folder,
         }
     }
 
@@ -244,6 +260,20 @@ mod tests {
                 );
             }
         }
+        // No recorded owner: the live pane in the hit's folder, unless exact.
+        let in_folder = Panes {
+            folder: &|cwd, harness| {
+                (cwd.ends_with("/deploy") && harness == "claude").then(|| "here".to_string())
+            },
+            ..NO_PANES
+        };
+        assert!(
+            matches!(resolve(&hits[0].session, &in_folder, false, &profiles, home), Target::Jump(id) if id == "here")
+        );
+        assert!(matches!(
+            resolve(&hits[0].session, &in_folder, true, &profiles, home),
+            Target::Resume(_)
+        ));
         // Exact reopens an earlier iteration, but never a conversation a pane runs now.
         assert!(matches!(
             resolve(

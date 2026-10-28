@@ -882,15 +882,17 @@ impl SessionSearchDialog {
     }
 }
 
-/// Hits group by the pane whose thread ran their conversation (a subagent's
-/// being its parent's), else by run.
+/// Hits group by their live session: the pane whose thread ran their
+/// conversation (a subagent's being its parent's), else a pane in their
+/// folder; else by run.
 fn thread_key(threads: &Threads, s: &Session) -> Option<String> {
     let parent = s.resume.as_ref().and_then(|r| r.session_id.as_deref());
     let pane = [s.harness_session_id.as_deref(), parent]
         .into_iter()
         .flatten()
         .find_map(|sid| threads.pane_of(sid))
-        .or(s.aoe_instance_id.as_deref());
+        .or(s.aoe_instance_id.as_deref())
+        .or_else(|| threads.pane_in_folder(s.cwd.as_deref()?, &s.harness));
     match (pane, &s.run_id) {
         (Some(pane), _) => Some(format!("pane:{pane}")),
         (None, Some(run)) => Some(format!("run:{run}")),
