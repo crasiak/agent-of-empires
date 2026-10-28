@@ -21,6 +21,7 @@ fn id_of(view: &HomeView, title: &str) -> String {
 
 /// Open the overlay over the fixture hits with `resolver`, so no test runs the real CLI.
 fn open_stub(view: &mut HomeView, resolver: impl Fn(&Session) -> Target + Send + 'static) {
+    let resolver = move |s: &Session, _exact: bool| resolver(s);
     view.session_search = Some(SessionSearchDialog::new(
         None,
         Box::new(|req| {
@@ -31,6 +32,7 @@ fn open_stub(view: &mut HomeView, resolver: impl Fn(&Session) -> Target + Send +
             (req.generation, Ok(hits))
         }),
         Box::new(resolver),
+        std::sync::Arc::default(),
     ));
 }
 

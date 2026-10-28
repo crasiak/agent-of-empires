@@ -33,26 +33,39 @@ pub enum Target {
     Nothing,
 }
 
-/// `live` says whether an AoE instance id is still listed; `bound` names the
-/// listed instance running a conversation id, which catches panes the hit
-/// carries no AoE link for (Pi conversations, notably).
+/// Where to take a hit, and how.
+pub struct Panes<'a> {
+    /// Whether an AoE instance id is still listed.
+    pub live: &'a dyn Fn(&str) -> bool,
+    /// The listed pane running a conversation id right now.
+    pub current: &'a dyn Fn(&str) -> Option<String>,
+    /// The listed pane whose thread ever ran a conversation id; it catches
+    /// earlier iterations, before a `/clear` or compaction.
+    pub hosted: &'a dyn Fn(&str) -> Option<String>,
+}
+
+/// A hit goes to the pane its thread lives in. With `exact`, it reopens the
+/// conversation itself instead, unless a pane is running it already: one
+/// conversation never runs twice.
 pub fn resolve(
     s: &Session,
-    live: &dyn Fn(&str) -> bool,
-    bound: &dyn Fn(&str) -> Option<String>,
+    panes: &Panes,
+    exact: bool,
     profiles: &[ProfileHomes],
     ledger_home: &Path,
 ) -> Target {
-    if let Some(id) = s.aoe_instance_id.as_deref().filter(|id| live(id)) {
-        return Target::Jump(id.to_string());
-    }
     let resume_id = s.resume.as_ref().and_then(|r| r.session_id.as_deref());
-    if let Some(id) = [s.harness_session_id.as_deref(), resume_id]
-        .into_iter()
-        .flatten()
-        .find_map(bound)
-    {
+    let ids = [s.harness_session_id.as_deref(), resume_id];
+    if let Some(id) = ids.into_iter().flatten().find_map(panes.current) {
         return Target::Jump(id);
+    }
+    if !exact {
+        if let Some(id) = s.aoe_instance_id.as_deref().filter(|id| (panes.live)(id)) {
+            return Target::Jump(id.to_string());
+        }
+        if let Some(id) = ids.into_iter().flatten().find_map(panes.hosted) {
+            return Target::Jump(id);
+        }
     }
     let Some(resume) = &s.resume else {
         return Target::Nothing;
@@ -157,6 +170,28 @@ pub fn profile_homes() -> Vec<ProfileHomes> {
 mod tests {
     use super::*;
 
+    fn none(_: &str) -> Option<String> {
+        None
+    }
+
+    const NO_PANES: Panes<'static> = Panes {
+        live: &|_| false,
+        current: &none,
+        hosted: &none,
+    };
+
+    fn panes<'a>(
+        live: &'a dyn Fn(&str) -> bool,
+        current: &'a dyn Fn(&str) -> Option<String>,
+        hosted: &'a dyn Fn(&str) -> Option<String>,
+    ) -> Panes<'a> {
+        Panes {
+            live,
+            current,
+            hosted,
+        }
+    }
+
     #[test]
     fn resolve_prefers_jump_then_native_resume_then_copy() {
         let hits =
@@ -173,9 +208,9 @@ mod tests {
             ],
         }];
         assert!(
-            matches!(resolve(&hits[0].session, &|id| id == "aoe1", &|_| None, &profiles, home), Target::Jump(id) if id == "aoe1")
+            matches!(resolve(&hits[0].session, &panes(&|id| id == "aoe1", &none, &none), false, &profiles, home), Target::Jump(id) if id == "aoe1")
         );
-        match resolve(&hits[0].session, &|_| false, &|_| None, &profiles, home) {
+        match resolve(&hits[0].session, &NO_PANES, false, &profiles, home) {
             Target::Resume(r) => {
                 assert_eq!(
                     (
@@ -194,18 +229,47 @@ mod tests {
             _ => panic!("expected resume"),
         }
         assert!(
-            matches!(resolve(&hits[0].session, &|_| false, &|_| None, &[], home), Target::CopyOnly(c) if c.contains("--resume c-111"))
+            matches!(resolve(&hits[0].session, &NO_PANES, false, &[], home), Target::CopyOnly(c) if c.contains("--resume c-111"))
         );
         // A pane AoE runs the conversation in is jumped to, even with no AoE link
         // on the hit; a subagent hit jumps to its parent's pane.
-        let bound = |id: &str| (id == "p-222").then(|| "pane9".to_string());
+        let pane9 = |id: &str| (id == "p-222").then(|| "pane9".to_string());
         for hit in &hits[1..] {
-            assert!(
-                matches!(resolve(&hit.session, &|_| false, &bound, &profiles, home), Target::Jump(id) if id == "pane9")
-            );
+            for p in [
+                panes(&|_| false, &pane9, &none),
+                panes(&|_| false, &none, &pane9),
+            ] {
+                assert!(
+                    matches!(resolve(&hit.session, &p, false, &profiles, home), Target::Jump(id) if id == "pane9")
+                );
+            }
         }
+        // Exact reopens an earlier iteration, but never a conversation a pane runs now.
+        assert!(matches!(
+            resolve(
+                &hits[1].session,
+                &panes(&|_| false, &none, &pane9),
+                true,
+                &profiles,
+                home
+            ),
+            Target::Resume(_)
+        ));
+        assert!(
+            matches!(resolve(&hits[1].session, &panes(&|_| false, &pane9, &none), true, &profiles, home), Target::Jump(id) if id == "pane9")
+        );
+        assert!(matches!(
+            resolve(
+                &hits[0].session,
+                &panes(&|_| true, &none, &none),
+                true,
+                &profiles,
+                home
+            ),
+            Target::Resume(_)
+        ));
         // Pi resumes only from its exact transcript.
-        match resolve(&hits[1].session, &|_| false, &|_| None, &profiles, home) {
+        match resolve(&hits[1].session, &NO_PANES, false, &profiles, home) {
             Target::Resume(r) => {
                 assert_eq!((r.tool.as_str(), r.session_id.as_str()), ("pi", "p-222"));
                 assert_eq!(
@@ -221,7 +285,7 @@ mod tests {
             .session;
         pi.transcript_path = None;
         assert!(matches!(
-            resolve(&pi, &|_| false, &|_| None, &profiles, home),
+            resolve(&pi, &NO_PANES, false, &profiles, home),
             Target::CopyOnly(_)
         ));
         // A subagent hit resumes its parent; its own transcript_path is the run's file.
@@ -230,7 +294,7 @@ mod tests {
             .remove(2)
             .session;
         run.transcript_path = Some("/home/u/.ledger/homes/personal/pi/runs/r-333.jsonl".into());
-        match resolve(&run, &|_| false, &|_| None, &profiles, home) {
+        match resolve(&run, &NO_PANES, false, &profiles, home) {
             Target::Resume(r) => {
                 assert_eq!(r.session_id, "p-222");
                 assert_eq!(
@@ -242,7 +306,7 @@ mod tests {
         }
         run.resume.as_mut().unwrap().transcript_path = None;
         assert!(matches!(
-            resolve(&run, &|_| false, &|_| None, &profiles, home),
+            resolve(&run, &NO_PANES, false, &profiles, home),
             Target::CopyOnly(c) if c.contains("--session p-222")
         ));
         let mut bare =
@@ -252,7 +316,7 @@ mod tests {
                 .session;
         bare.resume = None;
         assert!(matches!(
-            resolve(&bare, &|_| false, &|_| None, &profiles, home),
+            resolve(&bare, &NO_PANES, false, &profiles, home),
             Target::Nothing
         ));
     }
@@ -281,7 +345,7 @@ mod tests {
             s.profile = Some(profile.into());
             assert!(
                 matches!(
-                    resolve(&s, &|_| false, &|_| None, &profiles, home),
+                    resolve(&s, &NO_PANES, false, &profiles, home),
                     Target::CopyOnly(_)
                 ),
                 "profile {profile:?}"
@@ -293,7 +357,7 @@ mod tests {
             s.harness = tool.into();
             assert!(
                 matches!(
-                    resolve(&s, &|_| false, &|_| None, &profiles, home),
+                    resolve(&s, &NO_PANES, false, &profiles, home),
                     Target::Resume(_)
                 ),
                 "{tool}"
@@ -301,7 +365,7 @@ mod tests {
             s.resume.as_mut().unwrap().session_id = Some("-rf".into());
             assert!(
                 matches!(
-                    resolve(&s, &|_| false, &|_| None, &profiles, home),
+                    resolve(&s, &NO_PANES, false, &profiles, home),
                     Target::CopyOnly(_)
                 ),
                 "{tool}"
