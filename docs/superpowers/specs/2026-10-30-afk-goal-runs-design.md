@@ -4,6 +4,7 @@
 **Status:** Design approved in chat. Written spec awaiting user review.
 **Overview:** [afk-menus-and-goal-runs-overview](2026-10-30-afk-menus-and-goal-runs-overview.md)
 **Depends on:** [S-A menu answering](2026-10-30-afk-menu-answering-design.md) (engine, policies, answer log).
+**Uses:** [S-D ticket record](2026-10-30-afk-ticket-record-design.md) (`afk-record`) for every ticket read and write.
 **Repos:** agent-of-empires (extension, run store, TUI review), Pi fork only if the session API gap below needs it.
 
 ## Goal
@@ -15,11 +16,12 @@ The user gives AFK a goal once, confirms one run envelope, and walks away. AFK w
 - **Ad-hoc:** `/afk-work on "<goal>" [--policy rules|yolo] [--hours H] [--requests N] [--items K] [--tracker <linear project|initiative>] [--no-merge]`
 - **Ticket:** `/afk-work do CRA-123 [same flags]`. AoE CLI and TUI equivalents: `aoe afk do <session> CRA-123` and a palette entry. Host commands only prepare the request; the grant still comes from the native consent dialog in Pi.
 - The goal is required. Without one, `/afk-work on N M` keeps today's single-task behaviour.
-- For a ticket, AFK reads the issue title and description as the goal text, and its open child issues (sorted by Linear sort order) as the seed items. The parent ticket is appended last as a "close out the goal" item. The Linear read goes through the AoE bridge using `LINEAR_API_KEY`; if it's missing, the run refuses to start and says why.
+- For a ticket, AFK reads the issue title and description as the goal text, and its open child issues (sorted by Linear sort order) as the seed items. The parent ticket is appended last as a "close out the goal" item. The Linear read is `afk-record children` (S-D).
+- Every run has a ticket: `afk-record resolve` uses the referenced ticket, or for a typed goal finds a matching open issue or creates one. If that fails (no `LINEAR_API_KEY`, no project), the run refuses to start and says why. Each admitted item gets its ticket from `afk-record item`.
 
 ### Consent
 
-One native consent dialog covers the whole run. It shows the goal, the seed items, the policy (with the `yolo` marker from S-A), outward actions ("opens ready PRs and moves tickets"; plus "merges PRs" under `yolo` unless `--no-merge`), and the run limits.
+One native consent dialog covers the whole run. It shows the goal, the seed items, the policy (with the `yolo` marker from S-A), outward actions ("opens ready PRs, creates and updates tickets"; plus "merges PRs" under `yolo` unless `--no-merge`), and the run limits.
 
 This changes a current decision: today every work period needs its own confirmation. Under a goal run, the run consent grants each item's work period. Human input, Off or reaching a limit still ends the run, and a new run needs a new confirmation.
 
@@ -30,7 +32,7 @@ This changes a current decision: today every work period needs its own confirmat
 3. Open a work period for the item under the run consent, with the item's request share: the larger of `run requests / items` (minimum 4) and the item's `estimate.requests`, capped by what's left of the run's requests. The run-level hours and requests are never raised by an estimate. The existing native work-period machinery runs it unchanged: evidence-cited checkpoints, continuations, limits.
 4. Menus are answered by S-A under the run's policy.
 5. When the item checkpoints `completed`, run **delivery** (below), record the result and handoff, and process follow-ups.
-6. Pull tracker next-work if the run has a ticket or `--tracker`.
+6. Pull tracker next-work (`afk-record children` / `next-work`).
 7. Stop if a stop condition holds, otherwise go to 1.
 
 ### Stop conditions
@@ -40,6 +42,7 @@ This changes a current decision: today every work period needs its own confirmat
 - Two items in a row end `blocked`.
 - Human input in the session, `/afk-work off`, or AoE Off.
 - The run store can't be written.
+- The ticket outbox is `stale` (S-D): end reason `ticket_record_stale`.
 
 A single blocked item doesn't stop the run: it's recorded and the next item starts.
 
@@ -107,9 +110,9 @@ The item is `done` only when the extension verifies through the bridge that:
 
 - the branch exists on the remote at the reported commit;
 - the PR exists and is open (`gh pr view <url> --json state,headRefOid`);
-- the ticket, if any, has a comment with the PR URL and is in the team's "In Review" state, or the tracker update is recorded as failed.
+- the item's `delivered` event is confirmed by `afk-record` (comment with the PR URL, ticket In Review), or is still pending in the outbox.
 
-Branching: `own` and `stack` items work on `afk/<run>/<item>-<slug>`; `own` items branch from the run's base branch (the session's branch at run start), `stack` items from their parent's branch with the PR targeting it. A `fold` item commits on its parent's branch, pushes, and updates the parent's PR instead of opening one; verification checks that PR's head is at the reported commit.
+Branching: `own` and `stack` items work on `afk/<run>/<ticket>-<slug>` (e.g. `afk/r7/CRA-124-config-loader`); `own` items branch from the run's base branch (the session's branch at run start), `stack` items from their parent's branch with the PR targeting it. A `fold` item commits on its parent's branch, pushes, and updates the parent's PR instead of opening one; verification checks that PR's head is at the reported commit.
 
 Outcomes:
 
@@ -117,10 +120,12 @@ Outcomes:
 |---|---|---|
 | Commit, push, PR and ticket all verified | `done` | yes |
 | Push or PR fails | `done_local` (branch kept, reason logged) | yes |
-| Ticket update fails | `done` with `ticket_update: failed` | yes |
+| `delivered` event not yet confirmed | `done` with `ticket_update: pending`; the outbox stale rule applies | yes |
 | Nothing committed | `blocked: nothing_to_deliver` | yes |
 
-**Merging:** never under `rules`. Under `yolo`, AFK merges a PR once required checks pass and every item folded into it is done, before starting items stacked on it. `--no-merge` turns this off for the run.
+**Merging:** never under `rules`. Under `yolo`, AFK merges a PR once required checks pass and every item folded into it is done, before starting items stacked on it. `--no-merge` turns this off for the run. After a merge, AFK moves each closed ticket to Done and labels it `afk-human-ack` (S-D).
+
+Ticket events during the item (progress, wrong assumptions, scope, new tasks, blocks) are defined in S-D.
 
 ## Records
 
@@ -140,6 +145,7 @@ Extends the existing AFK review (Outcome / Effect / Needs attention):
 
 - **Outcome:** goal, items done / done_local / blocked / skipped, end reason, limits used.
 - **Effect:** per item: PR link, ticket, files changed, branch.
+- **Tickets:** `afk-record status`: pending or failed writes, and tickets still labelled `afk-human-ack`.
 - **Answers AFK gave:** grouped by policy. Permission approvals and scope-check warnings are listed first. Under `yolo`, answers that `rules` would have refused are marked.
 - **Needs you:** each blocked item and each stopped menu, with the question and options. Choosing an option there writes a human answer and can start a new run from that item (new consent).
 - **Skipped:** follow-ups and tracker items AFK chose not to take, with reasons.
@@ -150,7 +156,7 @@ The TUI review and `aoe afk review <session>` both read the run store.
 
 | Failure | Result |
 |---|---|
-| Linear read fails at start | Run refuses to start, with the error. |
+| `afk-record resolve` fails at start | Run refuses to start, with the error. |
 | Linear read fails mid-run | Tracker pull skipped for that step and logged; run continues. |
 | `newSession` cancelled or fails | Item `blocked: session_unavailable`; counts toward the two-in-a-row stop. |
 | Handoff missing after delivery | Item still `done`; review flags the missing handoff. |
@@ -161,7 +167,7 @@ The TUI review and `aoe afk review <session>` both read the run store.
 
 - **Queue state machine** (Node, `aoe-afk-run-queue.test.mjs`): fold events, admission paths, depth-first ordering, duplicate detection, stop conditions including two blocked in a row.
 - **Delivery verifier** with a fake bridge: each outcome row above.
-- **Ticket seeding** with a recorded Linear response fixture.
+- **Ticket seeding and item tickets** with a fake `afk-record` returning recorded outputs.
 - **Session-per-item spike** (first plan task), then a test that a run with three items creates three Pi session files and carries no conversation content across.
 - **Offline scripted-provider demo:** ad-hoc goal, two seed items, one follow-up admitted and one skipped, one menu answered, delivery against a local bare git remote and a stubbed `gh`.
 - **Live canary** on the preview route: a small goal against a throwaway repo with a real remote, under `rules`.
