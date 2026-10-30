@@ -43,18 +43,21 @@ pub enum ContextMenuAction {
     /// Clear the session's group so it drops back to ungrouped. Offered only
     /// when the row is currently in a group.
     RemoveFromGroup,
-    /// Set the session's per-row highlight color to red.
-    HighlightRed,
-    /// Set the session's per-row highlight color to amber.
-    HighlightAmber,
-    /// Set the session's per-row highlight color to green.
-    HighlightGreen,
-    /// Set the session's per-row highlight color to purple.
-    HighlightPurple,
-    /// Set the session's per-row highlight color to teal.
-    HighlightTeal,
-    /// Clear the session's per-row highlight color.
-    ClearHighlight,
+    /// Set the session's per-row highlight color, or clear it with `None`.
+    /// Picking the color the row already has clears it, so each row toggles.
+    SessionColor(Option<&'static str>),
+    /// Remove one highlight color (or, with `None`, every highlight) from the
+    /// sessions the current filters show. Confirmed first with a count.
+    ClearShownHighlight(Option<&'static str>),
+    /// Set (or, with `None`, clear) the highlight on every committed `/` search
+    /// match. Confirmed first with a count.
+    ColorSearchMatches(Option<&'static str>),
+    /// Narrow the F4 highlight filter to sessions of this one color.
+    ShowOnlyColor(&'static str),
+    /// Drill into a submenu. Handled inside the dialog; never submitted.
+    Open(Submenu),
+    /// Return from a submenu to its parent. Handled inside the dialog.
+    Back,
     /// Open the group-by mode picker (`'g'`).
     OpenGroupPicker,
     /// Pin or unpin the project header (project view only, `'p'`).
@@ -70,28 +73,175 @@ pub enum ContextMenuAction {
     Restore,
 }
 
+/// A menu that opens in place of its parent, with a "‹ Back" row on top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SessionHighlightMenu {
-    show: bool,
-    has_highlight: bool,
+pub enum Submenu {
+    /// Session highlight colors plus the bulk operations on shown sessions.
+    Highlight,
+    /// The project header's repo colors.
+    ProjectHighlight,
+    /// Colors to apply to every committed `/` search match.
+    ColorMatches,
 }
 
-impl SessionHighlightMenu {
-    pub const HIDDEN: Self = Self {
-        show: false,
-        has_highlight: false,
-    };
+/// What the session Highlight menu offers. `session` is `Some` when a session row
+/// is selected, carrying its current color; `shown` flags, in `SESSION_COLORS`
+/// order, which colors appear on at least one shown session; `search_matches`
+/// adds the color-the-matches entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HighlightOps {
+    pub session: Option<Option<&'static str>>,
+    pub shown: [bool; 5],
+    pub search_matches: bool,
+}
 
-    pub fn new(show: bool, has_highlight: bool) -> Self {
-        Self {
-            show,
-            has_highlight,
+type MenuItem = (ContextMenuAction, &'static str);
+
+/// Per-color labels in `SESSION_COLORS` order: (color, this-session row,
+/// clear-from-shown row, show-only row, search-match row).
+const SESSION_COLOR_ROWS: [(&str, &str, &str, &str, &str); 5] = [
+    (
+        "red",
+        "Highlight red",
+        "Clear red from shown",
+        "Show only red",
+        "Red",
+    ),
+    (
+        "amber",
+        "Highlight amber",
+        "Clear amber from shown",
+        "Show only amber",
+        "Amber",
+    ),
+    (
+        "green",
+        "Highlight green",
+        "Clear green from shown",
+        "Show only green",
+        "Green",
+    ),
+    (
+        "purple",
+        "Highlight purple",
+        "Clear purple from shown",
+        "Show only purple",
+        "Purple",
+    ),
+    (
+        "teal",
+        "Highlight teal",
+        "Clear teal from shown",
+        "Show only teal",
+        "Teal",
+    ),
+];
+
+/// The Highlight menu's rows and, when there are search matches, the color
+/// submenu they open. Empty when there is nothing to offer.
+fn highlight_menu(ops: HighlightOps) -> (Vec<MenuItem>, Vec<(Submenu, Vec<MenuItem>)>) {
+    let mut items = Vec::new();
+    if let Some(current) = ops.session {
+        for (color, label, ..) in SESSION_COLOR_ROWS {
+            items.push((ContextMenuAction::SessionColor(Some(color)), label));
         }
+        if current.is_some() {
+            items.push((ContextMenuAction::SessionColor(None), "Remove highlight"));
+        }
+    }
+    for ((color, _, label, ..), shown) in SESSION_COLOR_ROWS.into_iter().zip(ops.shown) {
+        if shown {
+            items.push((ContextMenuAction::ClearShownHighlight(Some(color)), label));
+        }
+    }
+    if ops.shown.contains(&true) {
+        items.push((
+            ContextMenuAction::ClearShownHighlight(None),
+            "Clear all shown highlights",
+        ));
+    }
+    let mut submenus = Vec::new();
+    if ops.search_matches {
+        items.push((
+            ContextMenuAction::Open(Submenu::ColorMatches),
+            "Color search matches ›",
+        ));
+        let mut colors: Vec<MenuItem> = SESSION_COLOR_ROWS
+            .into_iter()
+            .map(|(color, .., label)| (ContextMenuAction::ColorSearchMatches(Some(color)), label))
+            .collect();
+        colors.push((
+            ContextMenuAction::ColorSearchMatches(None),
+            "Remove highlight",
+        ));
+        submenus.push((Submenu::ColorMatches, colors));
+    }
+    if let Some(Some(current)) = ops.session {
+        if let Some((color, _, _, label, _)) =
+            SESSION_COLOR_ROWS.into_iter().find(|row| row.0 == current)
+        {
+            items.push((ContextMenuAction::ShowOnlyColor(color), label));
+        }
+    }
+    (items, submenus)
+}
+
+fn project_highlight_items() -> Vec<MenuItem> {
+    use crate::session::repo_appearance::RepoColor;
+    vec![
+        (
+            ContextMenuAction::ProjectColor(Some(RepoColor::Amber)),
+            "Highlight Amber",
+        ),
+        (
+            ContextMenuAction::ProjectColor(Some(RepoColor::Teal)),
+            "Highlight Teal",
+        ),
+        (
+            ContextMenuAction::ProjectColor(Some(RepoColor::Sky)),
+            "Highlight Sky",
+        ),
+        (
+            ContextMenuAction::ProjectColor(Some(RepoColor::Violet)),
+            "Highlight Violet",
+        ),
+        (
+            ContextMenuAction::ProjectColor(Some(RepoColor::Rose)),
+            "Highlight Rose",
+        ),
+        (
+            ContextMenuAction::ProjectColor(Some(RepoColor::Slate)),
+            "Highlight Slate",
+        ),
+        (
+            ContextMenuAction::ProjectColor(None),
+            "Clear project highlight",
+        ),
+    ]
+}
+
+/// The in-menu hotkey for a row that carries its own: the color's initial for
+/// color rows, `x` for removing one, `l` for a Highlight submenu.
+fn row_hotkey(action: ContextMenuAction) -> Option<char> {
+    match action {
+        ContextMenuAction::SessionColor(color) | ContextMenuAction::ColorSearchMatches(color) => {
+            Some(color.and_then(|c| c.chars().next()).unwrap_or('x'))
+        }
+        ContextMenuAction::ClearShownHighlight(None) => Some('c'),
+        ContextMenuAction::ShowOnlyColor(_) => Some('f'),
+        ContextMenuAction::Open(Submenu::Highlight | Submenu::ProjectHighlight) => Some('l'),
+        ContextMenuAction::Open(Submenu::ColorMatches) => Some('m'),
+        _ => None,
     }
 }
 
 pub struct ContextMenuDialog {
-    items: Vec<(ContextMenuAction, &'static str)>,
+    items: Vec<MenuItem>,
+    /// Rows each `Open` item drills into.
+    submenus: Vec<(Submenu, Vec<MenuItem>)>,
+    /// The menus a submenu was opened from, with their highlight, so Back
+    /// restores them.
+    parents: Vec<(Vec<MenuItem>, Option<usize>)>,
     /// The highlighted item. Opens at `Some(0)` so Enter submits the first
     /// item, but hover clears it to `None` once the cursor leaves every row.
     highlight: Option<usize>,
@@ -163,7 +313,7 @@ impl ContextMenuDialog {
             unread,
             can_fork,
             switch_view,
-            SessionHighlightMenu::HIDDEN,
+            None,
         )
     }
 
@@ -174,7 +324,7 @@ impl ContextMenuDialog {
         unread: Option<bool>,
         can_fork: bool,
         switch_view: Option<bool>,
-        highlights: SessionHighlightMenu,
+        highlights: Option<HighlightOps>,
     ) -> Self {
         let archive_label = if is_archived { "Unarchive" } else { "Archive" };
         let mut items = vec![
@@ -195,15 +345,10 @@ impl ContextMenuDialog {
             items.push((ContextMenuAction::ToggleUnread, unread_label));
         }
         items.push((ContextMenuAction::AddProject, "Add project"));
-        if highlights.show {
-            items.push((ContextMenuAction::HighlightRed, "Highlight red"));
-            items.push((ContextMenuAction::HighlightAmber, "Highlight amber"));
-            items.push((ContextMenuAction::HighlightGreen, "Highlight green"));
-            items.push((ContextMenuAction::HighlightPurple, "Highlight purple"));
-            items.push((ContextMenuAction::HighlightTeal, "Highlight teal"));
-            if highlights.has_highlight {
-                items.push((ContextMenuAction::ClearHighlight, "Remove highlight"));
-            }
+        let (highlight_items, mut submenus) = highlights.map(highlight_menu).unwrap_or_default();
+        if !highlight_items.is_empty() {
+            items.push((ContextMenuAction::Open(Submenu::Highlight), "Highlight ›"));
+            submenus.push((Submenu::Highlight, highlight_items));
         }
         items.push((ContextMenuAction::Delete, "Delete"));
         if can_fork {
@@ -217,7 +362,21 @@ impl ContextMenuDialog {
             };
             items.push((ContextMenuAction::SwitchView, label));
         }
-        Self::new(anchor, items)
+        let mut menu = Self::new(anchor, items);
+        menu.submenus = submenus;
+        menu
+    }
+
+    /// The Highlight menu on its own, opened by the `L` key. `None` when it
+    /// would have no rows.
+    pub fn for_highlights(anchor: (u16, u16), ops: HighlightOps) -> Option<Self> {
+        let (items, submenus) = highlight_menu(ops);
+        if items.is_empty() {
+            return None;
+        }
+        let mut menu = Self::new(anchor, items);
+        menu.submenus = submenus;
+        Some(menu)
     }
 
     /// Add the group entries to a session menu, right after Rename: "Move to
@@ -269,53 +428,19 @@ impl ContextMenuDialog {
         } else {
             "Pin project"
         };
-        Self::new(
+        let mut menu = Self::new(
             anchor,
             vec![
                 (ContextMenuAction::NewFromSelection, "New Session"),
                 (ContextMenuAction::TogglePin, pin_label),
                 (
-                    ContextMenuAction::ProjectColor(Some(
-                        crate::session::repo_appearance::RepoColor::Amber,
-                    )),
-                    "Highlight Amber",
-                ),
-                (
-                    ContextMenuAction::ProjectColor(Some(
-                        crate::session::repo_appearance::RepoColor::Teal,
-                    )),
-                    "Highlight Teal",
-                ),
-                (
-                    ContextMenuAction::ProjectColor(Some(
-                        crate::session::repo_appearance::RepoColor::Sky,
-                    )),
-                    "Highlight Sky",
-                ),
-                (
-                    ContextMenuAction::ProjectColor(Some(
-                        crate::session::repo_appearance::RepoColor::Violet,
-                    )),
-                    "Highlight Violet",
-                ),
-                (
-                    ContextMenuAction::ProjectColor(Some(
-                        crate::session::repo_appearance::RepoColor::Rose,
-                    )),
-                    "Highlight Rose",
-                ),
-                (
-                    ContextMenuAction::ProjectColor(Some(
-                        crate::session::repo_appearance::RepoColor::Slate,
-                    )),
-                    "Highlight Slate",
-                ),
-                (
-                    ContextMenuAction::ProjectColor(None),
-                    "Clear project highlight",
+                    ContextMenuAction::Open(Submenu::ProjectHighlight),
+                    "Project highlight ›",
                 ),
             ],
-        )
+        );
+        menu.submenus = vec![(Submenu::ProjectHighlight, project_highlight_items())];
+        menu
     }
 
     pub fn for_synthetic_project(anchor: (u16, u16)) -> Self {
@@ -326,10 +451,7 @@ impl ContextMenuDialog {
     }
 
     pub fn for_project_highlights(anchor: (u16, u16)) -> Self {
-        let mut menu = Self::for_project_group(anchor, false);
-        menu.items
-            .retain(|(action, _)| matches!(action, ContextMenuAction::ProjectColor(_)));
-        menu
+        Self::new(anchor, project_highlight_items())
     }
 
     /// Menu for the Trash section header: empty it, restore everything, or
@@ -372,14 +494,50 @@ impl ContextMenuDialog {
         )
     }
 
-    fn new(anchor: (u16, u16), items: Vec<(ContextMenuAction, &'static str)>) -> Self {
+    fn new(anchor: (u16, u16), items: Vec<MenuItem>) -> Self {
         Self {
             items,
+            submenus: Vec::new(),
+            parents: Vec::new(),
             highlight: Some(0),
             anchor,
             last_area: Rect::default(),
             scroll_offset: 0,
         }
+    }
+
+    /// Open a submenu or step back out of one, both in place; every other
+    /// action is submitted for the caller to dispatch.
+    fn activate(&mut self, action: ContextMenuAction) -> DialogResult<ContextMenuAction> {
+        match action {
+            ContextMenuAction::Open(submenu) => {
+                if let Some((_, children)) = self.submenus.iter().find(|(s, _)| *s == submenu) {
+                    let mut items = vec![(ContextMenuAction::Back, "‹ Back")];
+                    items.extend(children.iter().copied());
+                    let parent = std::mem::replace(&mut self.items, items);
+                    self.parents.push((parent, self.highlight));
+                    self.highlight = Some(1);
+                    self.scroll_offset = 0;
+                }
+                DialogResult::Continue
+            }
+            ContextMenuAction::Back => {
+                self.back();
+                DialogResult::Continue
+            }
+            action => DialogResult::Submit(action),
+        }
+    }
+
+    /// Return to the parent menu. False at the top level.
+    fn back(&mut self) -> bool {
+        let Some((items, highlight)) = self.parents.pop() else {
+            return false;
+        };
+        self.items = items;
+        self.highlight = highlight;
+        self.scroll_offset = 0;
+        true
     }
 
     fn has(&self, action: ContextMenuAction) -> bool {
@@ -400,7 +558,7 @@ impl ContextMenuDialog {
     /// (action, label) pairs, so a test can assert which menu opened without
     /// rendering.
     #[cfg(test)]
-    pub fn items_for_test(&self) -> &[(ContextMenuAction, &'static str)] {
+    pub fn items_for_test(&self) -> &[MenuItem] {
         &self.items
     }
 
@@ -432,7 +590,7 @@ impl ContextMenuDialog {
             }
             Some(idx) => {
                 self.highlight = Some(idx);
-                Some(DialogResult::Submit(self.items[idx].0))
+                Some(self.activate(self.items[idx].0))
             }
         }
     }
@@ -468,12 +626,19 @@ impl ContextMenuDialog {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> DialogResult<ContextMenuAction> {
         match key.code {
-            KeyCode::Esc => DialogResult::Cancel,
+            // Esc and Left step out of a submenu; at the top Esc closes the menu.
+            KeyCode::Esc | KeyCode::Left | KeyCode::Backspace => {
+                if !self.back() && key.code == KeyCode::Esc {
+                    DialogResult::Cancel
+                } else {
+                    DialogResult::Continue
+                }
+            }
             // Enter submits the highlighted item. If mouse hover cleared the
             // highlight (cursor left every item) there's nothing to submit,
             // so keep the menu open rather than firing a stale action.
             KeyCode::Enter => match self.highlight {
-                Some(idx) => DialogResult::Submit(self.items[idx].0),
+                Some(idx) => self.activate(self.items[idx].0),
                 None => DialogResult::Continue,
             },
             // Arrow keys always re-establish a concrete highlight, so the
@@ -499,6 +664,17 @@ impl ContextMenuDialog {
             // action is actually in the current menu's item list, so the
             // session menu's `r` doesn't accidentally fire on the
             // empty-sidebar menu (which has different items).
+            // Rows with their own hotkey (the highlight menus) win, so `r` picks
+            // red there while it still renames from the session menu.
+            KeyCode::Char(c) if self.items.iter().any(|(a, _)| row_hotkey(*a) == Some(c)) => {
+                let action = self
+                    .items
+                    .iter()
+                    .find(|(a, _)| row_hotkey(*a) == Some(c))
+                    .map(|(a, _)| *a)
+                    .expect("checked by the guard");
+                self.activate(action)
+            }
             KeyCode::Char(c) => {
                 let action = match c {
                     'r' | 'R' => Some(ContextMenuAction::Rename),
@@ -623,9 +799,15 @@ mod tests {
     #[test]
     fn project_highlight_menu_scrolls_focus_and_never_hits_clipped_border() {
         let mut menu = ContextMenuDialog::for_project_group((1, 1), false);
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Char('l'))),
+            DialogResult::Continue
+        ));
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(48, 8)).unwrap();
         let theme = crate::tui::styles::load_theme("empire");
+        // The submenu opens on its first color; Up reaches Back, then wraps to the end.
+        menu.handle_key(key(KeyCode::Up));
         menu.handle_key(key(KeyCode::Up));
         terminal.draw(|f| menu.render(f, f.area(), &theme)).unwrap();
         let text: String = terminal
@@ -658,8 +840,127 @@ mod tests {
         assert_eq!(menu.scroll_offset, 0);
         assert!(matches!(
             menu.handle_click(x, menu.last_area.y + 1),
-            Some(DialogResult::Submit(A::NewFromSelection))
+            Some(DialogResult::Continue)
         ));
+        assert_eq!(labels(&menu)[0], "New Session", "the Back row returns");
+    }
+
+    fn highlight_session(ops: HighlightOps) -> ContextMenuDialog {
+        ContextMenuDialog::for_session_with_highlights(
+            (0, 0),
+            false,
+            None,
+            None,
+            false,
+            None,
+            Some(ops),
+        )
+    }
+
+    #[test]
+    fn highlight_submenu_drills_in_hotkeys_colors_and_steps_back() {
+        let ops = HighlightOps {
+            session: Some(Some("red")),
+            shown: [true, false, false, false, true],
+            search_matches: true,
+        };
+        let mut menu = highlight_session(ops);
+        let top = labels(&menu);
+        assert!(top.contains(&"Highlight ›"));
+        assert!(!top.contains(&"Highlight red"));
+        // `r` still renames from the top menu.
+        assert!(matches!(
+            highlight_session(ops).handle_key(key(KeyCode::Char('r'))),
+            DialogResult::Submit(A::Rename)
+        ));
+
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Char('l'))),
+            DialogResult::Continue
+        ));
+        assert_eq!(
+            labels(&menu),
+            vec![
+                "‹ Back",
+                "Highlight red",
+                "Highlight amber",
+                "Highlight green",
+                "Highlight purple",
+                "Highlight teal",
+                "Remove highlight",
+                "Clear red from shown",
+                "Clear teal from shown",
+                "Clear all shown highlights",
+                "Color search matches ›",
+                "Show only red",
+            ]
+        );
+        assert_eq!(menu.highlight_for_test(), Some(1));
+        // Inside the submenu `r` means red, `x` remove, `c` clear all shown.
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Char('r'))),
+            DialogResult::Submit(A::SessionColor(Some("red")))
+        ));
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Char('x'))),
+            DialogResult::Submit(A::SessionColor(None))
+        ));
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Char('c'))),
+            DialogResult::Submit(A::ClearShownHighlight(None))
+        ));
+
+        // A nested submenu, then Left and Esc each step back one level.
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Char('m'))),
+            DialogResult::Continue
+        ));
+        assert_eq!(labels(&menu)[1], "Red");
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Char('g'))),
+            DialogResult::Submit(A::ColorSearchMatches(Some("green")))
+        ));
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Left)),
+            DialogResult::Continue
+        ));
+        assert_eq!(labels(&menu)[0], "‹ Back");
+        assert_eq!(labels(&menu)[1], "Highlight red");
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Esc)),
+            DialogResult::Continue
+        ));
+        assert_eq!(labels(&menu), top);
+        assert!(matches!(
+            menu.handle_key(key(KeyCode::Esc)),
+            DialogResult::Cancel
+        ));
+    }
+
+    #[test]
+    fn highlight_menu_rows_follow_what_there_is_to_do() {
+        let plain = HighlightOps {
+            session: Some(None),
+            ..Default::default()
+        };
+        let mut menu = highlight_session(plain);
+        menu.handle_key(key(KeyCode::Char('l')));
+        let rows = labels(&menu);
+        assert!(!rows.contains(&"Remove highlight"));
+        assert!(!rows.iter().any(|r| r.starts_with("Clear")));
+        assert!(!rows.contains(&"Color search matches ›"));
+
+        // No session row and nothing shown: no Highlight entry, and `L` has no menu.
+        assert!(!labels(&highlight_session(HighlightOps::default())).contains(&"Highlight ›"));
+        assert!(ContextMenuDialog::for_highlights((0, 0), HighlightOps::default()).is_none());
+        let bulk_only = HighlightOps {
+            shown: [false, true, false, false, false],
+            ..Default::default()
+        };
+        assert_eq!(
+            labels(&ContextMenuDialog::for_highlights((0, 0), bulk_only).unwrap()),
+            vec!["Clear amber from shown", "Clear all shown highlights"]
+        );
     }
 
     /// A session menu at `(0, 0)` with snooze shown, unread hidden, fork on.
@@ -778,32 +1079,12 @@ mod tests {
             (
                 "unpinned project",
                 labels(&ContextMenuDialog::for_project_group((0, 0), false)),
-                vec![
-                    "New Session",
-                    "Pin project",
-                    "Highlight Amber",
-                    "Highlight Teal",
-                    "Highlight Sky",
-                    "Highlight Violet",
-                    "Highlight Rose",
-                    "Highlight Slate",
-                    "Clear project highlight",
-                ],
+                vec!["New Session", "Pin project", "Project highlight ›"],
             ),
             (
                 "pinned project",
                 labels(&ContextMenuDialog::for_project_group((0, 0), true)),
-                vec![
-                    "New Session",
-                    "Unpin project",
-                    "Highlight Amber",
-                    "Highlight Teal",
-                    "Highlight Sky",
-                    "Highlight Violet",
-                    "Highlight Rose",
-                    "Highlight Slate",
-                    "Clear project highlight",
-                ],
+                vec!["New Session", "Unpin project", "Project highlight ›"],
             ),
         ];
         for (name, got, want) in cases {

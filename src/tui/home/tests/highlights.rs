@@ -1,6 +1,7 @@
 use super::*;
 use crate::session::config::{GroupByMode, SortOrder};
 use crate::session::repo_appearance::{RepoAppearance, RepoColor};
+use crate::tui::dialogs::ContextMenuAction;
 
 #[test]
 #[serial]
@@ -217,7 +218,9 @@ fn highlight_filter_rebuild_selection_search_and_duplicate_basename_safety() {
         .unwrap()
         .contains("Clear highlight filters"));
     v.select_session_by_id(&a.id);
-    v.dispatch_context_menu_action(crate::tui::dialogs::ContextMenuAction::HighlightGreen);
+    v.dispatch_context_menu_action(crate::tui::dialogs::ContextMenuAction::SessionColor(Some(
+        "green",
+    )));
     assert!(
         v.flat_items.is_empty(),
         "a local color edit must immediately remove its nonmatching row"
@@ -398,4 +401,174 @@ fn project_menu_preserves_alias_tints_with_precedence_and_refreshes_external_sta
         v.repo_appearances["/one/repo"].alias.as_deref(),
         Some("Alias")
     );
+}
+
+fn colored(title: &str, path: &str, color: Option<&str>) -> Instance {
+    let mut inst = Instance::new(title, path);
+    inst.color = color.map(str::to_string);
+    inst
+}
+
+fn stored_color(id: &str) -> Option<String> {
+    crate::session::Storage::new_unwatched("test")
+        .unwrap()
+        .load()
+        .unwrap()
+        .into_iter()
+        .find(|inst| inst.id == id)
+        .unwrap()
+        .color
+}
+
+#[test]
+#[serial]
+fn clear_shown_red_skips_rows_the_filters_hide_and_waits_for_confirm() {
+    let red_a = colored("red-a", "/repo/a", Some("red"));
+    let red_b = colored("red-b", "/repo/b", Some("red"));
+    let mut red_archived = colored("red-archived", "/repo/c", Some("red"));
+    red_archived.archive();
+    let amber = colored("amber", "/repo/d", Some("amber"));
+    let mut env = seeded_env(
+        test_home(),
+        &[
+            red_a.clone(),
+            red_b.clone(),
+            red_archived.clone(),
+            amber.clone(),
+        ],
+        false,
+    );
+    let v = &mut env.view;
+    crate::session::update_app_state(|state| {
+        state.repo_appearances.insert(
+            "/repo/b".into(),
+            RepoAppearance {
+                alias: None,
+                color: Some(RepoColor::Sky),
+            },
+        );
+    })
+    .unwrap();
+    v.try_refresh_from_config_watcher().unwrap();
+    // Only uncolored projects show, so red-b's Sky project is filtered out.
+    v.highlight_filters.projects = vec![None];
+    v.rebuild_flat_items_keeping_cursor();
+
+    v.dispatch_context_menu_action(ContextMenuAction::ClearShownHighlight(Some("red")));
+    let dialog = v
+        .confirm_dialog
+        .as_ref()
+        .expect("bulk clear confirms first");
+    assert_eq!(dialog.action(), "highlight_bulk");
+    assert_eq!(stored_color(&red_a.id).as_deref(), Some("red"));
+
+    v.confirm_dialog = None;
+    v.dispatch_confirm_submit("highlight_bulk");
+    assert_eq!(stored_color(&red_a.id), None);
+    assert_eq!(
+        stored_color(&red_b.id).as_deref(),
+        Some("red"),
+        "filtered out"
+    );
+    assert_eq!(
+        stored_color(&red_archived.id).as_deref(),
+        Some("red"),
+        "archived is not shown"
+    );
+    assert_eq!(stored_color(&amber.id).as_deref(), Some("amber"));
+    assert!(v.status_flash_text().unwrap().contains("Cleared"));
+
+    // Clear-all then takes the remaining shown color and leaves the hidden ones.
+    v.dispatch_context_menu_action(ContextMenuAction::ClearShownHighlight(None));
+    v.confirm_dialog = None;
+    v.dispatch_confirm_submit("highlight_bulk");
+    assert_eq!(stored_color(&amber.id), None);
+    assert_eq!(stored_color(&red_b.id).as_deref(), Some("red"));
+
+    // Nothing left to clear: no confirm, just a note.
+    v.dispatch_context_menu_action(ContextMenuAction::ClearShownHighlight(Some("red")));
+    assert!(v.confirm_dialog.is_none());
+}
+
+#[test]
+#[serial]
+fn cancelled_bulk_confirm_changes_nothing() {
+    let red = colored("red", "/repo/a", Some("red"));
+    let mut env = seeded_env(test_home(), std::slice::from_ref(&red), false);
+    let v = &mut env.view;
+    v.dispatch_context_menu_action(ContextMenuAction::ClearShownHighlight(Some("red")));
+    assert!(v.pending_highlight_bulk.is_some());
+    v.handle_key(key(KeyCode::Esc), None);
+    assert!(v.confirm_dialog.is_none());
+    assert!(v.pending_highlight_bulk.is_none());
+    v.dispatch_confirm_submit("highlight_bulk");
+    assert_eq!(stored_color(&red.id).as_deref(), Some("red"));
+}
+
+#[test]
+#[serial]
+fn search_matches_take_a_color_and_the_l_menu_offers_it() {
+    let one = colored("deploy-one", "/repo/a", None);
+    let two = colored("deploy-two", "/repo/b", Some("green"));
+    let other = colored("unrelated", "/repo/c", None);
+    let mut env = seeded_env(
+        test_home(),
+        &[one.clone(), two.clone(), other.clone()],
+        false,
+    );
+    let v = &mut env.view;
+    v.search_query = Input::new("deploy".into());
+    v.rebuild_flat_items_keeping_cursor();
+    assert_eq!(v.search_matches.len(), 2);
+
+    assert!(v.highlight_ops().search_matches);
+    v.handle_key(key(KeyCode::Char('L')), None);
+    let actions: Vec<_> = v
+        .context_menu
+        .as_ref()
+        .expect("L opens the highlight menu")
+        .items_for_test()
+        .iter()
+        .map(|(a, _)| *a)
+        .collect();
+    assert!(actions.contains(&ContextMenuAction::Open(
+        crate::tui::dialogs::Submenu::ColorMatches
+    )));
+    v.context_menu = None;
+
+    v.dispatch_context_menu_action(ContextMenuAction::ColorSearchMatches(Some("red")));
+    assert!(v
+        .confirm_dialog
+        .as_ref()
+        .is_some_and(|d| d.action() == "highlight_bulk"));
+    v.confirm_dialog = None;
+    v.dispatch_confirm_submit("highlight_bulk");
+    assert_eq!(stored_color(&one.id).as_deref(), Some("red"));
+    assert_eq!(stored_color(&two.id).as_deref(), Some("red"));
+    assert_eq!(stored_color(&other.id), None);
+}
+
+#[test]
+#[serial]
+fn show_only_color_narrows_the_filter_and_f4_clear_respects_it() {
+    let red = colored("red", "/repo/a", Some("red"));
+    let amber = colored("amber", "/repo/b", Some("amber"));
+    let mut env = seeded_env(test_home(), &[red.clone(), amber.clone()], false);
+    let v = &mut env.view;
+    v.dispatch_context_menu_action(ContextMenuAction::ShowOnlyColor("amber"));
+    assert_eq!(
+        v.highlight_filters.sessions,
+        vec![Some("amber".to_string())]
+    );
+    assert_eq!(v.shown_session_ids(), vec![amber.id.clone()]);
+
+    // F4 → `x` on the "All session highlights" row clears every shown color.
+    v.handle_key(key(KeyCode::F(4)), None);
+    assert!(v.highlight_filter_dialog.is_some());
+    v.handle_key(key(KeyCode::Char('x')), None);
+    assert!(v.highlight_filter_dialog.is_none());
+    v.confirm_dialog = None;
+    v.dispatch_confirm_submit("highlight_bulk");
+    assert_eq!(stored_color(&amber.id), None);
+    assert_eq!(stored_color(&red.id).as_deref(), Some("red"));
 }

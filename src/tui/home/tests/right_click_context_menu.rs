@@ -5,7 +5,8 @@
 use super::*;
 use crate::session::config::SortOrder;
 use crate::session::Item;
-use crate::tui::dialogs::ContextMenuAction;
+use crate::tui::dialogs::{ContextMenuAction, DialogResult, Submenu};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
 fn setup_inner(env: &mut TestEnv) {
@@ -68,7 +69,7 @@ fn right_click_on_group_uses_group_menu() {
 /// Session-menu entries route through the same helpers as their keys: Rename like `r`,
 /// Archive like `z` (immediate, no dialog), Delete like `d`. Esc cancels without a dialog.
 /// Attention sort shows the full menu: New Session / Rename / Move to group (manual grouping)
-/// / Archive / Snooze / Mark unread / Add project / five highlight choices / Delete.
+/// / Archive / Snooze / Mark unread / Add project / Highlight › / Delete.
 #[test]
 #[serial]
 fn session_menu_entries_route_like_their_keys() {
@@ -80,7 +81,7 @@ fn session_menu_entries_route_like_their_keys() {
         ("archive", 3, KeyCode::Enter, |v, id| {
             v.get_instance(id).unwrap().is_archived()
         }),
-        ("delete", 12, KeyCode::Enter, |v, _| {
+        ("delete", 8, KeyCode::Enter, |v, _| {
             v.unified_delete_dialog.is_some()
         }),
         ("esc", 0, KeyCode::Esc, |v, _| {
@@ -150,7 +151,7 @@ fn right_click_unarchive_action_restores_session() {
     // (`right_click_fork_requires_provenance_not_a_tool_label`). Manual
     // grouping adds "Move to group" after Rename; the row is ungrouped, so no
     // "Remove from group". Menu is New Session / Rename / Move to group /
-    // Unarchive / Mark unread / Add project / highlight choices / Delete.
+    // Unarchive / Mark unread / Add project / Highlight › / Delete.
     assert_eq!(
         labels,
         vec![
@@ -160,11 +161,7 @@ fn right_click_unarchive_action_restores_session() {
             "Unarchive",
             "Mark unread",
             "Add project",
-            "Highlight red",
-            "Highlight amber",
-            "Highlight green",
-            "Highlight purple",
-            "Highlight teal",
+            "Highlight ›",
             "Delete",
         ]
     );
@@ -290,14 +287,23 @@ fn right_click_session_menu_hides_fork_for_unforkable_agent() {
     );
 }
 
+/// Drill into the open menu's Highlight submenu with `l` and list its rows.
+fn highlight_submenu_actions(env: &mut TestEnv) -> Vec<ContextMenuAction> {
+    let menu = env.view.context_menu.as_mut().unwrap();
+    assert!(matches!(
+        menu.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+        DialogResult::Continue
+    ));
+    menu.items_for_test().iter().map(|(a, _)| *a).collect()
+}
+
 #[test]
 #[serial]
 fn right_click_session_menu_offers_highlight_actions() {
     let mut env = create_test_env_with_sessions(1);
     setup_inner(&mut env);
     assert!(env.view.handle_right_click(5, 1));
-
-    let actions: Vec<ContextMenuAction> = env
+    let top: Vec<ContextMenuAction> = env
         .view
         .context_menu
         .as_ref()
@@ -306,13 +312,16 @@ fn right_click_session_menu_offers_highlight_actions() {
         .iter()
         .map(|(a, _)| *a)
         .collect();
+    assert!(top.contains(&ContextMenuAction::Open(Submenu::Highlight)));
+    assert!(!top.contains(&ContextMenuAction::SessionColor(Some("red"))));
 
-    assert!(actions.contains(&ContextMenuAction::HighlightRed));
-    assert!(actions.contains(&ContextMenuAction::HighlightAmber));
-    assert!(actions.contains(&ContextMenuAction::HighlightGreen));
-    assert!(actions.contains(&ContextMenuAction::HighlightPurple));
-    assert!(actions.contains(&ContextMenuAction::HighlightTeal));
-    assert!(!actions.contains(&ContextMenuAction::ClearHighlight));
+    let actions = highlight_submenu_actions(&mut env);
+    assert!(actions.contains(&ContextMenuAction::SessionColor(Some("red"))));
+    assert!(actions.contains(&ContextMenuAction::SessionColor(Some("amber"))));
+    assert!(actions.contains(&ContextMenuAction::SessionColor(Some("green"))));
+    assert!(actions.contains(&ContextMenuAction::SessionColor(Some("purple"))));
+    assert!(actions.contains(&ContextMenuAction::SessionColor(Some("teal"))));
+    assert!(!actions.contains(&ContextMenuAction::SessionColor(None)));
 }
 
 #[test]
@@ -331,17 +340,8 @@ fn right_click_session_menu_clear_highlight_appears_only_when_set() {
         .unwrap();
 
     assert!(env.view.handle_right_click(5, 1));
-    let actions: Vec<ContextMenuAction> = env
-        .view
-        .context_menu
-        .as_ref()
-        .unwrap()
-        .items_for_test()
-        .iter()
-        .map(|(a, _)| *a)
-        .collect();
-
-    assert!(actions.contains(&ContextMenuAction::ClearHighlight));
+    let actions = highlight_submenu_actions(&mut env);
+    assert!(actions.contains(&ContextMenuAction::SessionColor(None)));
 }
 
 #[test]
@@ -353,7 +353,7 @@ fn context_menu_highlight_action_persists_and_clears_color() {
     let id = env.view.selected_session.clone().unwrap();
 
     env.view
-        .dispatch_context_menu_action(ContextMenuAction::HighlightRed);
+        .dispatch_context_menu_action(ContextMenuAction::SessionColor(Some("red")));
     assert_eq!(
         env.view.get_instance(&id).unwrap().color.as_deref(),
         Some("red")
@@ -368,7 +368,7 @@ fn context_menu_highlight_action_persists_and_clears_color() {
     assert_eq!(row.color.as_deref(), Some("red"));
 
     env.view
-        .dispatch_context_menu_action(ContextMenuAction::ClearHighlight);
+        .dispatch_context_menu_action(ContextMenuAction::SessionColor(None));
     assert_eq!(env.view.get_instance(&id).unwrap().color, None);
     let row = crate::session::Storage::new_unwatched("test")
         .unwrap()
@@ -389,14 +389,14 @@ fn context_menu_highlight_action_toggles_same_color_off() {
     let id = env.view.selected_session.clone().unwrap();
 
     env.view
-        .dispatch_context_menu_action(ContextMenuAction::HighlightAmber);
+        .dispatch_context_menu_action(ContextMenuAction::SessionColor(Some("amber")));
     assert_eq!(
         env.view.get_instance(&id).unwrap().color.as_deref(),
         Some("amber")
     );
 
     env.view
-        .dispatch_context_menu_action(ContextMenuAction::HighlightAmber);
+        .dispatch_context_menu_action(ContextMenuAction::SessionColor(Some("amber")));
     assert_eq!(env.view.get_instance(&id).unwrap().color, None);
     let row = crate::session::Storage::new_unwatched("test")
         .unwrap()
@@ -428,12 +428,7 @@ fn context_menu_highlight_actions_hidden_when_setting_is_off() {
 
     assert!(!actions.iter().any(|action| matches!(
         action,
-        ContextMenuAction::HighlightRed
-            | ContextMenuAction::HighlightAmber
-            | ContextMenuAction::HighlightGreen
-            | ContextMenuAction::HighlightPurple
-            | ContextMenuAction::HighlightTeal
-            | ContextMenuAction::ClearHighlight
+        ContextMenuAction::SessionColor(_) | ContextMenuAction::Open(Submenu::Highlight)
     )));
 }
 
@@ -446,11 +441,15 @@ fn purple_and_teal_highlights_persist_and_draw_fixed_hue_dots() {
     use ratatui::style::Color;
     for (action, name, rgb) in [
         (
-            ContextMenuAction::HighlightPurple,
+            ContextMenuAction::SessionColor(Some("purple")),
             "purple",
             (0xa8, 0x55, 0xf7),
         ),
-        (ContextMenuAction::HighlightTeal, "teal", (0x14, 0xb8, 0xa6)),
+        (
+            ContextMenuAction::SessionColor(Some("teal")),
+            "teal",
+            (0x14, 0xb8, 0xa6),
+        ),
     ] {
         let mut env = create_test_env_with_sessions(2);
         setup_inner(&mut env);

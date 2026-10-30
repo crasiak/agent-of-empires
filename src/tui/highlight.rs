@@ -45,21 +45,66 @@ impl HighlightFilters {
     }
 }
 
+/// What the filter dialog asks of its host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HighlightFilterOutcome {
+    Apply(HighlightFilters),
+    /// Apply the filters, then remove this session color (every color with `None`)
+    /// from the sessions they show.
+    ClearShown(HighlightFilters, Option<&'static str>),
+}
+
 pub struct HighlightFilterDialog {
     draft: HighlightFilters,
     cursor: usize,
+    /// Offer `x` to clear a color from the shown sessions. Local home only.
+    bulk_clear: bool,
 }
 impl HighlightFilterDialog {
     pub fn new(filters: &HighlightFilters) -> Self {
         Self {
             draft: filters.clone(),
             cursor: 0,
+            bulk_clear: false,
         }
     }
-    pub fn handle_key(&mut self, key: KeyEvent) -> DialogResult<HighlightFilters> {
+    pub fn with_bulk_clear(mut self) -> Self {
+        self.bulk_clear = true;
+        self
+    }
+    pub fn handle_key(&mut self, key: KeyEvent) -> DialogResult<HighlightFilterOutcome> {
         match key.code {
             KeyCode::Esc => return DialogResult::Cancel,
-            KeyCode::Enter => return DialogResult::Submit(self.draft.clone()),
+            KeyCode::Enter => {
+                return DialogResult::Submit(HighlightFilterOutcome::Apply(self.draft.clone()))
+            }
+            KeyCode::Char('x') if self.bulk_clear && self.cursor <= 5 => {
+                let color = self
+                    .cursor
+                    .checked_sub(1)
+                    .and_then(|i| SESSION_COLORS.get(i).copied());
+                return DialogResult::Submit(HighlightFilterOutcome::ClearShown(
+                    self.draft.clone(),
+                    color,
+                ));
+            }
+            KeyCode::Char('-') => match self.cursor {
+                1..=6 => hide(
+                    &mut self.draft.sessions,
+                    SESSION_COLORS
+                        .iter()
+                        .map(|c| Some(c.to_string()))
+                        .chain([None])
+                        .collect(),
+                    SESSION_COLORS.get(self.cursor - 1).map(|s| s.to_string()),
+                ),
+                8..=14 => hide(
+                    &mut self.draft.projects,
+                    RepoColor::ALL.into_iter().map(Some).chain([None]).collect(),
+                    RepoColor::ALL.get(self.cursor - 8).copied(),
+                ),
+                _ => {}
+            },
             KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => {
                 self.cursor = (self.cursor + 1) % 16
             }
@@ -145,7 +190,11 @@ impl HighlightFilterDialog {
             );
         }
         row(15, "Clear both selectors (c)".into(), false);
-        lines.push(Line::raw(" Space toggle · Enter apply · Esc cancel"));
+        lines.push(Line::raw(if self.bulk_clear {
+            " Space toggle · - hide · x clear from shown · Enter apply"
+        } else {
+            " Space toggle · - hide · Enter apply · Esc cancel"
+        }));
         lines.push(Line::raw(" OR within a selector; AND between selectors"));
         let scroll = (self.cursor + 2).saturating_sub(height.saturating_sub(2) as usize) as u16;
         frame.render_widget(Clear, rect);
@@ -159,6 +208,17 @@ impl HighlightFilterDialog {
             ),
             rect,
         );
+    }
+}
+/// Take `value` out of a selector, expanding an empty ("All") selector to every
+/// option first. Hiding the last one left is a no-op, since an empty selector
+/// would mean All again.
+fn hide<T: PartialEq>(selected: &mut Vec<T>, all: Vec<T>, value: T) {
+    if selected.is_empty() {
+        *selected = all;
+    }
+    if selected.len() > 1 {
+        selected.retain(|v| *v != value);
     }
 }
 fn toggle<T: PartialEq>(values: &mut Vec<T>, value: T) {
@@ -264,7 +324,7 @@ mod tests {
         ));
         assert!(f.active());
         assert!(
-            matches!(dialog.handle_key(KeyCode::Enter.into()), DialogResult::Submit(filters) if !filters.active())
+            matches!(dialog.handle_key(KeyCode::Enter.into()), DialogResult::Submit(HighlightFilterOutcome::Apply(filters)) if !filters.active())
         );
     }
 }

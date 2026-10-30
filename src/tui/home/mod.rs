@@ -6,6 +6,7 @@ mod creation;
 mod dialogs;
 #[cfg(test)]
 mod file_watch_tests;
+mod highlight_ops;
 mod icons;
 mod input;
 mod last_prompt;
@@ -282,6 +283,8 @@ pub struct HomeView {
     pub(super) structured_transcript_painted: bool,
     pub(super) pending_force_remove_session: Option<String>,
     pub(super) pending_trash_session: Option<String>,
+    /// Sessions and the color a confirmed bulk highlight change sets on them.
+    pub(super) pending_highlight_bulk: Option<(Vec<String>, Option<&'static str>)>,
     pub(super) pending_dialog_click_action: Option<crate::tui::app::Action>,
     pub(super) search_active: bool,
     pub(super) search_query: Input,

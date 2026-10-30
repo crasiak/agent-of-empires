@@ -5,7 +5,7 @@ mod render;
 
 use crate::session::repo_appearance::{RepoAppearances, MULTI_REPO_ID, SCRATCH_REPO_ID};
 use crate::tui::dialogs::DialogResult;
-use crate::tui::highlight::{HighlightFilterDialog, HighlightFilters};
+use crate::tui::highlight::{HighlightFilterDialog, HighlightFilterOutcome, HighlightFilters};
 use std::io::Stdout;
 
 use crate::acp::client::discovery::DaemonEndpoint;
@@ -252,7 +252,11 @@ async fn run(
             match dialog.handle_key(key) {
                 DialogResult::Continue => {}
                 DialogResult::Cancel => state.filter_dialog = None,
-                DialogResult::Submit(filters) => {
+                // Remote never offers the bulk clear, so only the filters apply.
+                DialogResult::Submit(
+                    HighlightFilterOutcome::Apply(filters)
+                    | HighlightFilterOutcome::ClearShown(filters, _),
+                ) => {
                     state.filter_dialog = None;
                     state.filters = filters;
                     state.rebuild();
