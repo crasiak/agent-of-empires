@@ -30,6 +30,9 @@ pub enum ActionId {
     ToolPicker,
     SearchStart,
     HighlightFilter,
+    /// Open the highlight menu: color the selected session, clear colors from the
+    /// shown sessions, or color every `/` search match.
+    HighlightMenu,
     SessionSearch,
     ProjectContext,
     SearchNext,
@@ -607,6 +610,21 @@ pub static BINDINGS: &[Binding] = &[
             title: "Filter session and project highlights",
             keywords: &["color", "filter", "highlight"],
             group: PaletteGroup::Views,
+        }),
+    },
+    Binding {
+        id: ActionId::HighlightMenu,
+        non_strict: &[k('L')],
+        strict: &[k('L')],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Highlight menu",
+        }),
+        palette: Some(PaletteMeta {
+            title: "Highlight menu: color, clear shown, color search matches",
+            keywords: &["color", "highlight", "clear", "search", "bulk"],
+            group: PaletteGroup::Actions,
         }),
     },
     Binding {
@@ -1244,6 +1262,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::ToolPicker => "tool-picker",
         ActionId::SearchStart => "search",
         ActionId::HighlightFilter => "highlight-filter",
+        ActionId::HighlightMenu => "highlight-menu",
         ActionId::SessionSearch => "session-search",
         ActionId::ProjectContext => "project-context",
         ActionId::SearchNext => "search-next",

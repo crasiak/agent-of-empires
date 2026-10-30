@@ -22,10 +22,11 @@ use crate::tui::dialogs::{
     DeleteDialogConfig, DialogResult, GroupDeleteOptions, GroupDeleteOptionsDialog,
     HooksInstallDialog, InfoDialog, IntroOutcome, NewSessionData, NewSessionDialog, NoAgentsAction,
     PaletteAction, PaletteCommand, PaletteGroup, ProfilePickerAction, ProjectsDialog, RenameDialog,
-    RenameMode, RepoTrustAction, RestartDialog, SendMessageDialog, SessionHighlightMenu,
-    TipsDialog, TipsOutcome, UnifiedDeleteDialog, WorktreeNameDialog,
+    RenameMode, RepoTrustAction, RestartDialog, SendMessageDialog, TipsDialog, TipsOutcome,
+    UnifiedDeleteDialog, WorktreeNameDialog,
 };
 use crate::tui::diff::{DiffAction, DiffView};
+use crate::tui::highlight::HighlightFilterOutcome;
 use crate::tui::responsive;
 use crate::tui::settings::{SettingsAction, SettingsView};
 
@@ -1060,6 +1061,10 @@ impl HomeView {
                 }
                 None
             }
+            "highlight_bulk" => {
+                self.apply_highlight_bulk();
+                None
+            }
             "empty_trash" => {
                 let checked = std::mem::take(&mut self.confirm_checked);
                 self.empty_trash_all(
@@ -1402,6 +1407,7 @@ impl HomeView {
                         self.pending_stop_tool = None;
                         self.pending_force_remove_session = None;
                         self.pending_trash_session = None;
+                        self.pending_highlight_bulk = None;
                         self.pending_image_pull = None;
                         // Mirrors the keyboard route: Cancel means "don't discard", so
                         // settings stays open and `settings_close_confirm` resets.
@@ -1887,10 +1893,22 @@ impl HomeView {
             match dialog.handle_key(key) {
                 DialogResult::Continue => {}
                 DialogResult::Cancel => self.highlight_filter_dialog = None,
-                DialogResult::Submit(filters) => {
+                DialogResult::Submit(outcome) => {
                     self.highlight_filter_dialog = None;
-                    self.highlight_filters = filters;
+                    let clear = match outcome {
+                        HighlightFilterOutcome::Apply(filters) => {
+                            self.highlight_filters = filters;
+                            None
+                        }
+                        HighlightFilterOutcome::ClearShown(filters, color) => {
+                            self.highlight_filters = filters;
+                            Some(color)
+                        }
+                    };
                     self.rebuild_flat_items_keeping_cursor();
+                    if let Some(color) = clear {
+                        self.prompt_clear_shown_highlight(color);
+                    }
                 }
             }
             return None;
@@ -2231,6 +2249,7 @@ impl HomeView {
                     self.pending_stop_tool = None;
                     self.pending_force_remove_session = None;
                     self.pending_trash_session = None;
+                    self.pending_highlight_bulk = None;
                     self.pending_image_pull = None;
                 }
                 DialogResult::Submit(_) => {
@@ -2844,11 +2863,13 @@ impl HomeView {
             }
             ActionId::HighlightFilter => {
                 self.highlight_filter_dialog = Some(
-                    crate::tui::highlight::HighlightFilterDialog::new(&self.highlight_filters),
+                    crate::tui::highlight::HighlightFilterDialog::new(&self.highlight_filters)
+                        .with_bulk_clear(),
                 );
             }
             ActionId::SessionSearch => self.open_session_search(),
             ActionId::ProjectContext => self.open_project_context_menu((2, 2)),
+            ActionId::HighlightMenu => self.open_highlight_menu(),
             ActionId::SearchStart => {
                 self.search_active = true;
                 self.search_query = Input::default();
@@ -4920,22 +4941,20 @@ impl HomeView {
             } else if is_group {
                 ContextMenuDialog::for_group(anchor)
             } else {
-                let (is_archived, is_snoozed, is_unread, has_highlight, in_group) =
-                    match &self.flat_items[idx] {
-                        super::Item::Session { id, .. } => self
-                            .get_instance(id)
-                            .map(|inst| {
-                                (
-                                    inst.is_archived(),
-                                    inst.is_snoozed(),
-                                    inst.is_unread(),
-                                    inst.color.is_some(),
-                                    !inst.group_path.is_empty(),
-                                )
-                            })
-                            .unwrap_or((false, false, false, false, false)),
-                        super::Item::Group { .. } => (false, false, false, false, false),
-                    };
+                let (is_archived, is_snoozed, is_unread, in_group) = match &self.flat_items[idx] {
+                    super::Item::Session { id, .. } => self
+                        .get_instance(id)
+                        .map(|inst| {
+                            (
+                                inst.is_archived(),
+                                inst.is_snoozed(),
+                                inst.is_unread(),
+                                !inst.group_path.is_empty(),
+                            )
+                        })
+                        .unwrap_or((false, false, false, false)),
+                    super::Item::Group { .. } => (false, false, false, false),
+                };
                 // Snooze is an Attention-sort triage primitive: the `'h'`
                 // keybinding only fires in Attention sort, so the menu omits
                 // the Snooze row everywhere else to keep the mouse and keyboard
@@ -4974,7 +4993,7 @@ impl HomeView {
                     unread,
                     can_fork,
                     switch_view,
-                    SessionHighlightMenu::new(self.show_session_colors, has_highlight),
+                    self.show_session_colors.then(|| self.highlight_ops()),
                 )
                 .with_work_arc(work_arc);
                 // Manual groups are invisible in project and org grouping, so
@@ -5080,12 +5099,14 @@ impl HomeView {
             ContextMenuAction::AddProject => self.open_add_project_for_selected(),
             ContextMenuAction::MoveToGroup => self.open_move_to_group_for_selected(),
             ContextMenuAction::RemoveFromGroup => self.remove_selected_from_group(),
-            ContextMenuAction::HighlightRed => self.set_selected_session_color(Some("red")),
-            ContextMenuAction::HighlightAmber => self.set_selected_session_color(Some("amber")),
-            ContextMenuAction::HighlightGreen => self.set_selected_session_color(Some("green")),
-            ContextMenuAction::HighlightPurple => self.set_selected_session_color(Some("purple")),
-            ContextMenuAction::HighlightTeal => self.set_selected_session_color(Some("teal")),
-            ContextMenuAction::ClearHighlight => self.set_selected_session_color(None),
+            ContextMenuAction::SessionColor(color) => self.set_selected_session_color(color),
+            ContextMenuAction::ClearShownHighlight(color) => {
+                self.prompt_clear_shown_highlight(color)
+            }
+            ContextMenuAction::ColorSearchMatches(color) => self.prompt_color_search_matches(color),
+            ContextMenuAction::ShowOnlyColor(color) => self.show_only_session_color(color),
+            // The dialog handles submenu navigation itself and never submits these.
+            ContextMenuAction::Open(_) | ContextMenuAction::Back => {}
             ContextMenuAction::OpenGroupPicker => self.show_group_picker(),
             ContextMenuAction::TogglePin => {
                 // The right-click already moved the cursor onto the project header, so
@@ -5122,7 +5143,7 @@ impl HomeView {
         }
     }
 
-    fn set_selected_session_color(&mut self, color: Option<&'static str>) {
+    pub(super) fn set_selected_session_color(&mut self, color: Option<&'static str>) {
         let Some(id) = self.selected_session.clone() else {
             return;
         };
