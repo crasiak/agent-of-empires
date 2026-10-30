@@ -130,7 +130,7 @@ Run after a rule allows an answer, under `rules`. Under `yolo` they only add war
 - The subject adds dependencies (lockfile or manifest change, `npm install <pkg>`, `cargo add`) unless a rule names it → stop.
 - The subject pushes to a protected branch, force-pushes, or deletes branches → stop.
 - The item has used more than 80 % of its request share and the menu is a `plan` that would start new work → stop.
-- The diff so far exceeds the run's `max_diff_lines` (default 1500) → stop.
+- The PR's diff so far exceeds its limit → stop. The limit is the larger of the run's `max_diff_lines` (default 1500) and the item's `estimate.diff_lines`; for a PR with folded items, their estimates add up.
 
 Each check has an id so the log and the return review can say which one fired.
 
@@ -153,7 +153,7 @@ Each check has an id so the log and the return review can say which one fired.
 - The reminder gains: "Commands must not wait for input. Pass answers explicitly (flags, `yes |`, `printf … |`). If a command needs a choice, decide it with `aoe_afk_answer` first."
 - New `tool_result` check for bash: if the output's last non-empty lines match a format recogniser (or a small set of prompt heuristics: trailing `?`, `(y/N)`, `[Y/n]`, `Password:`), the result is annotated `aoe_afk_prompt_seen` with the parsed `Menu`.
 - An annotated result doesn't count as progress evidence for a checkpoint until an `aoe_afk_answer` call covering that menu has been logged. This closes the "default taken silently" hole.
-- Bash calls in an AFK period get a default timeout (10 minutes, configurable) when the agent passes none, so a command waiting forever can't run until the period ends.
+- Bash calls in an AFK period get a default timeout (10 minutes, configurable) when the agent passes none, so a command waiting forever can't run until the period ends. The reminder tells the agent to pass a longer timeout for commands it expects to run longer (full builds, long test suites). The work period's own limits still apply.
 
 #### Pi dialogs, including permission gates (Pi-fork change)
 

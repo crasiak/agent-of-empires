@@ -12,14 +12,14 @@ The user gives AFK a goal once, confirms one run envelope, and walks away. AFK w
 
 ## Starting a run
 
-- **Ad-hoc:** `/afk-work on "<goal>" [--policy rules|yolo] [--hours H] [--requests N] [--items K] [--tracker <linear project|initiative>] [--merge]`
+- **Ad-hoc:** `/afk-work on "<goal>" [--policy rules|yolo] [--hours H] [--requests N] [--items K] [--tracker <linear project|initiative>] [--no-merge]`
 - **Ticket:** `/afk-work do CRA-123 [same flags]`. AoE CLI and TUI equivalents: `aoe afk do <session> CRA-123` and a palette entry. Host commands only prepare the request; the grant still comes from the native consent dialog in Pi.
 - The goal is required. Without one, `/afk-work on N M` keeps today's single-task behaviour.
 - For a ticket, AFK reads the issue title and description as the goal text, and its open child issues (sorted by Linear sort order) as the seed items. The parent ticket is appended last as a "close out the goal" item. The Linear read goes through the AoE bridge using `LINEAR_API_KEY`; if it's missing, the run refuses to start and says why.
 
 ### Consent
 
-One native consent dialog covers the whole run. It shows the goal, the seed items, the policy (with the `yolo` marker from S-A), outward actions ("opens ready PRs and moves tickets"; plus "merges PRs" only with `--merge` under `yolo`), and the run limits.
+One native consent dialog covers the whole run. It shows the goal, the seed items, the policy (with the `yolo` marker from S-A), outward actions ("opens ready PRs and moves tickets"; plus "merges PRs" under `yolo` unless `--no-merge`), and the run limits.
 
 This changes a current decision: today every work period needs its own confirmation. Under a goal run, the run consent grants each item's work period. Human input, Off or reaching a limit still ends the run, and a new run needs a new confirmation.
 
@@ -27,7 +27,7 @@ This changes a current decision: today every work period needs its own confirmat
 
 1. Take the next `queued` item.
 2. Start a fresh Pi conversation for it (see "Fresh conversation per item") seeded with: the goal, the run rules, the previous item's handoff, the item's title and detail, and its branch.
-3. Open a work period for the item under the run consent, with the item's request share (default `run requests / items`, minimum 4). The existing native work-period machinery runs it unchanged: evidence-cited checkpoints, continuations, limits.
+3. Open a work period for the item under the run consent, with the item's request share: the larger of `run requests / items` (minimum 4) and the item's `estimate.requests`, capped by what's left of the run's requests. The run-level hours and requests are never raised by an estimate. The existing native work-period machinery runs it unchanged: evidence-cited checkpoints, continuations, limits.
 4. Menus are answered by S-A under the run's policy.
 5. When the item checkpoints `completed`, run **delivery** (below), record the result and handoff, and process follow-ups.
 6. Pull tracker next-work if the run has a ticket or `--tracker`.
@@ -50,6 +50,7 @@ A single blocked item doesn't stop the run: it's recorded and the next item star
 ```json
 { "id": "i3", "source": "goal | ticket | agent | tracker", "title": "…", "detail": "…",
   "parent": "i1", "ticket": "CRA-124", "status": "queued | running | done | done_local | blocked | skipped",
+  "delivery": "fold | stack | own", "estimate": { "requests": 12, "diff_lines": 2200, "why": "…" },
   "admitted_by": { "policy": "rules", "rule": "…", "reason": "…" },
   "branch": "afk/<run>/i3-short-title", "base": "afk/<run>/i1-…",
   "result": { "commit": "…", "pr_url": "…", "summary": "…", "handoff": "items/i3/handoff.md", "conversation": "<pi session file>" } }
@@ -58,7 +59,7 @@ A single blocked item doesn't stop the run: it's recorded and the next item star
 ### Where items come from
 
 - **Goal or ticket seed:** at run start.
-- **Agent follow-ups:** the `completed` checkpoint gains an optional `follow_ups: [{ title, detail, why }]` (max 5). `next_step` stays null for `completed`.
+- **Agent follow-ups:** the `completed` checkpoint gains an optional `follow_ups: [{ title, detail, why, fold, estimate }]` (max 5). `next_step` stays null for `completed`. The item reminder says to finish related work inside the current item rather than split it out: one large coherent PR beats five small ones. A follow-up should be work that couldn't reasonably go in this item.
 - **Tracker next-work:** after each item, re-read the goal ticket's open children (and `--tracker` project or initiative next-work, including initiative `STATUS.yaml` when named). New ones are proposed for admission.
 
 ### Admission (goal check)
@@ -72,6 +73,20 @@ Every non-seed item goes through the S-A engine as a `Menu` with `kind: "admit_i
   - matches a `stop` rule.
 - **`yolo`:** admit everything except duplicates and items over the `--items` limit.
 - Rejected items are recorded as `skipped` with the reason, so the review shows what AFK chose not to do.
+
+### Fold or stack
+
+Each admitted follow-up gets a `delivery` mode. The default is to bring the work into the parent's PR:
+
+- **`fold`** (default): the item works on its parent's branch and its commits go into the parent's PR, whose description is updated with the item's summary. Allowed when the follow-up is in the same repo, the parent's PR is still open and unmerged, and the combined diff stays within the PR's diff limit (S-A scope checks).
+- **`stack`:** used when the agent sets `fold: false` with a reason (a separate concern a reviewer should judge on its own) or a fold check fails. The item branches from its parent's branch and its PR targets that branch.
+- **`own`:** seed and tracker items. They branch from the run's base branch and open their own PR.
+
+The chosen mode and the reason are recorded on the item, so the review shows why work was folded or split.
+
+### Estimates
+
+Defaults (request share, PR diff limit in S-A, bash timeout in S-A) hold unless work is estimated to need more. A follow-up carries its `estimate` in the proposal; for seed and tracker items the agent may give one in the item's first checkpoint. An estimate raises the item's request share and its PR's diff limit, never the run's hours or total requests. Estimates are recorded with their `why` and shown in the review next to what the item actually used.
 
 ### Order
 
@@ -94,7 +109,7 @@ The item is `done` only when the extension verifies through the bridge that:
 - the PR exists and is open (`gh pr view <url> --json state,headRefOid`);
 - the ticket, if any, has a comment with the PR URL and is in the team's "In Review" state, or the tracker update is recorded as failed.
 
-Branching: each item works on `afk/<run>/<item>-<slug>`. A follow-up branches from its parent item's branch and its PR targets that branch (stacked). Seed and tracker items branch from the run's base branch (the session's branch at run start).
+Branching: `own` and `stack` items work on `afk/<run>/<item>-<slug>`; `own` items branch from the run's base branch (the session's branch at run start), `stack` items from their parent's branch with the PR targeting it. A `fold` item commits on its parent's branch, pushes, and updates the parent's PR instead of opening one; verification checks that PR's head is at the reported commit.
 
 Outcomes:
 
@@ -105,7 +120,7 @@ Outcomes:
 | Ticket update fails | `done` with `ticket_update: failed` | yes |
 | Nothing committed | `blocked: nothing_to_deliver` | yes |
 
-**Merging:** never under `rules`. Under `yolo` with `--merge`, AFK merges an item's PR once required checks pass, before starting items stacked on it. Without `--merge`, nothing is merged.
+**Merging:** never under `rules`. Under `yolo`, AFK merges a PR once required checks pass and every item folded into it is done, before starting items stacked on it. `--no-merge` turns this off for the run.
 
 ## Records
 

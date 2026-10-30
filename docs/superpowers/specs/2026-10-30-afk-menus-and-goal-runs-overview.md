@@ -56,7 +56,7 @@ These were settled AFK decisions. The user changed them in this design session; 
 | Every work period needs its own native confirmation | native work period, preview README | Under a goal run, one run consent grants each item's work period. A new run still needs a new confirmation. |
 | Work period blocks compaction and conversation switches | `aoe-afk-work-period.mjs:364` | Unchanged inside an item. Goal runs start a fresh conversation per item instead of compacting. |
 
-Unchanged: human input stops everything, evidence-cited checkpoints, the Ledger launch guard, Pi as the only full AFK harness, merging stays with the user (except under `yolo` with `--merge`, see S-B).
+Unchanged: human input stops everything, evidence-cited checkpoints, the Ledger launch guard, Pi as the only full AFK harness, merging stays with the user (except under `yolo`, which merges unless `--no-merge`, see S-B).
 
 ## Prerequisites
 
