@@ -1075,7 +1075,8 @@ impl Storage {
             let mut content = String::new();
             if let Some(mut file) = open_regular_registry(&self.sessions_path)? {
                 let mut bytes = Vec::new();
-                let mut chunk = [0_u8; 8192];
+                // Storage also loads on the 128 KiB session-id poller stack.
+                let mut chunk = vec![0_u8; 8192];
                 loop {
                     ensure_not_cancelled(cancel)?;
                     let count = file.read(&mut chunk)?;
