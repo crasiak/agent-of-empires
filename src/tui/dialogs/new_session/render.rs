@@ -86,7 +86,7 @@ impl NewSessionDialog {
         let is_host_only = self.selected_tool_host_only();
         let has_sandbox = self.docker_available && !is_host_only;
         let has_yolo = !self.selected_tool_always_yolo();
-        let has_structured = self.structured_capable;
+        let has_structured = self.structured_capable && !self.has_ledger_launch();
         let dialog_width = 80;
         // Captured before the loop below shadows `area` per field, or the
         // centered pickers anchor to whichever row it last held.
@@ -103,6 +103,9 @@ impl NewSessionDialog {
         let mut constraints = Vec::new();
         if has_profile_selection {
             constraints.push(Constraint::Length(profile_field_height)); // Profile
+        }
+        if self.ledger_profile.is_some() {
+            constraints.push(Constraint::Length(2));
         }
         constraints.extend([
             Constraint::Length(2), // Title
@@ -168,6 +171,21 @@ impl NewSessionDialog {
             let area = chunks[ci];
             self.render_profile_field(frame, area, theme);
             self.focusable_rects.push((0, area));
+            ci += 1;
+        }
+
+        if let Some(profile) = &self.ledger_profile {
+            let area = chunks[ci];
+            render_text_field(
+                frame,
+                area,
+                "Ledger profile:",
+                profile,
+                self.focused_field == fields.ledger_profile,
+                Some("(normal agent command)"),
+                theme,
+            );
+            self.focusable_rects.push((fields.ledger_profile, area));
             ci += 1;
         }
 
@@ -1194,6 +1212,7 @@ impl NewSessionDialog {
         let base_height: u16 = 20;
         let dialog_height: u16 = base_height
             + if has_profile_selection { 3 } else { 0 }
+            + if self.ledger_profile.is_some() { 3 } else { 0 }
             + if has_tool_selection { 3 } else { 0 }
             + if has_sandbox { 3 } else { 0 }
             + if show_sandbox_options_help { 12 } else { 0 };
@@ -1218,6 +1237,7 @@ impl NewSessionDialog {
         for help in FIELD_HELP {
             let show = match help.name {
                 "Profile" => has_profile_selection,
+                "Ledger profile" => self.ledger_profile.is_some(),
                 "Tool" => has_tool_selection,
                 "YOLO Mode" => !self.selected_tool_always_yolo(),
                 "Sandbox" => has_sandbox,

@@ -3,6 +3,7 @@ import type { CustomSettingsWidget } from "./customWidgets";
 import {
   DefaultToolWidget,
   LoggingTargetsWidget,
+  QuickLaunchWidget,
   SmartRenameAgentWidget,
   SmartRenameModelWidget,
   SoundVolumeWidget,
@@ -18,4 +19,5 @@ export const CUSTOM_SETTINGS_WIDGETS: Record<string, CustomSettingsWidget> = {
   "sound-volume": SoundVolumeWidget,
   "logging-targets": LoggingTargetsWidget,
   "acp-defaults": AcpDefaultsWidget,
+  "quick-launch": QuickLaunchWidget,
 };

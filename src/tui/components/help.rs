@@ -84,6 +84,10 @@ fn shortcuts(strict: bool, live_on_enter: bool) -> Vec<(&'static str, Vec<(Strin
     let mut actions_rows = vec![
         ("Enter".to_string(), enter_desc.to_string()),
         ("Tab".to_string(), tab_desc.to_string()),
+        (
+            "Ctrl+1..9".to_string(),
+            "Quick launch preset (editable form)".to_string(),
+        ),
     ];
     actions_rows.append(&mut actions);
 
