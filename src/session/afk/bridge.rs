@@ -23,6 +23,9 @@ enum Command {
     RuntimeAck {
         ack: delegation::RuntimeAck,
     },
+    WorkPeriodReply {
+        reply: work_period::Inspection,
+    },
     Ack {
         ack: Box<Ack>,
     },
@@ -124,6 +127,13 @@ pub(super) fn serve(
                         &validate,
                     )?;
                     view["usage_report"] = usage_report;
+                    view["work_period_capability"] = serde_json::json!(1);
+                    view["work_period_request"] = serde_json::to_value(work_period::request(
+                        store,
+                        binding,
+                        generation,
+                        now_ms(),
+                    )?)?;
                     if let (Some(app), Some(runtime)) = (app, runtime) {
                         view["automatic_wake"] = automatic_wake.observe(
                             wake::Peer {
@@ -152,6 +162,11 @@ pub(super) fn serve(
                     now_ms(),
                     &validate,
                 ),
+                Command::WorkPeriodReply { reply } => {
+                    validate()?;
+                    work_period::acknowledge(store, binding, generation, reply, now_ms())?;
+                    Ok(serde_json::json!({"acknowledged": true}))
+                }
                 Command::RuntimeAck { ack } => {
                     let runtime = runtime.context("runtime unavailable")?;
                     let _lock = runtime.lock_existing(TIMEOUT)?;

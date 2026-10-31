@@ -4,6 +4,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 import { randomUUID, createHash } from "node:crypto";
 
 const root = process.env.AOE_PI_ROOT;
@@ -16,7 +17,7 @@ function claims() {
 
 async function runCase(scenario, externalHost) {
   const sdk = await import(pathToFileURL(sourceRoot ? join(sourceRoot, "packages/coding-agent/src/index.ts") : join(root, "dist/index.js")));
-  assert.equal(sdk.VERSION, "0.87.1");
+  assert.equal(sdk.VERSION, "1.2.0");
   const { loadExtensions, createExtensionRuntime } = await import(pathToFileURL(sourceRoot ? join(sourceRoot, "packages/coding-agent/src/core/extensions/loader.ts") : join(root, "dist/core/extensions/loader.js")));
   const { AssistantMessageEventStream } = await import(pathToFileURL(sourceRoot ? join(sourceRoot, "packages/ai/src/utils/event-stream.ts") : join(root, "node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js")));
   const cwd = await mkdtemp(join(tmpdir(), "aoe-afk-sdk-"));
@@ -416,6 +417,85 @@ if (process.argv.includes("--host")) {
   });
   process.stdout.write(JSON.stringify({ result }) + "\n"); process.exit(0);
 } else {
+  test("registered record schema rejects array pros/cons before the host codec", { skip: !root && !sourceRoot }, async () => {
+    const sdk = await import(pathToFileURL(sourceRoot ? join(sourceRoot, "packages/coding-agent/src/index.ts") : join(root, "dist/index.js")));
+    assert.equal(sdk.VERSION, "1.2.0");
+    const { loadExtensions, createExtensionRuntime } = await import(pathToFileURL(sourceRoot ? join(sourceRoot, "packages/coding-agent/src/core/extensions/loader.ts") : join(root, "dist/core/extensions/loader.js")));
+    const { validateToolArguments } = await import(pathToFileURL(sourceRoot ? join(sourceRoot, "packages/ai/src/utils/validation.ts") : join(root, "node_modules/@earendil-works/pi-ai/dist/utils/validation.js")));
+    const cwd = await mkdtemp(join(tmpdir(), "aoe-afk-schema-"));
+    try {
+      const fixture = join(cwd, "extension.mjs");
+      await writeFile(fixture, `import { delegationRuntime } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk-runtime.mjs")).href)}; export default delegationRuntime;`);
+      const loaded = await loadExtensions([fixture], cwd, sdk.createEventBus(), createExtensionRuntime());
+      assert.deepEqual(loaded.errors, []);
+      const tool = loaded.extensions[0].tools.get("aoe_afk_record").definition;
+      const valid = { decision: claims() };
+      const validate = args => validateToolArguments(tool, { type: "toolCall", id: "schema-fixture", name: tool.name, arguments: args });
+      assert.deepEqual(validate(valid), valid, "host-compatible strings survive SDK validation unchanged");
+      const bad = structuredClone(valid);
+      bad.decision.alternatives[0].pros = ["Harmless short greeting", "No dependence on display preference"];
+      bad.decision.alternatives[0].cons = ["No personalization"];
+      assert.throws(() => validate(bad), /Validation failed.*aoe_afk_record/s, "captured bad-array shape must not reach the strict host codec");
+      assert.ok(Array.isArray(bad.decision.alternatives[0].pros), "validation must not repair the original claims");
+      const require = createRequire(sourceRoot ? join(sourceRoot, "packages/ai/src/index.ts") : join(root, "dist/index.js"));
+      const { Compile } = await import(pathToFileURL(require.resolve("typebox/compile")));
+      const advertised = Compile(JSON.parse(JSON.stringify(tool.parameters)));
+      for (const risk of ["low", "high", "unknown"]) {
+        const deferred = structuredClone(valid);
+        Object.assign(deferred.decision, { risk, human_required: true, depends_on: ["unanswered question"], action: null });
+        assert.ok(advertised.Check(deferred), "human-required/deferred claims remain recordable, not permission to act");
+        assert.deepEqual(validate(deferred), deferred);
+      }
+      const replace = structuredClone(valid);
+      replace.decision.action.expected_hash = "a".repeat(64);
+      replace.decision.alternatives[0].scores = [1];
+      replace.decision.criteria[0].weight = 5;
+      assert.ok(advertised.Check(replace));
+      assert.deepEqual(validate(replace), replace);
+      const invalid = [
+        ["array pros", x => x.decision.alternatives[0].pros = ["simple"]],
+        ["array cons", x => x.decision.alternatives[0].cons = ["small"]],
+        ["missing field", x => delete x.decision.rollback],
+        ["unknown wrapper field", x => x.extra = true],
+        ["unknown decision field", x => x.decision.extra = true],
+        ["unknown alternative field", x => x.decision.alternatives[0].extra = true],
+        ["unknown criterion field", x => x.decision.criteria[0].extra = true],
+        ["unknown action field", x => x.decision.action.extra = true],
+        ["invalid UUID", x => x.decision.id = "not-a-uuid"],
+        ["one alternative", x => x.decision.alternatives.pop()],
+        ["five alternatives", x => x.decision.alternatives = Array(5).fill(x.decision.alternatives[0])],
+        ["no criteria", x => x.decision.criteria = []],
+        ["five criteria", x => x.decision.criteria = Array(5).fill(x.decision.criteria[0])],
+        ...[0, 6].flatMap(n => [
+          [`score ${n}`, x => x.decision.alternatives[0].scores = [n]],
+          [`weight ${n}`, x => x.decision.criteria[0].weight = n],
+        ]),
+        ["empty scores", x => x.decision.alternatives[0].scores = []],
+        ["five scores", x => x.decision.alternatives[0].scores = [1, 1, 1, 1, 1]],
+        ...["evidence", "assumptions", "uncertainties", "depends_on"].map(key => [key, x => x.decision[key] = [{}]]),
+        ...["question", "rationale", "rollback"].map(key => [`empty ${key}`, x => x.decision[key] = ""]),
+        ["unknown risk", x => x.decision.risk = "medium"],
+        ["nonboolean reversible", x => x.decision.reversible = {}],
+        ["nonboolean human_required", x => x.decision.human_required = {}],
+        ["nonstring path", x => x.decision.action.path = []],
+        ["nonstring content", x => x.decision.action.content = []],
+        ["invalid hash", x => x.decision.action.expected_hash = "not-sha256"],
+      ];
+      for (const [label, mutate] of invalid) {
+        const input = structuredClone(valid); mutate(input);
+        assert.equal(advertised.Check(input), false, `${label}: model-facing JSON schema`);
+        assert.throws(() => validate(input), /Validation failed.*aoe_afk_record/s, `${label}: SDK validation`);
+      }
+      const fractional = structuredClone(valid);
+      fractional.decision.alternatives[0].scores = [1.5];
+      fractional.decision.criteria[0].weight = 1.5;
+      assert.equal(advertised.Check(fractional), false, "advertised scores/weights are integers, regardless of SDK primitive conversion");
+      for (const [key, value] of [["reversible", "true"], ["human_required", 0]]) {
+        const input = structuredClone(valid); input.decision[key] = value;
+        assert.equal(advertised.Check(input), false, `${key}: advertised boolean is not a primitive coercion`);
+      }
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
   test("monotonic expiry cannot make a protected pending window ordinary work", {skip:!sourceRoot,timeout:60000},async()=>{for(const scenario of ["usage-monotonic-expiry","usage-local-stop","usage-local-failure"])console.log(JSON.stringify(await runCase(scenario)));});
   test("failed native usage append withholds actual SDK financial ACK and dispatch", {skip:!sourceRoot,timeout:60000}, async()=>{for(const scenario of ["usage-intent-deferred","usage-intent-failed"])console.log(JSON.stringify(await runCase(scenario)));});
   test("required usage denial before first admission survives native reopen", {skip: !sourceRoot, timeout: 60000}, async () => {for (const scenario of ["usage-first-denied", "usage-preack-denied"]) console.log(JSON.stringify(await runCase(scenario)));});

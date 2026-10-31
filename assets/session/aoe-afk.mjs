@@ -84,6 +84,7 @@ export function registerAfk(pi, options = {}) {
     runtime = undefined;
     if (!old) return;
     old.stop?.();
+    options.workPeriod?.shutdown(old);
     await options.delegation?.shutdown(old);
     old.state = "unavailable";
     if (old.ctx.hasUI) old.ctx.ui.setStatus("aoe-afk", undefined);
@@ -112,6 +113,7 @@ export function registerAfk(pi, options = {}) {
     }, state: "off", revision: 0, deadline: 0, lastAck: "", policy: null };
     runtime = r;
     options.delegation?.attach(r);
+    options.workPeriod?.attach(r);
     const refresh = (boundary = "poll") => {
       if (r.refreshing) return r.refreshing;
       r.refreshing = (async () => {
@@ -119,11 +121,12 @@ export function registerAfk(pi, options = {}) {
           if (runtime !== r || ctx.sessionManager.getSessionId() !== bootstrap.binding.native_id) {
             r.state = "invalidated"; return;
           }
-          const wake = options.delegation?.wakeObservation?.(r);
-          const { policy: p, probe, delegation, runtime_probe, question_guards, usage_report, automatic_wake } = await r.bridge.request({ op: "poll", usage: options.delegation?.observation?.(r, boundary), wake: wake?.request });
+          const wake = options.workPeriod?.blocked(r) ? undefined : options.delegation?.wakeObservation?.(r);
+          const { policy: p, probe, delegation, runtime_probe, question_guards, usage_report, automatic_wake, work_period_request, work_period_capability } = await r.bridge.request({ op: "poll", usage: options.delegation?.observation?.(r, boundary), wake: wake?.request });
           options.delegation?.usageReply?.(r, usage_report);
           if (runtime !== r) return;
-          await options.delegation?.poll(r, delegation, runtime_probe, question_guards);
+          const runtimeProbe = options.workPeriod ? await options.workPeriod.beforeDelegation(r, delegation, runtime_probe) : runtime_probe;
+          await options.delegation?.poll(r, delegation, runtimeProbe, question_guards);
           if (runtime !== r || ctx.sessionManager.getSessionId() !== bootstrap.binding.native_id) return;
           r.policy = p;
           if (!p) r.state = "off";
@@ -142,6 +145,7 @@ export function registerAfk(pi, options = {}) {
             if (wall() >= p.expires_at_ms || mono() >= r.deadline) r.expiredRevision = p.revision;
             r.state = r.expiredRevision === p.revision ? "expired" : "control-only";
           }
+          await options.workPeriod?.poll(r, work_period_request, work_period_capability);
           if (probe && probe.version === 1 && same(probe.binding, bootstrap.binding) && probe.revision === (p?.revision ?? 0)) {
             const ack = { version: 1, binding: bootstrap.binding, challenge: probe.challenge, generation, revision: p?.revision ?? 0,
               window: p?.window ?? null, expires_at_ms: p?.expires_at_ms ?? null, mode: "control-only", allowance: 0, state: r.state };
@@ -151,10 +155,10 @@ export function registerAfk(pi, options = {}) {
               if (runtime === r) r.lastAck = signature;
             }
           }
-          if (runtime === r && ctx.sessionManager.getSessionId() === bootstrap.binding.native_id) options.delegation?.wakeReply?.(r, automatic_wake, wake);
-        } catch { r.state = "unavailable"; options.delegation?.failed(r); }
+          if (runtime === r && ctx.sessionManager.getSessionId() === bootstrap.binding.native_id && !options.workPeriod?.blocked(r)) options.delegation?.wakeReply?.(r, automatic_wake, wake);
+        } catch { r.state = "unavailable"; options.workPeriod?.failed(r); options.delegation?.failed(r); }
         finally {
-          if (runtime === r && ctx.hasUI) ctx.ui.setStatus("aoe-afk", r.publicationWarning ?? options.delegation?.status(r) ?? (r.state === "off" ? undefined : `AFK: ${r.state} (no autonomy)`));
+          if (runtime === r && ctx.hasUI) ctx.ui.setStatus("aoe-afk", r.publicationWarning ?? options.workPeriod?.status(r) ?? options.delegation?.status(r) ?? (r.state === "off" ? undefined : `AFK: ${r.state} (no autonomy)`));
           r.refreshing = undefined;
         }
       })();
@@ -167,11 +171,14 @@ export function registerAfk(pi, options = {}) {
   pi.on("context", async (event, ctx) => {
     const r = runtime;
     let messages = event.messages.filter(m => !["aoe-afk-control", "aoe-afk-delegation"].includes(m.customType));
-    if (!r) return { messages: messages.filter(m => m.customType !== "aoe-afk-continuation") };
+    if (!r) return { messages: (options.workPeriod?.clean(messages) ?? messages).filter(m => m.customType !== "aoe-afk-continuation") };
     // An idle poll may have read its snapshot before this request boundary.
     if (r.refreshing) await r.refreshing;
-    if (runtime !== r) return { messages: messages.filter(m => m.customType !== "aoe-afk-continuation") };
+    if (runtime !== r) return { messages: (options.workPeriod?.clean(messages) ?? messages).filter(m => m.customType !== "aoe-afk-continuation") };
     await r.refresh("before_request");
+    const work = await options.workPeriod?.context(r, messages, ctx);
+    if (work) return work;
+    messages = options.workPeriod?.clean(messages) ?? messages;
     const delegated = await options.delegation?.context(r, messages, ctx);
     if (delegated) return delegated;
     messages = messages.filter(m => m.customType !== "aoe-afk-continuation");

@@ -387,6 +387,7 @@ pub(super) struct NativeExecution {
     pub(super) target_session_id: Option<String>,
     pub(super) resolved_target_session_id: Option<String>,
     pub(super) pi_pinnable: bool,
+    pub(super) ledger_runtime: Option<crate::session::ledger_pi::Runtime>,
     pub(super) opencode_preassign: bool,
     pub(super) opencode_schema: Option<OpenCodeSessionSchema>,
     /// A recorded store outranks the store a new session would use here, as
@@ -632,6 +633,14 @@ pub(super) struct NativeLaunchInputs {
     pub(super) usage_tracking: bool,
 }
 impl NativeLaunchInputs {
+    pub(super) fn host_environment_pairs(&self) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        self.environment
+            .iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .chain(self.raw_environment.iter().cloned())
+            .collect()
+    }
+
     /// Whether the pane runs `program` as the binary AoE's own PATH resolves `binary` to, which
     /// is what a host `--help` probe of `binary` describes.
     pub(super) fn runs_host_path_binary(&self, binary: &str, program: &std::path::Path) -> bool {
@@ -1652,6 +1661,10 @@ impl Instance {
     /// native agent is resolved to decide a fork's capability, so a wrapper
     /// whose identity cannot be resolved fails instead of forking.
     pub(crate) fn fork_parent_ref(&self) -> Result<Option<ForkParentRef<'_>>> {
+        anyhow::ensure!(
+            !self.guarded_ledger_fresh_only(),
+            "Guarded Ledger Pi v1 supports fresh conversations only; native fork is not qualified"
+        );
         let (sid, binding) = match &self.resume_intent {
             ResumeIntent::Fork { .. } => return Ok(Some(ForkParentRef::Unlaunched)),
             ResumeIntent::Use(sid) => (Some(sid), self.resume_binding.as_ref()),
@@ -1693,7 +1706,9 @@ impl Instance {
     ) -> Result<&'static AgentDef> {
         anyhow::ensure!(!Self::contains_active_shell_syntax(command),
             "managed conversation requires a direct native command or an explicitly declared wrapper");
-        if crate::session::tailored::document::command_account(tool, command).is_some() {
+        if crate::session::tailored::document::command_account(tool, command).is_some()
+            || crate::session::ledger_pi::profile(tool, command).is_some()
+        {
             return crate::agents::get_agent("pi").context("Pi agent is unavailable");
         }
         let words = shell_words::split(command)?;
@@ -1751,6 +1766,15 @@ impl Instance {
             );
             return Ok(None);
         }
+        if crate::session::ledger_pi::profile(&self.tool, self.get_tool_command()).is_some() {
+            let arguments = shell_words::split(&extra)
+                .map_err(|_| anyhow::anyhow!("Ledger Pi launch arguments cannot be parsed"))?;
+            return validate_managed_arguments(agent, &arguments).map_err(|_| {
+                anyhow::anyhow!(
+                    "Ledger Pi arguments are not supported by the guarded launch contract"
+                )
+            });
+        }
         let mut words = shell_words::split(self.get_tool_command())?;
         words.extend(shell_words::split(&extra)?);
         validate_managed_arguments(agent, &words[1..])
@@ -1771,24 +1795,20 @@ impl Instance {
         let agent =
             Self::execution_agent_for(&self.tool, self.get_tool_command(), &config.session)?;
         let mut session_dir = self.managed_user_argv(agent)?;
-        let document_runtime = crate::session::tailored::document::account(self)
-            .map(|account| {
-                crate::session::tailored::document::native::qualify(
+        let mut pi_runtime =
+            if let Some(account) = crate::session::tailored::document::account(self) {
+                let runtime = crate::session::tailored::document::native::qualify(
                     account,
                     std::path::Path::new(&self.project_path),
-                )
-            })
-            .transpose()?;
-        if let Some(runtime) = &document_runtime {
-            anyhow::ensure!(!self.is_sandboxed(), "Document chat requires a host launch");
-            session_dir = Some(
-                runtime
-                    .sessions
-                    .to_str()
-                    .context("Ledger native store is not UTF-8")?
-                    .to_owned(),
-            );
-        }
+                )?;
+                Some(crate::session::ledger_pi::Runtime {
+                    agent_dir: runtime.agent_dir,
+                    sessions: runtime.sessions,
+                    plan: None,
+                })
+            } else {
+                None
+            };
         let direct_capture = self.launch_invokes_resolved_agent_directly(agent);
         let target_session_id = target.map(|(sid, _, _)| sid.to_owned());
         let mut resolved_target_session_id = None;
@@ -1806,6 +1826,33 @@ impl Instance {
             program.is_absolute() && program.to_str().is_some(),
             "native program must have an absolute UTF-8 path"
         );
+        if pi_runtime.is_none() {
+            if let Some(profile) =
+                crate::session::ledger_pi::profile(&self.tool, self.get_tool_command())
+            {
+                anyhow::ensure!(!self.is_sandboxed(), "Ledger Pi requires a host launch");
+                pi_runtime = Some(crate::session::ledger_pi::qualify(
+                    &program,
+                    &inputs.host_environment_pairs(),
+                    &profile,
+                    &inputs.cwd,
+                )?);
+            }
+        }
+        if let Some(runtime) = &pi_runtime {
+            anyhow::ensure!(!self.is_sandboxed(), "Ledger Pi requires a host launch");
+            anyhow::ensure!(
+                session_dir.is_none(),
+                "Ledger owns the native session directory; a session-dir override is unsupported"
+            );
+            session_dir = Some(
+                runtime
+                    .sessions
+                    .to_str()
+                    .context("Ledger native store is not UTF-8")?
+                    .to_owned(),
+            );
+        }
         let mut prime = None;
         let mut prime_runtime = None;
         let value = |key: &str| inputs.environment.get(key).cloned();
@@ -2011,9 +2058,9 @@ impl Instance {
                 let expand = |raw: &str| absolute(if raw == "~" { home.clone() }
                     else if let Some(relative) = raw.strip_prefix("~/") { home.join(relative) }
                     else { PathBuf::from(raw) });
-                let agent_dir = inputs.canonical_path(&document_runtime.as_ref().map(|r| r.agent_dir.clone()).or_else(|| declared.clone()).or_else(|| value("PI_CODING_AGENT_DIR").filter(|value| !value.is_empty()).map(|value| expand(&value)))
+                let agent_dir = inputs.canonical_path(&pi_runtime.as_ref().map(|r| r.agent_dir.clone()).or_else(|| declared.clone()).or_else(|| value("PI_CODING_AGENT_DIR").filter(|value| !value.is_empty()).map(|value| expand(&value)))
                     .unwrap_or_else(|| home.join(".pi/agent")))?;
-                if document_runtime.is_none() {
+                if pi_runtime.is_none() {
                     routing.push(("PI_CODING_AGENT_DIR".into(), Some(agent_dir.to_str().context("Pi agent directory is not UTF-8")?.into())));
                     routing.push(("PI_CODING_AGENT_SESSION_DIR".into(), value("PI_CODING_AGENT_SESSION_DIR")));
                 }
@@ -2066,7 +2113,7 @@ impl Instance {
                         }
                     }
                 }
-                if document_runtime.is_some() && namespace_arguments.is_empty() {
+                if pi_runtime.is_some() && namespace_arguments.is_empty() {
                     namespace_arguments.extend(["--session-dir".into(), store.to_str().context("Ledger native store is not UTF-8")?.to_owned()]);
                 }
                 pi_root = Some(if namespace_arguments.is_empty() { root } else { store.clone() });
@@ -2391,7 +2438,7 @@ impl Instance {
         } else {
             None
         };
-        let pi_pinnable = document_runtime.is_some()
+        let pi_pinnable = pi_runtime.is_some()
             || (agent.name == "pi"
                 && inputs.runs_host_path_binary("pi", &program)
                 && crate::agents::pi_supports_session_id_flag());
@@ -2421,6 +2468,7 @@ impl Instance {
             target_session_id,
             resolved_target_session_id,
             pi_pinnable,
+            ledger_runtime: pi_runtime.filter(|runtime| runtime.plan.is_some()),
             opencode_preassign,
             opencode_schema: None,
             store_override,
@@ -2621,6 +2669,30 @@ pub(super) fn validate_managed_arguments(
                     "--cwd",
                 ],
                 &["--yolo", "--dangerously-skip-permissions", "--verbose"],
+            ),
+            "pi" => (
+                &[
+                    "--model",
+                    "-m",
+                    "--system-prompt",
+                    "--append-system-prompt",
+                    "--agent",
+                    "--session-dir",
+                    "--tools",
+                ],
+                &[
+                    "--yolo",
+                    "--dangerously-skip-permissions",
+                    "--allow-all-tools",
+                    "--trust-all-tools",
+                    "--verbose",
+                    "--no-extensions",
+                    "--no-mcp",
+                    "--no-skills",
+                    "--no-prompt-templates",
+                    "--no-themes",
+                    "--no-context-files",
+                ],
             ),
             "prime-agent" => (
                 super::prime_capture::PRIME_VALUE_OPTIONS,
@@ -3033,6 +3105,272 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ledger_pi_commands_have_a_native_execution_identity() {
+        let config = crate::session::config::SessionConfig::default();
+        for command in [
+            "ledger run pi --profile personal --",
+            "/opt/bin/ledger run pi --profile work --",
+        ] {
+            let agent = Instance::execution_agent_for("pi", command, &config)
+                .unwrap_or_else(|error| panic!("{command}: {error}"));
+            assert_eq!(agent.name, "pi");
+        }
+        for command in [
+            "ledger run pi --profile personal --; echo next",
+            "ledger run claude --profile work --",
+            "ledger run pi --profile personal -- --session stolen",
+            "unknown-wrapper pi",
+        ] {
+            assert!(
+                Instance::execution_agent_for("pi", command, &config).is_err(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper invoked by ledger_pi_launch_binds_the_qualified_store_and_native_afk_command"]
+    fn ledger_pi_metadata_helper() {
+        let root = std::path::PathBuf::from(std::env::var_os("AOE_LEDGER_FIXTURE_ROOT").unwrap());
+        std::fs::write(root.join("observed-home"), std::env::var("HOME").unwrap()).unwrap();
+        let bytes = std::fs::read(root.join("argv")).unwrap();
+        let words = bytes
+            .split(|b| *b == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8(part.to_vec()).unwrap())
+            .collect::<Vec<_>>();
+        let output = if words.first().map(String::as_str) == Some("lock") {
+            std::fs::read(root.join("lock.json")).unwrap()
+        } else {
+            assert_eq!(words.first().map(String::as_str), Some("launch"));
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(root.join("description.json")).unwrap())
+                    .unwrap();
+            let boundary = words.iter().position(|word| word == "--").unwrap();
+            value["arguments"].as_array_mut().unwrap().extend(
+                words[boundary + 1..]
+                    .iter()
+                    .map(|word| serde_json::json!(word)),
+            );
+            serde_json::to_vec(&value).unwrap()
+        };
+        std::fs::write(root.join("response.json"), output).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn ledger_pi_launch_binds_the_qualified_store_and_native_afk_command() {
+        use crate::session::test_support::{
+            install_login_shell_path_command, isolate_app_dir_at, EnvGuard,
+        };
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let temp = tempfile::tempdir().unwrap();
+        let _app = isolate_app_dir_at(temp.path());
+        crate::session::afk::authority::migration::initialize_test(
+            &crate::session::get_app_dir().unwrap(),
+        );
+        let _ambient = EnvGuard::unset(&["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"]);
+        let root = temp.path().canonicalize().unwrap();
+        let cwd = root.join("scratch");
+        let store_root = root.join("immutable");
+        let core = store_root.join("pi-core");
+        let runtime = root.join("profile/runtime");
+        for path in [&cwd, &core.join("bin"), &runtime.join("sessions")] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(core.join("entry.js"), "").unwrap();
+        symlink(core.join("entry.js"), core.join("bin/pi")).unwrap();
+        let help = "--session-id --session --session-dir --extension --no-extensions --no-tools --no-mcp --no-context-files --no-skills --no-prompt-templates";
+        std::fs::write(
+            core.join("bin/node"),
+            format!("#!/bin/sh\nprintf '%s\\n' '{help}'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            core.join("bin/node"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let lock = serde_json::json!({"schema":"ledger-profile-lock-v4","hash":"a".repeat(64),"profile":{"name":"personal"},"binding":{"harness":"pi","account_class":"pi-home","launcher":"direct","launch":{"share":["conversation"]},"core":{"mode":"immutable","path":core}}});
+        let description = serde_json::json!({"profile":"personal","harness":"pi","target":"direct","cwd":cwd,"ready":true,"state":"current","executable":core.join("bin/node"),"arguments":[core.join("entry.js")],"environment":{"PI_CODING_AGENT_DIR":runtime,"PI_CODING_AGENT_SESSION_DIR":"","NODE_OPTIONS":"","PI_SKIP_VERSION_CHECK":"1"},"run_guard":{"contract":"ledger.run-guard/v1","digest":"b".repeat(64),"expected_lock":"a".repeat(64),"conversation_namespace":runtime.join("sessions")}});
+        let lock_file = root.join("lock.json");
+        let description_file = root.join("description.json");
+        let calls = root.join("calls");
+        std::fs::write(&lock_file, serde_json::to_vec(&lock).unwrap()).unwrap();
+        std::fs::write(&description_file, serde_json::to_vec(&description).unwrap()).unwrap();
+        let quote =
+            |p: &std::path::Path| crate::session::environment::shell_escape(p.to_str().unwrap());
+        let executable = std::env::current_exe().unwrap();
+        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nprintf '%s\\0' \"$@\" > {}\nAOE_LEDGER_FIXTURE_ROOT={} {} --exact session::instance::execution::tests::ledger_pi_metadata_helper --ignored > {} 2>&1 || exit 94\n/bin/cat {}\n", quote(&calls), quote(&root.join("argv")), quote(&root), quote(&executable), quote(&root.join("helper.log")), quote(&root.join("response.json")));
+        let _ledger = install_login_shell_path_command(
+            &root,
+            "ledger",
+            &format!(
+                "#!/bin/sh\n: > {}\nexit 93\n",
+                quote(&root.join("wrong-ledger-called"))
+            ),
+        );
+        let selected = root.join("selected");
+        let configured_home = root.join("selected-home");
+        std::fs::create_dir(&selected).unwrap();
+        std::fs::create_dir(&configured_home).unwrap();
+        let selected_ledger = selected.join("ledger");
+        std::fs::write(&selected_ledger, script).unwrap();
+        std::fs::set_permissions(&selected_ledger, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            crate::session::get_app_dir().unwrap().join("config.toml"),
+            format!(
+                "environment = [{}]\n",
+                serde_json::to_string(&format!("HOME={}", configured_home.display())).unwrap()
+            ),
+        )
+        .unwrap();
+        let _core =
+            crate::session::ledger_pi::test_support::CoreRootFixture::new(&cwd, &store_root);
+        let mut instance =
+            crate::session::instance::test_helpers::tool_instance("pi", cwd.to_str().unwrap());
+        instance.command = format!("{} run pi --profile personal --", quote(&selected_ledger));
+        instance.extra_args = "--no-extensions --no-mcp --no-skills --no-prompt-templates --no-themes --tools read,write,edit,bash".into();
+        let native = instance.resolve_native_execution(None).unwrap();
+        assert!(native.pi_pinnable);
+        assert_eq!(native.program, selected_ledger);
+        assert_eq!(
+            std::fs::read_to_string(root.join("observed-home")).unwrap(),
+            configured_home.to_str().unwrap()
+        );
+        assert!(!root.join("wrong-ledger-called").exists());
+        assert_eq!(native.binding.stores, vec![runtime.join("sessions")]);
+        let command = instance
+            .prepare_launch_command(instance.conversation_state())
+            .unwrap()
+            .command
+            .unwrap();
+        assert!(uuid::Uuid::parse_str(instance.agent_session_id.as_ref().unwrap()).is_ok());
+        assert_eq!(command.matches("--aoe-afk-binding").count(), 1, "{command}");
+        assert_eq!(command.matches("--expect-launch").count(), 1, "{command}");
+        assert!(command.contains(&"b".repeat(64)), "{command}");
+        assert!(
+            command.contains("aoe-afk-runtime.mjs") && command.contains("pi-aoe-session-id.js"),
+            "{command}"
+        );
+        assert!(
+            command.contains(runtime.join("sessions").to_str().unwrap()),
+            "{command}"
+        );
+        assert_eq!(command.matches("--session-dir").count(), 1, "{command}");
+        assert!(
+            instance
+                .build_launch_command(None, &mut instance.conversation_state())
+                .is_err(),
+            "Never fall back to an unbound Ledger model launch"
+        );
+        assert!(!instance.supports_native_resume());
+        assert!(matches!(
+            instance.terminal_context_resume_cached(),
+            crate::session::instance::TerminalContextResume::CommandUnsupported
+        ));
+        assert!(instance.fork_parent_ref().is_err());
+        let sid = instance.agent_session_id.clone().unwrap();
+        for intent in [
+            ResumeIntent::Use(sid.clone()),
+            ResumeIntent::Fork { from: sid },
+        ] {
+            instance.resume_intent = intent;
+            let error = instance
+                .build_launch_command(Some(&native), &mut instance.conversation_state())
+                .err()
+                .unwrap();
+            assert!(
+                error.to_string().contains("fresh conversations only"),
+                "{error}"
+            );
+        }
+        instance.resume_intent = ResumeIntent::Default;
+        let recorded = instance.agent_session_id.clone().unwrap();
+        let preallocated = Some(ConversationBinding {
+            session_id: recorded.clone(),
+            execution: Some(native.binding.clone()),
+            provenance: ConversationProvenance::Preallocated,
+            transcript_path: None,
+        });
+        instance.agent_session_binding = preallocated.clone();
+        let observed = instance.agent_session_binding.as_mut().unwrap();
+        observed.provenance = ConversationProvenance::Observed;
+        observed.transcript_path = Some(
+            runtime
+                .join("sessions")
+                .join(format!("missing_{recorded}.jsonl")),
+        );
+        let missing = instance
+            .resolve_native_execution(instance.conversation_target())
+            .unwrap();
+        assert!(missing.pi_transcript_path.is_none());
+        let error = instance
+            .build_launch_command(Some(&missing), &mut instance.conversation_state())
+            .err();
+        assert!(
+            error.is_some(),
+            "Missing observed history must not become a fresh conversation"
+        );
+        assert!(error
+            .unwrap()
+            .to_string()
+            .contains("fresh conversations only"));
+        assert_eq!(
+            instance.agent_session_id.as_deref(),
+            Some(recorded.as_str())
+        );
+        instance.resume_intent = ResumeIntent::Cleared;
+        assert!(instance
+            .build_launch_command(Some(&native), &mut instance.conversation_state())
+            .is_ok());
+        assert_ne!(
+            instance.agent_session_id.as_deref(),
+            Some(recorded.as_str())
+        );
+        instance.resume_intent = ResumeIntent::Default;
+        instance.agent_session_id = Some(recorded);
+        instance.agent_session_binding = preallocated;
+        assert!(
+            instance
+                .build_launch_command(Some(&native), &mut instance.conversation_state())
+                .is_ok(),
+            "A never-materialized preallocated ID remains fresh"
+        );
+        instance.extra_args = "--session-dir /another-store".into();
+        assert!(instance.resolve_native_execution(None).is_err());
+        instance.extra_args.clear();
+        let mut stale = description;
+        stale["state"] = serde_json::json!("stale");
+        std::fs::write(&description_file, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(instance.resolve_native_execution(None).is_err());
+        let error = instance
+            .prepare_launch_command(instance.conversation_state())
+            .err()
+            .unwrap();
+        assert!(
+            format!("{error:#}")
+                .contains("Ledger Pi launch description is unavailable or mismatched"),
+            "{error:#}"
+        );
+        instance.agent_session_id = None;
+        instance.agent_session_binding = None;
+        instance.extra_args = "private-argv-detail".into();
+        let error = instance
+            .prepare_launch_command(instance.conversation_state())
+            .err()
+            .unwrap();
+        let message = format!("{error:#}");
+        assert!(message.contains("Ledger Pi arguments"), "{message}");
+        assert!(!message.contains("private-argv-detail"), "{message}");
+        let calls = std::fs::read_to_string(calls).unwrap();
+        assert!(
+            !calls.lines().any(|line| line.starts_with("run ")),
+            "Qualification must remain read-only"
+        );
+    }
+
+    #[test]
     #[serial_test::serial]
     fn document_persisted_shape_resolves_through_real_lock_describe_and_pinned_help() {
         use crate::session::tailored::{document, CaptureAccount};
@@ -3360,6 +3698,7 @@ mod tests {
             target_session_id: None,
             resolved_target_session_id: None,
             pi_pinnable: false,
+            ledger_runtime: None,
             opencode_preassign: false,
             opencode_schema: Some(OpenCodeSessionSchema::Session),
             store_override: None,

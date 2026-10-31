@@ -202,7 +202,7 @@ impl Instance {
     }
     /// Whether a launch fragment carries shell syntax the pane's shell would
     /// act on, so the agent is not what the command word names.
-    pub(super) fn contains_active_shell_syntax(value: &str) -> bool {
+    pub(crate) fn contains_active_shell_syntax(value: &str) -> bool {
         let mut quote = None;
         let mut escaped = false;
         for ch in value.chars() {
@@ -480,7 +480,15 @@ impl Instance {
         })
     }
 
+    pub(crate) fn guarded_ledger_fresh_only(&self) -> bool {
+        crate::session::ledger_pi::profile(&self.tool, self.get_tool_command()).is_some()
+            && crate::session::tailored::document::account(self).is_none()
+    }
+
     pub fn supports_native_resume(&self) -> bool {
+        if self.guarded_ledger_fresh_only() {
+            return false;
+        }
         let native = self.resolved_agent();
         let Some(agent) = native.or_else(|| self.legacy_default_selector_agent()) else {
             return false;
