@@ -590,4 +590,136 @@ mod decide {
             Some("1")
         );
     }
+
+    #[test]
+    fn adversarial_subjects_stop_under_rules() {
+        let allow_all = rules("[[rule]]\nid='all'\nkind='permission'\nanswer='approve'");
+        let cases = [
+            (
+                "Bash command: git push origin HEAD:main",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: git push origin HEAD:refs/heads/master",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: git push -fu origin x",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: git push -uf origin x",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: git -C dir push -f origin x",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: git -c k=v push --force origin x",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: git push --mirror origin",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: git push --prune origin",
+                "scope:protected_push",
+            ),
+            ("Bash command: git branch -a -D x", "scope:protected_push"),
+            (
+                "Bash command: git branch -v --delete x",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: npm install -D left-pad",
+                "scope:dependencies",
+            ),
+            ("Bash command: npm i --save x", "scope:dependencies"),
+            ("Bash command: yarn add -D x", "scope:dependencies"),
+            ("Bash command: pnpm add -D x", "scope:dependencies"),
+            ("Bash command: npm install -g x", "scope:dependencies"),
+            ("Bash command: poetry add requests", "scope:dependencies"),
+            ("Bash command: pdm add requests", "scope:dependencies"),
+            ("Bash command: bundle add rails", "scope:dependencies"),
+            (
+                "Bash command: composer require foo/bar",
+                "scope:dependencies",
+            ),
+            ("Bash command: cargo update", "scope:dependencies"),
+            ("Edit file: /repo/Gemfile", "scope:dependencies"),
+            ("Edit file: /repo/Gemfile.lock", "scope:dependencies"),
+            ("Edit file: /repo/poetry.lock", "scope:dependencies"),
+            ("Edit file: /repo/composer.json", "scope:dependencies"),
+            ("Edit file: /repo/bun.lockb", "scope:dependencies"),
+            ("Bash command: cat a > /etc/x", "scope:outside_repo"),
+            ("Bash command: ls && rm -rf /etc/foo", "scope:outside_repo"),
+            ("Bash command: grep x f | tee /etc/y", "scope:outside_repo"),
+            ("Bash command: cat a;rm /etc/x", "scope:outside_repo"),
+            ("Bash command: rm -rf ~", "scope:outside_repo"),
+            ("Bash command: rm -rf ~/x", "scope:outside_repo"),
+            ("Bash command: rm -rf $HOME/x", "scope:outside_repo"),
+            ("Bash command: rm -rf ${HOME}/x", "scope:outside_repo"),
+            ("Bash command: rm -rf ~user/x", "scope:outside_repo"),
+            ("Bash command: echo x;/etc/y", "scope:outside_repo"),
+        ];
+        for (subject, want) in cases {
+            assert_eq!(
+                stop(&decide(
+                    &perm(subject),
+                    &run(Policy::Rules),
+                    &allow_all,
+                    None
+                )),
+                Some(want),
+                "{subject}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_subjects_still_answer_under_rules() {
+        let allow_all = rules("[[rule]]\nid='all'\nkind='permission'\nanswer='approve'");
+        let cases = [
+            "Bash command: cargo test",
+            "Bash command: cargo test 2>/dev/null",
+            "Bash command: ls /repo/src",
+            "Bash command: cat /etc/hosts",
+            "Bash command: git push origin feature/x",
+            "Bash command: git push",
+            "Bash command: npm test",
+            "Bash command: git branch feature/x",
+        ];
+        for subject in cases {
+            assert_eq!(
+                choice(&decide(
+                    &perm(subject),
+                    &run(Policy::Rules),
+                    &allow_all,
+                    None
+                )),
+                Some("1"),
+                "{subject}"
+            );
+        }
+    }
+
+    #[test]
+    fn tilde_paths_resolve_against_home_or_count_as_outside() {
+        use super::super::scope::outside_repo;
+        use std::path::Path;
+        let roots = [PathBuf::from("/repo")];
+        assert!(outside_repo("Bash command: rm ~/x", &roots, None));
+        assert!(!outside_repo(
+            "Bash command: rm ~/x",
+            &roots,
+            Some(Path::new("/repo"))
+        ));
+        assert!(outside_repo(
+            "Bash command: rm ~/x",
+            &roots,
+            Some(Path::new("/home/u"))
+        ));
+    }
 }

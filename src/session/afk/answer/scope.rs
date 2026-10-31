@@ -7,37 +7,47 @@ use std::sync::LazyLock;
 
 static DEPENDENCY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-    r"\b((npm|pnpm|yarn|bun)\s+(install|i|add)\s+[^-\s]|cargo\s+add\b|pip3?\s+install\b|uv\s+(add|pip\s+install)\b|go\s+get\b|(Cargo\.(toml|lock)|package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|go\.(mod|sum)|pyproject\.toml|uv\.lock|requirements[^/\s]*\.txt)\b)"
+    r"\b((npm|pnpm|yarn|bun)\s+(install|i|add)(\s+-\S+)*\s+[^-\s]|cargo\s+(add|update)\b|pip3?\s+install\b|uv\s+(add|pip\s+install)\b|go\s+get\b|(poetry|pdm|bundle)\s+add\b|composer\s+require\b|(Cargo\.(toml|lock)|package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|go\.(mod|sum)|pyproject\.toml|uv\.lock|poetry\.lock|Gemfile(\.lock)?|composer\.(json|lock)|requirements[^/\s]*\.txt)\b)"
 ).unwrap()
 });
+// A bare `git push` (no refspec) can't be judged without branch context, so it passes.
 static PUSH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-    r"git\s+push\b.*(\s(-f|--force|--force-with-lease|--delete|-d)\b|\s\+\S|\s:\S|\s(origin\s+)?(main|master)\b)|git\s+branch\s+(-D|-d|--delete)\b"
+    r"\bgit\b[^\n;&|]*\bpush\b[^\n;&|]*(\s-[a-zA-Z]*[fd][a-zA-Z]*\b|\s--(force|force-with-lease|force-if-includes|delete|mirror|prune)\b|\s\+\S|\s:\S|[\s:/+](main|master)($|[\s:]))|\bgit\b[^\n;&|]*\bbranch\b[^\n;&|]*\s(-[a-zA-Z]*[dD][a-zA-Z]*|--delete)\b"
 ).unwrap()
 });
 static READ_ONLY: &[&str] = &[
     "cat", "ls", "grep", "rg", "head", "tail", "wc", "stat", "file", "less", "diff",
 ];
+static SHELL_META: &[&str] = &[";", "&", "|", ">", "<", "`", "$(", "\n"];
 
 fn under(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|r| path.starts_with(r))
 }
 
-fn outside_repo(subject: &str, roots: &[PathBuf]) -> bool {
+/// Unresolvable paths (`$VAR`, `~user`, `~` without `HOME`) count as outside.
+pub(super) fn outside_repo(subject: &str, roots: &[PathBuf], home: Option<&Path>) -> bool {
     let command = subject.split_once(": ").map_or(subject, |(_, c)| c);
-    if READ_ONLY.contains(&command.split_whitespace().next().unwrap_or("")) {
+    let first = command.split_whitespace().next().unwrap_or("");
+    if READ_ONLY.contains(&first) && !SHELL_META.iter().any(|m| command.contains(m)) {
         return false;
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
     command
-        .split(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '=' || c == '>')
+        .split(|c: char| c.is_whitespace() || "\"'=><;&|()`".contains(c))
         .any(|t| {
-            let p = if let (Some(rest), Some(h)) = (t.strip_prefix("~/"), &home) {
-                h.join(rest)
-            } else {
-                PathBuf::from(t)
+            if t.starts_with('$') {
+                return true;
+            }
+            let p = match t.strip_prefix('~') {
+                Some(rest) if rest.is_empty() || rest.starts_with('/') => match home {
+                    Some(h) => h.join(rest.trim_start_matches('/')),
+                    None => return true,
+                },
+                Some(_) => return true,
+                None => PathBuf::from(t),
             };
-            (p.is_absolute() && !under(&p, roots)) || t.split('/').any(|c| c == "..")
+            (p.is_absolute() && p != Path::new("/dev/null") && !under(&p, roots))
+                || t.split('/').any(|c| c == "..")
         })
 }
 
@@ -58,7 +68,14 @@ pub fn run_checks(menu: &Menu, run: &RunContext, allow_dependencies: bool) -> Ve
         },
         Check {
             id: "outside_repo",
-            result: fail(!subject.is_empty() && outside_repo(subject, &run.repo_roots)),
+            result: fail(
+                !subject.is_empty()
+                    && outside_repo(
+                        subject,
+                        &run.repo_roots,
+                        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+                    ),
+            ),
         },
         Check {
             id: "dependencies",
