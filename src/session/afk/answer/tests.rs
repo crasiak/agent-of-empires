@@ -663,6 +663,49 @@ mod decide {
             ("Bash command: rm -rf ${HOME}/x", "scope:outside_repo"),
             ("Bash command: rm -rf ~user/x", "scope:outside_repo"),
             ("Bash command: echo x;/etc/y", "scope:outside_repo"),
+            (
+                "Bash command: git push origin main;echo ok",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: git push origin main&&echo ok",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: git push origin HEAD:main;",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: git push origin 'HEAD:main'",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: git push origin \"main\"",
+                "scope:protected_push",
+            ),
+            (
+                "Bash command: pnpm --filter app add x",
+                "scope:dependencies",
+            ),
+            ("Bash command: pnpm -w add x", "scope:dependencies"),
+            (
+                "Bash command: yarn workspace app add x",
+                "scope:dependencies",
+            ),
+            (
+                "Bash command: npm --prefix . install x",
+                "scope:dependencies",
+            ),
+            ("Bash command: curl -o/etc/x http://a", "scope:outside_repo"),
+            ("Bash command: tar -C/etc -xf a.tar", "scope:outside_repo"),
+            ("Bash command: rm -rf {/etc/x,y}", "scope:outside_repo"),
+            (
+                "Bash command: bash -c \"git push origin main\"",
+                "scope:outside_repo",
+            ),
+            ("Bash command: sh -c 'rm x'", "scope:outside_repo"),
+            ("Bash command: zsh -lc 'rm x'", "scope:outside_repo"),
+            ("Bash command: eval \"rm x\"", "scope:outside_repo"),
         ];
         for (subject, want) in cases {
             assert_eq!(
@@ -689,6 +732,8 @@ mod decide {
             "Bash command: git push origin feature/x",
             "Bash command: git push",
             "Bash command: npm test",
+            "Bash command: npm run build",
+            "Bash command: pnpm test",
             "Bash command: git branch feature/x",
         ];
         for subject in cases {

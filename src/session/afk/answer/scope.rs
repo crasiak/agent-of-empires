@@ -7,34 +7,48 @@ use std::sync::LazyLock;
 
 static DEPENDENCY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-    r"\b((npm|pnpm|yarn|bun)\s+(install|i|add)(\s+-\S+)*\s+[^-\s]|cargo\s+(add|update)\b|pip3?\s+install\b|uv\s+(add|pip\s+install)\b|go\s+get\b|(poetry|pdm|bundle)\s+add\b|composer\s+require\b|(Cargo\.(toml|lock)|package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|go\.(mod|sum)|pyproject\.toml|uv\.lock|poetry\.lock|Gemfile(\.lock)?|composer\.(json|lock)|requirements[^/\s]*\.txt)\b)"
+    r"\b((npm|pnpm|yarn|bun)(\s+-\S+(\s+[^-\s]\S*)?|\s+workspace\s+\S+)*\s+(install|i|add)(\s+-\S+)*\s+[^-\s]|cargo\s+(add|update)\b|pip3?\s+install\b|uv\s+(add|pip\s+install)\b|go\s+get\b|(poetry|pdm|bundle)\s+add\b|composer\s+require\b|(Cargo\.(toml|lock)|package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|go\.(mod|sum)|pyproject\.toml|uv\.lock|poetry\.lock|Gemfile(\.lock)?|composer\.(json|lock)|requirements[^/\s]*\.txt)\b)"
 ).unwrap()
 });
 // A bare `git push` (no refspec) can't be judged without branch context, so it passes.
 static PUSH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-    r"\bgit\b[^\n;&|]*\bpush\b[^\n;&|]*(\s-[a-zA-Z]*[fd][a-zA-Z]*\b|\s--(force|force-with-lease|force-if-includes|delete|mirror|prune)\b|\s\+\S|\s:\S|[\s:/+](main|master)($|[\s:]))|\bgit\b[^\n;&|]*\bbranch\b[^\n;&|]*\s(-[a-zA-Z]*[dD][a-zA-Z]*|--delete)\b"
+    r#"\bgit\b[^\n;&|]*\bpush\b[^\n;&|]*(\s-[a-zA-Z]*[fd][a-zA-Z]*\b|\s--(force|force-with-lease|force-if-includes|delete|mirror|prune)\b|\s\+\S|\s:\S|[\s:/+'"](main|master)($|[\s:;&|'")]))|\bgit\b[^\n;&|]*\bbranch\b[^\n;&|]*\s(-[a-zA-Z]*[dD][a-zA-Z]*|--delete)\b"#
 ).unwrap()
 });
 static READ_ONLY: &[&str] = &[
     "cat", "ls", "grep", "rg", "head", "tail", "wc", "stat", "file", "less", "diff",
 ];
 static SHELL_META: &[&str] = &[";", "&", "|", ">", "<", "`", "$(", "\n"];
+static NESTED_SHELL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(sh|bash|zsh|dash|ksh)\s+(-\S+\s+)*-[a-zA-Z]*c\b|\beval\b").unwrap()
+});
 
 fn under(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|r| path.starts_with(r))
 }
 
-/// Unresolvable paths (`$VAR`, `~user`, `~` without `HOME`) count as outside.
+/// Unresolvable paths (`$VAR`, `~user`, `~` without `HOME`) and nested shells
+/// (`sh -c`, `eval`) count as outside.
 pub(super) fn outside_repo(subject: &str, roots: &[PathBuf], home: Option<&Path>) -> bool {
     let command = subject.split_once(": ").map_or(subject, |(_, c)| c);
     let first = command.split_whitespace().next().unwrap_or("");
     if READ_ONLY.contains(&first) && !SHELL_META.iter().any(|m| command.contains(m)) {
         return false;
     }
+    if NESTED_SHELL.is_match(command) {
+        return true;
+    }
     command
-        .split(|c: char| c.is_whitespace() || "\"'=><;&|()`".contains(c))
+        .split(|c: char| c.is_whitespace() || "\"'=><;&|()`{},".contains(c))
         .any(|t| {
+            // A path glued to a short flag: `-o/etc/x`, `-C/etc`.
+            let t = match t.strip_prefix('-') {
+                Some(rest) if !rest.starts_with('-') => {
+                    rest.trim_start_matches(|c: char| c.is_ascii_alphabetic())
+                }
+                _ => t,
+            };
             if t.starts_with('$') {
                 return true;
             }
