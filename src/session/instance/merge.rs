@@ -163,7 +163,7 @@ impl Instance {
             return;
         }
         if self.work_arc_enabled || self.work_arc.record.is_some() {
-            self.work_arc.clear();
+            self.work_arc.invalidate();
             self.work_arc_enabled = false;
             self.work_arc_status = None;
         }
@@ -344,14 +344,15 @@ impl Instance {
         if pre.work_arc_enabled != post.work_arc_enabled {
             if !post.work_arc_enabled {
                 self.work_arc_enabled = false;
-                self.work_arc.clear();
+                self.work_arc.invalidate();
                 self.work_arc_status = None;
             } else if self.agent_session_id == pre.agent_session_id
                 && self.active_execution == pre.active_execution
                 && self.work_arc.epoch == pre.work_arc.epoch
             {
                 self.work_arc_enabled = true;
-                self.work_arc.clear();
+                self.work_arc.consent_version = post.work_arc.consent_version;
+                self.work_arc.invalidate();
                 self.work_arc.cleared = false;
                 self.work_arc_status = None;
             }

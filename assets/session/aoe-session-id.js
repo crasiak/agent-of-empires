@@ -2,7 +2,7 @@
 // report context resets, prompts, and turns to AoE's usage log, and write AoE's
 // hook status file so a turn's state does not depend on reading the screen.
 import { spawn } from "node:child_process";
-import { chmodSync, closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, renameSync, rmdirSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -366,7 +366,7 @@ export default function (pi) {
       const leaf = ctx?.sessionManager?.getLeafId?.();
       if (!id || !(leaf === null || (typeof leaf === "string" && /^[a-zA-Z0-9-]{1,64}$/.test(leaf)))) return;
       writeAtomic(cursorTarget, JSON.stringify({
-        version: 1, session_id: id, source, leaf_id: leaf, settled: arcSettled && idle(ctx), updated_at: new Date().toISOString(),
+        version: 1, process_id: process.pid, session_id: id, source, leaf_id: leaf, settled: arcSettled && idle(ctx), updated_at: new Date().toISOString(),
       }));
       publishedCursorSession = id;
     } catch {
@@ -400,7 +400,7 @@ export default function (pi) {
   const startArcServer = async (ctx) => {
     if (!socketTarget || !sessionId(ctx)) return;
     await stopArcServer();
-    const dir = mkdtempSync(join(tmpdir(), "aoe-arc-"));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "aoe-arc-")));
     chmodSync(dir, 0o700);
     const path = join(dir, "s");
     if (Buffer.byteLength(path) > 99) {

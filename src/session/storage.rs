@@ -1063,7 +1063,34 @@ impl Storage {
     /// Deserialise the session rows, keeping the ones that failed apart from
     /// the ones that did not. Pure: quarantining is the caller's decision.
     fn split_instances(&self) -> Result<(Vec<Instance>, Vec<serde_json::Value>)> {
-        let Some(content) = read_nonempty(&self.sessions_path)? else {
+        self.split_instances_cancellable(None)
+    }
+
+    fn split_instances_cancellable(
+        &self,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<(Vec<Instance>, Vec<serde_json::Value>)> {
+        let content = if let Some(cancel) = cancel {
+            use std::io::Read;
+            let mut content = String::new();
+            if let Some(mut file) = open_regular_registry(&self.sessions_path)? {
+                let mut bytes = Vec::new();
+                let mut chunk = [0_u8; 8192];
+                loop {
+                    ensure_not_cancelled(cancel)?;
+                    let count = file.read(&mut chunk)?;
+                    if count == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk[..count]);
+                }
+                content = String::from_utf8(bytes)?;
+            }
+            (!content.trim().is_empty()).then_some(content)
+        } else {
+            read_nonempty(&self.sessions_path)?
+        };
+        let Some(content) = content else {
             return Ok((Vec::new(), Vec::new()));
         };
 
@@ -1071,12 +1098,16 @@ impl Storage {
         let mut instances = Vec::with_capacity(rows.len());
         let mut corrupt = Vec::new();
         for (idx, row) in rows.into_iter().enumerate() {
+            if let Some(cancel) = cancel {
+                ensure_not_cancelled(cancel)?;
+            }
             match <Instance as serde::Deserialize>::deserialize(&row) {
                 Ok(mut inst) => {
                     // `source_profile` is never persisted, so a loaded row
                     // would otherwise resolve its agent against the default
                     // profile rather than the store it came from.
                     inst.source_profile = self.profile.clone();
+                    super::work_arc::hydrate(self.arc_root()?, &mut inst)?;
                     inst.set_file_watch(self.file_watch.clone());
                     instances.push(inst);
                 }
@@ -1093,6 +1124,53 @@ impl Storage {
             }
         }
         Ok((instances, corrupt))
+    }
+
+    pub(crate) fn arc_root(&self) -> Result<&Path> {
+        self.sessions_path
+            .parent()
+            .map(app_dir_for_profile_dir)
+            .ok_or_else(|| anyhow!("sessions path has no parent"))
+    }
+
+    pub(crate) fn load_work_arc_owners(
+        &self,
+        target: &Instance,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Vec<Instance>> {
+        ensure_not_cancelled(cancel)?;
+        let (instances, corrupt) = self.split_instances_cancellable(Some(cancel))?;
+        if !corrupt.is_empty() {
+            self.quarantine_corrupt_rows(&corrupt);
+        }
+        for row in corrupt {
+            ensure_not_cancelled(cancel)?;
+            let unrelated_id = row
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.is_empty() && id != target.id);
+            let unrelated_pi = match row.get("agent_session_id") {
+                Some(serde_json::Value::Null) => true,
+                Some(serde_json::Value::String(sid)) => {
+                    !sid.is_empty() && target.agent_session_id.as_deref() != Some(sid.as_str())
+                }
+                _ => false,
+            };
+            anyhow::ensure!(
+                unrelated_id && unrelated_pi,
+                "corrupt session row conceals ownership"
+            );
+        }
+        ensure_not_cancelled(cancel)?;
+        Ok(instances)
+    }
+
+    pub(crate) fn work_arc_history(
+        &self,
+        session: &Instance,
+        limit: usize,
+    ) -> Result<Vec<super::work_arc::ArcDocument>> {
+        super::work_arc::history(self.arc_root()?, session, limit)
     }
 
     fn groups_path(&self) -> std::path::PathBuf {
@@ -1223,12 +1301,68 @@ impl Storage {
     where
         F: FnOnce(&mut Vec<Instance>, &mut Vec<Group>) -> Result<R>,
     {
-        let (mut instances, mut groups) = self.load_with_groups()?;
-        let groups_before = groups.clone();
-        let result = f(&mut instances, &mut groups)?;
+        self.update_changed_under_lock(|instances, groups| {
+            f(instances, groups).map(|result| (result, true))
+        })
+    }
 
-        // Pre-serialise both buffers so a serde failure on either side
-        // aborts before any file is touched.
+    pub(crate) fn update_changed_under_lock<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut Vec<Instance>, &mut Vec<Group>) -> Result<(R, bool)>,
+    {
+        self.update_changed_checked_under_lock(None, f)
+    }
+
+    pub(crate) fn update_changed_cancellable_under_lock<F, R>(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+        f: F,
+    ) -> Result<R>
+    where
+        F: FnOnce(&mut Vec<Instance>, &mut Vec<Group>) -> Result<(R, bool)>,
+    {
+        self.update_changed_checked_under_lock(Some(cancel), f)
+    }
+
+    fn update_changed_checked_under_lock<F, R>(
+        &self,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+        f: F,
+    ) -> Result<R>
+    where
+        F: FnOnce(&mut Vec<Instance>, &mut Vec<Group>) -> Result<(R, bool)>,
+    {
+        let (mut instances, mut groups) = if let Some(cancel) = cancel {
+            ensure_not_cancelled(cancel)?;
+            let (instances, corrupt) = self.split_instances_cancellable(Some(cancel))?;
+            if !corrupt.is_empty() {
+                self.quarantine_corrupt_rows(&corrupt);
+            }
+            ensure_not_cancelled(cancel)?;
+            let (groups, corrupt) = self.split_groups()?;
+            if !corrupt.is_empty() {
+                self.quarantine_corrupt_group_rows(&corrupt);
+            }
+            ensure_not_cancelled(cancel)?;
+            (instances, groups)
+        } else {
+            self.load_with_groups()?
+        };
+        let groups_before = groups.clone();
+        let (result, changed) = f(&mut instances, &mut groups)?;
+        if let Some(cancel) = cancel {
+            ensure_not_cancelled(cancel)?;
+        }
+        if !changed {
+            return Ok(result);
+        }
+        // Immutable documents precede their commit pointers; failed row writes leave only orphans.
+        for instance in &instances {
+            if let Some(cancel) = cancel {
+                ensure_not_cancelled(cancel)?;
+            }
+            super::work_arc::publish_state(self.arc_root()?, instance)?;
+        }
         let instances_buf = serde_json::to_vec_pretty(&instances)?;
         let groups_changed = groups != groups_before;
         let groups_buf = if groups_changed {
@@ -1238,6 +1372,9 @@ impl Storage {
         };
 
         // groups first, sessions last.
+        if let Some(cancel) = cancel {
+            ensure_not_cancelled(cancel)?;
+        }
         if let Some(buf) = groups_buf {
             let groups_path = self.sessions_path.with_file_name("groups.json");
             atomic_write(&groups_path, &buf)?;
@@ -2254,9 +2391,53 @@ fn validate_recovery_journal(
 /// them can change until it returns. Locks are taken in the canonical-directory order profile
 /// moves use.
 pub(crate) fn with_storages_locked<R>(storages: &[Storage], f: impl FnOnce() -> R) -> Result<R> {
+    with_storages_locked_cancellable(storages, &tokio_util::sync::CancellationToken::new(), f)
+}
+
+fn ensure_not_cancelled(cancel: &tokio_util::sync::CancellationToken) -> Result<()> {
+    anyhow::ensure!(!cancel.is_cancelled(), "storage operation cancelled");
+    Ok(())
+}
+
+fn cancellable_flock(
+    file: fs::File,
+    path: &Path,
+    cancel: &tokio_util::sync::CancellationToken,
+    shared: bool,
+) -> Result<StorageFlock> {
+    #[cfg(test)]
+    let mut reported = false;
+    loop {
+        ensure_not_cancelled(cancel)?;
+        let result = if shared {
+            FileExt::try_lock_shared(&file)
+        } else {
+            file.try_lock_exclusive()
+        };
+        match result {
+            Ok(()) => return Ok(StorageFlock { file }),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                #[cfg(test)]
+                if !reported {
+                    report_lock_contention_for_test(path);
+                    reported = true;
+                }
+                std::thread::park_timeout(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
+        }
+    }
+}
+
+pub(crate) fn with_storages_locked_cancellable<R>(
+    storages: &[Storage],
+    cancel: &tokio_util::sync::CancellationToken,
+    f: impl FnOnce() -> R,
+) -> Result<R> {
     let mut sorted = storages
         .iter()
         .map(|storage| {
+            ensure_not_cancelled(cancel)?;
             let dir = storage
                 .sessions_path
                 .parent()
@@ -2268,19 +2449,48 @@ pub(crate) fn with_storages_locked<R>(storages: &[Storage], f: impl FnOnce() -> 
     sorted.sort_by(|(left, _), (right, _)| left.cmp(right));
     sorted.dedup_by(|(left, _), (right, _)| left == right);
 
-    let _mutexes: Vec<_> = sorted
+    let mut mutexes = Vec::with_capacity(sorted.len());
+    for (_, storage) in &sorted {
+        #[cfg(test)]
+        let mut reported = false;
+        loop {
+            ensure_not_cancelled(cancel)?;
+            match storage.save_lock.try_lock() {
+                Ok(guard) => {
+                    mutexes.push(guard);
+                    break;
+                }
+                Err(std::sync::TryLockError::Poisoned(error)) => {
+                    mutexes.push(error.into_inner());
+                    break;
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    #[cfg(test)]
+                    if !reported {
+                        report_lock_contention_for_test(&storage.sessions_path);
+                        reported = true;
+                    }
+                    std::thread::park_timeout(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+    let mut app_dirs: Vec<_> = sorted
         .iter()
-        .map(|(_, storage)| {
-            storage
-                .save_lock
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-        })
+        .map(|(dir, _)| app_dir_for_profile_dir(dir))
         .collect();
-    let dirs: Vec<&Path> = sorted.iter().map(|(dir, _)| dir.as_path()).collect();
-    let _transition_flocks = acquire_transition_flocks_for_profile_dirs(&dirs)?;
-    let mut held: Vec<(fs::Metadata, StorageFlock)> = Vec::with_capacity(dirs.len());
-    for dir in dirs {
+    app_dirs.sort();
+    app_dirs.dedup();
+    let mut transitions = Vec::with_capacity(app_dirs.len());
+    for dir in app_dirs {
+        ensure_not_cancelled(cancel)?;
+        let (file, path) =
+            open_storage_lock_file(dir, crate::migrations::v027_isolate_sandbox_stores::LOCK)?;
+        transitions.push(cancellable_flock(file, &path, cancel, true)?);
+    }
+    let mut held: Vec<(fs::Metadata, StorageFlock)> = Vec::with_capacity(sorted.len());
+    for (dir, _) in &sorted {
+        ensure_not_cancelled(cancel)?;
         let (file, path) = open_storage_lock_file(dir, STORAGE_LOCK_FILENAME)?;
         let metadata = file.metadata()?;
         // A second flock on a shared lock file would wait on this thread forever.
@@ -2290,8 +2500,9 @@ pub(crate) fn with_storages_locked<R>(storages: &[Storage], f: impl FnOnce() -> 
         {
             continue;
         }
-        held.push((metadata, acquire_open_storage_flock(file, &path)?));
+        held.push((metadata, cancellable_flock(file, &path, cancel, false)?));
     }
+    ensure_not_cancelled(cancel)?;
     Ok(f())
 }
 
@@ -2768,6 +2979,209 @@ mod tests {
     use crate::session::GroupTree;
     use serial_test::serial;
     use tempfile::tempdir;
+
+    #[test]
+    fn arc_owner_scan_refuses_corruption_that_could_hide_the_target() {
+        for unknown in [false, true] {
+            let root = tempdir().unwrap();
+            let storage =
+                Storage::new_for_test_path("arc-owner", root.path().join("sessions.json"));
+            let target = Instance::new("synthetic", "/tmp/synthetic");
+            let corrupt = if unknown {
+                serde_json::json!({"damaged":true})
+            } else {
+                serde_json::json!({"id":target.id,"agent_session_id":null,"work_arc":"damaged"})
+            };
+            let raw = serde_json::json!([target, corrupt]).to_string();
+            fs::write(storage.sessions_path(), &raw).unwrap();
+            assert!(
+                storage
+                    .load_work_arc_owners(&target, &tokio_util::sync::CancellationToken::new())
+                    .is_err(),
+                "unknown or duplicate ownership cannot be skipped"
+            );
+            assert_eq!(fs::read_to_string(storage.sessions_path()).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn arc_flock_holder_child() {
+        use std::io::{Read, Write};
+        let Some(path) = std::env::var_os("AOE_ARC_FLOCK_CHILD") else {
+            return;
+        };
+        let _held = acquire_storage_flock(Path::new(&path), STORAGE_LOCK_FILENAME).unwrap();
+        println!("READY");
+        std::io::stdout().flush().unwrap();
+        std::io::stdin().read_exact(&mut [0]).unwrap();
+    }
+
+    #[test]
+    fn arc_cancelled_cross_process_flock_wait_releases_earlier_store() {
+        use std::io::{BufRead, Read, Write};
+        use std::sync::mpsc;
+        struct FlockChild {
+            child: std::process::Child,
+            reader: Option<std::thread::JoinHandle<String>>,
+        }
+        impl Drop for FlockChild {
+            fn drop(&mut self) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                if let Some(reader) = self.reader.take() {
+                    let _ = reader.join();
+                }
+            }
+        }
+        let root = tempdir().unwrap();
+        let a = Storage::new_for_test_path("arc-flock-a", root.path().join("a/sessions.json"));
+        let b = Storage::new_for_test_path("arc-flock-b", root.path().join("b/sessions.json"));
+        fs::create_dir_all(a.sessions_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(b.sessions_path.parent().unwrap()).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "session::storage::tests::arc_flock_holder_child",
+                "--nocapture",
+            ])
+            .env("AOE_ARC_FLOCK_CHILD", b.sessions_path.parent().unwrap())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (ready, readiness) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut output = std::io::BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                assert!(
+                    output.read_line(&mut line).unwrap() > 0,
+                    "child exited before locking B"
+                );
+                if line.trim().rsplit(" ... ").next() == Some("READY") {
+                    let _ = ready.send(());
+                    break;
+                }
+            }
+            let mut tail = String::new();
+            output.read_to_string(&mut tail).unwrap();
+            tail
+        });
+        let mut child = FlockChild {
+            child,
+            reader: Some(reader),
+        };
+        readiness
+            .recv_timeout(Duration::from_secs(5))
+            .expect("child acquired B flock");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (contended, waiting) = mpsc::channel();
+        let (mutated, complete) = mpsc::channel();
+        let (cancelled, before_release) = std::thread::scope(|scope| {
+            let _cancel_on_exit = cancel.clone().drop_guard();
+            let worker_cancel = cancel.clone();
+            let a_ref = &a;
+            let b_ref = &b;
+            let worker = scope.spawn(move || {
+                let _observer = observe_lock_contention_for_test(contended);
+                with_storages_locked_cancellable(
+                    &[
+                        Storage::new_for_test_path("arc-flock-b", b_ref.sessions_path.clone()),
+                        Storage::new_for_test_path("arc-flock-a", a_ref.sessions_path.clone()),
+                    ],
+                    &worker_cancel,
+                    || (),
+                )
+            });
+            let path = waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(
+                path.parent().unwrap().canonicalize().unwrap(),
+                b.sessions_path.parent().unwrap().canonicalize().unwrap()
+            );
+            assert!(
+                matches!(
+                    a.save_lock.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ),
+                "A acquired before waiting on B"
+            );
+            cancel.cancel();
+            scope.spawn(|| {
+                mutated.send(a.update(|_, _| Ok(())).is_ok()).unwrap();
+            });
+            let before_release = complete.recv_timeout(Duration::from_secs(1));
+            child.child.stdin.take().unwrap().write_all(b"x").unwrap();
+            assert!(child.child.wait().unwrap().success());
+            (worker.join().unwrap().is_err(), before_release)
+        });
+        let tail = child.reader.take().unwrap().join().unwrap();
+        println!(
+            "A mutation before B release={before_release:?}; cancelled={cancelled}; child={tail}"
+        );
+        assert_eq!(
+            before_release,
+            Ok(true),
+            "cancellation releases A without B becoming available"
+        );
+        assert!(cancelled);
+    }
+
+    #[test]
+    fn arc_cancelled_lock_wait_releases_already_acquired_locks() {
+        use std::sync::mpsc;
+        let root = tempdir().unwrap();
+        let a = Storage::new_for_test_path("arc-lock-a", root.path().join("a/sessions.json"));
+        let b = Storage::new_for_test_path("arc-lock-b", root.path().join("b/sessions.json"));
+        fs::create_dir_all(a.sessions_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(b.sessions_path.parent().unwrap()).unwrap();
+        let held_b = b.save_lock.lock().unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (done, received) = mpsc::channel();
+        let released_before_b = std::thread::scope(|scope| {
+            let _cancel_on_exit = cancel.clone().drop_guard();
+            let worker_cancel = cancel.clone();
+            let a_ref = &a;
+            let b_ref = &b;
+            let worker = scope.spawn(move || {
+                with_storages_locked_cancellable(
+                    &[
+                        Storage::new_for_test_path("arc-lock-b", b_ref.sessions_path.clone()),
+                        Storage::new_for_test_path("arc-lock-a", a_ref.sessions_path.clone()),
+                    ],
+                    &worker_cancel,
+                    || (),
+                )
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if matches!(
+                    a.save_lock.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "worker did not acquire A before B"
+                );
+                std::thread::yield_now();
+            }
+            cancel.cancel();
+            scope.spawn(|| {
+                done.send(a.update(|_, _| Ok(())).is_ok()).unwrap();
+            });
+            let before_release = received.recv_timeout(Duration::from_secs(1));
+            drop(held_b);
+            let result = worker.join().unwrap();
+            (before_release, result.is_err())
+        });
+        assert_eq!(
+            released_before_b,
+            (Ok(true), true),
+            "cancellation releases A before B becomes available"
+        );
+    }
 
     #[test]
     fn registry_read_keeps_validated_file_after_path_replacement() {

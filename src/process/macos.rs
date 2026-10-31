@@ -856,19 +856,25 @@ pub(super) fn monotonic_millis() -> Option<u64> {
 
 /// `kern.boottime` shifts on clock steps; the session UUID does not.
 pub(super) fn boot_id() -> Option<String> {
-    let out = Command::new("sysctl")
-        .args(["-n", "kern.bootsessionuuid"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
+    let mut bytes = [0_u8; 64];
+    let mut length = bytes.len();
+    // The kernel receives the fixed buffer and its capacity, with no write request.
+    let result = unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            bytes.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || length > bytes.len() {
         return None;
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    let value = std::str::from_utf8(&bytes[..length])
+        .ok()?
+        .trim_end_matches('\0');
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 pub(super) fn foreground_arguments(shell_pid: u32) -> Vec<super::ProcessArguments> {
@@ -1056,6 +1062,14 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial]
+    fn boot_identity_does_not_depend_on_a_path_resolved_child() {
+        let before = boot_id().expect("native boot identity available");
+        let _path = crate::session::test_support::EnvGuard::set(&[("PATH", "")]);
+        assert_eq!(boot_id().as_deref(), Some(before.as_str()));
+    }
+
+    #[test]
     fn foreign_runner_probe_requires_an_empty_original_group_and_keeps_native_tokens_strict() {
         use std::io::BufRead as _;
         use std::os::unix::process::CommandExt as _;
@@ -1213,6 +1227,12 @@ mod tests {
         assert!(!remaining.contains(&owned));
         assert!(child.0.wait().unwrap().success());
     }
+}
+
+pub(super) fn peer_identity(stream: &std::os::unix::net::UnixStream) -> Option<(u32, u32)> {
+    use nix::sys::socket::{getsockopt, sockopt::LocalPeerPid};
+    let pid = getsockopt(stream, LocalPeerPid).ok()?;
+    (pid > 0).then_some((peer_uid(stream)?, pid as u32))
 }
 
 pub(super) fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
