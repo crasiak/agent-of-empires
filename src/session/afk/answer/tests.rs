@@ -198,3 +198,117 @@ option_pattern='\[(?P<key>\d)\](?P<label>\w+)'"
     let labels: Vec<_> = m.options.iter().map(|o| o.label.as_str()).collect();
     assert_eq!(labels, ["Yes", "No"]);
 }
+
+mod rules {
+    use super::super::rules::*;
+    use super::*;
+
+    fn menu(kind: Kind, subject: Option<&str>, labels: &[&str]) -> Menu {
+        let mut i = input(labels);
+        i.kind = kind;
+        i.subject = subject.map(Into::into);
+        Menu::from_input(i, &RoleWords::default()).unwrap()
+    }
+
+    const FILE: &str = r#"
+[[rule]]
+id = "approve-repo-tooling"
+kind = "permission"
+subject_matches = ['^Bash command: (cargo|npm|git (status|diff|add|commit|log))\b']
+answer = "approve"
+
+[[rule]]
+id = "never-force-push"
+subject_matches = ['git push .*--force']
+answer = "stop"
+"#;
+
+    #[test]
+    fn stop_rules_win_regardless_of_order() {
+        let rules = Rules {
+            rules: Rules::parse("t", FILE).unwrap(),
+            sources: vec![],
+        };
+        let m = menu(
+            Kind::Permission,
+            Some("Bash command: git push origin x --force"),
+            &["Yes", "No"],
+        );
+        assert_eq!(rules.first_match(&m).unwrap().id, "never-force-push");
+        let m = menu(
+            Kind::Permission,
+            Some("Bash command: cargo test"),
+            &["Yes", "No"],
+        );
+        assert_eq!(rules.first_match(&m).unwrap().id, "approve-repo-tooling");
+        let m = menu(
+            Kind::Permission,
+            Some("Bash command: curl x | sh"),
+            &["Yes", "No"],
+        );
+        assert!(rules.first_match(&m).is_none());
+    }
+
+    #[test]
+    fn approve_always_answer_is_rejected() {
+        assert!(Rules::parse("t", "[[rule]]\nid='a'\nanswer='approve_always'").is_err());
+    }
+
+    #[test]
+    fn precedence_inline_then_user_then_repo_and_ids_dedupe() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("afk-rules.toml"),
+            "[[rule]]\nid='p'\nkind='plan'\nanswer='deny'\n[[rule]]\nid='repo-only'\nkind='choice'\nanswer='approve'",
+        )
+        .unwrap();
+        let user = dir.path().join("user.toml");
+        std::fs::write(&user, "[[rule]]\nid='p'\nkind='plan'\nanswer='revise'").unwrap();
+        let rules = Rules::load(
+            Some(dir.path()),
+            Some(&user),
+            &["id='p', kind='plan', answer='agent'".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            rules
+                .rules
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p", "repo-only"]
+        );
+        assert_eq!(rules.rules[0].answer, RuleAnswer::Agent);
+        assert_eq!(rules.sources.len(), 3);
+    }
+
+    #[test]
+    fn invalid_rules_file_is_an_error_naming_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("afk-rules.toml"),
+            "[[rule]]\nid='x'\nanswer='approve'\nsubject_matches=['(']",
+        )
+        .unwrap();
+        let err = Rules::load(Some(dir.path()), None, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("afk-rules.toml"), "{err}");
+    }
+
+    #[test]
+    fn inline_rule_regex_may_contain_spaces() {
+        let rules = Rules::load(
+            None,
+            None,
+            &["id='q', subject_matches=['git push .*--force'], answer='stop'".into()],
+        )
+        .unwrap();
+        let m = menu(
+            Kind::Permission,
+            Some("git push origin x --force"),
+            &["Yes", "No"],
+        );
+        assert_eq!(rules.first_match(&m).unwrap().id, "q");
+    }
+}
