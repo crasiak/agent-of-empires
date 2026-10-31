@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-30-afk-menu-answering-design.md` (overview: `2026-10-30-afk-menus-and-goal-runs-overview.md`). Read both before starting a task.
 
+**Approved 2026-10-31:** execution is subagent-driven. The three plan decisions stand: recognition in Rust behind the bridge (ops `recognise`, `decide`, `answer_delivered`, `rules_check`); answer log at `<transport store>/afk-answers/<period>.jsonl`, append-only; `rules_check` returns `{valid:false,error}` as a value. Both uncommitted source trees are now committed (see Task 1 and Task 11).
+
 ## Global Constraints
 
 - Menu schema id `aoe.afk-menu.v1`; answer log schema id `aoe.afk-answer.v1`.
@@ -66,7 +68,7 @@
 
 ### Task 1: Land the native work period on main
 
-The native work period (the base for every other task) is uncommitted in `~/code/agent-of-empires-worktrees/CRA-859-afk-headroom-rollout-20261027` (branch `feature/CRA-859-afk-headroom-rollout`), based on `2145bd7f8`, 62 commits behind `origin/main`. Five of its modified files also changed on main: `docs/guides/afk.md`, `src/session/instance/accessors.rs`, `src/session/instance/execution.rs`, `src/session/instance/identity_sidecar.rs`, `src/session/mod.rs`.
+The native work period (the base for every other task) is committed as WIP `59d6a9ccb` on `feature/CRA-859-afk-headroom-rollout` (pushed to `crasiak/agent-of-empires`; worktree `~/code/agent-of-empires-worktrees/CRA-859-afk-headroom-rollout-20261027`), based on `2145bd7f8`, behind `origin/main`. Five of its modified files also changed on main: `docs/guides/afk.md`, `src/session/instance/accessors.rs`, `src/session/instance/execution.rs`, `src/session/instance/identity_sidecar.rs`, `src/session/mod.rs`.
 
 **Files:**
 - Modify: the 22 tracked files listed by `git status --short` in that worktree
@@ -76,7 +78,7 @@ The native work period (the base for every other task) is uncommitted in `~/code
 **Interfaces:**
 - Produces: on a new branch from `origin/main`, the modules `aoe-afk-work-state.mjs` (`createWorkPeriod`), `aoe-afk-work-period.mjs` (`workPeriodRuntime`, `workCheckpointParameters`, `WORK_CHECKPOINT_TOOL`), `aoe-afk-work-native.mjs` (`createNativeWorkJournal`, `WORK_PERIOD_MARKER`), Rust `afk::work_period` and the bridge op `work_period_reply`. Every later task builds on this branch.
 
-- [ ] **Step 1: Snapshot the uncommitted tree as a WIP commit on its own branch**
+- [x] **Step 1: Snapshot the uncommitted tree as a WIP commit on its own branch** (done 2026-10-31: `WIP_SHA` = `59d6a9ccb`; do not re-run)
 
 ```bash
 cd ~/code/agent-of-empires-worktrees/CRA-859-afk-headroom-rollout-20261027
@@ -2283,7 +2285,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 ### Task 11: Pi fork `ui_prompt_respond` hook
 
-**Precondition (ask the user first):** the Pi fork runtime that AoE runs is itself uncommitted in `~/code/pi-worktrees/CRA-859-ledger-afk-runtime-20261027` (branch `feature/CRA-859-ledger-afk-runtime-v1.2`, origin `earendil-works/pi`, remote branch `origin/afk-v1.2.0`). Ask the user where the fork's changes should be committed and how the runtime is pinned for Ledger (`ledger runtime promote|verify`). Don't commit or promote in that tree without the go-ahead. Everything in Tasks 2–10 works without this hook: Pi dialogs keep stopping as `human_prompt`.
+**Precondition (resolved 2026-10-31):** the Pi runtime AoE runs is committed as `c8348c3d` on our fork `crasiak/pi`, branch `feature/CRA-859-ledger-afk-runtime-v1.2` (worktree `~/code/pi-worktrees/CRA-859-ledger-afk-runtime-20261027`, remote `crasiak`; `origin` there is upstream `earendil-works/pi`, never push to it). Build on that branch. Promoting a new Pi core for Ledger (`ledger runtime promote|verify`, a new `pi-core-afk` store path) and requalifying the preview still need the user's go-ahead. Everything in Tasks 2–10 works without this hook: Pi dialogs keep stopping as `human_prompt`.
 
 **Files:**
 - Modify: `packages/coding-agent/src/core/extensions/runner.ts` (`wrapUIPromptContext`, new `respondOr`, `emitUIPromptRespond`)

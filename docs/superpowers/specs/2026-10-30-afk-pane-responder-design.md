@@ -1,7 +1,7 @@
 # S-C: AFK pane responder for Claude Code and Codex
 
 **Date:** 2026-10-30
-**Status:** Design approved in chat (option A: separate host-side slice after Pi). Written spec awaiting user review.
+**Status:** Approved 2026-10-31 (option A: separate host-side slice after Pi).
 **Overview:** [afk-menus-and-goal-runs-overview](2026-10-30-afk-menus-and-goal-runs-overview.md)
 **Depends on:** [S-A menu answering](2026-10-30-afk-menu-answering-design.md) (`Menu` model, format recognisers, Rust answer engine, answer log).
 **Repo:** agent-of-empires only.

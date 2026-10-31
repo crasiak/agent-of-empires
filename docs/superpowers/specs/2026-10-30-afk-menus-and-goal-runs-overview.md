@@ -1,7 +1,7 @@
 # AFK menus and goal runs: overview
 
 **Date:** 2026-10-30
-**Status:** Design approved in chat section by section (2026-10-29 to 2026-10-30). Written specs awaiting user review.
+**Status:** Approved 2026-10-31 (designed in chat section by section, 2026-10-29 to 2026-10-31). S-A is in implementation.
 **Revised:** 2026-10-31: aligned with the session-orientation arc (CRA-1376); see "Session orientation" below.
 **Tracking:** CRA-859 (AFK native work period hub). New tickets per slice once the specs are approved. Orientation work: CRA-1376 (umbrella), CRA-1377, CRA-1378.
 **Repos:** agent-of-empires (crasiak fork), the Pi fork (`packages/coding-agent`), attic `afk-record/` (S-D), attic `ledger/` (later slice only).

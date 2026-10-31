@@ -1,7 +1,7 @@
 # S-B: AFK goal runs and the work queue
 
 **Date:** 2026-10-30
-**Status:** Design approved in chat. Written spec awaiting user review (revised 2026-10-31 for `session-arc-v1` and `aoe-fleet next`).
+**Status:** Approved 2026-10-31 (revised the same day for `session-arc-v1` and `aoe-fleet next`).
 **Overview:** [afk-menus-and-goal-runs-overview](2026-10-30-afk-menus-and-goal-runs-overview.md)
 **Depends on:** [S-A menu answering](2026-10-30-afk-menu-answering-design.md) (engine, policies, answer log).
 **Uses:** [S-D ticket record](2026-10-30-afk-ticket-record-design.md) (`afk-record`) for every ticket read and write; `session-arc-v1` and `timeline arc validate` (CRA-1377) for handoffs and the review; `aoe-fleet next` (CRA-1256) for next-work proposals. See the overview's "Session orientation".

@@ -1,7 +1,7 @@
 # S-A: AFK menu answering
 
 **Date:** 2026-10-30
-**Status:** Design approved in chat. Written spec awaiting user review.
+**Status:** Approved 2026-10-31. Implementation plan: `docs/superpowers/plans/2026-10-31-afk-menu-answering.md` (approved, subagent-driven execution).
 **Overview:** [afk-menus-and-goal-runs-overview](2026-10-30-afk-menus-and-goal-runs-overview.md)
 **Repos:** agent-of-empires (engine, recognisers, extension), Pi fork (`ui_prompt_respond` hook).
 
