@@ -6,6 +6,7 @@ import type { SettingsFieldDescriptor } from "../../../lib/types";
 import {
   DefaultToolWidget,
   LoggingTargetsWidget,
+  QuickLaunchWidget,
   SmartRenameAgentWidget,
   SmartRenameModelWidget,
   ThemeNameWidget,
@@ -84,6 +85,14 @@ it("LoggingTargetsWidget removes one runtime override without losing another", (
   rerender({ "runtime.uds": "warn", "runtime.ws": "debug" });
   fireEvent.change(control("runtime.ws", "select"), { target: { value: "" } });
   expect(save).toHaveBeenLastCalledWith({ "runtime.uds": "warn" });
+});
+
+it("QuickLaunchWidget displays host-only presets without offering web edits", () => {
+  const preset = { "5": { profile: "work-headroom-ledger", tool: "pi", ledger_profile: "work-claude" } };
+  const { save, container } = mount(QuickLaunchWidget, "Quick Launch Presets", preset);
+  expect(container.querySelector("pre")?.textContent).toContain('"ledger_profile": "work-claude"');
+  expect(container.querySelector("input, textarea, button")).toBeNull();
+  expect(save).not.toHaveBeenCalled();
 });
 
 describe("ThemeNameWidget", () => {

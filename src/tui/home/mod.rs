@@ -22,6 +22,7 @@ mod pollers;
 mod preview;
 mod profiles;
 mod projects;
+mod quick_launch;
 pub(crate) mod render;
 mod reorder;
 mod rows;

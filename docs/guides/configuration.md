@@ -131,6 +131,42 @@ Per-agent structured view defaults live under `[acp]`, not `[session]`:
 
 The rest of `[acp]` tunes the structured view globally; see [Structured View Internals](../development/internals/structured-view.md#global-tuning-acp).
 
+### Quick launch
+
+On the TUI home screen, **Ctrl+1** through **Ctrl+9** open an editable New Session
+form from an explicitly assigned preset. Nothing launches until you submit.
+Assignments are global, independent of profile picker order, and empty by default.
+Configure them in **Settings > Global > Interaction > Quick Launch Presets** as
+JSON, or in the global `config.toml`:
+
+```toml
+[session.quick_launch]
+"1" = { profile = "personal-sub-headroom-ledger", tool = "pi", ledger_profile = "personal" }
+"2" = { profile = "work-headroom-ledger", tool = "pi", ledger_profile = "work" }
+"3" = { profile = "personal-oss-headroom-ledger", tool = "pi", ledger_profile = "personal-oss" }
+"4" = { profile = "personal-sub-headroom-ledger", tool = "claude", ledger_profile = "personal" }
+"5" = { profile = "work-headroom-ledger", tool = "pi", ledger_profile = "work-claude" }
+```
+
+`profile` is the destination AoE profile. Its settings supply the form defaults.
+`tool` is optional; omit it to use that profile's default agent. `ledger_profile`
+is optional and requires an explicit `pi`, `claude` or `codex` tool. It launches
+through `ledger run <tool> --profile <ledger_profile> --`, independently of the
+AoE destination. Ledger presets use host terminal view, not Sandbox or ACP.
+The Ledger profile appears as an editable form field; clear it to restore the
+normal agent command. Ledger must already be installed and the profile provisioned.
+
+The selected sidebar session suggests its repository directory and group. A
+selected group borrows a member's repository directory, or a pinned project's
+registered directory. Empty or synthetic groups keep the normal default directory;
+a scratch session never lends its temporary directory. All suggestions can be
+changed. Missing profiles or unavailable agents show an explanation, not a fallback.
+
+These shortcuts do not interrupt dialogs, search input or live-send. Terminals
+must support distinguishable Ctrl+digit events, such as the Kitty keyboard
+protocol; legacy terminal encodings alias some Ctrl+digits to other keys.
+The presets are local-only settings, not writable from the web dashboard.
+
 ### Launch identity badges
 
 With `session.row_tag = "agent"`, Claude/Codex/Pi rows show

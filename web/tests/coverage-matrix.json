@@ -808,6 +808,16 @@
       "components": ["web/src/components/settings/customWidgets.tsx"]
     },
     {
+      "id": "settings.quick-launch-readonly",
+      "kind": "vitest",
+      "risk": "low",
+      "specs": ["src/components/settings/__tests__/customWidgets.test.tsx"],
+      "components": [
+        "web/src/components/settings/customWidgets.tsx",
+        "web/src/components/settings/customWidgetRegistry.ts"
+      ]
+    },
+    {
       "id": "settings.acp-defaults",
       "kind": "vitest",
       "risk": "medium",
