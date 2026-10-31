@@ -2,7 +2,8 @@
 
 **Date:** 2026-10-30
 **Status:** Design approved in chat section by section (2026-10-29 to 2026-10-30). Written specs awaiting user review.
-**Tracking:** CRA-859 (AFK native work period hub). New tickets per slice once the specs are approved.
+**Revised:** 2026-10-31: aligned with the session-orientation arc (CRA-1376); see "Session orientation" below.
+**Tracking:** CRA-859 (AFK native work period hub). New tickets per slice once the specs are approved. Orientation work: CRA-1376 (umbrella), CRA-1377, CRA-1378.
 **Repos:** agent-of-empires (crasiak fork), the Pi fork (`packages/coding-agent`), attic `afk-record/` (S-D), attic `ledger/` (later slice only).
 
 ## Why
@@ -19,8 +20,8 @@ Two features follow:
 | Slice | Spec | Scope | Depends on |
 |---|---|---|---|
 | S-A | [afk-menu-answering](2026-10-30-afk-menu-answering-design.md) | Menu model, pluggable recognisers, answer engine, `rules` and `yolo` policies, answer log, Pi menus (text, `ask_user`, bash prompts, dialogs via a new Pi hook) | Native work period landed on main (see Prerequisites) |
-| S-D | [afk-ticket-record](2026-10-30-afk-ticket-record-design.md) | `afk-record` CLI: every run has a ticket, append-only on the user's tickets, event comments with read-back, outbox, `afk-human-ack` | none |
-| S-B | [afk-goal-runs](2026-10-30-afk-goal-runs-design.md) | Goal, work queue, fresh conversation per item, full-flow PRs and tickets, run limits, run records, return review | S-A, S-D |
+| S-D | [afk-ticket-record](2026-10-30-afk-ticket-record-design.md) | `afk-record` CLI: every run has a ticket, append-only on the user's tickets, event comments with read-back, outbox, `afk-human-ack` | CRA-1377 (`session-arc-v1`), for the arc block in `progress` and `run_summary` only |
+| S-B | [afk-goal-runs](2026-10-30-afk-goal-runs-design.md) | Goal, work queue, fresh conversation per item, full-flow PRs and tickets, run limits, run records, return review | S-A, S-D, CRA-1377; next-work proposals from `aoe-fleet next` |
 | S-C | [afk-pane-responder](2026-10-30-afk-pane-responder-design.md) | Host-side responder for Claude Code and Codex pane menus, reusing AoE status detection | S-A (engine, log, menu model) |
 | Later | none yet | `review` policy (second-model check on plan menus), Ledger import of run records, Foreman or worker per item, Claude Code as a full AFK harness | S-A, S-B |
 
@@ -35,6 +36,49 @@ Two features follow:
 - **Answer log:** append-only record of every decision, with the policy and rule that produced it. Answers are labelled `answered_by: afk/<policy>` and are never presented as human answers.
 - **Ticket record:** tickets are the durable record of AFK's actions. Every run has a ticket; all ticket I/O goes through `afk-record` (S-D).
 - **Goal:** required for a goal run. Either typed (`/afk-work on "goal"`) or taken from a ticket (`afk do CRA-123`).
+- **Arc:** the shared `session-arc-v1` summary (purpose, objective, now, remaining, next, needs_you), where every claim cites its source and carries a `basis`. AFK writes arcs and reads them for display only. See "Session orientation".
+
+## Session orientation
+
+Eleven tools already answer "what are we doing, where are we, what's next", each in its own format (CRA-1376, attic `.sage/work/20261030-session-orientation/proposal.md`). These specs would have added three more: S-B's item handoff and S-D's `progress` and `run_summary` comments. Instead, AFK joins the shared contract.
+
+### Consolidated
+
+| Concern | One owner | What AFK does |
+|---|---|---|
+| Summaries (where it stands, what's next, what needs the user) | `session-arc-v1` (CRA-1377) | S-B item handoffs and S-D `progress` / `run_summary` comments carry an arc block. Checkpoint `summary`, `next_step` and `human_required` map to the arc's `now`, `next` and `needs_you` as `assistant_reported` claims. Run and item facts (status, limits, end reason, PR state) are `host_fact` claims. |
+| Arc validation | One Go validator in Timeline, exposed as `timeline arc validate` | `afk-record` imports the validator package; the Pi extension and AoE call the command. No AFK copy of the rules. |
+| Next-work suggestions | `aoe-fleet next` (CRA-1256), on Timeline's course data | S-B calls it for proposals. The planned `afk-record next-work` is dropped; `afk-record children` stays as a plain Linear read. |
+| Transcript and run reading | Timeline readers (CRA-1378) | Timeline reads S-B's run store (`aoe.afk-run.v1`) and S-D's outbox (`afk-record.outbox.v1`) alongside the work-period entries, so other tools never parse them separately. |
+| Linear routing | `linear-project-work` `references/projects.md` | `afk-record` reads that table, never a copy. |
+| Return review | Existing AFK review (CRA-864) | S-B extends it, with the run's arc on top. `aoe-fleet review` shows the same arc per session. |
+
+### Kept separate, on purpose
+
+- **Gates take no arc input.** Consent, item admission, continuation, stop conditions, delivery verification, Ledger `run-guard/v1` and `aoe-admission/v1` never use an arc, a handoff, an `aoe-fleet next` rationale or any Timeline summary as evidence for a decision. A next-work suggestion is only a proposal and goes through S-A admission like any other item.
+- **Handoffs are untrusted context.** An item handoff seeds the next conversation; nothing else reads it as fact.
+- **Ticket events are a record; arcs are an interpretation.** Events log what AFK did and stay the source of truth; an arc block summarises them.
+- **Menu answering (S-A, S-C)** is live control and has no orientation overlap. It shares only AoE's waiting-state detection.
+- **Handoff detail** (files, commands, open loops, warnings) stays in the handoff, under the arc header.
+- **`ir`** stays the worktree inventory. Whether `ir next` is retired or feeds `aoe-fleet next` is a separate decision.
+
+### Decisions (2026-10-31)
+
+The four open questions in the CRA-1376 proposal were answered:
+
+1. `needs_you` is a first-class arc field. It is AFK's "Needs you".
+2. The panel's course line is produced without a model call.
+3. One validator: `timeline arc validate`, a Go package other Go code imports.
+4. Handoffs embed an arc block rather than linking to one.
+
+## Order of work
+
+1. CRA-949 slice 1 lands unchanged (phase 0).
+2. S-A plan starts now; it has no arc dependency. Its first task lands the native work period on main.
+3. CRA-1377 (`session-arc-v1`, fixtures, `timeline arc validate`) runs alongside S-A. The parts of S-D that don't render arcs (resolve, item, ticket rules, outbox, read-back, labels) can start in parallel.
+4. S-D's `progress` and `run_summary` arc blocks follow CRA-1377.
+5. CRA-1378 adds the AFK run store and outbox readers.
+6. S-B builds on S-A, S-D and CRA-1377. S-C follows S-A.
 
 ## Flexibility principle
 

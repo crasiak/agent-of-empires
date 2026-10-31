@@ -1,10 +1,10 @@
 # S-B: AFK goal runs and the work queue
 
 **Date:** 2026-10-30
-**Status:** Design approved in chat. Written spec awaiting user review.
+**Status:** Design approved in chat. Written spec awaiting user review (revised 2026-10-31 for `session-arc-v1` and `aoe-fleet next`).
 **Overview:** [afk-menus-and-goal-runs-overview](2026-10-30-afk-menus-and-goal-runs-overview.md)
 **Depends on:** [S-A menu answering](2026-10-30-afk-menu-answering-design.md) (engine, policies, answer log).
-**Uses:** [S-D ticket record](2026-10-30-afk-ticket-record-design.md) (`afk-record`) for every ticket read and write.
+**Uses:** [S-D ticket record](2026-10-30-afk-ticket-record-design.md) (`afk-record`) for every ticket read and write; `session-arc-v1` and `timeline arc validate` (CRA-1377) for handoffs and the review; `aoe-fleet next` (CRA-1256) for next-work proposals. See the overview's "Session orientation".
 **Repos:** agent-of-empires (extension, run store, TUI review), Pi fork only if the session API gap below needs it.
 
 ## Goal
@@ -28,11 +28,11 @@ This changes a current decision: today every work period needs its own confirmat
 ## Run loop
 
 1. Take the next `queued` item.
-2. Start a fresh Pi conversation for it (see "Fresh conversation per item") seeded with: the goal, the run rules, the previous item's handoff, the item's title and detail, and its branch.
+2. Start a fresh Pi conversation for it (see "Fresh conversation per item") seeded with: the goal, the run rules, the previous item's handoff (labelled as untrusted context), the item's title and detail, and its branch.
 3. Open a work period for the item under the run consent, with the item's request share: the larger of `run requests / items` (minimum 4) and the item's `estimate.requests`, capped by what's left of the run's requests. The run-level hours and requests are never raised by an estimate. The existing native work-period machinery runs it unchanged: evidence-cited checkpoints, continuations, limits.
 4. Menus are answered by S-A under the run's policy.
 5. When the item checkpoints `completed`, run **delivery** (below), record the result and handoff, and process follow-ups.
-6. Pull tracker next-work (`afk-record children` / `next-work`).
+6. Pull tracker work: the goal ticket's open children (`afk-record children`) and next-work proposals (`aoe-fleet next`). See "Where items come from".
 7. Stop if a stop condition holds, otherwise go to 1.
 
 ### Stop conditions
@@ -63,7 +63,11 @@ A single blocked item doesn't stop the run: it's recorded and the next item star
 
 - **Goal or ticket seed:** at run start.
 - **Agent follow-ups:** the `completed` checkpoint gains an optional `follow_ups: [{ title, detail, why, fold, estimate }]` (max 5). `next_step` stays null for `completed`. The item reminder says to finish related work inside the current item rather than split it out: one large coherent PR beats five small ones. A follow-up should be work that couldn't reasonably go in this item.
-- **Tracker next-work:** after each item, re-read the goal ticket's open children (and `--tracker` project or initiative next-work, including initiative `STATUS.yaml` when named). New ones are proposed for admission.
+- **Tracker next-work:** after each item:
+  - re-read the goal ticket's open children (`afk-record children`);
+  - ask `aoe-fleet next --session <item session> --project <run project> --generate` for its recommended next issue and alternatives. `--tracker` overrides the project. The call counts as one request toward the run's total and is skipped when fewer than 4 run requests remain. Its route is the session's Ledger home, as `aoe-fleet` already enforces.
+
+  New ones are proposed for admission. A recommendation from `aoe-fleet next` is a proposal like any other: it carries no authority and goes through the same admission check. Initiative `STATUS.yaml` files are not read directly; that course data reaches AFK through `aoe-fleet next` or not at all.
 
 ### Admission (goal check)
 
@@ -75,6 +79,7 @@ Every non-seed item goes through the S-A engine as a `Menu` with `kind: "admit_i
   - touches a repo not in the run;
   - matches a `stop` rule.
 - **`yolo`:** admit everything except duplicates and items over the `--items` limit.
+- Admission reads only the item proposal, the queue, the run limits and the rules. It never reads an arc, a handoff or an `aoe-fleet next` rationale as evidence that an item serves the goal.
 - Rejected items are recorded as `skipped` with the reason, so the review shows what AFK chose not to do.
 
 ### Fold or stack
@@ -134,14 +139,18 @@ Ticket events during the item (progress, wrong assumptions, scope, new tasks, bl
 - `run.json`: goal, ticket, policy, limits, consent, start and end, end reason.
 - `queue.jsonl`: queue events.
 - `answers.jsonl`: S-A answer log, including item admissions.
-- `items/<id>/handoff.md`: what the item did, what's left, decisions made, written by the agent in the delivery turn and checked to be non-empty.
+- `items/<id>/handoff.md`: written by the agent in the delivery turn. It opens with a `session-arc-v1` block for the item's conversation, followed by the handoff detail an arc can't hold: files and branch, decisions made, open loops and warnings.
+  - The extension checks the arc block with `timeline arc validate`. If it fails, the handoff is kept, marked `arc: invalid` with the validator's reason, and the review flags it. Delivery isn't affected.
+  - The handoff is untrusted context. It seeds the next item's conversation and is shown in the review. No gate reads it (see the overview's "Kept separate, on purpose").
 - `unrecognised/`: raw samples from S-A.
 
-The format is versioned so Ledger can import a run later as a record that groups the item sessions. Ledger import is a later slice and is not built here.
+The format is versioned so Ledger can import a run later as a record that groups the item sessions. Ledger import is a later slice and is not built here. Timeline reads the run store (CRA-1378) so other tools get run and item facts from Timeline rather than parsing these files themselves.
 
 ## Return review
 
-Extends the existing AFK review (Outcome / Effect / Needs attention):
+Extends the existing AFK review (Outcome / Effect / Needs attention), with the run's arc on top:
+
+- **Arc:** the `run_summary` arc. Each line shows its basis: run and item facts from the run store are `host_fact`, ticket and PR state is `course_fact`, and the agent's summaries are `assistant_reported`. `needs_you` lists the items below.
 
 - **Outcome:** goal, items done / done_local / blocked / skipped, end reason, limits used.
 - **Effect:** per item: PR link, ticket, files changed, branch.
@@ -158,6 +167,7 @@ The TUI review and `aoe afk review <session>` both read the run store.
 |---|---|
 | `afk-record resolve` fails at start | Run refuses to start, with the error. |
 | Linear read fails mid-run | Tracker pull skipped for that step and logged; run continues. |
+| `aoe-fleet next` fails, times out or returns no recommendation | Proposals skipped for that step and logged; run continues. |
 | `newSession` cancelled or fails | Item `blocked: session_unavailable`; counts toward the two-in-a-row stop. |
 | Handoff missing after delivery | Item still `done`; review flags the missing handoff. |
 | Run store write fails | Run stops immediately; nothing further is delivered. |
@@ -168,6 +178,8 @@ The TUI review and `aoe afk review <session>` both read the run store.
 - **Queue state machine** (Node, `aoe-afk-run-queue.test.mjs`): fold events, admission paths, depth-first ordering, duplicate detection, stop conditions including two blocked in a row.
 - **Delivery verifier** with a fake bridge: each outcome row above.
 - **Ticket seeding and item tickets** with a fake `afk-record` returning recorded outputs.
+- **Next-work proposals** with a fake `aoe-fleet next`: a recommendation is admitted or skipped by the same rules as a tracker item; failure and the low-request skip are logged.
+- **Arc isolation:** handoffs and `aoe-fleet next` rationales that claim approval, completion or scope don't change any admission, delivery or stop decision. A handoff whose arc fails `timeline arc validate` is kept and flagged.
 - **Session-per-item spike** (first plan task), then a test that a run with three items creates three Pi session files and carries no conversation content across.
 - **Offline scripted-provider demo:** ad-hoc goal, two seed items, one follow-up admitted and one skipped, one menu answered, delivery against a local bare git remote and a stubbed `gh`.
 - **Live canary** on the preview route: a small goal against a throwaway repo with a real remote, under `rules`.
