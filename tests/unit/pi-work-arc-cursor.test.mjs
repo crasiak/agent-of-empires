@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, existsSync, realpathSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net, { createConnection } from "node:net";
@@ -84,6 +84,7 @@ test("Pi cursor follows the active leaf, not the file's latest entry", async (t)
     { session_id: sid, source, leaf_id: null },
   );
   assert.equal(initial.version, 1);
+  assert.equal(initial.process_id, process.pid, "cursor identifies its actual socket publisher");
   assert.ok(!Number.isNaN(Date.parse(initial.updated_at)));
 
   state.leaf = "oldbranch";
@@ -94,6 +95,30 @@ test("Pi cursor follows the active leaf, not the file's latest entry", async (t)
   await handlers.get("agent_settled")({}, ctx);
   assert.equal(JSON.parse(readFileSync(cursor, "utf8")).leaf_id, "newbranch");
   assert.ok(!readFileSync(cursor, "utf8").includes("prompt text"));
+});
+
+test("socket publisher resolves a symlinked temporary directory before binding and publication", async (t) => {
+  const previous = process.env.TMPDIR;
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "ap-"));
+  const physical = join(root, "real");
+  const alias = join(root, "alias");
+  mkdirSync(physical);
+  symlinkSync(physical, alias);
+  process.env.TMPDIR = alias;
+  const { handlers, state, ctx, socketFile } = setup(t);
+  t.after(() => {
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+    rmSync(root, { recursive: true, force: true });
+  });
+  state.leaf = "leaf";
+  ctx.model = { provider: "fake", id: "selected" };
+  ctx.modelRegistry = { complete: () => assert.fail("status cannot infer") };
+  await handlers.get("session_start")({}, ctx);
+  const published = readFileSync(socketFile, "utf8").trim();
+  assert.equal(published, realpathSync(published), "consumer admits only physical no-follow paths");
+  assert.ok(published.startsWith(physical + "/"));
+  assert.equal((await request(published, { op: "status", version: 1, instance_id: "aoe-test", session_id: sid, source, leaf_id: "leaf", nonce: "physical" })).ok, true);
 });
 
 test("bounded work-arc requests use the owning Pi process model route", async (t) => {

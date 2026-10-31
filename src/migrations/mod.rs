@@ -64,6 +64,7 @@ mod v051_research_requests;
 mod v052_document_conversations;
 mod v053_skill_workshop;
 mod v054_work_arc_consent;
+mod v055_session_work_arc;
 
 /// Fixtures shared by the migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -110,7 +111,7 @@ use anyhow::Result;
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 54;
+const CURRENT_VERSION: u32 = 55;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -291,6 +292,7 @@ const MIGRATIONS: &[Migration] = &[
     ),
     (53, "skill_workshop", v053_skill_workshop::run),
     (54, "work_arc_consent", v054_work_arc_consent::run),
+    (55, "session_work_arc", v055_session_work_arc::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -439,6 +441,86 @@ fn set_version(version: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn schema54_upgrade_pauses_legacy_arcs_without_touching_newer_main_state() {
+        use serde_json::json;
+        let _home = crate::session::test_support::isolate_app_dir();
+        let app = crate::session::get_app_dir().unwrap();
+        let profile = app.join("profiles/test");
+        fs::create_dir_all(&profile).unwrap();
+        let session = crate::session::Instance::new("legacy", "/tmp/legacy");
+        let mut row = serde_json::to_value(&session).unwrap();
+        let at = "2026-10-20T01:02:03Z";
+        row["work_arc_enabled"] = true.into();
+        row["work_arc"] = json!({
+            "record":{"identity":{"session_id":session.id,"pi_id":"old-pi","launch_id":"old-launch","generation":1,"leaf":"old-turn"},
+                "at":at,"arc":{"goal":"Keep goal","now":"Old progress","remaining":"Checks","next":"Review"},
+                "selected_route":"fake/route","provider":"fake","model":"test","usage":null},
+            "attempts":[at],"pending":"stale-nonce","failed":false,"unavailable":false,"cleared":false,"epoch":7,"cost":"Unknown"
+        });
+        row["unrelated_current_main_field"] =
+            json!({"research":"keep", "documents":["keep"], "workshop":"keep"});
+        let original = serde_json::to_vec(&json!([row])).unwrap();
+        let path = profile.join("sessions.json");
+        fs::write(&path, &original).unwrap();
+        fs::write(app.join(VERSION_FILE), "54").unwrap();
+        let sentinels = [
+            "afk-control",
+            "afk-runtime",
+            "afk-settlement",
+            "research-requests",
+            "document-conversations",
+            "skill-workshop",
+        ];
+        for name in sentinels {
+            fs::create_dir_all(app.join(name)).unwrap();
+            fs::write(
+                app.join(name).join("retained.json"),
+                b"SYNTHETIC_UNRELATED_STATE",
+            )
+            .unwrap();
+        }
+        run_migrations().unwrap();
+        let migrated: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            migrated[0]["work_arc_enabled"], false,
+            "legacy conversation-only consent cannot become Session-lifetime consent"
+        );
+        assert_eq!(migrated[0]["work_arc"]["attempts"], json!([at]));
+        assert_eq!(migrated[0]["work_arc"]["pending"], serde_json::Value::Null);
+        assert_eq!(migrated[0]["work_arc"]["epoch"], 8);
+        assert_eq!(
+            migrated[0]["unrelated_current_main_field"],
+            row["unrelated_current_main_field"]
+        );
+        assert_eq!(get_current_version(), 55);
+        let registry = fs::read(&path).unwrap();
+        assert!(
+            fs::read_dir(&profile)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .any(|entry| {
+                    entry.file_name().to_string_lossy().contains("migration")
+                        && fs::read(entry.path()).ok().as_deref() == Some(original.as_slice())
+                }),
+            "migration keeps an exact old-shape backup"
+        );
+        for name in sentinels {
+            assert_eq!(
+                fs::read(app.join(name).join("retained.json")).unwrap(),
+                b"SYNTHETIC_UNRELATED_STATE"
+            );
+        }
+        run_migrations().unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            registry,
+            "second startup is byte-idempotent"
+        );
+    }
 
     // CRA-1131: an app dir that is the user's own symlink (for example
     // ~/.config/agent-of-empires -> ~/.agent-of-empires) must still run

@@ -353,9 +353,16 @@ impl Instance {
     pub(crate) fn uses_pi_session_sidecar(&self) -> bool {
         self.pi_sidecar_source().is_some_and(|source| {
             self.pi_extension_launched
-                || source
-                    .read_file(&self.id, "session_id", SESSION_SIDECAR_MAX_BYTES, None)
-                    .is_some()
+                || crate::hooks::session_id_leaf(
+                    self.active_execution
+                        .as_ref()
+                        .map(|execution| execution.launch_id.as_str()),
+                )
+                .is_ok_and(|leaf| {
+                    source
+                        .read_file(&self.id, &leaf, SESSION_SIDECAR_MAX_BYTES, None)
+                        .is_some()
+                })
         })
     }
 
@@ -572,6 +579,38 @@ mod tests {
     use crate::session::instance::test_helpers::*;
     use crate::session::test_support::EnvGuard;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    #[serial_test::serial]
+    fn pi_poller_after_reload_uses_only_the_current_launch_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let fixture = crate::session::work_arc::test_support::Fixture::new(temp.path());
+        let session: Instance =
+            serde_json::from_value(serde_json::to_value(&fixture.session).unwrap()).unwrap();
+        assert!(
+            session.uses_pi_session_sidecar(),
+            "a reloaded launch can find its qualified publication"
+        );
+        assert!(session.supports_session_poller());
+        let launch = &session.active_execution.as_ref().unwrap().launch_id;
+        std::fs::remove_file(fixture.hooks.join(format!("session_id.{launch}"))).unwrap();
+        std::fs::write(
+            fixture.hooks.join("session_id"),
+            "stale-legacy-conversation",
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.hooks.join("session_id.old-launch"),
+            "stale-launch-conversation",
+        )
+        .unwrap();
+        assert!(
+            !session.uses_pi_session_sidecar(),
+            "another launch or legacy leaf cannot admit the poller"
+        );
+        assert!(!session.supports_session_poller());
+    }
 
     #[test]
     #[serial_test::serial]

@@ -14,6 +14,7 @@ pub(crate) struct ArcIdentity {
 impl ArcIdentity {
     pub(crate) fn matches(&self, session: &Instance) -> bool {
         session.work_arc_enabled
+            && session.work_arc.consent_version == CONSENT_VERSION
             && self.session_id == session.id
             && session.agent_session_id.as_deref() == Some(&self.pi_id)
             && session.lifecycle_generation == self.generation
@@ -53,9 +54,16 @@ impl ArcCost {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ArcState {
+    #[serde(default)]
+    pub consent_version: u32,
+    #[serde(skip)]
     pub record: Option<StoredArc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(skip)]
+    pub document: Option<Box<ArcDocument>>,
     attempts: Vec<DateTime<Utc>>,
     pending: Option<String>,
     pub failed: bool,
@@ -67,9 +75,38 @@ pub(crate) struct ArcState {
     pub last_attempt_usage: Option<Value>,
 }
 
+impl Default for ArcState {
+    fn default() -> Self {
+        Self {
+            consent_version: CONSENT_VERSION,
+            record: None,
+            revision: None,
+            document: None,
+            attempts: Vec::new(),
+            pending: None,
+            failed: false,
+            unavailable: false,
+            cleared: false,
+            epoch: 0,
+            cost: ArcCost::NoRequest,
+            last_attempt_usage: None,
+        }
+    }
+}
+
 impl ArcState {
+    pub(crate) fn invalidate(&mut self) {
+        self.pending = None;
+        self.failed = false;
+        self.unavailable = false;
+        self.epoch = self.epoch.saturating_add(1);
+    }
+
+    #[cfg(test)]
     pub(crate) fn clear(&mut self) {
         self.record = None;
+        self.revision = None;
+        self.document = None;
         self.pending = None;
         self.failed = false;
         self.unavailable = false;
@@ -106,6 +143,10 @@ impl ArcState {
         Some(nonce)
     }
 
+    pub(crate) fn is_pending(&self, nonce: &str) -> bool {
+        self.pending.as_deref() == Some(nonce)
+    }
+
     pub(crate) fn finish(
         &mut self,
         nonce: &str,
@@ -128,6 +169,9 @@ impl ArcState {
             ArcCost::Unknown
         };
         if let Some(record) = record {
+            let document = ArcDocument::observe(record.clone(), self.document.as_deref(), false);
+            self.revision = Some(document.revision.clone());
+            self.document = Some(Box::new(document));
             self.record = Some(record);
         }
         true
@@ -137,6 +181,7 @@ impl ArcState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArcStatus {
     Off,
+    Paused,
     Missing,
     Loading,
     Current,
@@ -150,6 +195,7 @@ impl ArcStatus {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Off => "off",
+            Self::Paused => "paused",
             Self::Missing => "missing / no useful input",
             Self::Loading => "loading",
             Self::Current => "current",
@@ -166,16 +212,18 @@ pub(crate) fn supported(session: &Instance) -> bool {
 }
 
 pub(crate) fn visible_record(session: &Instance) -> Option<&StoredArc> {
-    session.work_arc.record.as_ref().filter(|r| {
-        session.work_arc_enabled
-            && r.identity.session_id == session.id
-            && session.agent_session_id.as_deref() == Some(&r.identity.pi_id)
-    })
+    session
+        .work_arc
+        .record
+        .as_ref()
+        .filter(|record| record.identity.session_id == session.id)
 }
 
 pub(crate) fn projection(session: &Instance) -> ArcStatus {
     if !session.work_arc_enabled {
-        return if session.work_arc.cleared {
+        return if visible_record(session).is_some() {
+            ArcStatus::Paused
+        } else if session.work_arc.cleared {
             ArcStatus::Cleared
         } else {
             ArcStatus::Off
@@ -211,6 +259,50 @@ mod tests {
             generation: 2,
             leaf: "leaf".into(),
         }
+    }
+
+    #[test]
+    fn session_arc_survives_a_successor_without_claiming_fresh_evidence() {
+        let mut session = Instance::new("synthetic", "/tmp/synthetic");
+        session.tool = "pi".into();
+        session.set_agent_conversation(Some("first".into()), None, None);
+        session.work_arc_enabled = true;
+        let mut source = identity();
+        source.session_id = session.id.clone();
+        source.pi_id = "first".into();
+        let at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let nonce = session.work_arc.reserve(&source, at).unwrap();
+        let record = StoredArc {
+            identity: source,
+            at,
+            arc: WorkArc::from_json(
+                r#"{"goal":"Retained goal","now":"Reported work","remaining":"Checks","next":"Review"}"#,
+            )
+            .unwrap(),
+            selected_route: "fake/route".into(),
+            provider: "fake".into(),
+            model: "synthetic".into(),
+            usage: None,
+        };
+        session.work_arc.finish(&nonce, Some(record.clone()), None);
+        let mut later = record.identity.clone();
+        later.leaf = "in-flight".into();
+        let pending = session
+            .work_arc
+            .reserve(&later, at + Duration::minutes(6))
+            .unwrap();
+
+        session.set_agent_conversation(Some("successor".into()), None, None);
+
+        assert!(session.work_arc_enabled, "Session consent survives handoff");
+        assert_eq!(visible_record(&session), Some(&record));
+        assert_eq!(projection(&session), ArcStatus::Stale);
+        assert!(!record.identity.matches(&session));
+        assert!(!session.work_arc.finish(&pending, Some(record), None));
+        assert!(session
+            .work_arc
+            .reserve(&later, at + Duration::minutes(7))
+            .is_none());
     }
 
     #[test]
@@ -285,7 +377,8 @@ mod tests {
         session.work_arc_status = Some(ArcStatus::Current);
         let mut row = serde_json::to_value(&session).unwrap();
         assert_eq!(row["work_arc"], expected);
-        assert!(row["work_arc"]["record"].is_object());
+        assert!(row["work_arc"].get("record").is_none());
+        assert!(row["work_arc"]["revision"].is_string());
         assert!(row.get("work_arc_status").is_none());
         let restored: Instance = serde_json::from_value(row.clone()).unwrap();
         assert!(restored.work_arc_enabled);

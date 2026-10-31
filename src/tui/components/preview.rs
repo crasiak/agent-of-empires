@@ -30,7 +30,10 @@ impl<'a> CachedPreview<'a> {
 /// Metadata rows before resources. `PreviewLayout` adds the shared info chrome.
 pub fn agent_info_height(instance: &Instance) -> u16 {
     let arc_rows = if crate::session::work_arc::supported(instance) {
-        1 + 4 * u16::from(instance.work_arc_enabled)
+        1 + 4 * u16::from(
+            instance.work_arc_enabled
+                || crate::session::work_arc::visible_record(instance).is_some(),
+        )
     } else {
         0
     };
@@ -429,16 +432,24 @@ impl Preview {
         if crate::session::work_arc::supported(instance) {
             let record = crate::session::work_arc::visible_record(instance);
             let covered = record
-                .map(|r| format!(", covered {}", r.at.format("%m-%d %H:%MZ")))
+                .map(|r| {
+                    format!(
+                        ", covered {}",
+                        r.at.with_timezone(&chrono::Local).format("%m-%d %H:%M %:z")
+                    )
+                })
                 .unwrap_or_default();
             let status = crate::session::work_arc::projection(instance);
-            let prior =
-                if record.is_some() && status != crate::session::work_arc::ArcStatus::Current {
-                    " (prior stale)"
-                } else {
-                    ""
-                };
-            let expand = if instance.work_arc_enabled {
+            let prior = if record
+                .is_some_and(|r| instance.agent_session_id.as_deref() != Some(&r.identity.pi_id))
+            {
+                " (carried forward)"
+            } else if record.is_some() && status != crate::session::work_arc::ArcStatus::Current {
+                " (prior stale)"
+            } else {
+                ""
+            };
+            let expand = if instance.work_arc_enabled || record.is_some() {
                 " [menu: expand]"
             } else {
                 ""
@@ -447,7 +458,7 @@ impl Preview {
                 format!("Arc: {}{prior}{covered}{expand}", status.label()),
                 Style::default().fg(theme.dimmed),
             ));
-            if instance.work_arc_enabled {
+            if instance.work_arc_enabled || record.is_some() {
                 for (label, value) in [
                     ("Goal: ", record.map(|r| r.arc.goal.as_str())),
                     ("Now: ", record.map(|r| r.arc.now.as_str())),
@@ -828,6 +839,7 @@ mod tests {
             (ArcStatus::Loading, 140),
             (ArcStatus::Stale, 140),
             (ArcStatus::Failed, 55),
+            (ArcStatus::Failed, 140),
             (ArcStatus::Unavailable, 55),
         ] {
             session.work_arc_status = Some(status);
@@ -853,6 +865,9 @@ mod tests {
                     usage: None,
                 });
             }
+            if status == ArcStatus::Failed {
+                session.agent_session_id = Some("successor-pi".into());
+            }
             let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
             terminal
                 .draw(|frame| {
@@ -874,6 +889,28 @@ mod tests {
             if status == ArcStatus::Stale {
                 assert!(rows[4].contains('…'), "clipped Goal has a cue: {text}");
                 assert!(text.contains("menu: expand"), "{text}");
+                let covered = session
+                    .work_arc
+                    .record
+                    .as_ref()
+                    .unwrap()
+                    .at
+                    .with_timezone(&chrono::Local)
+                    .format("%m-%d %H:%M %:z")
+                    .to_string();
+                assert!(
+                    text.contains(&covered),
+                    "covered time includes local UTC offset: {text}"
+                );
+            }
+            if status == ArcStatus::Failed {
+                assert!(
+                    text.contains("carried"),
+                    "successor cue must be distinguished from same-conversation staleness: {text}"
+                );
+                if width == 140 {
+                    assert!(text.contains("carried forward"), "{text}");
+                }
             }
             assert!(rows[8].trim().is_empty(), "arc cannot spill into resources");
         }

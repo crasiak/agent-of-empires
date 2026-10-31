@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 pub(super) struct ArcRefresh {
     pub(super) task: Option<tokio::task::JoinHandle<()>>,
+    invalidated: tokio_util::sync::CancellationToken,
     target: Option<Instance>,
     updates: mpsc::Receiver<ArcUpdate>,
     sender: mpsc::Sender<ArcUpdate>,
@@ -23,6 +24,7 @@ impl Default for ArcRefresh {
         let (sender, updates) = mpsc::channel();
         Self {
             task: None,
+            invalidated: tokio_util::sync::CancellationToken::new(),
             target: None,
             updates,
             sender,
@@ -34,16 +36,24 @@ impl Default for ArcRefresh {
 
 impl Drop for ArcRefresh {
     fn drop(&mut self) {
+        self.invalidated.cancel();
         if let Some(task) = self.task.take() {
             task.abort();
         }
     }
 }
 
-fn unchanged(row: &Instance, before: &Instance) -> bool {
+fn consent_unchanged(row: &Instance, before: &Instance) -> bool {
     row.work_arc_enabled
+        && row.work_arc.consent_version == arc::CONSENT_VERSION
+        && row.work_arc.consent_version == before.work_arc.consent_version
         && row.work_arc.epoch == before.work_arc.epoch
         && row.agent_session_id == before.agent_session_id
+}
+
+fn unchanged(row: &Instance, before: &Instance) -> bool {
+    consent_unchanged(row, before)
+        && row.agent_session_binding == before.agent_session_binding
         && row.active_execution == before.active_execution
         && row.lifecycle_generation == before.lifecycle_generation
 }
@@ -58,87 +68,155 @@ fn source_status(error: SourceError) -> ArcStatus {
     }
 }
 
-fn unique_owner(before: &Instance) -> bool {
-    let Ok(profiles) = crate::session::list_profiles() else {
-        return false;
-    };
-    for profile in profiles {
-        let Ok(storage) = Storage::open(&profile, crate::file_watch::FileWatchService::noop())
-        else {
-            return false;
-        };
-        let Ok(rows) = storage.load() else {
-            return false;
-        };
-        if rows.iter().any(|row| {
-            (row.id != before.id || profile != before.source_profile)
-                && (row.id == before.id
-                    || (row.agent_session_id.is_some()
-                        && row.agent_session_id == before.agent_session_id))
-        }) {
-            return false;
-        }
+fn arc_storages(before: &Instance) -> Result<Vec<Storage>, SourceError> {
+    let profiles = crate::session::list_profiles().map_err(|_| SourceError::Unavailable)?;
+    let storages = profiles
+        .into_iter()
+        .map(|profile| {
+            Storage::open(&profile, crate::file_watch::FileWatchService::noop())
+                .map_err(|_| SourceError::Unavailable)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !storages
+        .iter()
+        .any(|store| store.profile() == before.source_profile)
+    {
+        return Err(SourceError::Unavailable);
     }
-    true
+    Ok(storages)
 }
 
-async fn refresh(before: Instance, sender: mpsc::Sender<ArcUpdate>) {
-    let snapshot = before.clone();
-    let prepared = tokio::task::spawn_blocking(move || {
-        let storage = Storage::open(
-            &snapshot.source_profile,
-            crate::file_watch::FileWatchService::noop(),
-        )
-        .map_err(|_| SourceError::Unavailable)?;
-        let rows = storage.load().map_err(|_| SourceError::Unavailable)?;
-        let row = rows
-            .into_iter()
-            .find(|row| row.id == snapshot.id && unchanged(row, &snapshot))
-            .ok_or(SourceError::Disabled)?;
-        if !unique_owner(&row) {
+fn unique_owner_in(
+    before: &Instance,
+    storages: &[Storage],
+    cancel: &tokio_util::sync::CancellationToken,
+) -> bool {
+    let mut occurrences = 0;
+    for storage in storages {
+        let Ok(rows) = storage.load_work_arc_owners(before, cancel) else {
+            return false;
+        };
+        for row in rows {
+            if cancel.is_cancelled() {
+                return false;
+            }
+            if row.id == before.id && storage.profile() == before.source_profile {
+                occurrences += 1;
+            } else if row.id == before.id
+                || (row.agent_session_id.is_some()
+                    && row.agent_session_id == before.agent_session_id)
+            {
+                return false;
+            }
+        }
+    }
+    occurrences == 1
+}
+
+fn locked_arc<R>(
+    before: &Instance,
+    cancel: &tokio_util::sync::CancellationToken,
+    f: impl FnOnce(&Storage) -> Result<R, SourceError>,
+) -> Result<R, SourceError> {
+    if cancel.is_cancelled() {
+        return Err(SourceError::Unavailable);
+    }
+    let storages = arc_storages(before)?;
+    crate::session::with_storages_locked_cancellable(&storages, cancel, || {
+        if !unique_owner_in(before, &storages, cancel) {
             return Err(SourceError::Unavailable);
         }
-        let bound = arc::read_arc_source(&row)?;
-        Ok((storage, bound))
+        let storage = storages
+            .iter()
+            .find(|store| store.profile() == before.source_profile)
+            .ok_or(SourceError::Unavailable)?;
+        f(storage)
     })
+    .map_err(|_| SourceError::Unavailable)?
+}
+
+struct ArcReceipt {
+    before: Instance,
+    identity: arc::ArcIdentity,
+    nonce: String,
+    result: Result<arc::GeneratedArc, arc::ArcFailure>,
+}
+
+async fn request_refresh(
+    mut before: Instance,
+    sender: &mpsc::Sender<ArcUpdate>,
+    invalidated: &tokio_util::sync::CancellationToken,
+) -> Option<ArcReceipt> {
+    let snapshot = before.clone();
+    let prepared = arc::bounded_source_cancellable(
+        move |cancel| {
+            locked_arc(&snapshot, &cancel, |storage| {
+                let row = storage
+                    .load_work_arc_owners(&snapshot, &cancel)
+                    .map_err(|_| SourceError::Unavailable)?
+                    .into_iter()
+                    .find(|row| row.id == snapshot.id && unchanged(row, &snapshot))
+                    .ok_or(SourceError::Disabled)?;
+                arc::read_arc_source_cancellable(&row, &cancel)
+            })
+        },
+        Duration::from_secs(2),
+        invalidated,
+    )
     .await;
-    let (storage, bound) = match prepared {
-        Ok(Ok(value)) => value,
-        result => {
-            let error = result
-                .ok()
-                .and_then(Result::err)
-                .unwrap_or(SourceError::Failed);
+    let bound = match prepared {
+        Ok(value) => value,
+        Err(error) => {
             let _ = sender.send(ArcUpdate {
                 before,
                 state: None,
                 status: source_status(error),
             });
-            return;
+            return None;
         }
     };
-    if arc::check_arc_route(&bound).await.is_err() {
+    if arc::check_arc_route_cancellable(&bound, invalidated)
+        .await
+        .is_err()
+    {
         let _ = sender.send(ArcUpdate {
             before,
             state: None,
             status: ArcStatus::Unavailable,
         });
-        return;
+        return None;
     }
     let identity = bound.identity();
-    let reserved = storage.update(|rows, _| {
-        let Some(row) = rows
-            .iter_mut()
-            .find(|row| row.id == before.id && unchanged(row, &before))
-        else {
-            return Ok(None);
-        };
-        if !arc::read_arc_source(row).is_ok_and(|latest| latest.identity() == identity) {
-            return Ok(None);
-        }
-        let nonce = row.work_arc.reserve(&identity, chrono::Utc::now());
-        Ok(Some((nonce, row.work_arc.clone())))
-    });
+    let reserved_identity = identity.clone();
+    let snapshot = before.clone();
+    let reserved = arc::bounded_source_cancellable(
+        move |cancel| {
+            locked_arc(&snapshot, &cancel, |storage| {
+                storage
+                    .update_changed_cancellable_under_lock(&cancel, |rows, _| {
+                        let Some(row) = rows
+                            .iter_mut()
+                            .find(|row| row.id == snapshot.id && unchanged(row, &snapshot))
+                        else {
+                            return Ok((None, false));
+                        };
+                        if !arc::read_arc_source_cancellable(row, &cancel)
+                            .is_ok_and(|latest| latest.identity() == reserved_identity)
+                        {
+                            return Ok((None, false));
+                        }
+                        let original = row.work_arc.clone();
+                        let nonce = row.work_arc.reserve(&reserved_identity, chrono::Utc::now());
+                        let changed = row.work_arc != original;
+                        Ok((Some((nonce, row.work_arc.clone())), changed))
+                    })
+                    .map_err(|_| SourceError::Failed)
+            })
+        },
+        Duration::from_secs(2),
+        invalidated,
+    )
+    .await;
     let (nonce, state) = match reserved {
         Ok(Some((Some(nonce), state))) => (nonce, state),
         Ok(Some((None, state))) => {
@@ -162,7 +240,7 @@ async fn refresh(before: Instance, sender: mpsc::Sender<ArcUpdate>) {
                 state: Some(state),
                 status,
             });
-            return;
+            return None;
         }
         _ => {
             let _ = sender.send(ArcUpdate {
@@ -170,82 +248,143 @@ async fn refresh(before: Instance, sender: mpsc::Sender<ArcUpdate>) {
                 state: None,
                 status: ArcStatus::Unavailable,
             });
-            return;
+            return None;
         }
     };
     let _ = sender.send(ArcUpdate {
         before: before.clone(),
-        state: Some(state),
+        state: Some(state.clone()),
         status: ArcStatus::Loading,
     });
-    let result = arc::request_arc(bound).await;
+    // Receipt projection is relative to this reservation, not a newer canonical reload.
+    before.work_arc = state;
+    #[cfg(test)]
+    send_hook(&before).await;
     let snapshot = before.clone();
-    let finished = tokio::task::spawn_blocking(move || {
-        let rows = storage.load().map_err(|_| SourceError::Failed)?;
-        let row = rows
-            .into_iter()
-            .find(|row| row.id == snapshot.id && unchanged(row, &snapshot))
-            .ok_or(SourceError::Disabled)?;
-        if !unique_owner(&row) {
-            return Err(SourceError::Unavailable);
-        }
-        let status;
-        let attempt_usage;
-        let record = match result {
-            Ok(generated) => {
-                attempt_usage = generated.usage.clone();
-                let latest = arc::read_arc_source(&row)?;
-                if latest.identity() != identity {
+    let send_nonce = nonce.clone();
+    let result = arc::request_arc_guarded(
+        bound,
+        Box::new(move |bound, stream, request, cancel| {
+            locked_arc(&snapshot, cancel, |storage| {
+                let row = storage
+                    .load_work_arc_owners(&snapshot, cancel)
+                    .map_err(|_| SourceError::Unavailable)?
+                    .into_iter()
+                    .find(|row| row.id == snapshot.id && unchanged(row, &snapshot))
+                    .ok_or(SourceError::Disabled)?;
+                if !row.work_arc.is_pending(&send_nonce) {
                     return Err(SourceError::Stale);
                 }
-                status = ArcStatus::Current;
-                Some(arc::StoredArc {
-                    identity: generated.bound.identity(),
-                    at: chrono::Utc::now(),
-                    arc: generated.arc,
-                    selected_route: generated.selected_route,
-                    provider: generated.provider,
-                    model: generated.model,
-                    usage: generated.usage,
-                })
-            }
-            Err(failure) => {
-                status = source_status(failure.error);
-                attempt_usage = failure.usage;
-                None
-            }
-        };
-        storage
-            .update(|rows, _| {
-                let Some(row) = rows
-                    .iter_mut()
-                    .find(|row| row.id == snapshot.id && unchanged(row, &snapshot))
-                else {
-                    return Ok(None);
-                };
-                if !identity.matches(row)
-                    || !unique_owner(row)
-                    || (record.is_some()
-                        && !arc::read_arc_source(row)
-                            .is_ok_and(|latest| latest.identity() == identity))
-                    || !row.work_arc.finish(&nonce, record, attempt_usage)
-                {
-                    return Ok(None);
+                let latest = arc::read_arc_source_cancellable(&row, cancel)?;
+                if &latest != bound {
+                    return Err(SourceError::Stale);
                 }
-                if status == ArcStatus::Unavailable {
-                    if row.work_arc.last_attempt_usage.is_none() {
-                        row.work_arc.cost = arc::ArcCost::NoRequest;
-                    }
-                    row.work_arc.unavailable = true;
-                }
-                Ok(Some((row.work_arc.clone(), status)))
+                bound.write_request(stream, request, cancel)
             })
-            .map_err(|_| SourceError::Failed)
+        }),
+        invalidated,
+    )
+    .await;
+    Some(ArcReceipt {
+        before,
+        identity,
+        nonce,
+        result,
     })
+}
+
+async fn refresh(
+    before: Instance,
+    sender: mpsc::Sender<ArcUpdate>,
+    invalidated: tokio_util::sync::CancellationToken,
+) {
+    let received = tokio::select! {
+        biased;
+        _ = invalidated.cancelled() => return,
+        received = request_refresh(before, &sender, &invalidated) => received,
+    };
+    let Some(ArcReceipt {
+        before,
+        identity,
+        nonce,
+        result,
+    }) = received
+    else {
+        return;
+    };
+    // UI invalidation stops source work and IPC, not bounded receipt accounting.
+    let source_cancel = invalidated.child_token();
+    let _source_guard = source_cancel.clone().drop_guard();
+    let snapshot = before.clone();
+    let finished = arc::bounded_source(
+        move |cancel| {
+            locked_arc(&snapshot, &cancel, |storage| {
+                storage
+                    .update_changed_cancellable_under_lock(&cancel, |rows, _| {
+                        let Some(row) = rows
+                            .iter_mut()
+                            .find(|row| row.id == snapshot.id && consent_unchanged(row, &snapshot))
+                        else {
+                            return Ok((None, false));
+                        };
+                        if !row.work_arc.is_pending(&nonce) {
+                            return Ok((None, false));
+                        }
+                        let fresh = !invalidated.is_cancelled()
+                            && unchanged(row, &snapshot)
+                            && row.work_arc.revision == snapshot.work_arc.revision
+                            && identity.matches(row);
+                        let route_refused =
+                            result.as_ref().is_err_and(|failure| failure.route_refused);
+                        let (status, record, usage) = match result {
+                            Ok(generated) if !fresh => (ArcStatus::Stale, None, generated.usage),
+                            Ok(generated) => {
+                                match arc::read_arc_source_cancellable(row, &source_cancel) {
+                                    Ok(latest)
+                                        if !invalidated.is_cancelled()
+                                            && latest.identity() == identity =>
+                                    {
+                                        (
+                                            ArcStatus::Current,
+                                            Some(arc::StoredArc {
+                                                identity: generated.bound.identity(),
+                                                at: chrono::Utc::now(),
+                                                arc: generated.arc,
+                                                selected_route: generated.selected_route,
+                                                provider: generated.provider,
+                                                model: generated.model,
+                                                usage: generated.usage.clone(),
+                                            }),
+                                            generated.usage,
+                                        )
+                                    }
+                                    Ok(_) => (ArcStatus::Stale, None, generated.usage),
+                                    Err(error) => (source_status(error), None, generated.usage),
+                                }
+                            }
+                            Err(failure) if !fresh => (ArcStatus::Stale, None, failure.usage),
+                            Err(failure) => (source_status(failure.error), None, failure.usage),
+                        };
+                        if !row.work_arc.finish(&nonce, record, usage) {
+                            return Ok((None, false));
+                        }
+                        if status == ArcStatus::Unavailable {
+                            if route_refused && row.work_arc.last_attempt_usage.is_none() {
+                                row.work_arc.cost = arc::ArcCost::NoRequest;
+                            }
+                            row.work_arc.unavailable = true;
+                        }
+                        Ok((Some((row.work_arc.clone(), status)), true))
+                    })
+                    .map_err(|_| SourceError::Failed)
+            })
+        },
+        Duration::from_secs(2),
+    )
     .await;
     let (state, status) = match finished {
-        Ok(Ok(Some((state, status)))) => (Some(state), status),
-        Ok(Err(error)) => (None, source_status(error)),
+        Ok(Some((state, status))) => (Some(state), status),
+        Err(error) => (None, source_status(error)),
         _ => (None, ArcStatus::Failed),
     };
     let _ = sender.send(ArcUpdate {
@@ -255,11 +394,33 @@ async fn refresh(before: Instance, sender: mpsc::Sender<ArcUpdate>) {
     });
 }
 
+#[cfg(test)]
+type SendHook = (
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+#[cfg(test)]
+pub(super) static SEND_HOOK: std::sync::Mutex<Option<SendHook>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+async fn send_hook(row: &Instance) {
+    let hook = {
+        let mut slot = SEND_HOOK.lock().unwrap();
+        if slot.as_ref().is_some_and(|(id, _, _)| id == &row.id) {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, ready, release)) = hook {
+        ready.send(()).unwrap();
+        release.await.unwrap();
+    }
+}
+
 impl HomeView {
     pub(super) fn invalidate_work_arc_selection(&mut self) {
-        if let Some(task) = self.work_arc_refresh.task.take() {
-            task.abort();
-        }
+        self.work_arc_refresh.invalidated.cancel();
         self.work_arc_refresh.target = None;
         self.work_arc_refresh.checked = None;
         for row in self.instances.values_mut() {
@@ -288,19 +449,19 @@ impl HomeView {
             self.invalidate_work_arc_selection();
             if let Err(error) = self.apply_user_action(&before.id, |row| {
                 row.work_arc_enabled = false;
-                row.work_arc.clear();
+                row.work_arc.invalidate();
                 row.work_arc_status = None;
             }) {
                 self.info_dialog = Some(InfoDialog::new(
                     "Work arc",
-                    &format!("Could not disable: {error}"),
+                    &format!("Could not pause: {error}"),
                 ));
             }
         } else {
             self.work_arc_refresh.consent = Some(before);
             self.confirm_dialog = Some(ConfirmDialog::new(
                 "Enable work arc for this Session?",
-                "AoE will read bounded user/assistant text and send it through this Pi process's selected model route. Provider charges may apply; a virtual route may use another physical model. Only derived cues and spend limits are saved locally. No generation while the TUI is closed. At most 1 attempt/5 minutes and 20/day. Disable removes the cue. Enable only this Session?",
+                "For this AoE Session, including successor Pi conversations, AoE will read bounded current user/assistant text and send it through the guarded Pi process's selected model route. Provider charges may apply; a virtual route may use another physical model. Local documents/history retain derived fields, provenance and spend limits. No prior arc values, raw history or field timestamps are sent; no remote upload. Refresh runs while the TUI is open, at most 1 attempt/5 minutes and 20/day per Session. Pause retains documents/history/budgets. Carried-forward text is not fresh evidence. Enable this Session?",
                 "enable_work_arc",
             ).neutral().buttons("Enable", "Cancel"));
         }
@@ -320,7 +481,8 @@ impl HomeView {
         }
         if let Err(error) = self.apply_user_action(&before.id, |row| {
             row.work_arc_enabled = true;
-            row.work_arc.clear();
+            row.work_arc.consent_version = arc::CONSENT_VERSION;
+            row.work_arc.invalidate();
             row.work_arc.cleared = false;
             row.work_arc_status = None;
         }) {
@@ -360,11 +522,73 @@ impl HomeView {
             text.push_str(&format!("Latest attempt usage: {usage}\nCosts are catalog estimates, not provider billing.\n"));
         }
         if let Some(record) = arc::visible_record(row) {
-            text.push_str(&format!("\nGoal: {}\n\nNow: {}\n\nRemaining: {}\n\nNext: {}\n\nCovered: {}\nSelected route: {}\nActual: {}/{}\nUsage: {}\nLeaf: {}",
-                record.arc.goal, record.arc.now, record.arc.remaining, record.arc.next,
-                record.at.format("%Y-%m-%d %H:%M UTC"), record.selected_route,
-                record.provider, record.model,
-                record.usage.as_ref().map_or("unknown".into(), |v| v.to_string()), record.identity.leaf));
+            let time = |at: Option<chrono::DateTime<chrono::Utc>>| {
+                at.map_or("unknown".into(), |at| {
+                    at.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S %:z")
+                        .to_string()
+                })
+            };
+            for (index, (label, value)) in [
+                ("Goal", &record.arc.goal),
+                ("Now", &record.arc.now),
+                ("Remaining", &record.arc.remaining),
+                ("Next", &record.arc.next),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                text.push_str(&format!("\n{label}: {value}\n"));
+                if let Some(document) = &row.work_arc.document {
+                    let field = &document.fields[index];
+                    let carried =
+                        if row.agent_session_id.as_deref() != Some(field.source.pi_id.as_str()) {
+                            " (carried forward)"
+                        } else {
+                            ""
+                        };
+                    text.push_str(&format!(
+                        "Observed: {} | Changed: {}\nSource: {} / {}{carried}\n",
+                        time(field.observed_at),
+                        time(field.changed_at),
+                        field.source.pi_id,
+                        field.source.leaf
+                    ));
+                }
+            }
+            text.push_str(&format!(
+                "\nCovered: {}\nSelected route: {}\nActual: {}/{}\nUsage: {}\nLeaf: {}",
+                time(Some(record.at)),
+                record.selected_route,
+                record.provider,
+                record.model,
+                record
+                    .usage
+                    .as_ref()
+                    .map_or("unknown".into(), |v| v.to_string()),
+                record.identity.leaf
+            ));
+            if let Some(storage) = self.storages.get(&row.source_profile) {
+                match storage.work_arc_history(row, 8) {
+                    Ok(history) => {
+                        text.push_str("\n\nRecent history (latest first, at most 8; older revisions retained):");
+                        for document in history {
+                            let record = document.record;
+                            text.push_str(&format!(
+                                "\n{} | {} / {}\nGoal: {} | Now: {}\nRemaining: {} | Next: {}",
+                                time(Some(record.at)),
+                                record.identity.pi_id,
+                                record.identity.leaf,
+                                record.arc.goal,
+                                record.arc.now,
+                                record.arc.remaining,
+                                record.arc.next
+                            ));
+                        }
+                    }
+                    Err(error) => text.push_str(&format!("\nHistory unavailable: {error}")),
+                }
+            }
         }
         self.info_dialog = Some(
             InfoDialog::new("Work arc (Up/Down to scroll)", &text)
@@ -385,11 +609,14 @@ impl HomeView {
         }
         let mut changed = invalidated;
         while let Ok(update) = self.work_arc_refresh.updates.try_recv() {
-            if let Some(row) = self
-                .instances
-                .get_mut(&update.before.id)
-                .filter(|row| unchanged(row, &update.before))
-            {
+            if let Some(row) = self.instances.get_mut(&update.before.id).filter(|row| {
+                unchanged(row, &update.before)
+                    && (row.work_arc == update.before.work_arc
+                        || update
+                            .state
+                            .as_ref()
+                            .is_some_and(|state| state == &row.work_arc))
+            }) {
                 if let Some(state) = update.state {
                     row.work_arc = state;
                 }
@@ -421,14 +648,17 @@ impl HomeView {
         else {
             return changed;
         };
-        if !row.work_arc_enabled || !arc::supported(row) {
+        if !row.work_arc_enabled
+            || row.work_arc.consent_version != arc::CONSENT_VERSION
+            || !arc::supported(row)
+        {
             return changed;
         }
         if self
             .work_arc_refresh
             .checked
             .as_ref()
-            .is_some_and(|(id, at)| *id == row.id && at.elapsed() < Duration::from_secs(5))
+            .is_some_and(|(id, at)| id == &row.id && at.elapsed() < Duration::from_secs(5))
         {
             return changed;
         }
@@ -443,9 +673,11 @@ impl HomeView {
         changed = true;
         self.work_arc_refresh.target = Some(row.clone());
         self.work_arc_refresh.checked = Some((row.id.clone(), Instant::now()));
+        self.work_arc_refresh.invalidated = tokio_util::sync::CancellationToken::new();
         self.work_arc_refresh.task = Some(tokio::spawn(refresh(
             row,
             self.work_arc_refresh.sender.clone(),
+            self.work_arc_refresh.invalidated.clone(),
         )));
         changed
     }

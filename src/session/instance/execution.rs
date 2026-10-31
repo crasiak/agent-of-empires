@@ -2847,9 +2847,8 @@ impl Instance {
     ) {
         if self.agent_session_id != sid {
             if self.work_arc_enabled || self.work_arc.record.is_some() {
-                self.work_arc.clear();
+                self.work_arc.invalidate();
             }
-            self.work_arc_enabled = false;
             self.work_arc_status = None;
         }
         self.agent_session_binding =
