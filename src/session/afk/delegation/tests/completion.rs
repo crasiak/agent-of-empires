@@ -85,8 +85,7 @@ fn persisted_sdk_completion_uses_one_continuous_host_bridge() {
         let transport = Store::transport(app.path(), "default", "test", true).unwrap();
         let mut child = Command::new("node")
             .arg("--import")
-            .arg(source.join("node_modules/tsx/dist/loader.mjs"))
-            .env("TSX_TSCONFIG_PATH", source.join("tsconfig.json"))
+            .arg(source.join("packages/coding-agent/src/experimental/source-resolver.ts"))
             .args(["assets/session/aoe-afk-completion-fixture.mjs", scenario])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

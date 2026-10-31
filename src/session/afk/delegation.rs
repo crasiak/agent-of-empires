@@ -1331,7 +1331,7 @@ pub(super) fn acknowledge(
             && ack.binding == *binding
             && probe.binding == *binding
             && ack.generation == generation
-            && ack.sdk == "0.87.1"
+            && ack.sdk == "1.2.0"
             && ack.coverage == COVERAGE
             && ack.challenge == probe.challenge
             && ack.window == probe.window
@@ -1382,7 +1382,7 @@ fn exchange_runtime(
                 && ack.budgeted == probe.budgeted
                 && ack.usage_policy_hash == probe.usage_policy_hash
                 && ack.usage_coverage == "native-entries-terminal-v2"
-                && ack.sdk == "0.87.1"
+                && ack.sdk == "1.2.0"
                 && ack.coverage == COVERAGE
                 && uuid::Uuid::parse_str(&ack.generation).is_ok()
             {

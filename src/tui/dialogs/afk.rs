@@ -13,6 +13,12 @@ use tui_input::{backend::crossterm::EventHandler, Input};
 
 type Reply = anyhow::Result<afk::Report>;
 type Dispatch = Box<dyn Fn(Operation) -> Receiver<Reply> + Send>;
+type NativeReply = anyhow::Result<afk::work_period::Inspection>;
+type NativeDispatch = Box<dyn Fn(NativeOperation) -> Receiver<NativeReply> + Send>;
+enum NativeOperation {
+    Inspect,
+    Stop(Box<afk::work_period::Inspection>),
+}
 
 pub struct AfkDialog {
     title: String,
@@ -23,24 +29,57 @@ pub struct AfkDialog {
     pending_operation: Option<Operation>,
     observed: Option<std::time::Instant>,
     stale: bool,
+    native_dispatch: Option<NativeDispatch>,
+    native_pending: Option<Receiver<NativeReply>>,
+    native_report: Option<afk::work_period::Inspection>,
+    native_message: String,
+    native_observed: Option<std::time::Instant>,
+    native_stale: bool,
+    scroll: u16,
 }
 impl AfkDialog {
     pub fn new(instance: Instance) -> Self {
         let title = instance.title.clone();
+        let worker = instance.clone();
         let (tx, rx) = mpsc::channel::<(Operation, mpsc::Sender<Reply>)>();
-        // Closing the dialog closes the queue; an already-requested Off still runs.
         std::thread::spawn(move || {
             for (operation, reply) in rx {
-                let _ = reply.send(afk::control(&instance, operation));
+                let _ = reply.send(afk::control(&worker, operation));
             }
         });
+        let off_instance = instance.clone();
         let dispatch = Box::new(move |operation| {
             let (reply, result) = mpsc::channel();
-            let _ = tx.send((operation, reply));
+            if operation == Operation::Off {
+                // Off publishes independently of an outstanding On/status exchange.
+                let instance = off_instance.clone();
+                std::thread::spawn(move || {
+                    let _ = reply.send(afk::control(&instance, operation));
+                });
+            } else {
+                let _ = tx.send((operation, reply));
+            }
             result
         });
+        let (native_tx, native_rx) =
+            mpsc::channel::<(NativeOperation, mpsc::Sender<NativeReply>)>();
+        std::thread::spawn(move || {
+            for (operation, reply) in native_rx {
+                let result = match operation {
+                    NativeOperation::Inspect => afk::work_period::inspect(&instance),
+                    NativeOperation::Stop(observed) => afk::work_period::stop(&instance, &observed),
+                };
+                let _ = reply.send(result);
+            }
+        });
         let mut dialog = Self::with_dispatch(title, dispatch);
+        dialog.native_dispatch = Some(Box::new(move |operation| {
+            let (reply, result) = mpsc::channel();
+            let _ = native_tx.send((operation, reply));
+            result
+        }));
         dialog.start(Operation::Status);
+        dialog.start_native(NativeOperation::Inspect);
         dialog
     }
     fn with_dispatch(title: String, dispatch: Dispatch) -> Self {
@@ -53,7 +92,28 @@ impl AfkDialog {
             pending_operation: None,
             observed: None,
             stale: false,
+            native_dispatch: None,
+            native_pending: None,
+            native_report: None,
+            native_message: "Start native work with /afk-work on in the attached Pi Session".into(),
+            native_observed: None,
+            native_stale: false,
+            scroll: 0,
         }
+    }
+    fn start_native(&mut self, operation: NativeOperation) {
+        if self.native_pending.is_some() {
+            return;
+        }
+        let Some(dispatch) = &self.native_dispatch else {
+            return;
+        };
+        self.native_pending = Some(dispatch(operation));
+        self.native_observed = None;
+        self.native_stale = false;
+        self.scroll = 0;
+        self.native_message =
+            "Waiting for native inspection/withdrawal; this cannot grant work...".into();
     }
     fn start(&mut self, operation: Operation) {
         if self.pending.is_some()
@@ -73,6 +133,42 @@ impl AfkDialog {
         .into();
     }
     pub fn tick(&mut self) -> bool {
+        let mut native_changed = false;
+        if let Some(rx) = &self.native_pending {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.native_message = match result {
+                        Ok(report) => {
+                            self.native_observed = Some(std::time::Instant::now());
+                            let text = report.describe();
+                            self.native_report = Some(report);
+                            text
+                        }
+                        Err(error) => {
+                            self.native_report = None;
+                            format!("Native work unconfirmed: {error:#}")
+                        }
+                    };
+                    self.native_pending = None;
+                    native_changed = true;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.native_pending = None;
+                    self.native_report = None;
+                    self.native_message = "Native inspection worker unavailable".into();
+                    native_changed = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if !self.native_stale
+            && self
+                .native_observed
+                .is_some_and(|at| at.elapsed() >= afk::FRESHNESS)
+        {
+            self.native_stale = true;
+            native_changed = true;
+        }
         if let Some(rx) = &self.pending {
             match rx.try_recv() {
                 Ok(result) => {
@@ -105,13 +201,29 @@ impl AfkDialog {
             self.stale = true;
             return true;
         }
-        false
+        native_changed
     }
     pub fn handle_key(&mut self, key: KeyEvent) -> DialogResult<()> {
         match key.code {
             KeyCode::Esc => return DialogResult::Cancel,
-            KeyCode::Char('r') => self.start(Operation::Status),
+            KeyCode::Char('r') => {
+                self.start(Operation::Status);
+                self.start_native(NativeOperation::Inspect);
+            }
             KeyCode::Char('o') => self.start(Operation::Off),
+            KeyCode::Char('s') => {
+                if !self.native_stale && self.native_observed.is_some() {
+                    if let Some(report) = self.native_report.clone() {
+                        self.start_native(NativeOperation::Stop(Box::new(report)));
+                    }
+                } else {
+                    self.native_message =
+                        "Inspect fresh native state before a targeted stop; o remains global Off"
+                            .into();
+                }
+            }
+            KeyCode::PageDown => self.scroll = self.scroll.saturating_add(5),
+            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(5),
             KeyCode::Enter => match self.minutes.value().parse::<u32>() {
                 Ok(minutes) if (1..=1440).contains(&minutes) => {
                     self.start(Operation::On { minutes })
@@ -135,25 +247,43 @@ impl AfkDialog {
     }
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let block = super::toned_dialog_block(
-            " AFK control-only / delegation status ",
+            " AFK / native work / restricted delegation ",
             theme.border,
             theme.title,
         );
-        let (_, inner) = super::render_dialog_frame(frame, area, 76, 19, block);
+        let (_, inner) = super::render_dialog_frame(frame, area, 86, 27, block);
         let stale = if self.stale {
             "STALE observation: press r to inspect again.\n"
         } else {
             ""
         };
-        let text = format!("{}\n\n{}{}\n\nExpiry in minutes: {}\nEnter: control-only on   o: off + bulk exclude   r: inspect   Esc: close\nQuestions remain open; delegation requires an explicit grant.\nCLI allow-bulk clears only the exclusion, never grants authority.", self.title, stale, self.message, self.minutes.value());
+        let native_stale = if self.native_stale {
+            "STALE native observation: r to inspect again.\n"
+        } else {
+            ""
+        };
+        let text = format!(
+            "{}\n{}{}\n\nAFK control-only / restricted delegation:\n{}{}",
+            self.title, native_stale, self.native_message, stale, self.message
+        );
+        let content = inner.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(7)]).split(content);
         frame.render_widget(
             Paragraph::new(text)
                 .wrap(Wrap { trim: false })
+                .scroll((self.scroll, 0))
                 .style(Style::default().fg(theme.text)),
-            inner.inner(Margin {
-                horizontal: 1,
-                vertical: 1,
-            }),
+            parts[0],
+        );
+        let controls = format!("Expiry in minutes: {} (control-only)\nEnter: control-only on   o: off + bulk exclude\ns: stop native work   r: inspect both   PgUp/PgDn: scroll\nNative start/consent: /afk-work on in the attached Pi Session\nQuestions remain open. CLI allow-bulk grants no authority.\nEsc: close (not Off)", self.minutes.value());
+        frame.render_widget(
+            Paragraph::new(controls)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(theme.text)),
+            parts[1],
         );
     }
 }

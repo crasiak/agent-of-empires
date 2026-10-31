@@ -120,7 +120,7 @@ test("failed usage release cannot be trusted by same-manager extension reload", 
     const reopened = restore(f);
     assert.equal(reopened.witness.blocked(undefined), true);
     assert.equal(reopened.witness.pending, 1);
-    const child = spawnSync(process.execPath,["--import",join(core,"node_modules/tsx/dist/loader.mjs"),fileURLToPath(import.meta.url),"--read-witness",f.manager.getSessionFile(),JSON.stringify(f.r.bootstrap.binding)],{encoding:"utf8",timeout:10000});
+    const child = spawnSync(process.execPath,["--import",join(core,"packages/coding-agent/src/experimental/source-resolver.ts"),fileURLToPath(import.meta.url),"--read-witness",f.manager.getSessionFile(),JSON.stringify(f.r.bootstrap.binding)],{encoding:"utf8",timeout:10000});
     assert.equal(child.status,0,child.stderr);
     assert.deepEqual(JSON.parse(child.stdout),{blocked:true,pending:1,failure:null},"fresh process reads original required intent, not poisoned memory");
     assert.equal(f.ops.length, 0);
@@ -140,7 +140,7 @@ test("failure custody dominates already-created release and admission shortcuts"
 
 test("failure custody overflow and malformed state are sticky across module reload", {skip:!core}, ()=>{
   for(const mode of ["preexisting","malformed","overflow"]){
-    const child=spawnSync(process.execPath,["--import",join(core,"node_modules/tsx/dist/loader.mjs"),fileURLToPath(import.meta.url),"--custody-fault",mode],{encoding:"utf8",timeout:20000});
+    const child=spawnSync(process.execPath,["--import",join(core,"packages/coding-agent/src/experimental/source-resolver.ts"),fileURLToPath(import.meta.url),"--custody-fault",mode],{encoding:"utf8",timeout:20000});
     assert.equal(child.status,0,child.stderr);assert.deepEqual(JSON.parse(child.stdout),{mode,stickyRefusal:true});
   }
 });

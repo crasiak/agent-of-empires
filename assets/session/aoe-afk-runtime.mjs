@@ -7,9 +7,39 @@ import { registerAfk } from "./aoe-afk.mjs";
 import { createCollector } from "./aoe-afk-usage.mjs";
 import { createUsageWitness, USAGE_COVERAGE } from "./aoe-afk-usage-guard.mjs";
 import { automaticWake } from "./aoe-afk-wake.mjs";
+import { workPeriodRuntime, workCheckpointParameters } from "./aoe-afk-work-period.mjs";
 
 const COVERAGE = "stock-sdk-main-loop-reservations";
 const NAMES = ["aoe_afk_read", "aoe_afk_record", "aoe_afk_apply", "aoe_afk_checkpoint"];
+const decisionSchema = Type.Object({
+  id: Type.String({ pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" }),
+  question: Type.String({ minLength: 1 }),
+  alternatives: Type.Array(Type.Object({
+    name: Type.String(),
+    pros: Type.String(),
+    cons: Type.String(),
+    scores: Type.Array(Type.Integer({ minimum: 1, maximum: 5 }), { minItems: 1, maxItems: 4 }),
+  }, { additionalProperties: false }), { minItems: 2, maxItems: 4 }),
+  criteria: Type.Array(Type.Object({
+    name: Type.String(),
+    weight: Type.Integer({ minimum: 1, maximum: 5 }),
+  }, { additionalProperties: false }), { minItems: 1, maxItems: 4 }),
+  evidence: Type.Array(Type.String()),
+  assumptions: Type.Array(Type.String()),
+  uncertainties: Type.Array(Type.String()),
+  recommendation: Type.String(),
+  rationale: Type.String({ minLength: 1 }),
+  rollback: Type.String({ minLength: 1 }),
+  reversible: Type.Boolean(),
+  risk: Type.Union([Type.Literal("low"), Type.Literal("high"), Type.Literal("unknown")]),
+  human_required: Type.Boolean(),
+  depends_on: Type.Array(Type.String()),
+  action: Type.Union([Type.Null(), Type.Object({
+    path: Type.String(),
+    expected_hash: Type.Union([Type.Null(), Type.String({ pattern: "^[0-9a-f]{64}$" })]),
+    content: Type.String(),
+  }, { additionalProperties: false })]),
+}, { additionalProperties: false });
 const textResult = value => ({ content: [{ type: "text", text: JSON.stringify(value) }], details: value });
 const CONTINUATION = "aoe-afk-continuation";
 const clean = messages => messages.filter(m => ![CONTINUATION, "aoe-afk-delegation"].includes(m.customType));
@@ -19,7 +49,8 @@ const REMINDER = "AoE explicit delegation. Use only aoe_afk_read, aoe_afk_record
 
 export function delegationRuntime(pi) {
   let current;
-  const qualified = VERSION === "0.87.1";
+  const qualified = ctx => VERSION === "1.2.0" && typeof ctx?.abortPreservingQueue === "function"
+    && typeof ctx.endRunPreservingQueue === "function" && ctx.inputProvenance === "pipeline-v1";
   const live = r => r.view && performance.now() < r.delegateDeadline && Date.now() < r.view.expires_at_ms;
   const observable = r => r.signal && !r.signal.aborted && r.ctx.signal === r.signal && !r.ctx.isIdle() && !r.settling;
   const active = r => r && (r.usageWitness?.failure || r.usageWitness?.pending || r.usageDenied || r.owned || (live(r) && (r.budgetDenied || (!r.parked && r.view.state === "pending"))));
@@ -33,6 +64,7 @@ export function delegationRuntime(pi) {
     && (!args.options || (Array.isArray(args.options) && args.options.every(o => o && typeof o.title === "string" && Object.keys(o).every(k => ["title", "description"].includes(k)))));
   const abortEpisode = (r, ctx = r?.ctx) => {
     if (r?.queueAbort) r.queueAbort();
+    else if (typeof ctx?.abortPreservingQueue === "function") ctx.abortPreservingQueue();
     else if (!r?.view?.grant.settlement_nudges && !r?.view?.grant.question_deferrals) ctx.abort();
   };
   const policyAbort = (r, ctx = r.ctx) => {
@@ -100,7 +132,7 @@ export function delegationRuntime(pi) {
   const questions = questionRuntime(pi, { current: () => current, stop, live, observable, supportedQuestion, usageDenied: (r, reason) => usageAbort(r, r.ctx, reason) });
   const wake = automaticWake(pi, (r, received) => {
     try {
-      return qualified && r.ctx.mode === "tui" && r.ctx.isIdle() && !r.ctx.hasPendingMessages()
+      return qualified(r.ctx) && r.ctx.mode === "tui" && r.ctx.isIdle() && !r.ctx.hasPendingMessages()
         && typeof r.ctx.ui.getEditorText === "function" && r.ctx.ui.getEditorText() === ""
         && !active(r) && !r.failure && !r.interaction && questions.wakeClear(r) && (!received || r.state === "off");
     } catch { return false; }
@@ -135,11 +167,11 @@ export function delegationRuntime(pi) {
   };
   for (const [name, parameters, run] of [
     [NAMES[0], Type.Object({ path: Type.String({ maxLength: 256 }) }, { additionalProperties: false }), (args) => ({ kind: "read", path: args.path })],
-    [NAMES[1], Type.Object({ decision: Type.Unknown() }, { additionalProperties: false }), (args) => ({ kind: "record", decision: args.decision })],
+    [NAMES[1], Type.Object({ decision: decisionSchema }, { additionalProperties: false }), (args) => ({ kind: "record", decision: args.decision })],
     [NAMES[2], Type.Object({ decision: Type.String({ maxLength: 36 }) }, { additionalProperties: false }), (args) => ({ kind: "apply", decision: args.decision })],
     [NAMES[3], Type.Object({ checkpoint: Type.Unknown() }, { additionalProperties: false }), args => ({ kind: "checkpoint", claims: args.checkpoint })],
   ]) {
-    pi.registerTool({ name, label: name, description: `${REMINDER} Record schema: {id:UUID,question,alternatives:[{name,pros,cons,scores:[1..5]}],criteria:[{name,weight:1..5}],evidence:[],assumptions:[],uncertainties:[],recommendation,rationale,rollback,reversible:boolean,risk:"low"|"high"|"unknown",human_required:boolean,depends_on:[],action:null|{path,expected_hash:null|sha256,content}}. Record at most 8KiB UTF8 JSON.`, parameters, executionMode: "sequential",
+    pi.registerTool({ name, label: name, description: `${REMINDER} Record at most 8KiB UTF8 JSON.`, parameters, executionMode: "sequential",
       async execute(_id, args, _signal, _update, ctx) { return textResult(await command(current, run(args), ctx)); },
     });
   }
@@ -293,7 +325,7 @@ export function delegationRuntime(pi) {
         r.window = view.window; r.externalMessages = undefined; r.queueAbort = undefined; r.usageCompletion = undefined;
         r.budgetDenied = false; r.budgetAbortSignal = undefined; r.questionDenied = undefined; r.usageDenied = undefined;
         r.parked = false; r.request = undefined; r.reason = undefined; r.questionUnavailable = false;
-        if (!qualified) { r.view = view; await stop(r, "unsupported SDK; executable activation refused"); return; }
+        if (!qualified(r.ctx)) { r.view = view; await stop(r, "unsupported SDK; executable activation refused"); return; }
         r.delegateDeadline = performance.now() + Math.max(0, Math.min(view.expires_at_ms - view.issued_at_ms, view.expires_at_ms - Date.now()));
       }
       if (!view && r.view) {
@@ -322,7 +354,7 @@ export function delegationRuntime(pi) {
       }
       await questions.poll(r);
       if (r.parked && view?.state === "pending") return;
-      if (probe && qualified && !r.usageWitness.failure && (!probe.window || !r.questionUnavailable) && (!probe.window || (!view?.grant.settlement_nudges && !view?.grant.question_deferrals && !probe.budgeted) || typeof r.ctx.abortPreservingQueue === "function") && probe.version === 6 && JSON.stringify(probe.binding) === JSON.stringify(r.bootstrap.binding)
+      if (probe && qualified(r.ctx) && !r.usageWitness.failure && (!probe.window || !r.questionUnavailable) && (!probe.window || (!view?.grant.settlement_nudges && !view?.grant.question_deferrals && !probe.budgeted) || typeof r.ctx.abortPreservingQueue === "function") && probe.version === 6 && JSON.stringify(probe.binding) === JSON.stringify(r.bootstrap.binding)
         && (!probe.window || (probe.window === view?.window && probe.grant_hash === view?.grant_hash && probe.budgeted === (view?.batch?.shared_requests != null)))
         && (!probe.window || probe.usage_policy_hash === view?.usage_policy_hash)
         && (probe.usage_policy_hash == null || (r.usageWitness.acknowledge(view) && r.usageCollector.supports(r)))) {
@@ -351,7 +383,7 @@ export function delegationRuntime(pi) {
       if (r.usageDenied || usageBlocked(r)) { usageAbort(r, ctx, r.usageDenied, true); return { messages }; }
       if (r.budgetDenied) { policyAbort(r, ctx); return { messages }; }
       const w = r.view;
-      if (!qualified || (!r.owned && (r.parked || !w || w.state !== "pending" || !w.confirmed))) return;
+      if (!qualified(ctx) || (!r.owned && (r.parked || !w || w.state !== "pending" || !w.confirmed))) return;
       // Context is emitted after the prior tool batch settles, never in a tool callback.
       r.owned = true;
       if (!w || r.parked || r.failure || !observable(r) || performance.now() >= r.delegateDeadline || Date.now() >= w.expires_at_ms || ctx.signal?.aborted || ctx.hasPendingMessages() || w.generation !== r.generation || w.state === "ended") {
@@ -386,4 +418,8 @@ export function delegationRuntime(pi) {
   };
 }
 
-export default function (pi) { registerAfk(pi, { protocol: 6, delegation: delegationRuntime(pi) }); }
+export default function (pi) {
+  const delegation = delegationRuntime(pi);
+  const workPeriod = workPeriodRuntime(pi, { version: VERSION, parameters: workCheckpointParameters(Type) });
+  registerAfk(pi, { protocol: 6, delegation, workPeriod });
+}

@@ -25,6 +25,7 @@ pub mod idle_reap;
 pub mod import;
 mod instance;
 pub mod launch_identity;
+pub(crate) mod ledger_pi;
 pub mod ledger_restart;
 pub mod mcp;
 mod move_journal;

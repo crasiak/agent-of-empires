@@ -103,6 +103,8 @@ impl Instance {
             if backend != SessionCaptureBackend::Pi
                 || launch_command::environment_defines_path(&self.resolved_host_environment())
                 || (crate::session::tailored::document::account(self).is_none()
+                    && crate::session::ledger_pi::profile(&self.tool, self.get_tool_command())
+                        .is_none()
                     && !crate::agents::pi_supports_extension_flag())
             {
                 return None;

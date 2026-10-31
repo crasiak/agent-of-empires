@@ -18,7 +18,7 @@ const capture = () => { const lines = []; return { lines, trace: createTrace(lin
 test("copied observer entry initializes through the actual source loader outside node_modules", () => {
   const dir = mkdtempSync(join(tmpdir(), "observer-entry-"));
   try {
-    for (const file of ["aoe-afk-observer-entry-fixture.mjs", "aoe-afk-observer-fixture.mjs", "aoe-afk-observer-audit.mjs", "aoe-afk-observer-probes.mjs", "aoe-afk.mjs", "aoe-afk-runtime.mjs", "aoe-afk-questions.mjs", "aoe-afk-usage.mjs", "aoe-afk-usage-guard.mjs", "aoe-afk-wake.mjs"]) {
+    for (const file of ["aoe-afk-observer-entry-fixture.mjs", "aoe-afk-observer-fixture.mjs", "aoe-afk-observer-audit.mjs", "aoe-afk-observer-probes.mjs", "aoe-afk.mjs", "aoe-afk-runtime.mjs", "aoe-afk-work-period.mjs", "aoe-afk-work-state.mjs", "aoe-afk-work-native.mjs", "aoe-afk-questions.mjs", "aoe-afk-usage.mjs", "aoe-afk-usage-guard.mjs", "aoe-afk-wake.mjs"]) {
       writeFileSync(join(dir, file), readFileSync(resolve("assets/session", file)));
     }
     const script = `import assert from 'node:assert/strict';
@@ -26,7 +26,7 @@ import {loadExtensions,createExtensionRuntime} from ${JSON.stringify(pathToFileU
 import {createEventBus} from ${JSON.stringify(pathToFileURL(join(source, "packages/coding-agent/src/index.ts")).href)};
 const loaded=await loadExtensions([${JSON.stringify(join(dir, "aoe-afk-observer-entry-fixture.mjs"))}],${JSON.stringify(dir)},createEventBus(),createExtensionRuntime());
 assert.deepEqual(loaded.errors,[]);assert.equal(loaded.extensions.length,1);assert.ok(loaded.extensions[0].flags.has('aoe-afk-binding'));assert.ok(loaded.extensions[0].tools.has('aoe_afk_record'));`;
-    const result = spawnSync(process.execPath, ["--require", join(source, "node_modules/tsx/dist/preflight.cjs"), "--import", join(source, "node_modules/tsx/dist/loader.mjs"), "--input-type=module", "-e", script], {
+    const result = spawnSync(process.execPath, ["--import", join(source, "packages/coding-agent/src/experimental/source-resolver.ts"), "--input-type=module", "-e", script], {
       cwd: dir, env: { ...process.env, AOE_FIXTURE_ROOT: dir, AOE_FIXTURE_TRACE: join(dir, "trace.jsonl") }, encoding: "utf8", timeout: 20000, maxBuffer: 16384,
     });
     assert.equal(result.status, 0, result.stderr || String(result.error));
@@ -92,7 +92,7 @@ test("real transport refusal stays usable; fatal JSON and deadline remain indist
 });
 
 async function realDelegation() {
-  const sdk = await load("packages/coding-agent/src/index.ts"); assert.equal(sdk.VERSION, "0.87.1");
+  const sdk = await load("packages/coding-agent/src/index.ts"); assert.equal(sdk.VERSION, "1.2.0");
   const { loadExtensions, createExtensionRuntime } = await load("packages/coding-agent/src/core/extensions/loader.ts");
   const dir = mkdtempSync(join(tmpdir(), "observer-sdk-"));
   const entry = join(dir, "entry.mjs");

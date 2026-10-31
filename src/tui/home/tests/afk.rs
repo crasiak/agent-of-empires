@@ -18,18 +18,22 @@ fn afk_palette_opens_visible_modal_and_off_does_not_send_terminal_input() {
     assert!(env.view.afk_dialog.is_some());
     assert!(env.view.has_dialog());
     assert!(env.view.has_non_live_send_overlay());
-    let wait = |view: &mut HomeView| {
+    let wait = |view: &mut HomeView, expected: &str| {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !view.afk_dialog.as_mut().unwrap().tick() {
+        loop {
+            view.afk_dialog.as_mut().unwrap().tick();
+            let text = render_home_to_string(view, 100, 30);
+            if text.contains(expected) {
+                return text;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
-                "AFK worker did not finish"
+                "AFK result did not arrive: {expected}; {text}"
             );
             std::thread::yield_now();
         }
     };
-    wait(&mut env.view);
-    let text = render_home_to_string(&mut env.view, 100, 30);
+    let text = wait(&mut env.view, "Unsupported");
     for expected in [
         "AFK control-only",
         "Unsupported",
@@ -42,8 +46,7 @@ fn afk_palette_opens_visible_modal_and_off_does_not_send_terminal_input() {
     }
     assert!(env.view.handle_dialog_click(0, 0));
     assert!(env.view.handle_key(key(KeyCode::Char('o')), None).is_none());
-    wait(&mut env.view);
-    let text = render_home_to_string(&mut env.view, 100, 30);
+    let text = wait(&mut env.view, "Requested: off");
     assert!(text.contains("Requested: off"));
     assert!(env.view.live_send.is_none());
     assert!(env.view.send_message_dialog.is_none());

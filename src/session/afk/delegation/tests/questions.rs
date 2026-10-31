@@ -254,12 +254,11 @@ fn actual_native_question_sdk_and_rust_ledger() {
         let mut child = Command::new("node")
             .args([
                 "--import",
-                &format!("{source}/node_modules/tsx/dist/loader.mjs"),
+                &format!("{source}/packages/coding-agent/src/experimental/source-resolver.ts"),
                 "assets/session/aoe-afk-questions.test.mjs",
                 "--host",
                 scenario,
             ])
-            .env("TSX_TSCONFIG_PATH", format!("{source}/tsconfig.json"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
