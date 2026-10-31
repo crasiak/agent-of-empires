@@ -3,6 +3,7 @@
 
 pub(crate) mod container_config;
 pub mod profile_config;
+pub mod quick_launch;
 pub mod repo_config;
 pub mod settings_schema;
 
@@ -1628,6 +1629,19 @@ pub struct SessionConfig {
     )]
     pub new_session_mode: NewSessionMode,
 
+    /// Ctrl+1 through Ctrl+9 presets, keyed by number. Each selects an AoE profile,
+    /// optionally an agent and Ledger profile; sidebar context suggests the directory and group.
+    #[serde(default)]
+    #[setting(
+        label = "Quick Launch Presets",
+        widget = "custom:quick-launch",
+        category = "Interaction",
+        global_only,
+        tui_only,
+        web = "local_only:Quick-launch presets select host launch commands"
+    )]
+    pub quick_launch: quick_launch::QuickLaunchPresets,
+
     /// Automatically start live-send when switching into Terminal or Tool
     /// view, instead of requiring a separate Enter/Tab/click.
     #[serde(default)]
@@ -2100,6 +2114,7 @@ impl Default for SessionConfig {
             live_send_leader: default_live_send_leader(),
             default_attach_mode: AttachMode::default(),
             new_session_mode: NewSessionMode::default(),
+            quick_launch: BTreeMap::new(),
             live_send_on_view_switch: false,
             click_action: ClickAction::default(),
             confirm_before_quit: true,

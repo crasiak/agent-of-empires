@@ -2685,7 +2685,12 @@ impl HomeView {
         key: KeyEvent,
         update_info: Option<&crate::update::UpdateInfo>,
     ) -> Option<Action> {
-        // Dynamic tool session hotkeys (checked before everything else).
+        if let Some(slot) = super::quick_launch::shortcut_slot(&key) {
+            self.open_quick_launch(slot);
+            return None;
+        }
+
+        // Dynamic tool session hotkeys.
         if let Some(tool_name) = self.match_tool_hotkey(&key) {
             return self.activate_tool(tool_name, true);
         }

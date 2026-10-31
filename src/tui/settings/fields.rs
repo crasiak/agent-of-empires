@@ -267,6 +267,17 @@ impl SettingField {
             {
                 validate_snooze_duration(*n)
             }
+            (
+                FieldKind::Schema {
+                    widget: WidgetKind::Custom { id },
+                    ..
+                },
+                FieldValue::Text(s),
+            ) if id == "quick-launch" => {
+                let value = serde_json::from_str(if s.trim().is_empty() { "{}" } else { s })
+                    .map_err(|e| format!("Invalid JSON: {e}"))?;
+                crate::session::config::quick_launch::validate_presets(value).map(|_| ())
+            }
             // Edited as raw JSON; require an object so a typo is rejected at
             // commit instead of wiping the map.
             (
@@ -508,7 +519,7 @@ fn custom_value_from_json(id: &str, current: &Value) -> FieldValue {
             let selected = volume_to_index(current.as_f64().unwrap_or(1.0));
             FieldValue::Select { selected, options }
         }
-        "acp-defaults" => {
+        "acp-defaults" | "quick-launch" => {
             // Raw JSON inline; commit validation rejects non-objects.
             let text = if current.is_null() {
                 "{}".to_string()
@@ -632,7 +643,7 @@ fn custom_value_to_json(id: &str, value: &FieldValue) -> Value {
             .get(*selected)
             .map(|s| json!(volume_from_option(s)))
             .unwrap_or(Value::Null),
-        ("acp-defaults", FieldValue::Text(s)) => {
+        ("acp-defaults" | "quick-launch", FieldValue::Text(s)) => {
             let trimmed = s.trim();
             if trimmed.is_empty() {
                 return json!({});
@@ -1308,6 +1319,11 @@ mod tests {
                 "smart-rename-model",
                 json!({"claude": "haiku", "codex": "gpt-5"}),
                 "\"oops\"",
+            ),
+            (
+                "quick-launch",
+                json!({"5": {"profile": "work-headroom-ledger", "tool": "pi", "ledger_profile": "work-claude"}}),
+                "[]",
             ),
         ];
         for (widget, current, not_an_object) in cases {

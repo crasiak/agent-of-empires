@@ -5,6 +5,8 @@ mod path_input;
 mod render;
 
 #[cfg(test)]
+mod quick_launch_tests;
+#[cfg(test)]
 mod tests;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -49,6 +51,11 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
     FieldHelp {
         name: "Profile",
         description: "Settings profile for session defaults (Left/Right to cycle)",
+    },
+    FieldHelp {
+        name: "Ledger profile",
+        description:
+            "Ledger launch profile; clear to use the agent's normal command (terminal view only)",
     },
     FieldHelp {
         name: "Title",
@@ -162,6 +169,7 @@ impl From<NewSessionData> for crate::session::builder::InstanceParams {
 
 pub struct NewSessionDialog {
     pub(super) profile: String,
+    pub(super) ledger_profile: Option<Input>,
     pub(super) available_profiles: Vec<String>,
     /// Short descriptions in lockstep with `available_profiles`, shown as
     /// helper text under the profile name.
@@ -432,6 +440,7 @@ fn build_inherited_settings(sandbox: &SandboxConfig) -> Vec<(String, String)> {
 /// [`NewSessionDialog::field_indices`].
 pub(super) struct FieldIndices {
     pub profile: usize,
+    pub ledger_profile: usize,
     pub path: usize,
     pub title: usize,
     pub tool: usize,
@@ -542,6 +551,7 @@ impl NewSessionDialog {
 
         Self {
             profile: profile.to_string(),
+            ledger_profile: None,
             available_profiles,
             profile_descriptions,
             profile_index,
@@ -625,6 +635,30 @@ impl NewSessionDialog {
         if !self.extra_env_overridden {
             self.reload_config_defaults();
         }
+    }
+
+    pub fn set_ledger_profile(&mut self, profile: String) {
+        self.ledger_profile = Some(Input::new(profile));
+        self.set_sandbox_enabled(false);
+        self.apply_structured_default();
+    }
+
+    pub(super) fn has_ledger_launch(&self) -> bool {
+        self.ledger_profile
+            .as_ref()
+            .is_some_and(|profile| !profile.value().trim().is_empty())
+    }
+
+    fn launch_command_override(&self) -> Result<String, String> {
+        if let Some(profile) = &self.ledger_profile {
+            if !profile.value().trim().is_empty() {
+                return crate::session::config::quick_launch::ledger_command(
+                    &self.available_tools[self.tool_index],
+                    profile.value().trim(),
+                );
+            }
+        }
+        Ok(self.command_override.value().trim().to_string())
     }
 
     pub fn set_group(&mut self, group: String) {
@@ -763,8 +797,9 @@ impl NewSessionDialog {
     /// incapable tool forces it off, and a capable one restores the user's
     /// choice or else the configured default.
     fn apply_structured_default(&mut self) {
-        self.structured_enabled =
-            self.structured_capable && self.structured_choice.unwrap_or(self.structured_default);
+        self.structured_enabled = self.structured_capable
+            && !self.has_ledger_launch()
+            && self.structured_choice.unwrap_or(self.structured_default);
     }
 
     /// The test constructors skip config resolution, so capability is opted
@@ -976,10 +1011,11 @@ impl NewSessionDialog {
         };
         FieldIndices {
             profile: take(self.has_profile_selection()),
+            ledger_profile: take(self.ledger_profile.is_some()),
             path: take(true),
             title: take(true),
             tool: take(self.available_tools.len() > 1),
-            structured: take(self.structured_capable),
+            structured: take(self.structured_capable && !self.has_ledger_launch()),
             yolo: take(!self.selected_tool_always_yolo()),
             worktree: take(!is_host_only),
             sandbox: take(self.docker_available && !is_host_only),
@@ -1096,6 +1132,7 @@ impl NewSessionDialog {
             tool_index,
             focused_field: 0,
             available_tools: tools,
+            ledger_profile: None,
             existing_groups: Vec::new(),
             group_picker: ListPicker::new("Select Group"),
             branch_picker: ListPicker::new("Select Branch"),
@@ -1178,6 +1215,7 @@ impl NewSessionDialog {
             tool_index: 0,
             focused_field: 0,
             available_tools: tools.iter().map(|s| s.to_string()).collect(),
+            ledger_profile: None,
             existing_groups: Vec::new(),
             group_picker: ListPicker::new("Select Group"),
             branch_picker: ListPicker::new("Select Branch"),
@@ -1710,6 +1748,9 @@ impl NewSessionDialog {
                     if self.focused_field == fields.group {
                         self.recompute_group_ghost();
                     }
+                    if self.focused_field == fields.ledger_profile {
+                        self.apply_structured_default();
+                    }
                 }
                 DialogResult::Continue
             }
@@ -2157,6 +2198,7 @@ impl NewSessionDialog {
         let fields = self.field_indices();
         match self.focused_field {
             n if n == fields.title => &mut self.title,
+            n if n == fields.ledger_profile => self.ledger_profile.as_mut().unwrap(),
             n if n == fields.path => &mut self.path,
             n if n == fields.group => &mut self.group,
             _ => &mut self.title,
@@ -2182,12 +2224,21 @@ impl NewSessionDialog {
             self.current_input_mut()
         };
         super::paste_into_input(target, text);
+        self.apply_structured_default();
     }
 
     /// Check the structured-view choice still holds (adapter installed, tool
     /// capable), surfacing a refusal inline. Runs before any worktree, scratch
     /// or container work, so a refusal cannot orphan resources.
     fn validate_structured(&mut self) -> bool {
+        if let Err(error) = self.launch_command_override() {
+            self.error_message = Some(error);
+            return false;
+        }
+        if self.has_ledger_launch() && self.sandbox_enabled {
+            self.error_message = Some("Ledger quick launch runs on the host. Turn Sandbox off or clear the Ledger profile.".into());
+            return false;
+        }
         if !(self.structured_enabled && self.structured_capable) {
             return true;
         }
@@ -2251,7 +2302,10 @@ impl NewSessionDialog {
                 Vec::new()
             },
             extra_args: self.extra_args.value().trim().to_string(),
-            command_override: self.command_override.value().trim().to_string(),
+            command_override: match self.launch_command_override() {
+                Ok(command) => command,
+                Err(_) => return DialogResult::Continue,
+            },
             scratch: self.scratch,
             fork_seed: self.fork_seed.clone(),
             structured: self.structured_enabled && self.structured_capable,

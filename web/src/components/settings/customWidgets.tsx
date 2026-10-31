@@ -185,6 +185,17 @@ export function LoggingTargetsWidget({ descriptor, value, save }: CustomWidgetPr
   );
 }
 
+/** Host-only presets are read-only on the web; editing stays in the TUI or config.toml. */
+export function QuickLaunchWidget({ descriptor, value }: CustomWidgetProps) {
+  return (
+    <div className="space-y-2">
+      <h4 className="text-sm font-semibold text-text-primary">{descriptor.label}</h4>
+      <p className="text-xs text-text-dim">Configure Ctrl+1 through Ctrl+9 in the terminal settings or config.toml.</p>
+      <pre className="overflow-x-auto text-xs font-mono text-text-primary">{JSON.stringify(value ?? {}, null, 2)}</pre>
+    </div>
+  );
+}
+
 /** `{ agent: model }` map for one-shot calls; clearing a row restores the built-in default. */
 export function SmartRenameModelWidget({ descriptor, value, save }: CustomWidgetProps) {
   const tunable = useOneshotAgents();
