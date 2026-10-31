@@ -1,0 +1,2 @@
+{ "schema": "aoe.afk-menu.v1", "source": "pane", "format": "text.select-prompt", "kind": "choice", "question": "? Select a package manager »", "subject": null,
+  "options": [ { "key": "1", "label": "npm", "role": "other" }, { "key": "2", "label": "pnpm", "role": "other" }, { "key": "3", "label": "yarn", "role": "other" } ], "free_text": false, "warnings": [], "deadline_ms": null }
