@@ -1,7 +1,7 @@
 # S-D: AFK ticket record (`afk-record`)
 
 **Date:** 2026-10-30
-**Status:** Design approved in chat section by section. Written spec awaiting user review (revised 2026-10-31 for `session-arc-v1`).
+**Status:** Approved 2026-10-31 (revised the same day for `session-arc-v1`; stale threshold 30 min, `afk-human-ack` on creation is a trial, rejected new tasks shown in the review).
 **Overview:** [afk-menus-and-goal-runs-overview](2026-10-30-afk-menus-and-goal-runs-overview.md)
 **Used by:** [S-B goal runs](2026-10-30-afk-goal-runs-design.md) (all ticket reads and writes), [S-C pane responder](2026-10-30-afk-pane-responder-design.md), interactive agents through the `linear-project-work` skill.
 **Depends on:** CRA-1377 (`session-arc-v1` and the validator behind `timeline arc validate`), for the arc block in `progress` and `run_summary` only. Everything else in this spec can be built first.
@@ -17,7 +17,7 @@ All ticket I/O for AFK goes through one harness-neutral CLI, `afk-record`. It ow
 
 - Every goal run has a ticket. A referenced ticket is used; otherwise AFK searches for a matching one and creates it only if none is found.
 - The user's tickets are append-only for AFK. AFK-owned tickets may be edited, with a changelog.
-- Writes go through a local outbox with read-back. Scope changes and new tasks block until confirmed; other writes don't. A stale outbox stops the run (runs never resume in place).
+- Writes go through a local outbox with read-back. Scope changes and new tasks block until confirmed; other writes don't. A write unconfirmed for 30 minutes stops the run (runs never resume in place).
 - AFK writes on every event and adds a progress comment at each checkpoint.
 - Under `yolo`, AFK marks a ticket Done after a successful merge.
 - `afk-human-ack` marks every ticket where AFK decided something on the user's behalf. Only the user removes it.
@@ -95,7 +95,9 @@ Never backwards, never Cancelled. If Linear's GitHub integration (or the user) h
 
 ### `afk-human-ack`
 
-Added when AFK closes a ticket, records an `assumption` or `scope` event on it, or creates it. AFK never removes it. The return review and `run_summary` list every ticket that still has it; a Linear view on the label is the user's inbox.
+Added when AFK closes a ticket, records an `assumption` or `scope` event on it, or creates it. AFK never removes it.
+
+Labelling every ticket AFK creates is a trial (2026-10-31). If it turns out to be more noise than use, a follow-up drops the label on creation and keeps it for closures, assumptions and scope events. The return review and `run_summary` list every ticket that still has it; a Linear view on the label is the user's inbox.
 
 ### Wrong assumptions, scope and new tasks
 
@@ -103,7 +105,7 @@ Added when AFK closes a ticket, records an `assumption` or `scope` event on it, 
 - **`scope`:** `added | changed | dropped`, why, and `changes_done: true|false` (whether the definition of done changes).
   - On a user's ticket with `changes_done: true`, AFK posts the event and holds the item `blocked: needs_human_scope` until the user decides.
   - On an AFK-owned ticket, AFK edits the description, logs the change and continues.
-- **`new_task`:** added work becomes a sub-issue (searched for before created), linked to the event comment, then put through S-B admission. A rejected task is still created, left in Backlog with the rejection reason, so the record exists either way.
+- **`new_task`:** added work becomes a sub-issue (searched for before created), linked to the event comment, then put through S-B admission. A rejected task is still created, left in Backlog with the rejection reason, so the record exists either way. Rejected tasks are part of what the user is shown at the end: `run_summary` lists them with their tickets, and the return review shows them under Skipped.
 
 ## Events
 
@@ -142,7 +144,7 @@ The hidden `event_id` (a ULID) lets read-back find the comment and lets a retry 
 - Item branches are `afk/<run>/CRA-124-<slug>`, so Linear links branches and PRs automatically.
 - A PR with folded items lists every ticket it closes.
 - Each folded ticket gets its own `delivered` event pointing at the shared PR.
-- At run end the run ticket gets `run_summary`: every item with ticket and PR, everything skipped, and every ticket still labelled `afk-human-ack`.
+- At run end the run ticket gets `run_summary`: every item with ticket and PR, everything skipped (including rejected new tasks and their Backlog tickets), and every ticket still labelled `afk-human-ack`.
 
 ## Outbox
 
@@ -151,7 +153,7 @@ The hidden `event_id` (a ULID) lets read-back find the comment and lets a retry 
 - Every command appends `queued` before sending.
 - Confirmation is a read-back: the comment with the `event_id`, or the expected field value.
 - Retries back off from 5 s to 2 min. The Pi extension calls `afk-record flush` at every settle.
-- Any write unconfirmed for more than 15 minutes makes `status` report `stale`. The extension then stops the run with end reason `ticket_record_stale`. The outbox keeps its pending writes; `afk-record flush` drains it later, and a new run (new consent) can pick up the remaining queue. Runs are never resumed in place (S-B, unchanged).
+- Any write unconfirmed for more than 30 minutes makes `status` report `stale`. The extension then stops the run with end reason `ticket_record_stale`. The outbox keeps its pending writes; `afk-record flush` drains it later, and a new run (new consent) can pick up the remaining queue. Runs are never resumed in place (S-B, unchanged).
 - `scope` and `new_task` wait up to 30 s for confirmation. If not confirmed, `event` exits 3 and the item is held `blocked: record_pending` and retried at the next settle.
 - The outbox is also the record: the later Ledger import takes it alongside the run store and transcripts. Timeline reads it too (CRA-1378), so other tools never parse it themselves.
 

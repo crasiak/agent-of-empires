@@ -157,7 +157,7 @@ Extends the existing AFK review (Outcome / Effect / Needs attention), with the r
 - **Tickets:** `afk-record status`: pending or failed writes, and tickets still labelled `afk-human-ack`.
 - **Answers AFK gave:** grouped by policy. Permission approvals and scope-check warnings are listed first. Under `yolo`, answers that `rules` would have refused are marked.
 - **Needs you:** each blocked item and each stopped menu, with the question and options. Choosing an option there writes a human answer and can start a new run from that item (new consent).
-- **Skipped:** follow-ups and tracker items AFK chose not to take, with reasons.
+- **Skipped:** follow-ups, tracker items and rejected new tasks AFK chose not to take, with reasons and, for rejected new tasks, their Backlog tickets (S-D).
 
 The TUI review and `aoe afk review <session>` both read the run store.
 
