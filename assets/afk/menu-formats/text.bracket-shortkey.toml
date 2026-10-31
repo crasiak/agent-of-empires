@@ -3,6 +3,8 @@ sources = ["agent_text", "bash_prompt", "pane"]
 kind = "choice"
 # A line with two or more [X]word options, e.g. "[A]pply / [S]kip / [R]evise"
 option_pattern = '\[(?P<key>[A-Za-z0-9])\](?P<label>[\w-]+)'
+# "[A]pply": the bracketed key letter starts the label
+label_includes_key = true
 min_options = 2
 question_lines_above = 3
 [roles]

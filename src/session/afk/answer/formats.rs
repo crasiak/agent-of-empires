@@ -49,6 +49,8 @@ struct FormatFile {
     min_options: usize,
     #[serde(default = "three")]
     question_lines_above: usize,
+    #[serde(default)]
+    label_includes_key: bool,
     #[serde(default, rename = "option")]
     fixed: Vec<FixedOption>,
     #[serde(default)]
@@ -72,6 +74,7 @@ struct Format {
     after_trigger: bool,
     min_options: usize,
     above: usize,
+    label_includes_key: bool,
     fixed: Vec<FixedOption>,
     roles: RoleWords,
 }
@@ -114,6 +117,7 @@ fn compile(name: &str, text: &str) -> Result<Format> {
         after_trigger: f.options_after_trigger,
         min_options: f.min_options.max(1),
         above: f.question_lines_above,
+        label_includes_key: f.label_includes_key,
         fixed: f.fixed,
         roles,
     })
@@ -185,10 +189,29 @@ impl Formats {
 
 impl Format {
     fn matches(&self, source: Source, window: &[&str], raw: &str) -> Option<Menu> {
-        let trigger_at = match &self.trigger {
-            Some(t) => Some(window.iter().rposition(|l| t.is_match(l))?),
-            None => None,
+        let is_option = |l: &str| self.option.as_ref().is_some_and(|re| re.is_match(l));
+        let Some(trigger) = &self.trigger else {
+            return self.build(source, window, None, raw);
         };
+        // A line that looks like an option is never the question. Formats that scan after the
+        // trigger try each trigger line from the bottom up; others use only the last one.
+        let mut candidates = (0..window.len())
+            .rev()
+            .filter(|&i| trigger.is_match(window[i]) && !is_option(window[i]));
+        if self.after_trigger {
+            candidates.find_map(|i| self.build(source, window, Some(i), raw))
+        } else {
+            self.build(source, window, Some(candidates.next()?), raw)
+        }
+    }
+
+    fn build(
+        &self,
+        source: Source,
+        window: &[&str],
+        trigger_at: Option<usize>,
+        raw: &str,
+    ) -> Option<Menu> {
         let scan_from = if self.after_trigger {
             trigger_at.map_or(0, |i| i + 1)
         } else {
@@ -202,15 +225,10 @@ impl Format {
                     continue;
                 }
                 for c in re.captures_iter(line) {
-                    let label_m = c.name("label")?;
-                    let mut label = label_m.as_str().trim().to_string();
+                    let mut label = c.name("label")?.as_str().trim().to_string();
                     let key = match c.name("key") {
                         Some(k) => {
-                            // "[A]pply": the bracketed key letter is the first letter of the label.
-                            if line[..k.start()].ends_with('[')
-                                && label_m.start() == k.end() + 1
-                                && line[k.end()..].starts_with(']')
-                            {
+                            if self.label_includes_key {
                                 label.insert_str(0, k.as_str());
                             }
                             k.as_str().to_string()
@@ -229,7 +247,7 @@ impl Format {
                 return None;
             }
             // Options must be the end of the text: nothing but options after the first option line.
-            if self.trigger.is_none()
+            if (self.trigger.is_none() || self.after_trigger)
                 && first_option_line.is_some_and(|i| window[i..].iter().any(|l| !re.is_match(l)))
             {
                 return None;

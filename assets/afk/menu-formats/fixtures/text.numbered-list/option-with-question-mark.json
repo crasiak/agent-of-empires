@@ -1,0 +1,2 @@
+{ "schema": "aoe.afk-menu.v1", "source": "agent_text", "format": "text.numbered-list", "kind": "choice", "question": "Which one next?", "subject": null,
+  "options": [ { "key": "1", "label": "Docs?", "role": "other" }, { "key": "2", "label": "Tests", "role": "other" }, { "key": "3", "label": "Release", "role": "other" } ], "free_text": false, "warnings": [], "deadline_ms": null }

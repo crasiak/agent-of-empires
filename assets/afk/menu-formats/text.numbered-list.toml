@@ -1,8 +1,8 @@
 id = "text.numbered-list"
 sources = ["agent_text", "bash_prompt", "pane"]
 kind = "choice"
-# "1. Yes" / "2) No" lines; needs a question line ending in "?" or ":" above
+# "1. Yes" / "2) No" lines under a question: a line ending in "?", or ending in ":" with a choice word
 option_pattern = '^\s*(?P<key>[1-9][0-9]?)[.)]\s+(?P<label>\S.{0,200})$'
-trigger = '[?:]\s*$'
+trigger = '(?i)(\?\s*$)|(\b(choose|pick|select|which|prefer|options?|would you like|want me to|should i)\b.*:\s*$)'
 options_after_trigger = true
 min_options = 2

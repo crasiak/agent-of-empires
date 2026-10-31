@@ -179,3 +179,22 @@ fn format_only_matches_its_sources() {
         .recognise(Source::BashPrompt, "? Pick a template ›\n❯ react\n  vue")
         .is_some());
 }
+
+#[test]
+fn label_excludes_key_unless_format_opts_in() {
+    let files = vec![(
+        "mine.toml".to_string(),
+        r"id='mine'
+sources=['agent_text']
+kind='choice'
+option_pattern='\[(?P<key>\d)\](?P<label>\w+)'"
+            .to_string(),
+    )];
+    let (f, warnings) = Formats::from_sources(&files);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let m = f
+        .recognise(Source::AgentText, "Pick one\n[1]Yes [2]No")
+        .unwrap();
+    let labels: Vec<_> = m.options.iter().map(|o| o.label.as_str()).collect();
+    assert_eq!(labels, ["Yes", "No"]);
+}
