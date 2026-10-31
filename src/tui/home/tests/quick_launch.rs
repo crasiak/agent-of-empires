@@ -101,13 +101,16 @@ fn quick_launch_uses_group_context_without_inheriting_a_scratch_directory() {
     view.new_dialog = None;
     source.scratch = true;
     view.instances.insert(source.id.clone(), source.clone());
-    view.selected_session = Some(source.id);
-    view.selected_group = None;
-    view.open_quick_launch('1');
-    assert_ne!(
-        view.new_dialog.as_ref().unwrap().path_value(),
-        temp.path().to_str().unwrap()
-    );
+    for (session, group) in [(Some(source.id.clone()), None), (None, Some("team".into()))] {
+        view.new_dialog = None;
+        view.selected_session = session;
+        view.selected_group = group;
+        view.open_quick_launch('1');
+        assert_ne!(
+            view.new_dialog.as_ref().unwrap().path_value(),
+            temp.path().to_str().unwrap()
+        );
+    }
 }
 
 #[test]

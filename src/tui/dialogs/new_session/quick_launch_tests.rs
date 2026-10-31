@@ -62,6 +62,30 @@ fn ledger_profile_is_visible_editable_and_tracks_the_selected_agent() {
         .unwrap()
         .contains("Ledger quick launch requires"));
 
+    crate::session::config::update_config(|config| {
+        config.sandbox.enabled_by_default = true;
+        config.session.default_tool = Some("claude".into());
+    })
+    .unwrap();
+    dialog.set_tool("claude");
+    dialog.docker_available = true;
+    dialog.focused_field = dialog.path_field();
+    dialog.handle_key(key(KeyCode::Tab));
+    assert!(
+        !dialog.sandbox_enabled,
+        "Ledger stays host-only after leaving Path"
+    );
+    dialog.set_path(temp.path().to_str().unwrap().into());
+    assert!(
+        !dialog.sandbox_enabled,
+        "profile defaults cannot re-enable Sandbox"
+    );
+    dialog.focused_field = dialog.path_field();
+    assert!(matches!(
+        dialog.handle_key(key(KeyCode::Enter)),
+        DialogResult::Submit(_)
+    ));
+
     dialog.set_tool("pi");
     dialog.ledger_profile = Some(Input::new("work; touch /tmp/bad".into()));
     assert!(matches!(

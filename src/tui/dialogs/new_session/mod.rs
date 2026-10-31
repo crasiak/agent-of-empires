@@ -947,6 +947,7 @@ impl NewSessionDialog {
             return;
         }
         let on = overridden.unwrap_or(config.sandbox.enabled_by_default)
+            && !self.has_ledger_launch()
             && self.docker_available
             && !self.selected_tool_host_only();
         if on != self.sandbox_enabled {
@@ -1060,6 +1061,7 @@ impl NewSessionDialog {
             ProjectOverridesLookup::Unknown => None,
         };
         self.sandbox_enabled = self.docker_available
+            && !self.has_ledger_launch()
             && overrides
                 .as_ref()
                 .and_then(|o| o.sandbox_enabled)

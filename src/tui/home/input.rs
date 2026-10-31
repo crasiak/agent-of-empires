@@ -3386,6 +3386,7 @@ impl HomeView {
         }
         self.instances
             .values()
+            .filter(|inst| !inst.scratch)
             .find(|inst| match self.group_by {
                 GroupByMode::Project => super::project_group_key(inst) == group_path,
                 GroupByMode::Org => false,
