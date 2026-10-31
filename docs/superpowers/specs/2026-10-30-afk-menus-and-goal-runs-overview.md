@@ -60,7 +60,7 @@ Eleven tools already answer "what are we doing, where are we, what's next", each
 - **Ticket events are a record; arcs are an interpretation.** Events log what AFK did and stay the source of truth; an arc block summarises them.
 - **Menu answering (S-A, S-C)** is live control and has no orientation overlap. It shares only AoE's waiting-state detection.
 - **Handoff detail** (files, commands, open loops, warnings) stays in the handoff, under the arc header.
-- **`ir`** stays the worktree inventory. Whether `ir next` is retired or feeds `aoe-fleet next` is a separate decision.
+- **`ir`** stays the worktree inventory. **`ir next` is retired** (decided 2026-10-31): `aoe-fleet next` is the one next-work producer. Its callers (the `initiatives` skill, `/scaffold`, the `initiative-updater` and `session-checkpoint` hooks) move or drop with it; tracked as CRA-1404.
 
 ### Decisions (2026-10-31)
 
