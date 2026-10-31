@@ -42,6 +42,14 @@ Do not run `cargo clean` or set `CARGO_TARGET_DIR`, `RUSTC_WRAPPER` or other
 build-location variables; read `docs/agents/building.md` before changing how
 anything is built or when a build blocks on a lock.
 
+On the maintainer's Mac, run fmt, clippy and tests on Bender with `aoe-gate`,
+not with local `cargo check`, `cargo clippy` or `cargo test`: those builds
+filled the Mac's disk. `aoe-gate` gates the committed `HEAD` only (commit WIP
+first), and `aoe-gate clippy` runs a single gate. Build locally only the binary
+you install (`cargo build --profile dev-release`). Bender cannot build a Mac
+binary. If `aoe-gate` is not on `PATH`, you are elsewhere: use local cargo.
+Setup and logs: `aoe-ops/bender-gates/README.md` in `crasiak/attic`.
+
 Run cargo in the foreground. Do not detach it with `&`, `nohup`, or
 `sh -c '...' &`: if that cargo is killed, its `rustc` children keep running
 under PID 1, each holding several GB of memory with no consumer.
@@ -115,7 +123,8 @@ Follow [CONTRIBUTING.md](CONTRIBUTING.md) for branches, titles and the PR
 template, and [MAINTAINERS.md](MAINTAINERS.md) for review and merge rules.
 
 - Before review, run `cargo fmt`, `cargo clippy`, and `cargo test`, adding
-  `--features web` when relevant.
+  `--features web` when relevant. Where `aoe-gate` exists, it runs the first
+  three on Bender.
 - For `web/` changes also run its format, lint, type, and applicable test checks
   from `web/AGENTS.md`, including the coverage matrix requirement.
 - Do not request reviewers; CODEOWNERS routes each PR.
