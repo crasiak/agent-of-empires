@@ -43,9 +43,9 @@ a model asking what the command means is not an AFK status or consent dialog.
 Duration is 1 through 1440 minutes; allowance is 1 through 512 main-loop
 requests. Local tool admissions are bounded to `min(requests * 16, 4096)`.
 The first supported tools are normal `read`, `write`, `edit` and `bash`, plus
-`aoe_afk_work_checkpoint`. The checkpoint tool must be active before native
+`aoe_afk_work_checkpoint` and `aoe_afk_answer`. The checkpoint tool must be active before native
 consent and effect admission. An explicit tool selector must include it alongside
-the desired local tools; AFK never enables an operator-disabled tool. Existing
+the desired local tools (and `aoe_afk_answer` if the agent should answer menus); AFK never enables an operator-disabled tool. Existing
 configured permissions and approval gates remain in force. This is **not an OS
 sandbox**: Bash retains its normal ability to start processes. Worker/agent
 launching and background work are not qualified and must not be started. Hidden retries, descendant requests and billing are
@@ -71,7 +71,9 @@ Completion claims, declared human requirements/dependencies, unsupported tools,
 missing or repeated progress evidence, Off, abort, expiry and exhaustion stop automatic
 work. No extra reporting request is added.
 
-Questions and approval gates are not answered by AFK. `no_human_answer` is not
+By default, questions and approval gates are not answered by AFK; the opt-in
+[answer policy](#answering-menus-during-a-work-period) below changes that for
+menus a confirmed period meets. `no_human_answer` is not
 approval; already-open human prompts are retained. A checkpoint's `completed`
 status is a **model claim**, and proved terminal settlement is not independent
 acceptance of the artifacts or tests. Inspect both when returning. Checkpoint
@@ -85,6 +87,193 @@ this conversation's retained work-period history. Incompatible restoration
 remains the [preservation release blocker](#optional-already-open-question-deferral)
 described below. The legacy overview/review sections below describe host one-file
 history, not an independently durable native work-period service.
+
+## Answering menus during a work period
+
+A work period normally stops at the first menu: an `ask_user` question, a Pi
+permission dialog, a numbered list in the agent's reply, a `(y/N)` prompt from a
+command. The answer policy lets AFK answer these itself, under rules you wrote
+before leaving or under `yolo`. It applies only inside a confirmed Session work
+period and only to menus that period meets. **It answers on your behalf; read
+the policy line in the consent dialog.**
+
+### Choosing a policy
+
+```text
+/afk-work on [--policy rules|yolo] [--rule '<toml>']… [minutes] [requests]
+```
+
+- `rules` (the default) answers only what a rule allows. Anything else stops the
+  period as `blocked`, with the reason (`no_rule`, `no_proposal`, `scope:…`) in
+  the answer log.
+- `yolo` answers every menu, including permission prompts. It takes the agent's
+  proposal if there is one, otherwise the first approving option, otherwise the
+  first option. Rules are ignored and scope checks only warn. Use it for a
+  throwaway checkout, not a tree you care about.
+- `--rule` adds a rule for this period only. Pass up to 8, each at most 1024 bytes,
+  written as the inside of a rule table:
+  `--rule "id='plans', kind='choice', answer='agent'"`.
+
+Invalid rules refuse the start with the parse error, and so does a grant whose
+inline rules are too large for the record ("AFK rules too large…"). The consent
+dialog shows the policy and the rule count and sources; `/afk-work` status adds
+`answers: N (rules M, yolo K), stops: S`. Those counts are in memory and read
+zero after a restart.
+
+### Rules files
+
+Rules come from three places. Earlier ones win on a repeated `id`:
+
+1. `--rule` values typed at `/afk-work on`.
+2. `~/.config/aoe/afk/rules.toml`.
+3. `afk-rules.toml` at the repo root (optional).
+
+Rules are evaluated in that order and the first match wins, except that a
+matching `stop` rule always beats an allowing one. A file is at most 64 KiB. No
+matching rule stops the period with `no_rule`. A rule matches when every field it
+sets matches:
+
+| Field | Matches |
+|---|---|
+| `kind` | `plan`, `choice`, `permission`, `confirm` or `input` |
+| `source` | `agent_text`, `ask_user`, `bash_prompt`, `pi_dialog` or `pane` |
+| `format` | The menu format id, such as `text.yes-no` or `pi.confirm` |
+| `question_matches` | Any of these regexes matches the question |
+| `subject_matches` | Any of these regexes matches the subject (a command or path) |
+| `has_role` | An option has this role: `approve`, `approve_always`, `deny`, `revise`, `other` |
+
+`answer` is `approve`, `deny`, `revise` or `other` (the first option with that
+role), `agent` (the option the agent proposed) or `stop`. A rule never picks an
+"always allow" option; that stops with `approve_always_refused`. Dependency
+changes stop unless the rule sets `allow_dependencies = true`.
+
+```toml
+# afk-rules.toml
+[[rule]]
+id = "approve-plans-in-goal"
+kind = "choice"
+answer = "agent"          # accept the agent's own pick if scope checks pass
+
+[[rule]]
+id = "approve-repo-tooling"
+kind = "permission"
+subject_matches = ['^Bash command: (cargo|npm|pnpm|git (status|diff|add|commit|log))\b']
+answer = "approve"
+
+[[rule]]
+id = "never-force-push"
+subject_matches = ['git push .*--force']
+answer = "stop"
+```
+
+Prefer narrow allow rules like the second one over broad ones such as
+`kind = "permission", answer = "approve"`.
+
+### Scope checks
+
+After a rule allows an answer, deterministic checks can still stop it, with
+`scope:<check>` as the reason. They are a best-effort deny-list on the menu's
+subject, **not a sandbox**: they sit behind the rule's own allow pattern, and a
+narrow rule is the real boundary. Under `yolo` a failed check only adds a warning.
+
+- `harness_warning`: the menu came with a harness warning.
+- `outside_repo`: a command segment writes or deletes outside the session's repo
+  root. Commands are split on `;`, `&`, `|`, newlines, backticks and `$(`, and each
+  segment is checked. `cd` with no target, to `~`, to `-` or to a `$…` value counts
+  as outside, as do tokens with a backslash, an unresolvable leading `~` or a `$`.
+  Nested shells (`sh`, `bash`, `zsh`, `fish`, `dash`, `ksh`, `eval`) count as
+  outside. `/dev/null` is allowed.
+- `dependencies`: `install` or `add` verbs of npm, pnpm, yarn and bun; `cargo add`
+  and `cargo update`; pip, uv, poetry, pdm, bundle, composer; `go get`; and edits
+  to manifests and lockfiles.
+- `protected_push`: pushes to `main` or `master` (including refspecs like
+  `HEAD:main`), force, delete, mirror and prune pushes, and `git branch -d/-D`. A
+  bare `git push` cannot be judged without branch context and passes.
+- `request_share`: a `plan` menu after 80 % of the request allowance.
+- `diff_limit`: applies only when the run supplies a diff size, which a work period
+  does not.
+
+Known gaps: shells behind wrappers (`timeout`, `env`, `sudo`, `xargs`,
+`find -exec`), `npm update`, `go mod tidy`, and pushes of `HEAD` while on `main`.
+
+### How each menu reaches the engine
+
+- **`aoe_afk_answer` tool.** The work-period reminder tells the agent never to end
+  a turn with a menu for the human, but to call `aoe_afk_answer` with the
+  question, the options (`key` and `label`), its proposed key or `null`, and a
+  reason (up to 1024 bytes). The result is `answered_by: "afk/<policy>"` with the
+  choice and rule, or `{ stopped: reason }`, which ends the period as
+  `blocked: menu_stopped`. An explicit tool selector must include the tool; with
+  no selector it is active.
+- **Agent text.** A turn that ends without a checkpoint and whose last text a menu
+  format recognises gets one corrective continuation per period ("Resolve it with
+  `aoe_afk_answer`"). No match stops as `missing_checkpoint` and saves no sample.
+- **`ask_user`.** A single question with options is answered by the engine and
+  returned to the agent as a blocked result labelled `afk/<policy>`, so it cannot
+  be mistaken for a human answer. Batches (`questions`) and `allowMultiple` stop as
+  before (`no_human_answer`). Because `ask_user` carries no proposal, `answer =
+  "agent"` stops it with `no_proposal`; use a role answer such as
+  `source = "ask_user", answer = "other"`.
+- **Bash prompts.** Commands must not wait for input: pass answers as flags or
+  with `yes |`. Bash calls get a 600 s timeout when the agent passes none, per
+  call; there is no global setting yet. Only output whose Pi trailer reports a
+  non-zero exit, a timeout, an abort or "terminated without an exit code" can be a
+  prompt, so a command that exited 0 is never treated as waiting. A recognised
+  prompt is annotated `aoe_afk_prompt_seen` and its evidence does not count for a
+  checkpoint until an `aoe_afk_answer` is answered; any answered call releases all
+  held prompts. An unrecognised prompt stops the period as
+  `blocked: unrecognised_menu` and saves the sample.
+- **Pi dialogs.** `select`, `confirm` and `input` dialogs are answered while the
+  period is owned, if the Pi runtime has the `ui_prompt_respond` hook (the Pi fork
+  commit `832d6f92`, not yet in the Ledger Pi core; without it the dialog opens and
+  stops the period as before). The engine has 4 s to decide; Pi's bound is 5 s.
+  Editor and custom dialogs, empty selects and AFK's own consent dialog are never
+  answered. An answer counts as delivered only when Pi reports the answered prompt
+  ended. If Pi drops the answer and opens the dialog, that is logged as `failed`
+  and the period stops as `human_prompt`.
+
+### Menu formats
+
+Recognition is data. Each format is a TOML file in `assets/afk/menu-formats/`
+(built in: `text.bracket-shortkey`, `text.numbered-list`, `text.select-prompt`,
+`text.yes-no`). Put your own in `~/.config/aoe/afk/menu-formats/*.toml` (at most 64
+files of 16 KiB); a file with a built-in `id` replaces that format, and an invalid
+file is skipped with a warning. A format has an `id`, `sources`, a `kind`, and
+either an `option_pattern` with named `key` and `label` groups or a `trigger` with
+fixed `[[option]]` entries. Optional keys: `options_after_trigger`, `min_options`,
+`question_lines_above`, `label_includes_key` (so `[A]pply` reads as "Apply") and
+`[roles]` word lists. For numbered lists the question line must end in `?`, or end
+in `:` and contain a choice word (choose, pick, select, which, prefer, option,
+would you like, want me to, should I); option lines are never the question and
+must be the end of the text, so "Summary of changes:" followed by a list is not a
+menu.
+
+### Answer log and unrecognised samples
+
+Every decision is appended to `afk-answers/<period-id>.jsonl` in the work
+period's transport store, under
+`<app dir>/afk-authority-v3/profiles/<profile>/transport/<instance id>/`. A
+decision line carries `delivered: "pending"`, or `"not_applicable"` for a stop; a
+separate delivery line with the same `answer_id` records `ok`, `failed` or
+`unknown`. Readers fold lines by `answer_id`. The log is append-only, with a line
+cap of 192 KiB and a file cap of 4 MiB. Unrecognised menus are saved next to it as
+`<period-id>-unrecognised-<n>.txt`.
+
+To teach AFK a new format from a sample:
+
+1. Copy the sample's menu text into
+   `assets/afk/menu-formats/fixtures/<format-id>/<case>.txt`.
+2. Write the format file `assets/afk/menu-formats/<format-id>.toml`, and register
+   it in the built-in list in `src/session/afk/answer/formats.rs`. To try it
+   without a build, drop the file in `~/.config/aoe/afk/menu-formats/`.
+3. Write the expected menu beside the sample as `<case>.json` (copy a neighbour).
+   Text that must not match goes in `fixtures/_negative/`.
+4. Run the `format_corpus_matches_expected_menus` test: it checks that every sample is recognised as
+   written and every negative sample is not.
+
+An offline end-to-end demo of both policies, driven through the pinned Pi SDK with
+a scripted model and a stub bridge, is `assets/session/aoe-afk-answer-sdk.test.mjs`
+(`AOE_PI_SOURCE_ROOT=… node --test assets/session/aoe-afk-answer-sdk.test.mjs`).
 
 ## Global read-only overview
 
