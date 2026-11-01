@@ -807,3 +807,120 @@ mod decide {
         ));
     }
 }
+
+mod log {
+    use super::super::decide::Policy;
+    use super::super::log::*;
+    use crate::session::anchored_fs::AnchoredDir;
+
+    const PERIOD: &str = "11111111-1111-1111-1111-111111111111";
+
+    #[test]
+    fn answer_log_appends_decision_then_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchored = AnchoredDir::open(dir.path()).unwrap();
+        let log = AnswerLog::new(&anchored, PERIOD).unwrap();
+        let id = log
+            .decision(&serde_json::json!({"decision":"answer","choice":"1"}))
+            .unwrap();
+        log.delivered(&id, Delivered::Ok).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(format!("afk-answers/{PERIOD}.jsonl")))
+            .unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["schema"], "aoe.afk-answer.v1");
+        assert_eq!(lines[0]["delivered"], "pending");
+        assert_eq!(lines[1]["answer_id"], lines[0]["answer_id"]);
+        assert_eq!(lines[1]["delivered"], "ok");
+    }
+
+    #[test]
+    fn unrecognised_samples_are_numbered() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AnswerLog::new(&AnchoredDir::open(dir.path()).unwrap(), PERIOD).unwrap();
+        assert_eq!(
+            log.unrecognised("a").unwrap(),
+            format!("{PERIOD}-unrecognised-1.txt")
+        );
+        assert_eq!(
+            log.unrecognised("b").unwrap(),
+            format!("{PERIOD}-unrecognised-2.txt")
+        );
+    }
+
+    #[test]
+    fn answer_log_refuses_symlinked_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("afk-answers")).unwrap();
+        std::fs::set_permissions(
+            dir.path().join("afk-answers"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "/tmp/elsewhere",
+            dir.path().join(format!("afk-answers/{PERIOD}.jsonl")),
+        )
+        .unwrap();
+        let log = AnswerLog::new(&AnchoredDir::open(dir.path()).unwrap(), PERIOD).unwrap();
+        assert!(log.decision(&serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn run_context_falls_back_to_cwd_outside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = super::super::run::RunInput {
+            period: "p".into(),
+            item: None,
+            goal: "g".into(),
+            policy: Policy::Rules,
+            rules: vec![],
+            cwd: dir.path().to_path_buf(),
+            requests_used: 0,
+            request_limit: 4,
+        };
+        let ctx = super::super::run::context(&input);
+        assert_eq!(ctx.repo_roots, vec![dir.path().canonicalize().unwrap()]);
+        assert_eq!(ctx.diff_lines, None);
+        assert_eq!(ctx.max_diff_lines, 1500);
+    }
+
+    #[test]
+    fn run_context_counts_diff_inside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(root.join("a.txt"), "two\nthree\n").unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        let input = super::super::run::RunInput {
+            period: "p".into(),
+            item: None,
+            goal: "g".into(),
+            policy: Policy::Rules,
+            rules: vec![],
+            cwd: root.join("sub"),
+            requests_used: 0,
+            request_limit: 4,
+        };
+        let ctx = super::super::run::context(&input);
+        assert_eq!(ctx.repo_roots, vec![root]);
+        // One line deleted, two added; no origin/HEAD, so the base is HEAD.
+        assert_eq!(ctx.diff_lines, Some(3));
+    }
+}

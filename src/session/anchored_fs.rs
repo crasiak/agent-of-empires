@@ -274,6 +274,28 @@ impl AnchoredDir {
         }
     }
 
+    /// Open `relative` for appending, creating it 0600 if absent. Never follows a symlink,
+    /// and refuses anything that is not a single-link regular file.
+    pub(crate) fn open_append_regular(&self, relative: &Path) -> Result<File> {
+        let (parent, leaf) = self.open_parent(relative)?;
+        let fd = openat(
+            &parent,
+            leaf.as_os_str(),
+            OFlag::O_CREAT
+                | OFlag::O_APPEND
+                | OFlag::O_WRONLY
+                | OFlag::O_CLOEXEC
+                | OFlag::O_NOFOLLOW,
+            Mode::S_IRUSR | Mode::S_IWUSR,
+        )
+        .context("opening anchored append file")?;
+        let stat = fstat(&fd)?;
+        if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_nlink != 1 {
+            bail!("anchored append target is not a private regular file");
+        }
+        Ok(File::from(fd))
+    }
+
     pub(crate) fn read_dir(&self, relative: &Path, max_entries: usize) -> Result<Vec<OsString>> {
         let fd = self.open_dir(relative)?;
         let mut dir = Dir::from_fd(fd)?;
