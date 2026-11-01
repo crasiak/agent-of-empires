@@ -1,7 +1,10 @@
 //! One opted-in Pi Agent conversation's bounded work-arc source and derived cue.
 
+mod document;
 mod source;
 mod state;
+pub(crate) use document::*;
+pub(crate) const CONSENT_VERSION: u32 = 2;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) use state::*;
@@ -225,6 +228,7 @@ pub(crate) enum SourceError {
     Failed,
 }
 
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct BoundArcInput {
     pub input: ArcInput,
     pub session_id: String,
@@ -232,6 +236,10 @@ pub(crate) struct BoundArcInput {
     pub launch_id: String,
     pub generation: u64,
     pub socket_path: std::path::PathBuf,
+    transcript_path: std::path::PathBuf,
+    process_id: u32,
+    process_birth: crate::process::ProcessBirthIdentity,
+    socket_stamp: Vec<(u64, u64, u32, u32)>,
 }
 
 impl BoundArcInput {
@@ -244,17 +252,65 @@ impl BoundArcInput {
             leaf: self.input.covered_leaf.clone(),
         }
     }
+
+    /// Caller holds canonical consent locks through validation and this bounded write.
+    pub(crate) fn write_request(
+        &self,
+        stream: &mut std::os::unix::net::UnixStream,
+        request: &[u8],
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), SourceError> {
+        use std::io::Write;
+        let started = std::time::Instant::now();
+        let allowed =
+            || !cancel.is_cancelled() && started.elapsed() < std::time::Duration::from_secs(2);
+        if !allowed()
+            || crate::process::peer_identity(stream)
+                != Some((unsafe { libc::geteuid() }, self.process_id))
+            || crate::process::process_birth_identity(self.process_id)
+                .ok()
+                .flatten()
+                .as_ref()
+                != Some(&self.process_birth)
+            || source::socket_stamp(&self.socket_path)? != self.socket_stamp
+        {
+            return Err(SourceError::Unavailable);
+        }
+        #[cfg(test)]
+        let _write_finished = test_support::before_write(self, request);
+        let mut remaining = request;
+        while !remaining.is_empty() {
+            if !allowed() {
+                return Err(SourceError::Unavailable);
+            }
+            match stream.write(remaining) {
+                Ok(0) => return Err(SourceError::Failed),
+                Ok(count) => remaining = &remaining[count..],
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::park_timeout(std::time::Duration::from_millis(5));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return Err(SourceError::Failed),
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct ArcFailure {
     pub error: SourceError,
     pub usage: Option<Value>,
+    pub route_refused: bool,
 }
 
 impl From<SourceError> for ArcFailure {
     fn from(error: SourceError) -> Self {
-        Self { error, usage: None }
+        Self {
+            error,
+            usage: None,
+            route_refused: false,
+        }
     }
 }
 
@@ -271,6 +327,7 @@ pub(crate) struct GeneratedArc {
 #[serde(deny_unknown_fields)]
 struct Cursor {
     version: u8,
+    process_id: u32,
     session_id: String,
     source: String,
     leaf_id: Option<String>,
@@ -280,12 +337,23 @@ struct Cursor {
 
 /// The only filesystem path into the producer. No caller may discover a Pi file by
 /// cwd, title or filename: admission starts with the observed pane publication.
+#[cfg(test)]
 pub(crate) fn read_arc_source(
     session: &crate::session::Instance,
 ) -> Result<BoundArcInput, SourceError> {
+    read_arc_source_cancellable(session, &tokio_util::sync::CancellationToken::new())
+}
+
+pub(crate) fn read_arc_source_cancellable(
+    session: &crate::session::Instance,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<BoundArcInput, SourceError> {
     use std::time::Duration;
 
-    if !session.work_arc_enabled {
+    if cancel.is_cancelled() {
+        return Err(SourceError::Unavailable);
+    }
+    if !session.work_arc_enabled || session.work_arc.consent_version != CONSENT_VERSION {
         return Err(SourceError::Disabled);
     }
     if session.is_structured() || session.is_sandboxed() {
@@ -385,7 +453,14 @@ pub(crate) fn read_arc_source(
         return Err(SourceError::Stale);
     }
     let leaf_id = cursor.leaf_id.as_deref().ok_or(SourceError::Missing)?;
-    let bytes = source::read_owned_transcript(&transcript, sid)?;
+    if cursor.process_id == 0 {
+        return Err(SourceError::Unavailable);
+    }
+    let process_birth = crate::process::process_birth_identity(cursor.process_id)
+        .ok()
+        .flatten()
+        .ok_or(SourceError::Unavailable)?;
+    let bytes = source::read_owned_transcript(&transcript, sid, cancel)?;
     let input = extract_arc_input(&bytes, sid, leaf_id).map_err(|reason| match reason {
         "no useful initial exchange" => SourceError::Missing,
         "missing branch ancestor" => SourceError::Stale,
@@ -400,18 +475,7 @@ pub(crate) fn read_arc_source(
     if !socket_path.is_absolute() || socket_path.as_os_str().len() > 99 {
         return Err(SourceError::Unavailable);
     }
-    let socket_parent = socket_path.parent().ok_or(SourceError::Unavailable)?;
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    let dir = std::fs::symlink_metadata(socket_parent).map_err(|_| SourceError::Unavailable)?;
-    let socket = std::fs::symlink_metadata(&socket_path).map_err(|_| SourceError::Unavailable)?;
-    if !dir.file_type().is_dir()
-        || dir.mode() & 0o077 != 0
-        || dir.uid() != unsafe { libc::geteuid() }
-        || !socket.file_type().is_socket()
-        || socket.uid() != unsafe { libc::geteuid() }
-    {
-        return Err(SourceError::Unavailable);
-    }
+    let socket_stamp = source::socket_stamp(&socket_path)?;
     if read_cursor()? != cursor_bytes || read_publication()? != transcript {
         return Err(SourceError::Stale);
     }
@@ -422,15 +486,77 @@ pub(crate) fn read_arc_source(
         launch_id: active.launch_id.clone(),
         generation: session.lifecycle_generation,
         socket_path,
+        transcript_path: transcript,
+        process_id: cursor.process_id,
+        process_birth,
+        socket_stamp,
     })
+}
+
+pub(crate) async fn bounded_source<T: Send + 'static>(
+    read: impl FnOnce(tokio_util::sync::CancellationToken) -> Result<T, SourceError> + Send + 'static,
+    deadline: std::time::Duration,
+) -> Result<T, SourceError> {
+    bounded_source_cancellable(read, deadline, &tokio_util::sync::CancellationToken::new()).await
+}
+
+pub(crate) async fn bounded_source_cancellable<T: Send + 'static>(
+    read: impl FnOnce(tokio_util::sync::CancellationToken) -> Result<T, SourceError> + Send + 'static,
+    deadline: std::time::Duration,
+    parent: &tokio_util::sync::CancellationToken,
+) -> Result<T, SourceError> {
+    let cancel = parent.child_token();
+    let _guard = cancel.clone().drop_guard();
+    if cancel.is_cancelled() {
+        return Err(SourceError::Unavailable);
+    }
+    let stopped = cancel.clone();
+    tokio::select! { biased;
+        _ = stopped.cancelled() => Err(SourceError::Unavailable),
+        result = tokio::time::timeout(deadline, tokio::task::spawn_blocking(move || read(cancel))) => {
+            result.map_err(|_| SourceError::Unavailable)?.map_err(|_| SourceError::Failed)?
+        }
+    }
+}
+
+pub(crate) type ArcSendAdmission = Box<
+    dyn FnOnce(
+            &BoundArcInput,
+            &mut std::os::unix::net::UnixStream,
+            &[u8],
+            &tokio_util::sync::CancellationToken,
+        ) -> Result<(), SourceError>
+        + Send,
+>;
+
+fn validate_connected_peer(
+    bound: &BoundArcInput,
+    standard: &std::os::unix::net::UnixStream,
+) -> Result<(), SourceError> {
+    #[cfg(test)]
+    let _birth_finished = test_support::before_peer_birth(bound);
+    if crate::process::peer_identity(standard)
+        != Some((unsafe { libc::geteuid() }, bound.process_id))
+        || crate::process::process_birth_identity(bound.process_id)
+            .ok()
+            .flatten()
+            .as_ref()
+            != Some(&bound.process_birth)
+        || source::socket_stamp(&bound.socket_path)? != bound.socket_stamp
+    {
+        return Err(SourceError::Unavailable);
+    }
+    Ok(())
 }
 
 async fn exchange(
     bound: &BoundArcInput,
     operation: &str,
     deadline: std::time::Duration,
+    admission: Option<ArcSendAdmission>,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Value, SourceError> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
 
     let nonce = uuid::Uuid::new_v4().to_string();
     if bound.input.text.len() > MAX_INPUT_BYTES {
@@ -454,13 +580,48 @@ async fn exchange(
         return Err(SourceError::Failed);
     }
     let exchange = async {
-        let mut stream = tokio::net::UnixStream::connect(&bound.socket_path)
+        let preflight = bound.clone();
+        bounded_source_cancellable(
+            move |cancel| {
+                if cancel.is_cancelled()
+                    || source::socket_stamp(&preflight.socket_path)? != preflight.socket_stamp
+                {
+                    return Err(SourceError::Unavailable);
+                }
+                Ok(())
+            },
+            std::time::Duration::from_secs(2),
+            cancel,
+        )
+        .await?;
+        let stream = tokio::net::UnixStream::connect(&bound.socket_path)
             .await
             .map_err(|_| SourceError::Unavailable)?;
-        stream
-            .write_all(&request)
-            .await
-            .map_err(|_| SourceError::Failed)?;
+        let standard = stream.into_std().map_err(|_| SourceError::Unavailable)?;
+        let admitted = bound.clone();
+        let standard = bounded_source_cancellable(
+            move |cancel| {
+                let mut standard = standard;
+                if cancel.is_cancelled() {
+                    return Err(SourceError::Unavailable);
+                }
+                validate_connected_peer(&admitted, &standard)?;
+                if cancel.is_cancelled() {
+                    return Err(SourceError::Unavailable);
+                }
+                if let Some(admission) = admission {
+                    admission(&admitted, &mut standard, &request, &cancel)?;
+                } else {
+                    admitted.write_request(&mut standard, &request, &cancel)?;
+                }
+                Ok(standard)
+            },
+            std::time::Duration::from_secs(2),
+            cancel,
+        )
+        .await?;
+        let mut stream =
+            tokio::net::UnixStream::from_std(standard).map_err(|_| SourceError::Unavailable)?;
         let mut response = Vec::new();
         let mut chunk = [0_u8; 1024];
         loop {
@@ -483,9 +644,10 @@ async fn exchange(
         }
         Ok(value)
     };
-    tokio::time::timeout(deadline, exchange)
-        .await
-        .map_err(|_| SourceError::Failed)?
+    tokio::select! { biased;
+        _ = cancel.cancelled() => Err(SourceError::Unavailable),
+        result = tokio::time::timeout(deadline, exchange) => result.map_err(|_| SourceError::Failed)?,
+    }
 }
 
 fn response_field(value: &Value, name: &str, cap: usize) -> Result<String, SourceError> {
@@ -509,15 +671,51 @@ fn response_status(value: &Value) -> Result<(), SourceError> {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn check_arc_route(bound: &BoundArcInput) -> Result<(), SourceError> {
-    let value = exchange(bound, "status", std::time::Duration::from_secs(2)).await?;
+    check_arc_route_cancellable(bound, &tokio_util::sync::CancellationToken::new()).await
+}
+
+pub(crate) async fn check_arc_route_cancellable(
+    bound: &BoundArcInput,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(), SourceError> {
+    let value = exchange(
+        bound,
+        "status",
+        std::time::Duration::from_secs(2),
+        None,
+        cancel,
+    )
+    .await?;
     response_status(&value)?;
     response_field(&value, "selected_route", 128)?;
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) async fn request_arc(bound: BoundArcInput) -> Result<GeneratedArc, ArcFailure> {
-    let value = exchange(&bound, "generate", std::time::Duration::from_secs(155)).await?;
+    request_arc_guarded(
+        bound,
+        Box::new(|bound, stream, request, cancel| bound.write_request(stream, request, cancel)),
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+}
+
+pub(crate) async fn request_arc_guarded(
+    bound: BoundArcInput,
+    admission: ArcSendAdmission,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<GeneratedArc, ArcFailure> {
+    let value = exchange(
+        &bound,
+        "generate",
+        std::time::Duration::from_secs(155),
+        Some(admission),
+        cancel,
+    )
+    .await?;
     let usage = value.get("usage").and_then(measured_usage);
     let result = (|| {
         response_status(&value)?;
@@ -532,7 +730,12 @@ pub(crate) async fn request_arc(bound: BoundArcInput) -> Result<GeneratedArc, Ar
             bound,
         })
     })();
-    result.map_err(|error| ArcFailure { error, usage })
+    result.map_err(|error| ArcFailure {
+        error,
+        usage,
+        // Only a correlated refusal proves inference did not start.
+        route_refused: error == SourceError::Unavailable,
+    })
 }
 
 fn measured_usage(value: &Value) -> Option<Value> {
@@ -560,6 +763,441 @@ fn measured_usage(value: &Value) -> Option<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn actual_js_publisher_is_admitted_through_physical_and_symlinked_tmpdirs() {
+        use std::io::{BufRead, Read};
+        let Ok(node) = which::which("node") else {
+            eprintln!("skipping actual JS publisher integration: Node unavailable");
+            return;
+        };
+        struct ChildGuard {
+            child: std::process::Child,
+            output: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                if let Some(output) = self.output.take() {
+                    let _ = output.join();
+                }
+            }
+        }
+        let temp = tempfile::Builder::new()
+            .prefix("arc-js-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let physical = root.join("real");
+        let alias = root.join("alias");
+        std::fs::create_dir(&physical).unwrap();
+        std::os::unix::fs::symlink(&physical, &alias).unwrap();
+        let mut paths = vec![physical, alias];
+        if cfg!(target_os = "macos") {
+            paths.push(std::path::PathBuf::from("/tmp"));
+        }
+        for tmpdir in paths {
+            let home = tempfile::tempdir().unwrap();
+            let _guard = crate::session::test_support::isolate_app_dir_at(home.path());
+            let fixture = test_support::Fixture::new(home.path());
+            let launch = &fixture.session.active_execution.as_ref().unwrap().launch_id;
+            let script = r#"
+                import { pathToFileURL } from 'node:url';
+                import { readFileSync } from 'node:fs';
+                const { default: install } = await import(pathToFileURL(process.env.ARC_TEST_ASSET));
+                const handlers = new Map();
+                install({ on(name, handler) {
+                    const prior = handlers.get(name);
+                    handlers.set(name, prior ? async (...args) => { await prior(...args); await handler(...args); } : handler);
+                }});
+                const ctx = { isIdle: () => true,
+                    sessionManager: { getSessionId: () => process.env.ARC_TEST_SID,
+                        getSessionFile: () => process.env.ARC_TEST_TRANSCRIPT, getLeafId: () => 'initial' },
+                    model: { provider: 'synthetic', id: 'no-inference' },
+                    modelRegistry: { complete() { throw new Error('status must not infer'); } } };
+                await handlers.get('session_start')({}, ctx);
+                readFileSync(process.env.ARC_TEST_SOCKET_FILE);
+                console.log('READY');
+                process.stdin.resume();
+                process.stdin.once('data', async () => { await handlers.get('session_shutdown')({}, ctx); process.exit(0); });
+            "#;
+            let mut child = std::process::Command::new(&node)
+                .args(["--input-type=module", "-e", script])
+                .env("TMPDIR", &tmpdir)
+                .env(
+                    "ARC_TEST_ASSET",
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("assets/session/aoe-session-id.js"),
+                )
+                .env(
+                    "ARC_TEST_SID",
+                    fixture.session.agent_session_id.as_ref().unwrap(),
+                )
+                .env("ARC_TEST_TRANSCRIPT", &fixture.transcript)
+                .env(
+                    "ARC_TEST_SOCKET_FILE",
+                    fixture.hooks.join(format!("work_arc_socket.{launch}")),
+                )
+                .env("AOE_SESSION_ID_FILE", fixture.hooks.join("session_id"))
+                .env("AOE_SESSION_SOURCE", launch)
+                .env("AOE_INSTANCE_ID", &fixture.session.id)
+                .env("AOE_HOOK_BASE", "/root/.pi/aoe-session")
+                .env_remove("AOE_USAGE_BIN")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let (ready, entered) = std::sync::mpsc::channel();
+            let output = std::thread::spawn(move || {
+                let mut output = std::io::BufReader::new(stdout);
+                loop {
+                    let mut line = String::new();
+                    if output.read_line(&mut line).unwrap() == 0 {
+                        return;
+                    }
+                    if line.trim() == "READY" {
+                        let _ = ready.send(());
+                        break;
+                    }
+                }
+                let mut tail = String::new();
+                output.read_to_string(&mut tail).unwrap();
+            });
+            let mut child = ChildGuard {
+                child,
+                output: Some(output),
+            };
+            entered
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("actual producer bound its socket");
+            let bound = read_arc_source(&fixture.session);
+            assert!(
+                bound.is_ok(),
+                "actual JS publication must be admitted with TMPDIR={tmpdir:?}"
+            );
+            let bound = bound.unwrap();
+            assert_eq!(bound.process_id, child.child.id());
+            assert_eq!(bound.socket_path, bound.socket_path.canonicalize().unwrap());
+            assert_eq!(check_arc_route(&bound).await, Ok(()));
+            use std::io::Write;
+            child.child.stdin.take().unwrap().write_all(b"x").unwrap();
+            assert!(child.child.wait().unwrap().success());
+            child.output.take().unwrap().join().unwrap();
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn blocked_peer_birth_query_does_not_block_exchange_timeout_or_cancellation() {
+        use std::io::Read;
+        for cancel_ui in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let _guard = crate::session::test_support::isolate_app_dir_at(home.path());
+            let fixture = test_support::Fixture::new(home.path());
+            let bound = read_arc_source(&fixture.session).unwrap();
+            let (entered, ready) = std::sync::mpsc::channel();
+            let (release, gate) = std::sync::mpsc::channel();
+            let (finished, done) = std::sync::mpsc::channel();
+            *test_support::BIRTH_GATE.lock().unwrap() =
+                Some((fixture.session.id.clone(), entered, gate, finished));
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let worker_cancel = cancel.clone();
+            let (complete, result) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let exchange = exchange(
+                        &bound,
+                        "generate",
+                        std::time::Duration::from_millis(50),
+                        Some(Box::new(|bound, stream, request, token| {
+                            bound.write_request(stream, request, token)
+                        })),
+                        &worker_cancel,
+                    );
+                    let value = if cancel_ui {
+                        tokio::select! { biased;
+                            _ = worker_cancel.cancelled() => Err(SourceError::Unavailable),
+                            value = exchange => value,
+                        }
+                    } else {
+                        exchange.await
+                    };
+                    let _ = complete.send(value);
+                });
+            });
+            let started = ready.recv_timeout(std::time::Duration::from_secs(5));
+            if cancel_ui {
+                cancel.cancel();
+            }
+            let while_blocked = result.recv_timeout(std::time::Duration::from_millis(500));
+            let _ = release.send(());
+            let returned = done.recv_timeout(std::time::Duration::from_secs(5));
+            worker.join().unwrap();
+            assert!(started.is_ok(), "peer birth query was actually entered");
+            assert!(returned.is_ok(), "owned query worker settled after release");
+            assert!(matches!(while_blocked, Ok(Err(_))), "async exchange must return before releasing a blocked identity query; cancel_ui={cancel_ui}, result={while_blocked:?}");
+            let (mut received, _) = fixture.listener.accept().unwrap();
+            received.set_nonblocking(true).unwrap();
+            use std::os::fd::AsFd;
+            let mut readable = [nix::poll::PollFd::new(
+                received.as_fd(),
+                nix::poll::PollFlags::POLLIN | nix::poll::PollFlags::POLLHUP,
+            )];
+            assert!(nix::poll::poll(&mut readable, 1000_u16).unwrap() > 0);
+            let mut bytes = Vec::new();
+            received.read_to_end(&mut bytes).unwrap();
+            assert!(
+                bytes.is_empty(),
+                "late validation sent {} excerpt bytes",
+                bytes.len()
+            );
+        }
+    }
+
+    #[test]
+    fn retained_arc_uses_a_commit_pointer_and_missing_document_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = crate::session::Storage::new_for_test_path(
+            "synthetic",
+            root.path().join("sessions.json"),
+        );
+        let mut session = crate::session::Instance::new("synthetic", "/tmp/synthetic");
+        let identity = ArcIdentity {
+            session_id: session.id.clone(),
+            pi_id: "synthetic".into(),
+            launch_id: "launch".into(),
+            generation: 1,
+            leaf: "first".into(),
+        };
+        let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let nonce = session.work_arc.reserve(&identity, at).unwrap();
+        session.work_arc.finish(&nonce, Some(StoredArc {
+            identity, at,
+            arc: WorkArc::from_json(r#"{"goal":"Retained orientation","now":"Progress","remaining":"Checks","next":"Review"}"#).unwrap(),
+            selected_route: "fake/route".into(), provider: "fake".into(), model: "test".into(), usage: None,
+        }), None);
+        storage
+            .update(|rows, _| {
+                rows.push(session.clone());
+                Ok(())
+            })
+            .unwrap();
+        let raw = std::fs::read(root.path().join("sessions.json")).unwrap();
+        let rows: Value = serde_json::from_slice(&raw).unwrap();
+        assert!(
+            rows[0]["work_arc"].get("record").is_none(),
+            "registry contains only the canonical commit pointer"
+        );
+        let revision = rows[0]["work_arc"]["revision"].as_str().unwrap();
+        assert_eq!(
+            storage.load().unwrap()[0].work_arc.record,
+            session.work_arc.record
+        );
+        std::fs::remove_file(
+            root.path()
+                .join("work-arcs")
+                .join(&session.id)
+                .join(format!("{revision}.json")),
+        )
+        .unwrap();
+        assert!(
+            storage.load().is_err(),
+            "missing committed data must not reset retained history"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconciliation_blocked_source_bounds_async_wait_and_cancels_worker() {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let pending = tokio::spawn(bounded_source(
+            move |cancel| {
+                entered.send(()).unwrap();
+                wait.recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                done.send(cancel.is_cancelled()).unwrap();
+                Ok(())
+            },
+            std::time::Duration::from_millis(20),
+        ));
+        ready.await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), pending).await;
+        release.send(()).unwrap();
+        let cancelled = finished.await.unwrap();
+        assert!(matches!(result, Ok(Ok(Err(SourceError::Unavailable)))));
+        assert!(
+            cancelled,
+            "worker observes cancellation after blocked read returns"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn stale_process_birth_and_cancelled_write_send_no_bytes() {
+        use std::io::Read;
+        let home = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(home.path());
+        let fixture = test_support::Fixture::new(home.path());
+        let original = read_arc_source(&fixture.session).unwrap();
+        for stale_birth in [false, true] {
+            let mut bound = original.clone();
+            let cancel = tokio_util::sync::CancellationToken::new();
+            if stale_birth {
+                bound.process_birth.start_id.push_str("-stale");
+            } else {
+                cancel.cancel();
+            }
+            let (mut sender, mut receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+            receiver.set_nonblocking(true).unwrap();
+            assert!(matches!(
+                bound.write_request(&mut sender, b"SYNTHETIC_EXCERPT", &cancel),
+                Err(SourceError::Unavailable)
+            ));
+            assert_eq!(
+                receiver.read(&mut [0_u8; 128]).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
+
+    #[test]
+    fn reconciliation_socket_substitute_child() {
+        let Some(path) = std::env::var_os("AOE_ARC_TEST_CHILD_SOCKET") else {
+            return;
+        };
+        use std::io::{Read, Write};
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        println!("READY");
+        std::io::stdout().flush().unwrap();
+        use std::os::fd::AsFd;
+        let mut ready = [nix::poll::PollFd::new(
+            listener.as_fd(),
+            nix::poll::PollFlags::POLLIN,
+        )];
+        if nix::poll::poll(&mut ready, 1000_u16).unwrap() == 0 {
+            println!("BYTES 0 (no connection)");
+            return;
+        }
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut readable = [nix::poll::PollFd::new(
+            stream.as_fd(),
+            nix::poll::PollFlags::POLLIN | nix::poll::PollFlags::POLLHUP,
+        )];
+        assert!(nix::poll::poll(&mut readable, 3000_u16).unwrap() > 0);
+        let mut bytes = [0_u8; 32768];
+        let read = stream.read(&mut bytes).unwrap();
+        println!("BYTES {read}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reconciliation_substituted_process_receives_zero_excerpt_bytes() {
+        use std::io::{BufRead, Read};
+        for replace_before_admission in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let _guard = crate::session::test_support::isolate_app_dir_at(home.path());
+            let fixture = test_support::Fixture::new(home.path());
+            let original_bound = read_arc_source(&fixture.session).unwrap();
+            std::fs::remove_file(&fixture.socket).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "session::work_arc::tests::reconciliation_socket_substitute_child",
+                    "--nocapture",
+                ])
+                .env("AOE_ARC_TEST_CHILD_SOCKET", &fixture.socket)
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+            loop {
+                let mut line = String::new();
+                assert!(output.read_line(&mut line).unwrap() > 0);
+                if line.trim().rsplit(" ... ").next() == Some("READY") {
+                    break;
+                }
+            }
+            let bound = if replace_before_admission {
+                read_arc_source(&fixture.session).unwrap()
+            } else {
+                original_bound
+            };
+            let result = request_arc(bound).await;
+            let mut tail = String::new();
+            output.read_to_string(&mut tail).unwrap();
+            assert!(child.wait().unwrap().success());
+            assert!(
+                tail.contains("BYTES 0"),
+                "unrelated process received request bytes: {tail}"
+            );
+            assert!(matches!(
+                result,
+                Err(ArcFailure {
+                    error: SourceError::Unavailable,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn reconciliation_missing_publisher_pid_fails_closed() {
+        let home = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(home.path());
+        let fixture = test_support::Fixture::new(home.path());
+        let path = fixture.hooks.join(format!(
+            "work_arc_cursor.{}",
+            fixture.session.active_execution.as_ref().unwrap().launch_id
+        ));
+        let mut cursor: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        cursor.as_object_mut().unwrap().remove("process_id");
+        std::fs::write(path, cursor.to_string()).unwrap();
+        assert!(matches!(
+            read_arc_source(&fixture.session),
+            Err(SourceError::Unavailable)
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn reconciliation_nonsticky_writable_socket_ancestor_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(home.path());
+        let fixture = test_support::Fixture::new(home.path());
+        let unsafe_dir = tempfile::Builder::new()
+            .prefix("arc-unsafe-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        std::fs::set_permissions(unsafe_dir.path(), std::fs::Permissions::from_mode(0o777))
+            .unwrap();
+        let private = unsafe_dir.path().join("p");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = private.canonicalize().unwrap().join("s");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::fs::write(
+            fixture.hooks.join(format!(
+                "work_arc_socket.{}",
+                fixture.session.active_execution.as_ref().unwrap().launch_id
+            )),
+            socket.to_str().unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_arc_source(&fixture.session),
+            Err(SourceError::Unavailable)
+        ));
+    }
 
     fn lines(rows: &[serde_json::Value]) -> Vec<u8> {
         let mut out = rows
@@ -662,7 +1300,8 @@ mod tests {
         );
         assert!(source::read_owned_transcript(
             &fixture.transcript,
-            fixture.session.agent_session_id.as_deref().unwrap()
+            fixture.session.agent_session_id.as_deref().unwrap(),
+            &tokio_util::sync::CancellationToken::new(),
         )
         .is_ok());
         use std::os::unix::fs::MetadataExt;
@@ -727,22 +1366,22 @@ mod tests {
     }
 
     #[test]
-    fn swapping_agent_drops_work_arc_consent_and_derived_cue() {
+    fn swapping_agent_pauses_work_arc_without_marking_it_erased() {
         let mut session = crate::session::Instance::new("pi-arc", "/tmp/pi-arc");
         session.tool = "pi".into();
         session.work_arc_enabled = true;
         session.swap_tool("claude");
         assert!(!session.work_arc_enabled);
-        assert!(session.work_arc.cleared);
+        assert!(!session.work_arc.cleared);
     }
 
     #[test]
-    fn new_agent_conversation_does_not_inherit_work_arc_consent() {
+    fn successor_conversation_retains_session_work_arc_consent() {
         let mut session = crate::session::Instance::new("pi-arc", "/tmp/pi-arc");
         session.set_agent_conversation(Some("one".into()), None, None);
         session.work_arc_enabled = true;
         session.set_agent_conversation(Some("two".into()), None, None);
-        assert!(!session.work_arc_enabled);
+        assert!(session.work_arc_enabled);
     }
 
     #[test]
@@ -783,7 +1422,9 @@ mod tests {
             .prefix("arc-")
             .tempdir_in("/tmp")
             .unwrap();
-        let path = dir.path().join("s");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().canonicalize().unwrap().join("s");
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -803,6 +1444,12 @@ mod tests {
                 .unwrap();
         });
         let bound = BoundArcInput {
+            socket_stamp: source::socket_stamp(&path).unwrap(),
+            process_id: std::process::id(),
+            process_birth: crate::process::process_birth_identity(std::process::id())
+                .unwrap()
+                .unwrap(),
+            transcript_path: std::path::PathBuf::new(),
             input: ArcInput {
                 covered_leaf: "leaf".into(),
                 text: "Synthetic input".into(),
@@ -817,7 +1464,8 @@ mod tests {
             request_arc(bound).await,
             Err(ArcFailure {
                 error: SourceError::Stale,
-                usage: None
+                usage: None,
+                route_refused: false,
             })
         ));
         server.await.unwrap();
@@ -830,7 +1478,9 @@ mod tests {
             .prefix("arc-")
             .tempdir_in("/tmp")
             .unwrap();
-        let path = dir.path().join("s");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().canonicalize().unwrap().join("s");
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -862,6 +1512,12 @@ mod tests {
                 .unwrap();
         });
         let bound = BoundArcInput {
+            socket_stamp: source::socket_stamp(&path).unwrap(),
+            process_id: std::process::id(),
+            process_birth: crate::process::process_birth_identity(std::process::id())
+                .unwrap()
+                .unwrap(),
+            transcript_path: std::path::PathBuf::new(),
             input: ArcInput {
                 covered_leaf: "leaf".into(),
                 text: "\u{1}\"\\".repeat(8000),

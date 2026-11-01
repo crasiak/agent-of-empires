@@ -828,6 +828,12 @@ impl super::SleepInhibit for SystemdInhibitor {
     }
 }
 
+pub(super) fn peer_identity(stream: &std::os::unix::net::UnixStream) -> Option<(u32, u32)> {
+    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+    let credentials = getsockopt(stream, PeerCredentials).ok()?;
+    (credentials.pid() > 0).then_some((credentials.uid(), credentials.pid() as u32))
+}
+
 pub(super) fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
     use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
     getsockopt(stream, PeerCredentials).ok().map(|c| c.uid())

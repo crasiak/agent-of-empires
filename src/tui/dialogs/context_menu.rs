@@ -279,15 +279,13 @@ impl ContextMenuDialog {
             self.items.push((
                 ContextMenuAction::ToggleWorkArc,
                 if enabled {
-                    "Disable work arc"
+                    "Pause work arc"
                 } else {
                     "Enable work arc…"
                 },
             ));
-            if enabled {
-                self.items
-                    .push((ContextMenuAction::ExpandWorkArc, "Expand work arc"));
-            }
+            self.items
+                .push((ContextMenuAction::ExpandWorkArc, "Expand work arc"));
         }
         self
     }

@@ -29,6 +29,10 @@ use linux as platform;
 use macos as platform;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod platform {
+    pub(super) fn peer_identity(_: &std::os::unix::net::UnixStream) -> Option<(u32, u32)> {
+        None
+    }
+
     pub(super) fn peer_uid(_: &std::os::unix::net::UnixStream) -> Option<u32> {
         None
     }
@@ -1074,6 +1078,11 @@ impl RunnerProcessGuard {
 /// The effective uid of a connected Unix-socket peer.
 pub(crate) fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
     platform::peer_uid(stream)
+}
+
+/// The effective UID and PID attested by this connected Unix socket.
+pub(crate) fn peer_identity(stream: &std::os::unix::net::UnixStream) -> Option<(u32, u32)> {
+    platform::peer_identity(stream)
 }
 
 pub(crate) fn process_birth_identity(pid: u32) -> anyhow::Result<Option<ProcessBirthIdentity>> {
