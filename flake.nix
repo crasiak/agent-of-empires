@@ -38,8 +38,10 @@
             # sandbox npm floor, and acp-worker/aoe-agent (manifest, lock and
             # sources), which src/acp/adapters.rs embeds to install the
             # in-tree agent and the acp::node test reads to pin `engines.node`
-            # to the Node floor (the aoe-test and aoe-clippy checks compile
-            # test code, so they need these even though the packages do not).
+            # to the Node floor, and src/session/afk/answer/testdata, the Pi
+            # permission-gate dialog fixture the AFK answer tests embed (the
+            # aoe-test and aoe-clippy checks compile test code, so they need
+            # these even though the packages do not).
             # `scripts/check-nix-embedded-assets.py` fails CI if a new embedded
             # asset lands without being added here.
             src = pkgs.lib.fileset.toSource {
@@ -53,6 +55,7 @@
                 ./acp-worker/test-shim/shim.mjs
                 ./assets
                 ./docker
+                ./src/session/afk/answer/testdata
                 ./src/session_search/testdata
                 ./tests/fixtures/cli-read
                 ./tests/fixtures/workshop
