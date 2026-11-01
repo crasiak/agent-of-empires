@@ -200,10 +200,14 @@ narrow rule is the real boundary. Under `yolo` a failed check only adds a warnin
   segment is checked. `cd` with no target, to `~`, to `-` or to a `$…` value counts
   as outside, as do tokens with a backslash, an unresolvable leading `~` or a `$`.
   Nested shells (`sh`, `bash`, `zsh`, `fish`, `dash`, `ksh`, `eval`) count as
-  outside. `/dev/null` is allowed.
-- `dependencies`: `install` or `add` verbs of npm, pnpm, yarn and bun; `cargo add`
-  and `cargo update`; pip, uv, poetry, pdm, bundle, composer; `go get`; and edits
-  to manifests and lockfiles.
+  outside, including behind `timeout`, `env`, `sudo`, `nice`, `nohup`, `xargs` and
+  `stdbuf` (checked against the command after their options) and as `find
+  -exec`/`-execdir` targets; `sudo -s`/`-i` and `env -S` count as shells.
+  `/dev/null` is allowed.
+- `dependencies`: `install` or `add` verbs of npm, pnpm, yarn and bun, and their
+  `update`/`upgrade`/`up`; `cargo add` and `cargo update`; pip, uv, poetry, pdm,
+  bundle (including `poetry update`), composer; `go get` and `go mod tidy`; and
+  edits to manifests and lockfiles.
 - `protected_push`: pushes to `main` or `master` (including refspecs like
   `HEAD:main`), force, delete, mirror and prune pushes, and `git branch -d/-D`. A
   bare `git push` cannot be judged without branch context and passes.
@@ -216,8 +220,9 @@ narrow rule is the real boundary. Under `yolo` a failed check only adds a warnin
   a deny stops with `scope:diff_limit`; no item estimate raises the limit yet. If
   git fails, the check is skipped.
 
-Known gaps: shells behind wrappers (`timeout`, `env`, `sudo`, `xargs`,
-`find -exec`), `npm update`, `go mod tidy`, and pushes of `HEAD` while on `main`.
+Known gaps: interpreters running inline code (`python -c`, `node -e`), `source`
+and `.`, versioned tool names such as `pip3.11`, and pushes of `HEAD` while on
+`main`.
 
 ### How each menu reaches the engine
 

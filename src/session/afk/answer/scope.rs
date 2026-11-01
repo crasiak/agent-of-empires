@@ -20,10 +20,16 @@ static DEPENDENCY_TOOLS: &[(&[&str], &[&str], bool)] = &[
         &["install", "i", "add"],
         true,
     ),
+    (
+        &["npm", "pnpm", "yarn", "bun"],
+        &["update", "upgrade", "up"],
+        false,
+    ),
     (&["cargo"], &["add", "update"], false),
     (&["pip", "pip3", "uv"], &["install", "add"], false),
-    (&["go"], &["get"], false),
-    (&["poetry", "pdm", "bundle"], &["add"], false),
+    // `go mod tidy` rewrites go.mod and go.sum.
+    (&["go"], &["get", "tidy"], false),
+    (&["poetry", "pdm", "bundle"], &["add", "update"], false),
     (&["composer"], &["require"], false),
 ];
 // A bare `git push` (no refspec) can't be judged without branch context, so it passes.
@@ -37,6 +43,96 @@ static READ_ONLY: &[&str] = &[
     "cat", "ls", "grep", "rg", "head", "tail", "wc", "stat", "file", "less", "diff",
 ];
 static SHELLS: &[&str] = &["sh", "bash", "zsh", "fish", "dash", "ksh", "eval"];
+static FIND_EXEC: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
+
+/// A command that runs another command: its short and long options that take a separate
+/// argument, the options that make it run a shell, and its positional arguments before the command.
+struct Wrapper {
+    name: &'static str,
+    arg_short: &'static str,
+    arg_long: &'static [&'static str],
+    shell_short: &'static str,
+    shell_long: &'static [&'static str],
+    positional: usize,
+}
+
+static WRAPPERS: &[Wrapper] = &[
+    Wrapper {
+        name: "timeout",
+        arg_short: "sk",
+        arg_long: &["--signal", "--kill-after"],
+        shell_short: "",
+        shell_long: &[],
+        positional: 1,
+    },
+    Wrapper {
+        name: "env",
+        arg_short: "uC",
+        arg_long: &["--unset", "--chdir"],
+        shell_short: "S",
+        shell_long: &["--split-string"],
+        positional: 0,
+    },
+    Wrapper {
+        name: "sudo",
+        arg_short: "ugCDhprtUTR",
+        arg_long: &[
+            "--user",
+            "--group",
+            "--close-from",
+            "--chdir",
+            "--host",
+            "--prompt",
+            "--role",
+            "--type",
+            "--other-user",
+            "--command-timeout",
+            "--chroot",
+        ],
+        shell_short: "si",
+        shell_long: &["--shell", "--login"],
+        positional: 0,
+    },
+    Wrapper {
+        name: "nice",
+        arg_short: "n",
+        arg_long: &["--adjustment"],
+        shell_short: "",
+        shell_long: &[],
+        positional: 0,
+    },
+    Wrapper {
+        name: "nohup",
+        arg_short: "",
+        arg_long: &[],
+        shell_short: "",
+        shell_long: &[],
+        positional: 0,
+    },
+    Wrapper {
+        name: "xargs",
+        arg_short: "ILnPsdEa",
+        arg_long: &[
+            "--max-args",
+            "--max-procs",
+            "--max-chars",
+            "--delimiter",
+            "--arg-file",
+            "--process-slot-var",
+        ],
+        shell_short: "",
+        shell_long: &[],
+        positional: 0,
+    },
+    Wrapper {
+        name: "stdbuf",
+        arg_short: "ioe",
+        arg_long: &["--input", "--output", "--error"],
+        shell_short: "",
+        shell_long: &[],
+        positional: 0,
+    },
+];
 static SHELL_META: &[&str] = &[";", "&", "|", ">", "<", "`", "$(", "\n"];
 
 /// The command part of a subject such as `Bash command: cargo test`.
@@ -44,11 +140,20 @@ fn command_of(subject: &str) -> &str {
     subject.split_once(": ").map_or(subject, |(_, c)| c)
 }
 
-/// Words of a command segment, with quotes and grouping characters trimmed.
+/// Words of a command segment, with quotes and grouping characters trimmed. A word ending in
+/// `{}` (the `find`/`xargs` placeholder, alone or as in `-I{}`) keeps its braces, so it still
+/// counts as an option's argument.
 fn words(segment: &str) -> Vec<&str> {
     segment
         .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| "\"'(){}".contains(c)))
+        .map(|w| {
+            let w = w.trim_matches(|c: char| "\"'".contains(c));
+            if w.ends_with("{}") {
+                w
+            } else {
+                w.trim_matches(|c: char| "\"'(){}".contains(c))
+            }
+        })
         .filter(|w| !w.is_empty())
         .collect()
 }
@@ -98,14 +203,60 @@ fn under(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|r| path.starts_with(r))
 }
 
-/// A segment that runs code we can't inspect (a shell or `eval`) or moves to an unresolvable
+/// The words a wrapper runs as its command, after its options, their arguments and its
+/// positionals; `None` when its options make it run a shell (`sudo -s`, `env -S`).
+fn wrapped<'a, 'b>(w: &Wrapper, args: &'b [&'a str]) -> Option<&'b [&'a str]> {
+    let (mut i, mut positional, mut options) = (0, w.positional, true);
+    while let Some(&a) = args.get(i) {
+        i += 1;
+        if options && a == "--" {
+            options = false;
+        } else if options && a.starts_with("--") {
+            let (name, value) = a.split_once('=').map_or((a, None), |(n, v)| (n, Some(v)));
+            if w.shell_long.contains(&name) {
+                return None;
+            }
+            if value.is_none() && w.arg_long.contains(&name) {
+                i += 1;
+            }
+        } else if let Some(cluster) = a.strip_prefix('-').filter(|_| options) {
+            // Short options cluster (`-Eu root`); one that takes an argument ends the cluster.
+            for (j, c) in cluster.char_indices() {
+                if w.shell_short.contains(c) {
+                    return None;
+                }
+                if w.arg_short.contains(c) {
+                    if j + c.len_utf8() == cluster.len() {
+                        i += 1;
+                    }
+                    break;
+                }
+            }
+        } else if positional > 0 {
+            positional -= 1;
+        } else {
+            return Some(&args[i - 1..]);
+        }
+    }
+    Some(&[])
+}
+
+/// A segment that runs code we can't inspect (a shell or `eval`, directly, behind a wrapper
+/// such as `sudo` or `xargs`, or as a `find -exec` target) or moves to an unresolvable
 /// directory (`cd`, `cd ~`, `cd -`, `cd $X`).
 fn unresolvable_segment(words: &[&str]) -> bool {
     match command_word(words) {
         Some(("cd", args)) => args
             .first()
             .is_none_or(|t| *t == "~" || *t == "-" || t.starts_with('$')),
-        Some((word, _)) => SHELLS.contains(&word),
+        Some(("find", args)) => args
+            .iter()
+            .enumerate()
+            .any(|(i, a)| FIND_EXEC.contains(a) && unresolvable_segment(&args[i + 1..])),
+        Some((word, args)) => match WRAPPERS.iter().find(|w| w.name == word) {
+            Some(w) => wrapped(w, args).is_none_or(unresolvable_segment),
+            None => SHELLS.contains(&word),
+        },
         None => false,
     }
 }
