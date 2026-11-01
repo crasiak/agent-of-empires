@@ -76,9 +76,9 @@ struct Period {
     completion_basis: Option<String>,
     settlement_status: String,
     /// Absent from extensions that predate menu answering.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     policy: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     answers: Option<Answers>,
 }
 
@@ -142,6 +142,8 @@ impl Inspection {
                     )
                     && (!p.active || p.guarded && matches!(p.status.as_str(), "pending" | "owned"))
                     && (p.status != "recovered" || !p.active && !p.guarded)
+                    // Keep the range check before `request_limit * 16`: `&&` short-circuits, so the
+                    // multiplication only runs on a limit that cannot overflow `u32`.
                     && (1..=512).contains(&p.request_limit)
                     && p.requests_used <= p.request_limit
                     && p.tool_limit == (p.request_limit * 16).min(4096)
@@ -333,6 +335,8 @@ mod tests {
         };
         assert!(reply.valid(&request, &generation, 1200));
         assert!(reply.describe().contains("no active authority"));
+        let period = serde_json::to_value(&reply).unwrap()["period"].clone();
+        assert!(period.get("policy").is_none() && period.get("answers").is_none());
         for mutation in ["start", "expired", "generation", "binding", "counter"] {
             let mut req = serde_json::to_value(&request).unwrap();
             let mut value = reply.clone();

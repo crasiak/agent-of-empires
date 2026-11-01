@@ -44,6 +44,8 @@ struct FormatFile {
     #[serde(default)]
     option_pattern: Option<String>,
     #[serde(default)]
+    footer_pattern: Option<String>,
+    #[serde(default)]
     options_after_trigger: bool,
     #[serde(default = "two")]
     min_options: usize,
@@ -71,6 +73,7 @@ struct Format {
     kind: Kind,
     trigger: Option<Regex>,
     option: Option<Regex>,
+    footer: Option<Regex>,
     after_trigger: bool,
     min_options: usize,
     above: usize,
@@ -94,6 +97,14 @@ fn compile(name: &str, text: &str) -> Result<Format> {
         f.option_pattern.is_some() || (!f.fixed.is_empty() && f.trigger.is_some()),
         "{name}: needs option_pattern, or trigger and [[option]]"
     );
+    ensure!(
+        f.fixed.is_empty() || f.option_pattern.is_none(),
+        "{name}: [[option]] and option_pattern are mutually exclusive"
+    );
+    ensure!(
+        f.footer_pattern.is_none() || f.option_pattern.is_some(),
+        "{name}: footer_pattern needs option_pattern"
+    );
     let re = |p: &Option<String>| {
         p.as_deref()
             .map(Regex::new)
@@ -104,13 +115,28 @@ fn compile(name: &str, text: &str) -> Result<Format> {
     let lower = |ws: Vec<String>| ws.into_iter().map(|w| w.to_lowercase());
     let mut roles = RoleWords::default();
     if let Some(extra) = f.roles {
+        // An empty word would match every label.
+        ensure!(
+            [&extra.approve, &extra.deny, &extra.revise]
+                .iter()
+                .all(|ws| ws.iter().all(|w| !w.trim().is_empty())),
+            "{name}: empty role word"
+        );
         roles.approve.extend(lower(extra.approve));
         roles.deny.extend(lower(extra.deny));
         roles.revise.extend(lower(extra.revise));
     }
+    let option = re(&f.option_pattern)?;
+    ensure!(
+        option
+            .as_ref()
+            .is_none_or(|o| o.capture_names().flatten().any(|n| n == "label")),
+        "{name}: option_pattern needs a `label` group"
+    );
     Ok(Format {
         trigger: re(&f.trigger)?,
-        option: re(&f.option_pattern)?,
+        option,
+        footer: re(&f.footer_pattern)?,
         id: f.id,
         sources: f.sources,
         kind: f.kind,
@@ -174,10 +200,25 @@ impl Formats {
 
     /// First match wins, in load order. A recogniser that can't build a valid menu is no match.
     pub fn recognise(&self, source: Source, text: &str) -> Option<Menu> {
+        // Fenced text is quoted data, never a live menu. So is a `>` blockquote in agent text; in a
+        // prompt or pane `>` is a selection cursor and its row is an option.
+        let mut fence: Option<&str> = None;
         let lines: Vec<&str> = text
             .lines()
             .map(str::trim_end)
-            .filter(|l| !l.trim().is_empty())
+            .filter(|l| {
+                let t = l.trim_start();
+                let marker = ["```", "~~~"].into_iter().find(|m| t.starts_with(m));
+                match (fence, marker) {
+                    (None, Some(m)) => fence = Some(m),
+                    (Some(open), Some(m)) if open == m => fence = None,
+                    _ => {}
+                }
+                fence.is_none()
+                    && marker.is_none()
+                    && !t.is_empty()
+                    && !(source == Source::AgentText && t.starts_with('>'))
+            })
             .collect();
         let window = &lines[lines.len().saturating_sub(WINDOW)..];
         self.0
@@ -228,7 +269,10 @@ impl Format {
                     let mut label = c.name("label")?.as_str().trim().to_string();
                     let key = match c.name("key") {
                         Some(k) => {
-                            if self.label_includes_key {
+                            // "[A]pprove" needs its key back; "[A]Approve" already has it.
+                            if self.label_includes_key
+                                && !label.to_lowercase().starts_with(&k.as_str().to_lowercase())
+                            {
                                 label.insert_str(0, k.as_str());
                             }
                             k.as_str().to_string()
@@ -246,9 +290,11 @@ impl Format {
             if options.len() < self.min_options {
                 return None;
             }
-            // Options must be the end of the text: nothing but options after the first option line.
+            // Options must be the end of the text: nothing but options (and footer lines) after the first option line.
+            let is_footer = |l: &str| self.footer.as_ref().is_some_and(|f| f.is_match(l.trim()));
             if (self.trigger.is_none() || self.after_trigger)
-                && first_option_line.is_some_and(|i| window[i..].iter().any(|l| !re.is_match(l)))
+                && first_option_line
+                    .is_some_and(|i| window[i..].iter().any(|l| !re.is_match(l) && !is_footer(l)))
             {
                 return None;
             }

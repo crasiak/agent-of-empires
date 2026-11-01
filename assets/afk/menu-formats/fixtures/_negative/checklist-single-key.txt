@@ -1,0 +1,3 @@
+Progress so far:
+- [x]parser
+- [ ]tests

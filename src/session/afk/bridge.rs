@@ -238,8 +238,14 @@ pub(super) fn serve(
                     answer_id,
                     delivered,
                 } => {
-                    answer::log::AnswerLog::new(&store.dir, &period)?
-                        .delivered(&answer_id, delivered)?;
+                    let log = answer::log::AnswerLog::new(&store.dir, &period)?;
+                    // A delivery with no decision before it is not evidence of anything.
+                    if !log.has_decision(&answer_id)? {
+                        return Ok(
+                            serde_json::json!({ "recorded": false, "reason": "unknown_answer" }),
+                        );
+                    }
+                    log.delivered(&answer_id, delivered)?;
                     Ok(serde_json::json!({ "recorded": true }))
                 }
             }
@@ -267,9 +273,12 @@ pub(super) fn serve(
     }
 }
 
-fn load_rules(run: &answer::run::RunInput) -> Result<answer::Rules> {
+fn load_rules(
+    run: &answer::run::RunInput,
+    budget: &answer::run::GitBudget,
+) -> Result<answer::Rules> {
     answer::Rules::load(
-        Some(&answer::run::repo_root(&run.cwd)),
+        Some(&answer::run::repo_root(&run.cwd, budget)),
         answer::rules::user_rules_file().as_deref(),
         &run.rules,
     )
@@ -278,20 +287,24 @@ fn load_rules(run: &answer::run::RunInput) -> Result<answer::Rules> {
 /// A parse error is a value, not a refusal: the consent dialog shows it to the user.
 fn rules_check(run: &answer::run::RunInput, format_warnings: &[String]) -> serde_json::Value {
     if run.policy == answer::Policy::Yolo {
-        return serde_json::json!({ "valid": true, "count": 0, "sources": [], "format_warnings": format_warnings });
+        return serde_json::json!({
+            "valid": true, "count": 0, "sources": [], "format_warnings": format_warnings, "rule_warnings": [],
+        });
     }
-    match load_rules(run) {
+    match load_rules(run, &answer::run::GitBudget::standard()) {
         Ok(rules) => serde_json::json!({
             "valid": true,
             "count": rules.rules.len(),
             "sources": rules.sources,
             "digest": rules.digest,
             "format_warnings": format_warnings,
+            "rule_warnings": rules.warnings,
         }),
         Err(error) => serde_json::json!({
             "valid": false,
             "error": format!("{error:#}"),
             "format_warnings": format_warnings,
+            "rule_warnings": [],
         }),
     }
 }
@@ -304,18 +317,26 @@ fn decide(
     text: Option<TextMenu>,
     proposal: Option<answer::Proposal>,
 ) -> Result<serde_json::Value> {
+    // One deadline for every git call this decide makes.
+    let budget = answer::run::GitBudget::standard();
     let log = answer::log::AnswerLog::new(&store.dir, &run.period)?;
     let menu = match (menu, text) {
         (Some(input), None) => answer::Menu::from_input(input, &answer::RoleWords::default())?,
         (None, Some(text)) => match formats.recognise(text.source, &text.text) {
             Some(menu) => menu,
             None => {
-                let sample = log.unrecognised(&text.text)?;
+                // The record comes first, so a sample that can't be saved loses nothing else.
                 let id = log.decision(&serde_json::json!({
                     "run": run.period, "item": run.item, "period": run.period, "menu": null,
-                    "proposal": null, "decision": "stop", "policy": run.policy,
-                    "reason": "unrecognised_menu", "sample": sample, "delivered": "not_applicable",
+                    "proposal": null, "decision": "stop", "choice": null, "text": null,
+                    "policy": run.policy, "rule": null, "rule_origin": null, "checks": [],
+                    "warnings": [], "reason": "unrecognised_menu", "sample": null,
+                    "delivered": "not_applicable",
                 }))?;
+                let sample = log.unrecognised(&text.text).ok();
+                if let Some(sample) = &sample {
+                    log.sample_saved(&id, sample)?;
+                }
                 return Ok(serde_json::json!({
                     "answer_id": id,
                     "menu": null,
@@ -329,15 +350,15 @@ fn decide(
     // Rules are fixed at consent: sources that no longer load to the consented digest stop.
     let rules = match run.policy {
         answer::Policy::Yolo => Some(answer::Rules::empty()),
-        answer::Policy::Rules => load_rules(&run)
+        answer::Policy::Rules => load_rules(&run, &budget)
             .ok()
             .filter(|r| run.rules_digest.as_deref() == Some(r.digest.as_str())),
     };
-    let decision = match rules {
+    let decision = match &rules {
         Some(rules) => answer::decide(
             &menu,
-            &answer::run::context(&run),
-            &rules,
+            &answer::run::context(&run, &budget),
+            rules,
             proposal.as_ref(),
         ),
         None => answer::Decision::Stop {
@@ -368,11 +389,18 @@ fn decide(
             "not_applicable",
         ),
     };
+    // A `stop` rule's id is in its reason; every other rule's is in `rule`.
+    let rule_origin = rules.as_ref().and_then(|rules| {
+        let id = rule
+            .as_deref()
+            .or_else(|| reason.strip_prefix("rule_stop:"))?;
+        rules.origin_of(id)
+    });
     let record = serde_json::json!({
         "run": run.period, "item": run.item, "period": run.period, "menu": menu,
         "proposal": proposal.as_ref().and_then(|p| p.key.clone()), "decision": kind,
-        "choice": choice, "text": text, "policy": run.policy, "rule": rule, "checks": checks,
-        "warnings": warnings, "reason": reason, "delivered": delivered,
+        "choice": choice, "text": text, "policy": run.policy, "rule": rule, "rule_origin": rule_origin,
+        "checks": checks, "warnings": warnings, "reason": reason, "delivered": delivered,
     });
     let id = log.decision(&record)?;
     Ok(serde_json::json!({ "answer_id": id, "menu": menu, "decision": decision }))
@@ -627,5 +655,322 @@ mod tests {
         other["rules"] = serde_json::json!(["id='other', answer='approve'"]);
         assert_eq!(decide(other)["reason"], "rules_changed");
         assert_eq!(decide(run("yolo", "stale"))["decision"], "answer");
+    }
+    const PERIOD: &str = "11111111-1111-1111-1111-111111111111";
+
+    fn binding() -> Binding {
+        Binding {
+            instance_id: "test".into(),
+            profile: "default".into(),
+            native_id: "native".into(),
+            launch_id: "launch".into(),
+        }
+    }
+
+    /// The whole reply line for one packet, `ok` flag included.
+    fn exchange(store: &Store, packet: serde_json::Value) -> (serde_json::Value, usize) {
+        let mut line = serde_json::to_vec(&packet).unwrap();
+        line.push(b'\n');
+        let mut out = Vec::new();
+        serve(
+            store,
+            None,
+            &binding(),
+            "generation",
+            std::io::Cursor::new(line),
+            &mut out,
+            || Ok(()),
+        )
+        .unwrap();
+        (serde_json::from_slice(&out).unwrap(), out.len())
+    }
+
+    fn value_of(store: &Store, packet: serde_json::Value) -> serde_json::Value {
+        let (reply, _) = exchange(store, packet);
+        assert_eq!(reply["ok"], true, "{reply}");
+        reply["value"].clone()
+    }
+
+    fn yes_no_menu() -> serde_json::Value {
+        serde_json::json!({
+            "source": "pi_dialog", "format": "pi.confirm", "kind": "confirm", "question": "Continue?",
+            "options": [{"key": "y", "label": "Yes"}, {"key": "n", "label": "No"}],
+        })
+    }
+
+    fn run_for(
+        cwd: &std::path::Path,
+        policy: &str,
+        rules: &[&str],
+        digest: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "period": PERIOD, "goal": "g", "policy": policy, "rules": rules,
+            "rules_digest": digest, "cwd": cwd, "requests_used": 0, "request_limit": 4,
+        })
+    }
+
+    /// The period's answer log, its lines folded into one object per answer id.
+    fn folded(store: &Store) -> std::collections::BTreeMap<String, serde_json::Value> {
+        let text =
+            std::fs::read_to_string(store.dir.path().join(format!("afk-answers/{PERIOD}.jsonl")))
+                .unwrap();
+        let mut by_id = std::collections::BTreeMap::new();
+        for line in text.lines() {
+            let line: serde_json::Value = serde_json::from_str(line).unwrap();
+            let id = line["answer_id"].as_str().unwrap().to_string();
+            let entry = by_id.entry(id).or_insert_with(|| serde_json::json!({}));
+            for (k, v) in line.as_object().unwrap() {
+                entry[k] = v.clone();
+            }
+        }
+        by_id
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn rules_check_reports_valid_invalid_yolo_and_warnings() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path(), "test", true).unwrap();
+        let check = |policy: &str, rules: &[&str]| {
+            value_of(
+                &store,
+                serde_json::json!({"op": "rules_check", "run": run_for(cwd.path(), policy, rules, "")}),
+            )
+        };
+        let valid = check("rules", &["id='a', kind='confirm', answer='approve'"]);
+        assert_eq!(valid["valid"], true, "{valid}");
+        assert_eq!(valid["count"], 1);
+        assert_eq!(valid["sources"], serde_json::json!(["inline rule 1"]));
+        assert_eq!(valid["digest"].as_str().unwrap().len(), 64);
+        assert_eq!(valid["rule_warnings"], serde_json::json!([]));
+        // A rule that does not parse is a value for the consent dialog, not a refusal.
+        let invalid = check("rules", &["id='a', answer='nope'"]);
+        assert_eq!(invalid["valid"], false, "{invalid}");
+        assert!(invalid["error"].as_str().unwrap().contains("not allowed"));
+        assert_eq!(invalid["rule_warnings"], serde_json::json!([]));
+        let yolo = check("yolo", &["id='a', answer='nope'"]);
+        assert_eq!(yolo["valid"], true);
+        assert_eq!(yolo["count"], 0);
+        assert_eq!(yolo["rule_warnings"], serde_json::json!([]));
+        // A repo stop rule that an inline rule's id shadows is reported.
+        std::fs::write(
+            cwd.path().join("afk-rules.toml"),
+            "[[rule]]\nid='guard'\nanswer='stop'\n",
+        )
+        .unwrap();
+        let shadowed = check("rules", &["id='guard', answer='approve'"]);
+        let warnings = shadowed["rule_warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1, "{shadowed}");
+        assert!(warnings[0]
+            .as_str()
+            .unwrap()
+            .contains("shadowed_stop_rules"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn rules_decisions_through_the_bridge_log_their_rule_origin() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path(), "test", true).unwrap();
+        let rules = [
+            "id='stop-all', kind='plan', answer='stop'",
+            "id='any', kind='confirm', answer='approve'",
+        ];
+        let checked = value_of(
+            &store,
+            serde_json::json!({"op": "rules_check", "run": run_for(cwd.path(), "rules", &rules, "")}),
+        );
+        let digest = checked["digest"].as_str().unwrap().to_string();
+        let run = run_for(cwd.path(), "rules", &rules, &digest);
+        let answered = value_of(
+            &store,
+            serde_json::json!({"op": "decide", "run": run, "menu": yes_no_menu()}),
+        );
+        assert_eq!(answered["decision"]["decision"], "answer", "{answered}");
+        assert_eq!(answered["decision"]["rule"], "any");
+        let mut plan = yes_no_menu();
+        plan["kind"] = "plan".into();
+        let stopped = value_of(
+            &store,
+            serde_json::json!({"op": "decide", "run": run, "menu": plan}),
+        );
+        assert_eq!(
+            stopped["decision"]["reason"], "rule_stop:stop-all",
+            "{stopped}"
+        );
+        let delivered = value_of(
+            &store,
+            serde_json::json!({
+                "op": "answer_delivered", "period": PERIOD,
+                "answer_id": answered["answer_id"], "delivered": "ok",
+            }),
+        );
+        assert_eq!(delivered["recorded"], true);
+        let log = folded(&store);
+        let answer = &log[answered["answer_id"].as_str().unwrap()];
+        assert_eq!(answer["rule"], "any");
+        assert_eq!(answer["rule_origin"], "inline rule 2");
+        assert_eq!(answer["decision"], "answer");
+        assert_eq!(answer["delivered"], "ok");
+        let stop = &log[stopped["answer_id"].as_str().unwrap()];
+        assert_eq!(stop["rule_origin"], "inline rule 1");
+        assert_eq!(stop["delivered"], "not_applicable");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn an_unrecognised_stop_record_has_the_same_keys_as_any_other() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path(), "test", true).unwrap();
+        let run = run_for(cwd.path(), "yolo", &[], "");
+        let unrecognised = value_of(
+            &store,
+            serde_json::json!({
+                "op": "decide", "run": run,
+                "text": {"source": "agent_text", "text": "nothing to answer here"},
+            }),
+        );
+        let answered = value_of(
+            &store,
+            serde_json::json!({"op": "decide", "run": run, "menu": yes_no_menu()}),
+        );
+        let log = folded(&store);
+        let stop = log[unrecognised["answer_id"].as_str().unwrap()]
+            .as_object()
+            .unwrap()
+            .clone();
+        let answer = log[answered["answer_id"].as_str().unwrap()]
+            .as_object()
+            .unwrap()
+            .clone();
+        for key in [
+            "choice",
+            "text",
+            "rule",
+            "rule_origin",
+            "checks",
+            "warnings",
+        ] {
+            assert!(stop.contains_key(key), "stop record lacks {key}");
+        }
+        let missing: Vec<_> = answer.keys().filter(|k| !stop.contains_key(*k)).collect();
+        assert!(missing.is_empty(), "stop record lacks {missing:?}");
+        assert!(stop["choice"].is_null() && stop["rule"].is_null() && stop["text"].is_null());
+        assert_eq!(stop["warnings"], serde_json::json!([]));
+        assert_eq!(stop["checks"], serde_json::json!([]));
+        // The sample is linked to its record by a follow-up line, which folds in.
+        let sample = unrecognised["sample"].as_str().unwrap();
+        assert_eq!(stop["sample"], sample);
+        assert!(store.dir.path().join("afk-answers").join(sample).is_file());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_delivery_for_an_unknown_answer_is_refused_as_a_value() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path(), "test", true).unwrap();
+        let deliver = |id: &str| {
+            value_of(
+                &store,
+                serde_json::json!({
+                    "op": "answer_delivered", "period": PERIOD, "answer_id": id, "delivered": "ok",
+                }),
+            )
+        };
+        let stranger = uuid::Uuid::new_v4().to_string();
+        let refused = deliver(&stranger);
+        assert_eq!(refused["recorded"], false, "{refused}");
+        assert_eq!(refused["reason"], "unknown_answer");
+        let decided = value_of(
+            &store,
+            serde_json::json!({"op": "decide", "run": run_for(cwd.path(), "yolo", &[], ""), "menu": yes_no_menu()}),
+        );
+        // Another period's decision is no evidence either.
+        let other = value_of(
+            &store,
+            serde_json::json!({
+                "op": "answer_delivered", "period": "22222222-2222-2222-2222-222222222222",
+                "answer_id": decided["answer_id"], "delivered": "ok",
+            }),
+        );
+        assert_eq!(other["recorded"], false);
+        assert_eq!(
+            deliver(decided["answer_id"].as_str().unwrap())["recorded"],
+            true
+        );
+        assert!(!folded(&store).contains_key(&stranger));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_answer_log_is_not_appended_through_a_hard_link_or_a_non_regular_file() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path(), "test", true).unwrap();
+        let decide = || {
+            exchange(
+                &store,
+                serde_json::json!({"op": "decide", "run": run_for(cwd.path(), "yolo", &[], ""), "menu": yes_no_menu()}),
+            )
+            .0
+        };
+        assert_eq!(decide()["ok"], true);
+        let log = store.dir.path().join(format!("afk-answers/{PERIOD}.jsonl"));
+        let before = std::fs::read(&log).unwrap();
+        let link = store.dir.path().join("afk-answers/elsewhere.jsonl");
+        std::fs::hard_link(&log, &link).unwrap();
+        let refused = decide();
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert_eq!(std::fs::read(&log).unwrap(), before, "nothing was appended");
+        std::fs::remove_file(&link).unwrap();
+        assert_eq!(decide()["ok"], true, "a single link is fine again");
+        std::fs::remove_file(&log).unwrap();
+        std::fs::create_dir(&log).unwrap();
+        let refused = decide();
+        assert_eq!(refused["ok"], false, "{refused}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_largest_decide_reply_fits_one_frame() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path(), "test", true).unwrap();
+        // Control bytes escape to six bytes each: the worst case for every text field.
+        let worst = |n: usize| format!("\"\\{}", "\u{1}".repeat(n - 2));
+        let menu = serde_json::json!({
+            "source": "pi_dialog", "format": worst(128), "kind": "choice",
+            "question": worst(2048), "subject": worst(2048),
+            "options": (0..32).map(|i| serde_json::json!({
+                "key": format!("{i:02}{}", "\u{1}".repeat(62)), "label": worst(256),
+            })).collect::<Vec<_>>(),
+            "free_text": true, "warnings": vec![worst(512); 8], "deadline_ms": u64::MAX,
+            "raw": worst(4096),
+        });
+        let (reply, bytes) = exchange(
+            &store,
+            serde_json::json!({
+                "op": "decide", "run": run_for(cwd.path(), "yolo", &[], ""), "menu": menu,
+                "proposal": {"reason": worst(1024)},
+            }),
+        );
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["value"]["decision"]["decision"], "answer");
+        assert!(
+            bytes > 100 * 1024 && bytes < delegation::FRAME_BYTES,
+            "{bytes} bytes vs frame {}",
+            delegation::FRAME_BYTES
+        );
     }
 }

@@ -25,6 +25,7 @@ const bounded = value => {
 };
 
 // Menus sit at the end of agent text: keep its last bytes, starting on a character boundary.
+// Lone surrogates become U+FFFD (Buffer encoding), so for malformed input the result is not a suffix of the value.
 export const textTail = value => {
   const bytes = Buffer.from(value);
   if (bytes.length <= FRAME_TEXT_MAX) return value;
@@ -96,8 +97,9 @@ export function createAnswerClient(bridge, { timeoutMs = DECIDE_TIMEOUT_MS } = {
       if (!answer_id) return;
       try { await withTimeout(bridge.request({ op: "answer_delivered", period, answer_id, delivered: status }), timeoutMs); } catch { /* the log keeps "pending"; the review shows it */ }
     },
+    // The menu, null when no format matches, or { error: true } when the engine could not answer.
     async recognise(source, text) {
-      try { return (await withTimeout(bridge.request({ op: "recognise", source, text: bounded(text) }), timeoutMs))?.menu ?? null; } catch { return null; }
+      try { return (await withTimeout(bridge.request({ op: "recognise", source, text: bounded(text) }), timeoutMs))?.menu ?? null; } catch { return { error: true }; }
     },
     async rulesCheck(run) { return withTimeout(bridge.request({ op: "rules_check", run }), timeoutMs); },
   };
@@ -108,6 +110,7 @@ export const answeredBy = policy => `afk/${policy}`;
 export const runInput = (s, cwd) => ({ period: s.id, item: null, goal: s.task, policy: s.policy, rules: s.rules, rules_digest: s.rules_digest, cwd,
   requests_used: s.requests_used, request_limit: s.request_limit });
 
+// Throws on an unterminated quote: a cut-off rule body must not become a different, shorter rule.
 export function splitArgs(s) {
   const out = []; let cur = "", quote = null, any = false;
   for (const ch of s.trim()) {
@@ -116,6 +119,7 @@ export function splitArgs(s) {
     if (/\s/.test(ch)) { if (cur || any) { out.push(cur); cur = ""; any = false; } continue; }
     cur += ch;
   }
+  if (quote) throw Error("Unterminated quote");
   if (cur || any) out.push(cur);
   return out;
 }
@@ -128,6 +132,7 @@ export function parseOnArgs(tokens) {
     positional.push(tokens[i]);
   }
   if (!["rules", "yolo"].includes(out.policy)) return { ...out, error: "Use --policy rules or --policy yolo" };
+  if (out.policy === "yolo" && out.rules.length) return { ...out, error: "--rule has no effect under yolo" };
   if (out.rules.length > 8 || out.rules.some(r => !r || Buffer.byteLength(r) > 1024)) return { ...out, error: "At most 8 --rule values of up to 1024 bytes" };
   if (positional.length > 2) return { ...out, error: "Usage: /afk-work on [--policy rules|yolo] [--rule '<toml>']… [minutes] [requests]" };
   return { ...out, ...(positional[0] ? { minutes: positional[0] } : {}), ...(positional[1] ? { requests: positional[1] } : {}) };

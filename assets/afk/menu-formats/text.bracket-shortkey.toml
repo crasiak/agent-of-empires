@@ -1,9 +1,13 @@
 id = "text.bracket-shortkey"
 sources = ["agent_text", "bash_prompt", "pane"]
 kind = "choice"
-# A line with two or more [X]word options, e.g. "[A]pply / [S]kip / [R]evise"
-option_pattern = '\[(?P<key>[A-Za-z0-9])\](?P<label>[\w-]+)'
-# "[A]pply": the bracketed key letter starts the label
+# A line with two or more [X]word or [X] Some words options, e.g. "[A]pply / [S]kip / [R]evise" or
+# "[A] Approve checkpoint  [R] Revise  [N] New session → /continue". A label is single-spaced words, so
+# two spaces, " / ", " | " and a trailing arrow suffix all end it.
+option_pattern = '\[(?P<key>[A-Za-z0-9])\] ?(?P<label>\w[\w-]*(?: \w[\w-]*)*)'
+# A closing prompt line may follow the options, e.g. "Pick A/R/N, or tell me what to change."
+footer_pattern = '^(?:(?:Pick|Choose|Select|Reply with|Enter)\b.*|\(?(?:or )?tell me .*)'
+# "[A]pply": the bracketed key letter starts the label, unless the label already starts with it ("[A]Approve")
 label_includes_key = true
 min_options = 2
 question_lines_above = 3

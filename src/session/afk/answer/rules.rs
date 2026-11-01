@@ -66,6 +66,8 @@ pub struct Rules {
     /// SHA-256 over every rule source as loaded: each inline rule, then the user and repo files'
     /// contents or their absence. Consent pins it, so a source edited mid-period is detected.
     pub digest: String,
+    /// Rules that were dropped or shadowed, for the consent dialog to show.
+    pub warnings: Vec<String>,
 }
 
 /// Feed one rule source to the digest, length-framed so sources cannot run together.
@@ -113,12 +115,22 @@ impl Rule {
     }
 }
 
-/// Append `rules` to `out`; the first definition of an id wins.
+/// Append `rules` to `out`; the first definition of an id wins. A dropped duplicate warns, as
+/// does a dropped `stop` rule from a lower-precedence source: the human expected it to apply.
 fn add(out: &mut Rules, origin: String, rules: Vec<Rule>) {
     out.sources.push(origin);
     for r in rules {
-        if !out.rules.iter().any(|o| o.id == r.id) {
-            out.rules.push(r);
+        match out.rules.iter().find(|o| o.id == r.id) {
+            None => out.rules.push(r),
+            Some(kept) if kept.origin == r.origin => out.warnings.push(format!(
+                "rule id {:?} is defined more than once in {}; only the first applies",
+                r.id, r.origin
+            )),
+            Some(kept) if r.answer == RuleAnswer::Stop => out.warnings.push(format!(
+                "shadowed_stop_rules: stop rule {:?} from {} is ignored because {} defines the same id",
+                r.id, r.origin, kept.origin
+            )),
+            Some(_) => {}
         }
     }
 }
@@ -126,6 +138,14 @@ fn add(out: &mut Rules, origin: String, rules: Vec<Rule>) {
 impl Rules {
     pub fn empty() -> Rules {
         Rules::default()
+    }
+
+    /// Where the rule with this id was defined: its source file, or `inline rule N`.
+    pub fn origin_of(&self, id: &str) -> Option<&str> {
+        self.rules
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.origin.as_str())
     }
 
     pub fn parse(origin: &str, text: &str) -> Result<Vec<Rule>> {
@@ -136,7 +156,7 @@ impl Rules {
             .map(|r| {
                 ensure!(
                     !r.id.is_empty() && r.id.len() <= RULE_ID_MAX,
-                    "{origin}: rule id required"
+                    "{origin}: rule id must be 1-{RULE_ID_MAX} chars"
                 );
                 let regexes = |xs: &[String]| {
                     xs.iter()

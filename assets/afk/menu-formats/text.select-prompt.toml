@@ -1,8 +1,9 @@
 id = "text.select-prompt"
 sources = ["bash_prompt", "pane"]
 kind = "choice"
+# A label never ends in sentence punctuation, so a trailing indented sentence is not an option.
 # inquirer/prompts style: "? Pick a template ›" followed by "❯ react" / "  vue"
 trigger = '^\?\s.+(›|»|>)\s*$'
-option_pattern = '^\s*(?:❯|>|›)?\s+(?P<label>[^\s?].{0,120})$'
+option_pattern = '^\s*(?:❯|>|›)?\s+(?P<label>[^\s?](?:.{0,119}[^\s.:;!,])?)$'
 options_after_trigger = true
 min_options = 2

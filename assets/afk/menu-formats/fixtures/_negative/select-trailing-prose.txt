@@ -1,0 +1,4 @@
+? Pick a template ›
+❯ react
+  vue
+  Note: the list above comes from the registry.

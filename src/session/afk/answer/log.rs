@@ -84,6 +84,28 @@ impl AnswerLog {
         }))
     }
 
+    /// Whether this period's log holds a decision record for `answer_id` (a delivery line alone is not one).
+    pub fn has_decision(&self, answer_id: &str) -> Result<bool> {
+        let name = format!("{}.jsonl", self.period);
+        let Some(bytes) = self.dir.read_regular(Path::new(&name), FILE_MAX as usize)? else {
+            return Ok(false);
+        };
+        Ok(bytes
+            .split(|b| *b == b'\n')
+            .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+            .any(|record| record["answer_id"] == answer_id && record.get("decision").is_some()))
+    }
+
+    /// Link a decision record to the sample saved for it; folding the log by answer id sets `sample`.
+    pub fn sample_saved(&self, answer_id: &str, sample: &str) -> Result<()> {
+        self.append(&serde_json::json!({
+            "schema": ANSWER_SCHEMA,
+            "answer_id": answer_id,
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "sample": sample,
+        }))
+    }
+
     /// Keep text no format recognised, for writing a new format; returns the sample's file name.
     pub fn unrecognised(&self, raw: &str) -> Result<String> {
         let mut end = raw.len().min(super::menu::RAW_MAX);

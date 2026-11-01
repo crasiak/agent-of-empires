@@ -45,7 +45,10 @@ requests. Local tool admissions are bounded to `min(requests * 16, 4096)`.
 The first supported tools are normal `read`, `write`, `edit` and `bash`, plus
 `aoe_afk_work_checkpoint` and `aoe_afk_answer`. The checkpoint tool must be active before native
 consent and effect admission. An explicit tool selector must include it alongside
-the desired local tools (and `aoe_afk_answer` if the agent should answer menus); AFK never enables an operator-disabled tool. Existing
+the desired local tools (and `aoe_afk_answer` if the agent should answer menus); AFK never enables an operator-disabled tool.
+Ledger's Pi launch code (`src/session/ledger_pi.rs`) passes no `--tools` selector (its only `--no-tools` is on the isolated
+help inspection), so a Ledger-launched Session has `aoe_afk_answer` active unless a selector comes from elsewhere, such as an
+instance's extra args; when a launch does pass an explicit `--tools` selector, it must include `aoe_afk_answer`. Existing
 configured permissions and approval gates remain in force. This is **not an OS
 sandbox**: Bash retains its normal ability to start processes. Worker/agent
 launching and background work are not qualified and must not be started. Hidden retries, descendant requests and billing are
@@ -55,8 +58,7 @@ Verified native custom entries record consent and consumption before admission.
 Readback proves the observed append, not universal power-loss durability. Missing
 consent behind retained work instructions stays guarded rather than becoming
 ordinary automatic work. Transport can inspect or withdraw authority, never
-create it. Requests and local
-tools use the same finite period; a new call ID or repeated old observation is
+create it. Requests and local tools use the same finite period; a new call ID or repeated old observation is
 not new progress. Each owned local result appends a JSON text block such as
 `{"aoe_afk_work_evidence_ref":"call_...|fc_..."}` without changing the underlying
 result. The model copies the exact field value into the checkpoint's `evidence`
@@ -112,14 +114,19 @@ the policy line in the consent dialog.**
   throwaway checkout, not a tree you care about.
 - `--rule` adds a rule for this period only. Pass up to 8, each at most 1024 bytes,
   written as the inside of a rule table:
-  `--rule "id='plans', kind='choice', answer='agent'"`.
+  `--rule "id='plans', kind='choice', answer='agent'"`. An inline body is your own
+  TOML, pasted into a rule table as written: a body containing `}, {` defines more
+  than one rule.
 
 Invalid rules refuse the start with the parse error, and so does a grant whose
 inline rules are too large for the record ("AFK rules too large…"). Each work
 period record is at most 8 KiB, inline rules included, so a later checkpoint
 that would not fit beside large inline rules stops the period as
 `blocked: record_capacity` instead. The consent
-dialog shows the policy and the rule count and sources; `/afk-work` status adds
+dialog shows the policy, the rule count and sources, and a `Warning:` line for
+a rule id defined more than once in the same source (only the first applies) and
+for a `stop` rule dropped because a higher-precedence source defines the same id.
+A shadowed `approve`, `deny` or other non-stop rule is dropped silently. `/afk-work` status adds
 `answers: N (rules M, yolo K), stops: S`. Those counts are in memory and read
 zero after a restart.
 
@@ -144,8 +151,7 @@ The repo rules file is still the repo's suggestion: review it like code before
 you start a period, and put rules you rely on in `~/.config/aoe/afk/rules.toml`
 or `--rule`.
 
-A rule matches when every field it
-sets matches:
+A rule matches when every field it sets matches:
 
 | Field | Matches |
 |---|---|
@@ -215,15 +221,19 @@ narrow rule is the real boundary. Under `yolo` a failed check only adds a warnin
   edits to manifests and lockfiles.
 - `protected_push`: pushes to `main` or `master` (including refspecs like
   `HEAD:main`), force, delete, mirror and prune pushes, and `git branch -d/-D`. A
-  bare `git push` cannot be judged without branch context and passes.
+  bare `git push` cannot be judged without branch context and passes. The protected
+  branches are `main`, `master` and the repo's default branch (from
+  `origin/HEAD`); if that lookup runs out of time the default branch is unknown, so any
+  push stops instead.
 - `request_share`: a `plan` menu after 80 % of the request allowance. Nothing in
   this release emits `plan`-kind menus, so this applies only to user formats that
   declare `kind = "plan"`.
 - `diff_limit`: the branch diff is measured on every decision with `git diff
-  --numstat` against the merge base with `origin/HEAD` (else `HEAD`). Once it
+  --numstat` against the merge base with `origin/HEAD`, else `origin/main`, else the branch's upstream (else `HEAD`). Once it
   passes 1500 added plus deleted lines, every otherwise-allowed answer other than
   a deny stops with `scope:diff_limit`; no item estimate raises the limit yet. If
-  git fails, the check is skipped.
+  git fails or runs out of time, the check is skipped. All the git reads for one
+  decision share a 2 s deadline.
 
 Known gaps: interpreters running inline code (`python -c`, `node -e`), `source`
 and `.`, versioned tool names such as `pip3.11`, and pushes of `HEAD` while on
@@ -291,7 +301,10 @@ decision line carries `delivered: "pending"`, or `"not_applicable"` for a stop; 
 separate delivery line with the same `answer_id` records `ok`, `failed` or
 `unknown`. Readers fold lines by `answer_id`. The log is append-only, with a line
 cap of 192 KiB and a file cap of 4 MiB. Unrecognised menus are saved next to it as
-`<period-id>-unrecognised-<n>.txt`.
+`<period-id>-unrecognised-<n>.txt`. A decision line also carries `rule_origin`, the
+source of the matching rule (`inline rule 2`, a file path), or `null` when no rule
+matched. A delivery report for an `answer_id` the log never issued is refused
+(`recorded: false, reason: "unknown_answer"`) and writes nothing.
 
 To teach AFK a new format from a sample:
 
@@ -305,9 +318,23 @@ To teach AFK a new format from a sample:
 4. Run the `format_corpus_matches_expected_menus` test: it checks that every sample is recognised as
    written and every negative sample is not.
 
-An offline end-to-end demo of both policies, driven through the pinned Pi SDK with
-a scripted model and a stub bridge, is `assets/session/aoe-afk-answer-sdk.test.mjs`
+An offline scripted demo of both policies with a stub bridge, driven through the
+pinned Pi SDK with a scripted model, is `assets/session/aoe-afk-answer-sdk.test.mjs`
 (`AOE_PI_SOURCE_ROOT=… node --test assets/session/aoe-afk-answer-sdk.test.mjs`).
+
+### Rolling back
+
+Work-period rows written by this release are version 2 (they carry the answer
+policy, the rules and the nudge count). An older build reads only version 1, so
+a Session that wrote v2 rows is unreadable history to it, and the build fails
+closed: it refuses every new period ("Native work-period evidence unavailable;
+inspect retained history"), aborts every turn and blocks every tool in that
+Session, so ordinary work fails too, and it cancels `/new`, `/resume`, `/fork`,
+compaction and tree navigation from inside the pane. Fresh ordinary input does not
+recover it, and there is no `/afk-work` reset command. After a downgrade, such a
+Session cannot do any work. Launch a fresh AoE session for the work, or upgrade aoe
+again: this release reads v2 rows normally, and reads version 1 rows too (they load
+as the `rules` policy with no rules).
 
 ## Global read-only overview
 

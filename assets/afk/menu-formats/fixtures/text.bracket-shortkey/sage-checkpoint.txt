@@ -1,0 +1,21 @@
+Sage → implemented the selected helper-only change.
+
+In ledger/internal/launch/run_guard_executor_test.go:53, the nested build now uses -ldflags=-compressdwarf=false. Debug
+data, assertions, overlay, isolation, and deadlines remain intact. Production code is unchanged.
+
+Verification: all 15 existing cases plus the parent passed under the race detector; no failures or skips.
+
+```text
+  PASS
+  ok     github.com/jws/ledger/internal/launch   38.877s
+```
+
+Full qualification remains blocked. The full suite was not rerun, and this check does not establish end-to-end speedup.
+No installation, shared/live changes, or publication occurred.
+
+Worktree: /Users/jws/code/attic-worktrees/CRA-1051-helper-compression-20261101
+
+Report: /private/tmp/CRA-1051-helper-compression-JmchasFT/report.md
+
+[A] Approve checkpoint  [R] Revise  [N] New session → /continue
+Pick A/R/N, or tell me what to change.

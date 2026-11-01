@@ -249,7 +249,8 @@ test("menu nudge shares settlement bookkeeping and needs an owned request", () =
 });
 
 test("forged nudge rows fail closed on load", () => {
-  for (const mutate of [x => x.menu_nudges = 2, x => x.continuations_used = 0, x => x.status = "pending"]) {
+  const swapped = { status: "unfinished", summary: "forged", next_step: "forged", evidence: [], human_required: false, depends_on: [] };
+  for (const mutate of [x => x.menu_nudges = 2, x => x.continuations_used = 0, x => x.status = "pending", x => x.checkpoint = swapped]) {
     const f = fixture(); f.start(); f.period.reserve(); f.period.nudge("menu");
     const rows = structuredClone(f.records); mutate(rows[2]);
     assert.ok(createWorkPeriod({ ...f.options, journal: { load: () => rows, append() {} } }).failure);

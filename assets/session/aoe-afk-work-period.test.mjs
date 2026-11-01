@@ -13,7 +13,7 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   const binding = { instance_id: "test", profile: "default", native_id: randomUUID(), launch_id: randomUUID() }, generation = randomUUID();
   let wall = 100000, mono = 0, idle = true, signal, leaf = "root", sequence = 0, memoryOnly = false, aborted = 0, ended = 0, atTurnEnd = false;
   const rows = [], handlers = new Map(), tools = new Map(), commands = new Map(), packets = [], messages = [], notices = [];
-  let answer = true, confirmHook, confirmMessage, confirmations = 0, decideReply = { decision: { decision: "stop", reason: "no_rule", checks: [] } }, recogniseReply = null,
+  let pending = false, answer = true, confirmHook, confirmMessage, confirmations = 0, decideReply = { decision: { decision: "stop", reason: "no_rule", checks: [] } }, recogniseReply = null,
     rulesCheck = { valid: true, count: 1, sources: ["inline rule 1"], format_warnings: [], digest: "d".repeat(64) }, activeTools = ["read", "write", "edit", "bash", WORK_CHECKPOINT_TOOL];
   writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: binding.native_id }) + "\n", { mode: 0o600 });
   const append = row => {
@@ -26,7 +26,7 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   append({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Task context ready" }] } });
   const manager = { getSessionId: () => binding.native_id, getSessionFile: () => file, getLeafId: () => leaf, getEntries: () => rows, getBranch: () => rows };
   const ctx = { mode: "tui", hasUI: true, cwd: root, inputProvenance: "pipeline-v1", sessionManager: manager, get signal() { return signal?.signal; }, isIdle: () => idle,
-    hasPendingMessages: () => false, abort: () => { aborted++; signal?.abort(); }, ui: { uiPromptOwnership: "exclusive-v1", setStatus() {}, getEditorText: () => "", notify: text => notices.push(text),
+    hasPendingMessages: () => pending, abort: () => { aborted++; signal?.abort(); }, ui: { uiPromptOwnership: "exclusive-v1", setStatus() {}, getEditorText: () => "", notify: text => notices.push(text),
       confirm: async (_title, message, options) => {
         confirmations++; confirmMessage?.(message); await emit("ui_prompt_start", { kind: "confirm", owner: options.owner }); await confirmHook?.();
         void emit("ui_prompt_end", { kind: "confirm", owner: options.owner }); return answer;
@@ -47,8 +47,8 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   const r = { ctx, bootstrap: { binding }, generation, revision: 0, state: "off", view: null, restoredGuards: new Map(), questionGuards: [],
     bridge: { async request(packet) {
       packets.push(structuredClone(packet));
-      return packet.op === "decide" ? (typeof decideReply === "function" ? decideReply() : structuredClone(decideReply)) : packet.op === "rules_check" ? structuredClone(rulesCheck)
-        : packet.op === "recognise" ? { menu: structuredClone(recogniseReply) } : {};
+      return packet.op === "decide" ? (typeof decideReply === "function" ? decideReply() : structuredClone(decideReply)) : packet.op === "rules_check" ? (typeof rulesCheck === "function" ? await rulesCheck() : structuredClone(rulesCheck))
+        : packet.op === "recognise" ? { menu: typeof recogniseReply === "function" ? await recogniseReply() : structuredClone(recogniseReply) } : {};
     } } };
   api.attach(r);
   const context = () => rows.filter(e => e.type === "message" && e.message.role === "user").map(e => e.message);
@@ -76,8 +76,8 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   return { root, file, binding, generation, rows, r, ctx, api, packets, messages, notices, native, emit, request, rpc, begin, ownedContext, call, callWithOutput, checkpoint, answer: answerTool, boundary, context, user,
     snapshots: () => rows.filter(e => e.type === "custom" && e.customType === WORK_PERIOD_MARKER).map(e => e.data),
     confirm: (value, hook, onMessage) => { answer = value; confirmHook = hook; confirmMessage = onMessage; },
-    decideReply: value => decideReply = value, recogniseReply: value => recogniseReply = value, rulesCheckError: error => rulesCheck = { valid: false, error, format_warnings: [] }, rulesCheckReply: value => rulesCheck = value,
-    activeTools: value => activeTools = value, get confirmations() { return confirmations; },
+    pending: value => pending = value, decideReply: value => decideReply = value, recogniseReply: value => recogniseReply = value, rulesCheckError: error => rulesCheck = { valid: false, error, format_warnings: [] }, rulesCheckReply: value => rulesCheck = value,
+    command: () => commands.get("afk-work"), activeTools: value => activeTools = value, get confirmations() { return confirmations; },
     memoryOnly: () => memoryOnly = true, tick: () => new Promise(r => setImmediate(r)), advance: (w, m) => { wall += w; mono += m; }, get aborted() { return aborted; }, get ended() { return ended; }, close: () => rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -928,7 +928,7 @@ test("the consent dialog and unowned periods are never answered", async () => {
   } finally { f.close(); }
 });
 
-test("an answer that arrives after the period stopped is logged failed and not returned", async () => {
+test("an answer is logged failed and not returned when another prompt opens while the engine decides", async () => {
   const f = await fixture();
   try {
     // Another prompt opens while the engine decides.
@@ -972,5 +972,165 @@ test("an answer Pi discards for its native dialog is logged failed and the human
     assert.match(f.notices.at(-1), /answers: 0 \(rules 0, yolo 0\)/);
     await f.emit("ui_prompt_end", { kind: "confirm" });
     assert.deepEqual(delivered(f, "d7"), ["failed"]);
+  } finally { f.close(); }
+});
+
+test("the consent dialog shows each rule warning on its own line", async () => {
+  const f = await fixture();
+  try {
+    let message;
+    f.rulesCheckReply({ valid: true, count: 2, sources: ["inline rule 1"], format_warnings: [], digest: "d".repeat(64),
+      rule_warnings: ["stop rule X in afk-rules.toml is shadowed by inline rule 1", "second"] });
+    f.confirm(true, undefined, m => message = m);
+    await f.native("on 120 8");
+    assert.match(message, /\nWarning: stop rule X in afk-rules\.toml is shadowed by inline rule 1\nWarning: second/);
+    f.rulesCheckReply({ valid: true, count: 0, sources: [], format_warnings: [], digest: "d".repeat(64) });
+    await f.native("off"); await f.native("on 120 8");
+  } finally { f.close(); }
+  const quiet = await fixture();
+  try {
+    let message; quiet.confirm(true, undefined, m => message = m);
+    await quiet.native("on 120 8"); assert.doesNotMatch(message, /Warning:/);
+  } finally { quiet.close(); }
+});
+
+test("a second /afk-work on while the rules check is pending is refused", async () => {
+  const f = await fixture();
+  try {
+    let reentered = false;
+    f.rulesCheckReply(async () => {
+      if (!reentered) { reentered = true; await f.command().handler("on 120 8", f.ctx); }
+      return { valid: true, count: 0, sources: [], format_warnings: [], digest: "d".repeat(64) };
+    });
+    await f.native("on 120 8");
+    assert.ok(f.notices.some(n => /already open/.test(n)), f.notices.join("|"));
+    assert.equal(f.confirmations, 1); assert.equal(f.snapshots().length, 1);
+  } finally { f.close(); }
+});
+
+test("/afk-work off while the rules check is pending cancels the start", async () => {
+  const f = await fixture();
+  try {
+    let reentered = false;
+    f.rulesCheckReply(async () => {
+      if (!reentered) { reentered = true; await f.command().handler("off", f.ctx); }
+      return { valid: true, count: 0, sources: [], format_warnings: [], digest: "d".repeat(64) };
+    });
+    await f.native("on 120 8");
+    assert.equal(f.confirmations, 0, "no dialog after off"); assert.equal(f.snapshots().length, 0);
+    assert.match(f.notices.at(-1), /Cancelled; no work authority created/);
+    f.rulesCheckReply({ valid: true, count: 0, sources: [], format_warnings: [], digest: "d".repeat(64) });
+    await f.native("on 120 8"); assert.equal(f.snapshots().length, 1, "the cancelled attempt left no pending consent behind");
+  } finally { f.close(); }
+});
+
+test("--rule with --policy yolo and an unterminated quote are refused", async () => {
+  for (const [args, pattern] of [[`on --policy yolo --rule "id='a', answer='stop'" 120 8`, /--rule has no effect under yolo/], [`on --rule "id='a', answer='stop' 120 8`, /Unterminated quote/]]) {
+    const f = await fixture();
+    try {
+      await f.native(args);
+      assert.match(f.notices.at(-1), pattern); assert.match(f.notices.at(-1), /no authority created/);
+      assert.equal(f.snapshots().length, 0); assert.equal(f.confirmations, 0);
+    } finally { f.close(); }
+  }
+});
+
+test("queued work or a human prompt that appears while the settle recogniser runs persists no nudge", async () => {
+  for (const [when, reason] of [["queued", "competing_work"], ["prompt", "human_prompt"]]) {
+    const f = await fixture();
+    try {
+      await f.native("on 120 8"); f.begin(); await f.ownedContext();
+      f.recogniseReply(() => { if (when === "queued") f.pending(true); else void f.emit("ui_prompt_start", { kind: "input" }); return { kind: "choice" }; });
+      assert.equal(await f.emit("agent_before_settle", menuBoundary(f, "[A]pply / [S]kip")), undefined, when);
+      assert.ok(!f.snapshots().some(x => x.action === "nudge"), `${when}: no phantom nudge row`);
+      assert.equal(f.snapshots().at(-1).reason, reason);
+    } finally { f.close(); }
+  }
+});
+
+test("an owned ask_user decision that outlives the checkpoint tool is refused and logged failed", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply(() => { f.activeTools(["read", "write", "edit", "bash"]); return { answer_id: "q9", menu: {}, decision: { decision: "answer", choice: "1", rule: "r", reason: "", warnings: [], checks: [] } }; });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const out = await f.emit("tool_call", { toolName: "ask_user", toolCallId: "ask", input: { question: "Which?", options: [{ title: "A" }] } });
+    assert.equal(out.block, true); assert.match(out.reason, /identity changed/);
+    assert.deepEqual(delivered(f, "q9"), ["failed"]);
+    assert.equal(f.snapshots().at(-1).reason, "operation_changed");
+  } finally { f.close(); }
+});
+
+test("a bridge failure while recognising a bash prompt stops as engine_unavailable, not unrecognised_menu", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply(() => { throw Error("bridge gone"); });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    await f.callWithOutput("bash", "e1", { command: "x" }, timedOut("Enter the magic word?"));
+    assert.equal(f.snapshots().at(-1).reason, "engine_unavailable"); assert.equal(f.snapshots().at(-1).status, "blocked");
+    assert.ok(!f.packets.some(p => p.op === "decide"), "no unrecognised sample is saved for an engine failure");
+  } finally { f.close(); }
+});
+
+test("an answered prompt end that arrives before its start is a delivery", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply(yes("e2"));
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    await respond(f);
+    await f.emit("ui_prompt_end", { kind: "confirm", answered_by: "afk/rules" });
+    assert.deepEqual(delivered(f, "e2"), ["ok"]);
+    await f.emit("ui_prompt_start", { kind: "confirm", answered_by: "afk/rules" });
+    assert.equal(f.snapshots().at(-1).status, "owned"); assert.deepEqual(delivered(f, "e2"), ["ok"]);
+    assert.equal((await f.ownedContext()).messages.at(-1).customType, "aoe-afk-work-instructions", "no open human prompt is left behind");
+    assert.equal(f.aborted, 0);
+  } finally { f.close(); }
+});
+
+test("a prompt start with a foreign answered_by while our answer pends is the human's", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply(yes("e3"));
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    await respond(f);
+    await f.emit("ui_prompt_start", { kind: "confirm", answered_by: "afk/other" });
+    assert.deepEqual(delivered(f, "e3"), ["failed"]); assert.equal(f.snapshots().at(-1).reason, "human_prompt");
+  } finally { f.close(); }
+});
+
+test("a dialog value the responder cannot map is logged failed and left to the human", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply({ answer_id: "e4", menu: {}, decision: { decision: "answer", choice: "9", rule: "r", reason: "", warnings: [], checks: [] } });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    assert.equal(await f.emit("ui_prompt_respond", { type: "ui_prompt_respond", kind: "select", title: "Pick", options: ["a", "b"] }), undefined);
+    assert.deepEqual(delivered(f, "e4"), ["failed"]);
+    await f.native("status"); assert.match(f.notices.at(-1), /answers: 0 \(rules 0, yolo 0\), stops: 1/);
+  } finally { f.close(); }
+});
+
+test("a second dialog answer while one pends is logged failed and not returned", async () => {
+  const f = await fixture();
+  try {
+    let n = 0; f.decideReply(() => yes(`e5-${++n}`));
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    assert.deepEqual(await respond(f), { value: true, answered_by: "afk/rules" });
+    assert.equal(await respond(f), undefined);
+    assert.deepEqual(delivered(f, "e5-2"), ["failed"]); assert.deepEqual(delivered(f, "e5-1"), []);
+  } finally { f.close(); }
+});
+
+test("a pending dialog answer from a previous period does not block the next period", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply(yes("e6"));
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    await respond(f);                                             // answered; Pi never reports the prompt
+    await f.checkpoint("completed"); await f.emit("agent_settled");
+    const proof = { source: "interactive", settled: false, transformed: false, handled: false, failed: false };
+    await f.emit("input", { source: "interactive", text: "Next task", provenance: proof }); f.user("Next task"); proof.settled = true;
+    f.begin(); await f.ownedContext(); await f.emit("agent_settled");
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    f.decideReply(yes("e7"));
+    assert.deepEqual(await respond(f), { value: true, answered_by: "afk/rules" }, "the stale pending answer was cleared at period start");
   } finally { f.close(); }
 });

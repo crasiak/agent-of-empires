@@ -1,0 +1,2 @@
+{ "schema": "aoe.afk-menu.v1", "source": "bash_prompt", "format": "text.select-prompt", "kind": "choice", "question": "? Pick a template ›", "subject": null,
+  "options": [ { "key": "1", "label": "react", "role": "other" }, { "key": "2", "label": "vue", "role": "other" }, { "key": "3", "label": "svelte", "role": "other" } ], "free_text": false, "warnings": [], "deadline_ms": null }
