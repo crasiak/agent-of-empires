@@ -1,7 +1,7 @@
 # S-A: AFK menu answering
 
 **Date:** 2026-10-30
-**Status:** Approved 2026-10-31. Implementation plan: `docs/superpowers/plans/2026-10-31-afk-menu-answering.md` (approved, subagent-driven execution).
+**Status:** Implemented. Landed in crasiak/agent-of-empires #53 (`5a53535a2`, 2026-11-01); follow-ups in #54. Pi hook on crasiak/pi `feature/CRA-859-ledger-afk-runtime-v1.2` (`9ab25a0c`), not yet in a Ledger Pi core (CRA-1411). Where the implementation differs from this text, see "Amendments after implementation" at the end. Implementation plan: `docs/superpowers/plans/2026-10-31-afk-menu-answering.md`.
 **Overview:** [afk-menus-and-goal-runs-overview](2026-10-30-afk-menus-and-goal-runs-overview.md)
 **Repos:** agent-of-empires (engine, recognisers, extension), Pi fork (`ui_prompt_respond` hook).
 
@@ -191,7 +191,7 @@ Each check has an id so the log and the return review can say which one fired.
 | Bridge `decide` timeout or error | `Stop { engine_unavailable }` |
 | Rules file invalid | Run refuses to start under `rules` (shows the parse error). `yolo` ignores rules files. |
 | Format file invalid | That format is skipped with a warning; others load. |
-| Recogniser throws | Treated as no match. If something is waiting, it stops as `unrecognised_menu`. |
+| Recogniser throws, or the bridge times out on `recognise` | Stops as `engine_unavailable` (not `unrecognised_menu`: no sample is saved, because nothing was judged). |
 | Dialog still open after a delivered answer | `delivery_unknown` stop. |
 | Answer log not writable | No answer is delivered; the period stops. |
 
@@ -207,3 +207,31 @@ Each check has an id so the log and the return review can say which one fired.
 ## Out of scope
 
 Goal runs and the work queue (S-B), Claude Code / Codex panes (S-C), the `review` policy, answering `editor`/`custom` dialogs, Ledger import of the answer log.
+
+## Amendments after implementation (2026-11-01)
+
+Rulings made during implementation and review. Where these differ from the sections above, these win.
+
+- **Rules are fixed at consent.** `rules_check` records a digest of the inline rules, the user file and the repo file. If any of them changes mid-period, `decide` stops with `rules_changed`. The agent can write both rules files, so re-reading them on every decision would let it authorise itself.
+- **Bash prompts are judged from Pi's status line.** Only output that Pi marks as an error (non-zero exit, timeout, abort, or killed by a signal) is a prompt candidate. A command that exited 0 is never waiting. For candidates, yes/no markers count anywhere in the last line; `?`, `Password:` and `›` must end it. Prompts followed by the CLI's own error line, and prompts that silently took a default, are not detected.
+- **Agent text with no recognised menu** stops as `missing_checkpoint` with no sample. The specific rule under "Agent text menus" wins over the general "unrecognised waits always stop" rule.
+- **Text in fences and blockquotes is data.** Menus inside ``` or ~~~ fences are ignored for every source. Menus in `>` blockquotes are ignored for agent text only, because bash and pane prompts use `>` as a cursor.
+- **Pi dialogs.**
+  - A select or confirm dialog's subject is its message, or its title when there is none. A title or message containing "dangerous" or ⚠ adds a harness warning, so Pi's permission gate is scope-checked.
+  - The responder declines AFK's own consent dialog itself.
+  - The engine gets 4 s to decide.
+  - Delivery counts only when Pi reports the answered dialog ended. If Pi drops the answer and opens the dialog natively, the answer is logged as failed.
+  - Pi consults handlers in order and the first valid answer wins. With AoE's single responder that is the same as "at most one responder".
+  - An empty select is a `human_prompt` stop.
+- **Scope checks are a best-effort deny-list, not a sandbox.**
+  - Commands are split into segments, and each segment's command word is checked.
+  - Shells (`sh`, `bash`, `zsh`, `fish`, `dash`, `ksh`) and `eval` count as outside the repo. So do the same shells behind `timeout`, `env`, `sudo`, `nice`, `nohup`, `xargs`, `stdbuf` or `find -exec`, except a shell running a repo-relative script file.
+  - Tokens that can't be resolved (`~`, `$…`, backslash-escaped paths, a bare `cd`) count as outside.
+  - The repo's default branch is protected along with main and master. If the default-branch lookup times out, every push stops.
+  - `diff_limit` measures the diff against the merge base with `origin/HEAD` (then `origin/main`, `@{upstream}`, `HEAD`). It is skipped when git fails or the shared 2 s git deadline expires.
+- **The bridge gives each op its own deadline.** `decide` and `rules_check` get 5 s; other ops 1.5 s. A late reply is dropped instead of killing the bridge, and the wait for a late reply is capped at 1.5 s.
+- **Record capacity.** A work-period row that wouldn't leave room for its stop row ends the period with a journalled `record_capacity` stop instead of corrupting the journal.
+- **The answer log** uses `<transport store>/afk-answers/<period>.jsonl`, append-only: a decision line, then a delivery line, folded by `answer_id`. Lines are capped at 192 KiB, and proposal reasons at 1024 bytes.
+- **The bash timeout** is configurable per call only (the agent passes `timeout`). There is no global setting yet.
+- **Open (CRA-1413):** `request_share` has no plan-kind producer in S-A, and rules can't yet match option labels.
+
