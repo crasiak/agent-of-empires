@@ -71,6 +71,59 @@ fn from_input_rejects_bad_menus() {
 }
 
 #[test]
+fn whitespace_only_label_is_invalid() {
+    let w = RoleWords::default();
+    assert!(Menu::from_input(input(&["Yes", "   "]), &w).is_err());
+    assert!(Menu::from_input(input(&["Yes", "\t\n"]), &w).is_err());
+    assert!(Menu::from_input(input(&["Yes", " No "]), &w).is_ok());
+}
+
+#[test]
+fn negated_labels_are_not_approvals() {
+    let w = RoleWords::default();
+    // "allow" is an approve word, but it is not the label's first word here.
+    assert_eq!(role_for("Don't allow", &w), Role::Other);
+    // The deny word leads, so the standing-approval wording cannot make it an approval.
+    assert_eq!(role_for("No, don't ask again", &w), Role::Deny);
+}
+
+#[test]
+fn bounded_cuts_on_a_char_boundary() {
+    // Three bytes each, so 4 is not a boundary.
+    assert_eq!(bounded("\u{20ac}\u{20ac}", 4), "\u{20ac}");
+    assert_eq!(bounded("a\u{20ac}", 2), "a");
+    assert_eq!(bounded("\u{20ac}", 2), "");
+    assert_eq!(bounded("abc", 10), "abc");
+}
+
+#[test]
+fn menu_size_limits_are_enforced() {
+    let w = RoleWords::default();
+    let labels: Vec<String> = (0..33).map(|i| format!("option {i}")).collect();
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    assert!(
+        Menu::from_input(input(&refs[..32]), &w).is_ok(),
+        "32 options"
+    );
+    assert!(Menu::from_input(input(&refs), &w).is_err(), "33 options");
+    let mut long_key = input(&["Yes", "No"]);
+    long_key.options[0].key = "k".repeat(65);
+    assert!(Menu::from_input(long_key, &w).is_err(), "65-byte key");
+    let mut max_key = input(&["Yes", "No"]);
+    max_key.options[0].key = "k".repeat(64);
+    assert!(Menu::from_input(max_key, &w).is_ok(), "64-byte key");
+    let mut long_format = input(&["Yes", "No"]);
+    long_format.format = "f".repeat(129);
+    assert!(
+        Menu::from_input(long_format, &w).is_err(),
+        "129-byte format"
+    );
+    let mut max_format = input(&["Yes", "No"]);
+    max_format.format = "f".repeat(128);
+    assert!(Menu::from_input(max_format, &w).is_ok(), "128-byte format");
+}
+
+#[test]
 fn explicit_role_is_kept() {
     let mut i = input(&["Proceed"]);
     i.options[0].role = Some(Role::Deny);
@@ -80,6 +133,16 @@ fn explicit_role_is_kept() {
 
 use super::formats::*;
 use std::path::Path;
+
+fn builtin(id: &str) -> String {
+    let file = format!("{id}.toml");
+    BUILTIN
+        .iter()
+        .find(|(name, _)| *name == file)
+        .unwrap_or_else(|| panic!("no built-in format {id}"))
+        .1
+        .to_string()
+}
 
 fn corpus() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/afk/menu-formats/fixtures")
@@ -148,11 +211,58 @@ fn invalid_format_is_skipped_and_others_load() {
             "bad-regex.toml".to_string(),
             "id='r'\nsources=['agent_text']\nkind='choice'\noption_pattern='('".to_string(),
         ),
-        ("ok.toml".to_string(), BUILTIN[2].1.to_string()),
+        ("ok.toml".to_string(), builtin("text.yes-no")),
     ];
     let (f, warnings) = Formats::from_sources(&files);
     assert_eq!(warnings.len(), 2);
     assert_eq!(f.ids(), vec!["text.yes-no"]);
+}
+
+#[test]
+fn contradictory_formats_are_skipped_with_a_warning() {
+    let files = vec![
+        (
+            "empty-word.toml".to_string(),
+            r"id='e'
+sources=['agent_text']
+kind='choice'
+option_pattern='(?P<label>x)'
+[roles]
+approve=['yes', ' ']"
+                .to_string(),
+        ),
+        (
+            "both.toml".to_string(),
+            r"id='b'
+sources=['agent_text']
+kind='confirm'
+trigger='\?$'
+option_pattern='(?P<label>x)'
+[[option]]
+key='y'
+label='Yes'"
+                .to_string(),
+        ),
+        (
+            "no-label.toml".to_string(),
+            r"id='n'
+sources=['agent_text']
+kind='choice'
+option_pattern='(?P<key>\d)x'"
+                .to_string(),
+        ),
+        ("ok.toml".to_string(), builtin("text.yes-no")),
+    ];
+    let (f, warnings) = Formats::from_sources(&files);
+    assert_eq!(f.ids(), vec!["text.yes-no"]);
+    assert_eq!(warnings.len(), 3, "{warnings:?}");
+    for (warning, needle) in
+        warnings
+            .iter()
+            .zip(["empty role word", "mutually exclusive", "`label` group"])
+    {
+        assert!(warning.contains(needle), "{warning}");
+    }
 }
 
 #[test]
@@ -229,6 +339,7 @@ answer = "stop"
             rules: Rules::parse("t", FILE).unwrap(),
             sources: vec![],
             digest: String::new(),
+            warnings: vec![],
         };
         let m = menu(
             Kind::Permission,
@@ -328,6 +439,133 @@ answer = "stop"
     }
 
     #[test]
+    fn rule_id_length_error_names_the_limit() {
+        for id in [String::new(), "x".repeat(129)] {
+            let err = Rules::parse("t", &format!("[[rule]]\nid='{id}'\nanswer='stop'"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("rule id must be 1-128 chars"), "{err}");
+        }
+        assert!(Rules::parse(
+            "t",
+            &format!("[[rule]]\nid='{}'\nanswer='stop'", "x".repeat(128))
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_shadowed_stop_rule_and_a_duplicate_id_warn() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        std::fs::write(
+            &user,
+            "[[rule]]\nid='guard'\nanswer='stop'\n[[rule]]\nid='plain'\nanswer='deny'",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("afk-rules.toml"),
+            "[[rule]]\nid='twice'\nanswer='approve'\n[[rule]]\nid='twice'\nanswer='stop'",
+        )
+        .unwrap();
+        let inline = [
+            "id='guard', answer='approve'".to_string(),
+            "id='plain', answer='approve'".to_string(),
+        ];
+        let rules = Rules::load(Some(dir.path()), Some(&user), &inline).unwrap();
+        assert_eq!(rules.warnings.len(), 2, "{:?}", rules.warnings);
+        // The user file's `guard` stop is dropped for the inline `guard`; its `plain` is not a stop.
+        assert!(rules.warnings[0].contains("shadowed_stop_rules"));
+        assert!(rules.warnings[0].contains("\"guard\""));
+        assert!(rules.warnings[0].contains("inline rule 1"));
+        assert!(rules.warnings[1].contains("\"twice\""));
+        assert!(rules.warnings[1].contains("more than once"));
+        assert!(
+            Rules::load(Some(dir.path()), None, &[])
+                .unwrap()
+                .warnings
+                .len()
+                == 1
+        );
+    }
+
+    #[test]
+    fn rule_origin_names_the_defining_source() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("afk-rules.toml"),
+            "[[rule]]\nid='from-repo'\nanswer='approve'",
+        )
+        .unwrap();
+        let rules =
+            Rules::load(Some(dir.path()), None, &["id='mine', answer='stop'".into()]).unwrap();
+        assert_eq!(rules.origin_of("mine"), Some("inline rule 1"));
+        assert!(rules
+            .origin_of("from-repo")
+            .is_some_and(|o| o.ends_with("afk-rules.toml")));
+        assert_eq!(rules.origin_of("absent"), None);
+    }
+
+    fn one(text: &str) -> Rules {
+        Rules {
+            rules: Rules::parse("t", text).unwrap(),
+            ..Rules::default()
+        }
+    }
+
+    #[test]
+    fn each_matcher_narrows_a_rule() {
+        let m = menu(Kind::Permission, Some("cargo test"), &["Yes", "No"]);
+        // `input` builds pi_dialog menus with format pi.select and question "Pick".
+        let cases = [
+            ("source='pi_dialog'", true),
+            ("source='agent_text'", false),
+            ("format='pi.select'", true),
+            ("format='pi.confirm'", false),
+            ("question_matches=['^Pick$']", true),
+            ("question_matches=['nothing','^Pic']", true),
+            ("question_matches=['nothing']", false),
+            ("has_role='deny'", true),
+            ("has_role='revise'", false),
+            ("subject_matches=['^cargo']", true),
+        ];
+        for (matcher, want) in cases {
+            let rules = one(&format!("[[rule]]\nid='r'\nanswer='approve'\n{matcher}"));
+            assert_eq!(rules.first_match(&m).is_some(), want, "{matcher}");
+        }
+    }
+
+    #[test]
+    fn a_subject_matcher_needs_a_subject() {
+        let rules = one("[[rule]]\nid='r'\nanswer='approve'\nsubject_matches=['.*']");
+        let without = menu(Kind::Permission, None, &["Yes", "No"]);
+        assert!(rules.first_match(&without).is_none());
+        let with = menu(Kind::Permission, Some(""), &["Yes", "No"]);
+        assert!(rules.first_match(&with).is_some());
+    }
+
+    #[test]
+    fn missing_rules_files_are_skipped_and_the_size_cap_is_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let none =
+            Rules::load(Some(dir.path()), Some(&dir.path().join("absent.toml")), &[]).unwrap();
+        assert!(none.rules.is_empty() && none.sources.is_empty());
+        let file = dir.path().join("afk-rules.toml");
+        std::fs::write(&file, "#".repeat(64 * 1024)).unwrap();
+        assert!(Rules::load(Some(dir.path()), None, &[]).is_ok(), "64 KiB");
+        std::fs::write(&file, "#".repeat(64 * 1024 + 1)).unwrap();
+        let err = Rules::load(Some(dir.path()), None, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("too large"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_answer_is_an_error() {
+        let err = Rules::parse("t", "[[rule]]\nid='a'\nanswer='maybe'").unwrap_err();
+        assert!(format!("{err:#}").contains("not allowed"), "{err:#}");
+    }
+
+    #[test]
     fn inline_rule_regex_may_contain_spaces() {
         let rules = Rules::load(
             None,
@@ -361,6 +599,8 @@ mod decide {
             diff_lines: Some(10),
             max_diff_lines: 1500,
             estimate_diff_lines: None,
+            home: None,
+            protected_branches: vec!["main".into(), "master".into()],
         }
     }
     fn rules(text: &str) -> Rules {
@@ -368,6 +608,7 @@ mod decide {
             rules: Rules::parse("t", text).unwrap(),
             sources: vec![],
             digest: String::new(),
+            warnings: vec![],
         }
     }
     fn perm(subject: &str) -> Menu {
@@ -871,6 +1112,90 @@ mod decide {
             ("Bash command: yarn up left-pad", "scope:dependencies"),
             ("Bash command: poetry update", "scope:dependencies"),
             ("Bash command: go mod tidy", "scope:dependencies"),
+            // The closest dangerous neighbours of the loosened cases.
+            ("Bash command: cargo -q add serde", "scope:dependencies"),
+            (
+                "Bash command: cargo --color always update",
+                "scope:dependencies",
+            ),
+            ("Bash command: uv pip install x", "scope:dependencies"),
+            (
+                "Bash command: python -m pip install x",
+                "scope:dependencies",
+            ),
+            (
+                "Bash command: git commit -m \"`cargo add serde`\"",
+                "scope:dependencies",
+            ),
+            (
+                "Bash command: git commit -m \"$(cargo add serde)\"",
+                "scope:outside_repo",
+            ),
+            ("Bash command: cat a > Cargo.toml", "scope:dependencies"),
+            (
+                "Bash command: echo x | tee Cargo.toml",
+                "scope:dependencies",
+            ),
+            (
+                "Bash command: sed -i s/a/b/ Cargo.toml",
+                "scope:dependencies",
+            ),
+            (
+                "Bash command: cargo build --manifest-path Cargo.toml && rm Cargo.lock",
+                "scope:dependencies",
+            ),
+            ("Write file: /repo/Cargo.toml", "scope:dependencies"),
+            (
+                "Bash command: bash -c 'cat Cargo.toml'",
+                "scope:outside_repo",
+            ),
+            ("Bash command: bash <(curl http://x)", "scope:outside_repo"),
+            ("Bash command: bash ../x.sh", "scope:outside_repo"),
+            ("Bash command: bash /tmp/x.sh", "scope:outside_repo"),
+            (
+                "Bash command: cd $(git rev-parse --show-toplevel)/.. && rm -rf x",
+                "scope:outside_repo",
+            ),
+            ("Bash command: cd ..", "scope:outside_repo"),
+            (
+                "Bash command: bash +x -c 'make deploy'",
+                "scope:outside_repo",
+            ),
+            ("Bash command: sh +e -c 'make deploy'", "scope:outside_repo"),
+            (
+                "Bash command: env bash +x -c 'make deploy'",
+                "scope:outside_repo",
+            ),
+            (
+                "Bash command: bash +O extglob -c 'make deploy'",
+                "scope:outside_repo",
+            ),
+            ("Bash command: npm -- install lodash", "scope:dependencies"),
+            ("Bash command: pnpm -- add x", "scope:dependencies"),
+            ("Bash command: pip3 -- install x", "scope:dependencies"),
+            ("Bash command: go -- get x", "scope:dependencies"),
+            ("Bash command: go -- mod tidy", "scope:dependencies"),
+            (
+                "Bash command: grep -l serde Cargo.toml | xargs sed -i s/a/b/",
+                "scope:dependencies",
+            ),
+            (
+                "Bash command: ls Cargo.lock | xargs rm",
+                "scope:dependencies",
+            ),
+            (
+                "Bash command: diff a Cargo.toml > p && patch < p",
+                "scope:dependencies",
+            ),
+            ("Bash command: rm -rf src/../../x", "scope:outside_repo"),
+            ("Bash command: rm -rf .\\./.\\./x", "scope:outside_repo"),
+            ("Bash command: rm -rf /repo/../etc/x", "scope:outside_repo"),
+            ("Bash command: rg foo /etc", "scope:outside_repo"),
+            ("Bash command: less /etc/hosts", "scope:outside_repo"),
+            (
+                "Bash command: git push origin main-fix; git push origin main",
+                "scope:protected_push",
+            ),
         ];
         for (subject, want) in cases {
             assert_eq!(
@@ -924,6 +1249,35 @@ mod decide {
             "Bash command: poetry run pytest",
             "Bash command: yarn test",
             "Bash command: npm run build",
+            // Read-only or non-mutating references to a manifest.
+            "Bash command: cat Cargo.toml",
+            "Bash command: grep serde Cargo.lock",
+            "Bash command: cargo build --manifest-path Cargo.toml",
+            "Bash command: cargo build --manifest-path=sub/Cargo.toml",
+            "Write file: /repo/src/new.rs",
+            // A `..` that stays inside the repo.
+            "Bash command: cargo fmt src/../lib.rs",
+            // Words that look like dependency verbs but are not the subcommand.
+            "Bash command: cargo test update",
+            "Bash command: cargo +nightly test",
+            "Bash command: cargo run -- add .",
+            "Bash command: cargo test -- update",
+            "Bash command: npm run build -- install",
+            "Bash command: go run ./cmd get",
+            "Bash command: uv run pytest add",
+            // Backslashes that are not path escapes.
+            "Bash command: sed 's/\\s+$//' notes.txt",
+            "Bash command: printf 'a\\n'",
+            "Bash command: grep -E 'a\\|b' src/lib.rs",
+            // A script file in the repo, and the repo's own root.
+            "Bash command: bash scripts/x.sh",
+            "Bash command: sh ./scripts/x.sh --flag",
+            "Bash command: cd $(git rev-parse --show-toplevel)",
+            "Bash command: cd $(git rev-parse --show-toplevel) && cargo test",
+            // A commit message is prose.
+            "Bash command: git commit -m 'cargo add serde and update Cargo.toml'",
+            "Bash command: git commit -am \"npm install docs\"",
+            "Bash command: git commit -m 'a; b' -m \"cargo update\"",
         ];
         for subject in cases {
             assert_eq!(
@@ -937,6 +1291,126 @@ mod decide {
                 "{subject}"
             );
         }
+    }
+
+    #[test]
+    fn unusable_proposal_text_is_a_different_stop_from_no_text() {
+        let mut i = input(&[]);
+        i.kind = Kind::Input;
+        i.free_text = true;
+        let m = Menu::from_input(i, &RoleWords::default()).unwrap();
+        let r = rules("[[rule]]\nid='i'\nkind='input'\nanswer='agent'");
+        let offer = |text: Option<&str>| Proposal {
+            key: None,
+            text: text.map(Into::into),
+            reason: None,
+        };
+        let oversized = "x".repeat(1025);
+        for bad in ["", oversized.as_str(), "a\u{7}b", "a\u{1b}[31m", "a\rb"] {
+            let p = offer(Some(bad));
+            assert_eq!(
+                stop(&decide(&m, &run(Policy::Rules), &r, Some(&p))),
+                Some("proposal_text_invalid"),
+                "rules {bad:?}"
+            );
+            assert_eq!(
+                stop(&decide(&m, &run(Policy::Yolo), &Rules::empty(), Some(&p))),
+                Some("proposal_text_invalid"),
+                "yolo {bad:?}"
+            );
+        }
+        assert_eq!(
+            stop(&decide(&m, &run(Policy::Rules), &r, Some(&offer(None)))),
+            Some("no_proposal")
+        );
+        assert_eq!(
+            stop(&decide(&m, &run(Policy::Rules), &r, None)),
+            Some("no_proposal")
+        );
+        assert_eq!(
+            stop(&decide(&m, &run(Policy::Yolo), &Rules::empty(), None)),
+            Some("no_text_answer")
+        );
+        let ok = offer(Some(&"y".repeat(1024)));
+        assert!(matches!(
+            decide(&m, &run(Policy::Rules), &r, Some(&ok)),
+            Decision::Answer { text: Some(_), .. }
+        ));
+        let multi = offer(Some("a\n\tb"));
+        assert!(matches!(
+            decide(&m, &run(Policy::Rules), &r, Some(&multi)),
+            Decision::Answer { text: Some(_), .. }
+        ));
+    }
+
+    #[test]
+    fn the_repos_default_branch_is_protected() {
+        let allow_all = rules("[[rule]]\nid='all'\nkind='permission'\nanswer='approve'");
+        let mut r = run(Policy::Rules);
+        r.protected_branches.extend(["trunk".into(), "v1.0".into()]);
+        let cases = [
+            (
+                "Bash command: git push origin trunk",
+                Some("scope:protected_push"),
+            ),
+            (
+                "Bash command: git push origin HEAD:trunk",
+                Some("scope:protected_push"),
+            ),
+            (
+                "Bash command: git push origin v1.0",
+                Some("scope:protected_push"),
+            ),
+            (
+                "Bash command: git push origin main",
+                Some("scope:protected_push"),
+            ),
+            ("Bash command: git push origin trunk-fix", None),
+            ("Bash command: git push origin v1x0", None),
+        ];
+        for (subject, want) in cases {
+            let d = decide(&perm(subject), &r, &allow_all, None);
+            assert_eq!(stop(&d), want, "{subject}");
+        }
+        // Without it in the run, only main and master are protected; they always are.
+        let mut bare = run(Policy::Rules);
+        bare.protected_branches.clear();
+        assert_eq!(
+            choice(&decide(
+                &perm("Bash command: git push origin trunk"),
+                &bare,
+                &allow_all,
+                None
+            )),
+            Some("1")
+        );
+        assert_eq!(
+            stop(&decide(
+                &perm("Bash command: git push origin master"),
+                &bare,
+                &allow_all,
+                None
+            )),
+            Some("scope:protected_push")
+        );
+    }
+
+    #[test]
+    fn tilde_resolves_against_the_runs_home() {
+        let allow_all = rules("[[rule]]\nid='all'\nkind='permission'\nanswer='approve'");
+        let subject = perm("Bash command: rm ~/x");
+        let mut r = run(Policy::Rules);
+        assert_eq!(
+            stop(&decide(&subject, &r, &allow_all, None)),
+            Some("scope:outside_repo")
+        );
+        r.home = Some("/repo".into());
+        assert_eq!(choice(&decide(&subject, &r, &allow_all, None)), Some("1"));
+        r.home = Some("/home/u".into());
+        assert_eq!(
+            stop(&decide(&subject, &r, &allow_all, None)),
+            Some("scope:outside_repo")
+        );
     }
 
     #[test]
@@ -1019,6 +1493,22 @@ mod log {
         assert_eq!(lines[0]["delivered"], "pending");
         assert_eq!(lines[1]["answer_id"], lines[0]["answer_id"]);
         assert_eq!(lines[1]["delivered"], "ok");
+    }
+
+    #[test]
+    fn only_a_decision_record_makes_an_answer_id_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AnswerLog::new(&AnchoredDir::open(dir.path()).unwrap(), PERIOD).unwrap();
+        let stranger = uuid::Uuid::new_v4().to_string();
+        assert!(!log.has_decision(&stranger).unwrap(), "no log file yet");
+        let id = log
+            .decision(&serde_json::json!({"decision":"answer","choice":"1"}))
+            .unwrap();
+        assert!(log.has_decision(&id).unwrap());
+        assert!(!log.has_decision(&stranger).unwrap());
+        // A delivery line for an id with no decision does not make it known.
+        log.delivered(&stranger, Delivered::Ok).unwrap();
+        assert!(!log.has_decision(&stranger).unwrap());
     }
 
     #[test]
@@ -1125,6 +1615,129 @@ mod log {
         assert_eq!(ctx.repo_roots, vec![dir.path().canonicalize().unwrap()]);
         assert_eq!(ctx.diff_lines, None);
         assert_eq!(ctx.max_diff_lines, 1500);
+    }
+
+    fn git_in(root: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn run_input(cwd: &std::path::Path) -> super::super::run::RunInput {
+        super::super::run::RunInput {
+            period: "p".into(),
+            item: None,
+            goal: "g".into(),
+            policy: Policy::Rules,
+            rules: vec![],
+            rules_digest: None,
+            cwd: cwd.to_path_buf(),
+            requests_used: 0,
+            request_limit: 4,
+        }
+    }
+
+    #[test]
+    fn diff_base_is_the_upstream_branch_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_in(remote.path(), &["init", "-q", "--bare"]);
+        git_in(&root, &["init", "-q", "-b", "trunk"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git_in(&root, &["add", "a.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "init"]);
+        git_in(
+            &root,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git_in(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        // Committed, so the work tree is clean: only the upstream base sees these lines.
+        std::fs::write(root.join("b.txt"), "1\n2\n3\n4\n5\n").unwrap();
+        git_in(&root, &["add", "b.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "more"]);
+        let ctx = super::super::run::context(&run_input(&root));
+        assert_eq!(ctx.diff_lines, Some(5));
+    }
+
+    #[test]
+    fn diff_base_prefers_origin_main_over_the_upstream() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_in(remote.path(), &["init", "-q", "--bare"]);
+        git_in(&root, &["init", "-q", "-b", "feature"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git_in(&root, &["add", "a.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "init"]);
+        git_in(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        std::fs::write(root.join("b.txt"), "1\n2\n3\n4\n").unwrap();
+        git_in(&root, &["add", "b.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "pushed"]);
+        git_in(
+            &root,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git_in(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        std::fs::write(root.join("c.txt"), "1\n2\n3\n").unwrap();
+        git_in(&root, &["add", "c.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "local"]);
+        let ctx = super::super::run::context(&run_input(&root));
+        assert_eq!(
+            ctx.diff_lines,
+            Some(7),
+            "the PR so far, not just the unpushed part"
+        );
+    }
+
+    #[test]
+    fn diff_base_falls_back_to_origin_main() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_in(&root, &["init", "-q"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git_in(&root, &["add", "a.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "init"]);
+        git_in(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        std::fs::write(root.join("b.txt"), "1\n2\n3\n").unwrap();
+        git_in(&root, &["add", "b.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "more"]);
+        let ctx = super::super::run::context(&run_input(&root));
+        assert_eq!(ctx.diff_lines, Some(3));
+    }
+
+    #[test]
+    fn default_branch_joins_the_protected_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_in(&root, &["init", "-q"]);
+        let ctx = super::super::run::context(&run_input(&root));
+        assert_eq!(ctx.protected_branches, ["main", "master"]);
+        git_in(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+        );
+        let ctx = super::super::run::context(&run_input(&root));
+        assert_eq!(ctx.protected_branches, ["main", "master", "trunk"]);
+        git_in(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        let ctx = super::super::run::context(&run_input(&root));
+        assert_eq!(ctx.protected_branches, ["main", "master"]);
     }
 
     #[test]

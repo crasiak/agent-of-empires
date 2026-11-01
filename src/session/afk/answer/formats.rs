@@ -94,6 +94,10 @@ fn compile(name: &str, text: &str) -> Result<Format> {
         f.option_pattern.is_some() || (!f.fixed.is_empty() && f.trigger.is_some()),
         "{name}: needs option_pattern, or trigger and [[option]]"
     );
+    ensure!(
+        f.fixed.is_empty() || f.option_pattern.is_none(),
+        "{name}: [[option]] and option_pattern are mutually exclusive"
+    );
     let re = |p: &Option<String>| {
         p.as_deref()
             .map(Regex::new)
@@ -104,13 +108,27 @@ fn compile(name: &str, text: &str) -> Result<Format> {
     let lower = |ws: Vec<String>| ws.into_iter().map(|w| w.to_lowercase());
     let mut roles = RoleWords::default();
     if let Some(extra) = f.roles {
+        // An empty word would match every label.
+        ensure!(
+            [&extra.approve, &extra.deny, &extra.revise]
+                .iter()
+                .all(|ws| ws.iter().all(|w| !w.trim().is_empty())),
+            "{name}: empty role word"
+        );
         roles.approve.extend(lower(extra.approve));
         roles.deny.extend(lower(extra.deny));
         roles.revise.extend(lower(extra.revise));
     }
+    let option = re(&f.option_pattern)?;
+    ensure!(
+        option
+            .as_ref()
+            .is_none_or(|o| o.capture_names().flatten().any(|n| n == "label")),
+        "{name}: option_pattern needs a `label` group"
+    );
     Ok(Format {
         trigger: re(&f.trigger)?,
-        option: re(&f.option_pattern)?,
+        option,
         id: f.id,
         sources: f.sources,
         kind: f.kind,

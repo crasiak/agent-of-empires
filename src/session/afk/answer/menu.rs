@@ -177,7 +177,7 @@ impl Menu {
         let mut seen = std::collections::HashSet::new();
         for o in &input.options {
             ensure!(
-                !o.key.is_empty() && o.key.len() <= 64 && !o.label.is_empty(),
+                !o.key.is_empty() && o.key.len() <= 64 && !o.label.trim().is_empty(),
                 "invalid menu option"
             );
             ensure!(seen.insert(o.key.clone()), "duplicate menu option key");

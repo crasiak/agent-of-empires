@@ -1,7 +1,7 @@
 id = "text.yes-no"
 sources = ["agent_text", "bash_prompt", "pane"]
 kind = "confirm"
-trigger = '(\((?:y/N|Y/n|y/n|yes/no)\)|\[(?:y/N|Y/n|y/n)\])\s*[:?]?\s*$'
+trigger = '(\((?:y/N|Y/n|y/n|Y/N|yes/no)\)|\[(?:y/N|Y/n|y/n|Y/N|yes/no)\])\s*[:?]?\s*$'
 [[option]]
 key = "y"
 label = "Yes"

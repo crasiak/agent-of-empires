@@ -142,6 +142,8 @@ impl Inspection {
                     )
                     && (!p.active || p.guarded && matches!(p.status.as_str(), "pending" | "owned"))
                     && (p.status != "recovered" || !p.active && !p.guarded)
+                    // Keep the range check before `request_limit * 16`: `&&` short-circuits, so the
+                    // multiplication only runs on a limit that cannot overflow `u32`.
                     && (1..=512).contains(&p.request_limit)
                     && p.requests_used <= p.request_limit
                     && p.tool_limit == (p.request_limit * 16).min(4096)

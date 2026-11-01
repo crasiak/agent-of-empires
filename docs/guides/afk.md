@@ -220,7 +220,7 @@ narrow rule is the real boundary. Under `yolo` a failed check only adds a warnin
   this release emits `plan`-kind menus, so this applies only to user formats that
   declare `kind = "plan"`.
 - `diff_limit`: the branch diff is measured on every decision with `git diff
-  --numstat` against the merge base with `origin/HEAD` (else `HEAD`). Once it
+  --numstat` against the merge base with `origin/HEAD`, else `origin/main`, else the branch's upstream (else `HEAD`). Once it
   passes 1500 added plus deleted lines, every otherwise-allowed answer other than
   a deny stops with `scope:diff_limit`; no item estimate raises the limit yet. If
   git fails, the check is skipped.

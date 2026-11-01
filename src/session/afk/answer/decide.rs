@@ -25,6 +25,10 @@ pub struct RunContext {
     pub diff_lines: Option<u64>,
     pub max_diff_lines: u64,
     pub estimate_diff_lines: Option<u64>,
+    /// `~` in a command resolves against this; without it a `~` path counts as outside.
+    pub home: Option<PathBuf>,
+    /// Branches a push must not touch: `main` and `master`, plus the repo's default branch.
+    pub protected_branches: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -87,9 +91,24 @@ pub fn decide(
     rules: &Rules,
     proposal: Option<&Proposal>,
 ) -> Decision {
-    let text = proposal
-        .and_then(|p| p.text.clone())
-        .filter(|t| !t.is_empty() && t.len() <= 1024);
+    let offered = proposal.and_then(|p| p.text.as_deref());
+    let text = offered
+        .filter(|t| {
+            !t.is_empty()
+                && t.len() <= 1024
+                && !t
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+        })
+        .map(str::to_string);
+    // Text that was offered but is unusable is not the same stop as no text at all.
+    let no_text = |absent: &str| {
+        stop(if offered.is_some() {
+            "proposal_text_invalid"
+        } else {
+            absent
+        })
+    };
     let reason = proposal
         .and_then(|p| p.reason.as_deref())
         .map(|r| bounded(r, REASON_MAX))
@@ -106,7 +125,7 @@ pub fn decide(
                         warnings: vec![],
                         checks: vec![],
                     },
-                    None => stop("no_text_answer"),
+                    None => no_text("no_text_answer"),
                 };
             }
             let option = proposed(menu, proposal)
@@ -156,7 +175,7 @@ pub fn decide(
                             warnings: vec![],
                             checks: vec![],
                         },
-                        None => stop("no_proposal"),
+                        None => no_text("no_proposal"),
                     };
                 }
                 RuleAnswer::Agent => match proposed(menu, proposal) {

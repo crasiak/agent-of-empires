@@ -46,9 +46,13 @@ pub fn repo_root(cwd: &Path) -> PathBuf {
         .unwrap_or_else(|| cwd.to_path_buf())
 }
 
-/// Lines added plus deleted since the branch left `origin/HEAD` (else since `HEAD`); `None` if git fails.
+/// Lines added plus deleted in the PR so far: since the branch left `origin/HEAD`, else
+/// `origin/main`, else its upstream (else since `HEAD`); `None` if git fails.
 fn diff_lines(root: &Path) -> Option<u64> {
-    let base = git(root, &["merge-base", "HEAD", "origin/HEAD"]).unwrap_or_else(|| "HEAD".into());
+    let base = ["origin/HEAD", "origin/main", "@{upstream}"]
+        .iter()
+        .find_map(|base| git(root, &["merge-base", "HEAD", base]))
+        .unwrap_or_else(|| "HEAD".into());
     let numstat = git(root, &["diff", "--numstat", &base])?;
     Some(
         numstat
@@ -65,8 +69,20 @@ fn diff_lines(root: &Path) -> Option<u64> {
     )
 }
 
+/// `main` and `master`, plus the repo's default branch when `origin/HEAD` names one.
+fn protected_branches(root: &Path) -> Vec<String> {
+    let mut branches = vec!["main".to_string(), "master".to_string()];
+    let default = git(root, &["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .and_then(|r| r.strip_prefix("refs/remotes/origin/").map(str::to_string));
+    if let Some(default) = default.filter(|d| !d.is_empty() && !branches.contains(d)) {
+        branches.push(default);
+    }
+    branches
+}
+
 pub fn context(input: &RunInput) -> RunContext {
     let root = repo_root(&input.cwd);
+    let protected_branches = protected_branches(&root);
     RunContext {
         goal: input.goal.clone(),
         policy: input.policy,
@@ -76,5 +92,7 @@ pub fn context(input: &RunInput) -> RunContext {
         request_limit: input.request_limit,
         max_diff_lines: MAX_DIFF_LINES,
         estimate_diff_lines: None,
+        home: std::env::var_os("HOME").map(PathBuf::from),
+        protected_branches,
     }
 }

@@ -1,0 +1,2 @@
+{ "schema": "aoe.afk-menu.v1", "source": "agent_text", "format": "text.yes-no", "kind": "confirm", "question": "Shall I commit now? [yes/no]", "subject": null,
+  "options": [ { "key": "y", "label": "Yes", "role": "approve" }, { "key": "n", "label": "No", "role": "deny" } ], "free_text": false, "warnings": [], "deadline_ms": null }
