@@ -754,6 +754,28 @@ test("a waiting ssh host-key prompt that hits the bash timeout is recognised", a
   } finally { f.close(); }
 });
 
+test("apt's [Y/n] Abort. at exit 100 is a prompt candidate", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply({ kind: "confirm" });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const r = await f.callWithOutput("bash", "b11", { command: "apt-get install foo" },
+      exited("After this operation, 2 MB of additional disk space will be used.\nDo you want to continue? [Y/n] Abort.", 100));
+    assert.ok(r.content.some(b => b.text?.includes("aoe_afk_prompt_seen")));
+    assert.ok(f.packets.find(p => p.op === "recognise").text.endsWith("[Y/n] Abort."));
+  } finally { f.close(); }
+});
+
+test("a prompt killed by a signal (terminated without an exit code) is a prompt candidate", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply({ kind: "confirm" });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const r = await f.callWithOutput("bash", "b12", { command: "x" }, "Overwrite config? (y/N)\n\nCommand terminated without an exit code");
+    assert.ok(r.content.some(b => b.text?.includes("aoe_afk_prompt_seen")));
+  } finally { f.close(); }
+});
+
 test("a truncated bash output whose last real line is a prompt is recognised", async () => {
   const f = await fixture();
   try {

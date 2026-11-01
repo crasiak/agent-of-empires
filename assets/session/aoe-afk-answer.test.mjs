@@ -102,7 +102,7 @@ const exited = (text, code = 1) => piStatus(text, `Command exited with code ${co
 const timedOut = (text, secs = 600) => piStatus(text, `Command timed out after ${secs} seconds`);
 const truncated = (text, a, b) => `${text}\n\n[Showing lines ${a}-${b} of ${b}. Full output: /tmp/pi-bash-1.log]`;
 
-test("promptLike flags prompts only when Pi reports a non-zero exit, timeout or abort", () => {
+test("promptLike flags prompts only when Pi reports a non-zero exit, timeout, abort or signal", () => {
   assert.equal(promptLike(exited("Need to install the following packages:\ncreate-vite@5.2.0\nOk to proceed? (y/N)")),
     "Need to install the following packages:\ncreate-vite@5.2.0\nOk to proceed? (y/N)");
   assert.equal(promptLike(timedOut("Password:")), "Password:");
@@ -111,6 +111,7 @@ test("promptLike flags prompts only when Pi reports a non-zero exit, timeout or 
   assert.ok(promptLike(exited("? Select a framework: ›", 130)));
   assert.ok(promptLike(timedOut(truncated("x\nOk to proceed? (y/N)", 1, 2))));
   assert.ok(promptLike(timedOut("Continue? [y/N]:")));
+  assert.ok(promptLike(piStatus("Password:", "Command terminated without an exit code")));
   assert.equal(promptLike(timedOut("")), null);
   assert.equal(promptLike(exited("error: could not compile `aoe`")), null);
   assert.equal(promptLike(""), null);
@@ -123,9 +124,13 @@ test("promptLike never flags exit-0 output, even when it ends like a prompt", ()
     "ℹ tests 274\nℹ pass 271\nℹ fail 1", "Ok to proceed? (y/N)", "Password:", truncated("Continue? (y/N)", 1, 1)]) assert.equal(promptLike(out), null, out);
 });
 
-test("promptLike anchors yes/no markers to the line end", () => {
-  assert.equal(promptLike(exited('src/x.rs:4: "(y/N)" is matched here')), null);
-  assert.equal(promptLike(exited("found [Y/n] marker in docs")), null);
+test("a yes/no marker anywhere in a candidate's last line counts; exit 0 stays excluded", () => {
+  assert.equal(promptLike(exited("Do you want to continue? [Y/n] Abort.", 100)), "Do you want to continue? [Y/n] Abort.");
+  assert.ok(promptLike(timedOut("Remove the lock (yes/no) and retry")));
+  assert.ok(promptLike(piStatus("Proceed (y/n) — waiting", "Command aborted")));
+  assert.ok(promptLike(piStatus("Continue? [y/N] ", "Command terminated without an exit code")));
+  assert.equal(promptLike("Do you want to continue? [Y/n] Abort."), null);
+  assert.equal(promptLike(exited("error: no marker here")), null);
 });
 
 test("promptLike keeps the last 12 non-empty lines", () => {
