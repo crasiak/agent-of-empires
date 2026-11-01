@@ -1,0 +1,33 @@
+{
+  "comment": "Pi examples/extensions/permission-gate.ts: ctx.ui.select(`⚠️ Dangerous command:\\n\\n  ${command}\\n\\nAllow?`, [\"Yes\", \"No\"]). menu is what dialogMenu builds from event.",
+  "event": {
+    "type": "ui_prompt_respond",
+    "kind": "select",
+    "title": "⚠️ Dangerous command:\n\n  rm -rf ~/Documents\n\nAllow?",
+    "options": [
+      "Yes",
+      "No"
+    ]
+  },
+  "menu": {
+    "source": "pi_dialog",
+    "format": "pi.select",
+    "kind": "permission",
+    "question": "⚠️ Dangerous command:\n\n  rm -rf ~/Documents\n\nAllow?",
+    "subject": "⚠️ Dangerous command:\n\n  rm -rf ~/Documents\n\nAllow?",
+    "options": [
+      {
+        "key": "1",
+        "label": "Yes"
+      },
+      {
+        "key": "2",
+        "label": "No"
+      }
+    ],
+    "warnings": [
+      "dialog marked dangerous"
+    ],
+    "raw": "{\"type\":\"ui_prompt_respond\",\"kind\":\"select\",\"title\":\"⚠️ Dangerous command:\\n\\n  rm -rf ~/Documents\\n\\nAllow?\",\"options\":[\"Yes\",\"No\"]}"
+  }
+}

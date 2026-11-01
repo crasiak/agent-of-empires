@@ -815,6 +815,40 @@ mod decide {
     }
 
     #[test]
+    fn pi_permission_gate_dialog_stops_under_a_broad_permission_rule() {
+        // The menu the extension's dialogMenu builds for Pi's permission-gate example.
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/pi-permission-gate.json")).unwrap();
+        let input: MenuInput = serde_json::from_value(fixture["menu"].clone()).unwrap();
+        let broad = rules("[[rule]]\nid='all'\nkind='permission'\nanswer='approve'");
+        let menu = Menu::from_input(input.clone(), &RoleWords::default()).unwrap();
+        let d = decide(&menu, &run(Policy::Rules), &broad, None);
+        assert_eq!(stop(&d), Some("scope:harness_warning"), "{d:?}");
+        // Without the warning, the command in the title still stops it.
+        let mut quiet = input;
+        quiet.warnings.clear();
+        let menu = Menu::from_input(quiet, &RoleWords::default()).unwrap();
+        assert_eq!(
+            stop(&decide(&menu, &run(Policy::Rules), &broad, None)),
+            Some("scope:outside_repo")
+        );
+        // The guide's narrow rule answers a dialog whose message is the command, and not the gate.
+        let narrow = rules(
+            "[[rule]]\nid='tooling'\nsource='pi_dialog'\nkind='permission'\nsubject_matches=['^(cargo|npm|pnpm) (test|build|check)\\b']\nanswer='approve'",
+        );
+        let mut allow = menu.clone();
+        allow.subject = Some("cargo test".into());
+        assert_eq!(
+            choice(&decide(&allow, &run(Policy::Rules), &narrow, None)),
+            Some("1")
+        );
+        assert_eq!(
+            stop(&decide(&menu, &run(Policy::Rules), &narrow, None)),
+            Some("no_rule")
+        );
+    }
+
+    #[test]
     fn tilde_paths_resolve_against_home_or_count_as_outside() {
         use super::super::scope::outside_repo;
         use std::path::Path;

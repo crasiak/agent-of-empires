@@ -55,16 +55,21 @@ export function askUserMenu(input) {
     free_text: input.allowFreeform !== false, raw: JSON.stringify(input).slice(0, 4096) };
 }
 
-const PERMISSION = /^(allow|approve|permit|run|execute)\b|permission/i;
+// Pi's permission gates put the command in the title: `⚠️ Dangerous command:\n\n  <cmd>\n\nAllow?` (examples/extensions/permission-gate.ts).
+const DANGER = /dangerous|⚠/i;
+const PERMISSION = /^(allow|approve|permit|run|execute)\b|permission|dangerous|⚠/i;
 // Pi select/confirm/input dialogs offered through ui_prompt_respond; editor and custom dialogs stay with the human.
+// The subject scope checks read is the message, else the title; a dangerous-looking dialog carries a harness warning.
 export function dialogMenu(e) {
   const kind = e?.kind, title = String(e?.title ?? "").slice(0, 2048) || "(untitled dialog)", raw = JSON.stringify(e).slice(0, 4096);
+  const subject = typeof e?.message === "string" ? e.message.slice(0, 2048) : e?.title ? title : null;
+  const warnings = DANGER.test(title) || DANGER.test(subject ?? "") ? ["dialog marked dangerous"] : [];
   if (kind === "select" && Array.isArray(e.options) && e.options.length)
-    return { source: "pi_dialog", format: "pi.select", kind: PERMISSION.test(title) ? "permission" : "choice", question: title, subject: e.message ?? null,
-      options: e.options.slice(0, 32).map((label, i) => ({ key: String(i + 1), label: String(label).slice(0, 256) })), raw };
+    return { source: "pi_dialog", format: "pi.select", kind: PERMISSION.test(title) ? "permission" : "choice", question: title, subject,
+      options: e.options.slice(0, 32).map((label, i) => ({ key: String(i + 1), label: String(label).slice(0, 256) })), warnings, raw };
   if (kind === "confirm")
-    return { source: "pi_dialog", format: "pi.confirm", kind: PERMISSION.test(title) ? "permission" : "confirm", question: title, subject: e.message ?? null,
-      options: [{ key: "y", label: "Yes" }, { key: "n", label: "No" }], raw };
+    return { source: "pi_dialog", format: "pi.confirm", kind: PERMISSION.test(title) ? "permission" : "confirm", question: title, subject,
+      options: [{ key: "y", label: "Yes" }, { key: "n", label: "No" }], warnings, raw };
   if (kind === "input") return { source: "pi_dialog", format: "pi.input", kind: "input", question: title, free_text: true, options: [], raw };
   return null;
 }

@@ -162,10 +162,13 @@ id = "approve-plans-in-goal"
 kind = "choice"
 answer = "agent"          # accept the agent's own pick if scope checks pass
 
+# A Pi dialog such as ctx.ui.confirm("Allow command?", "cargo test"): the subject is the
+# dialog's message, or its title when it has none.
 [[rule]]
 id = "approve-repo-tooling"
+source = "pi_dialog"
 kind = "permission"
-subject_matches = ['^Bash command: (cargo|npm|pnpm|git (status|diff|add|commit|log))\b']
+subject_matches = ['^(cargo|npm|pnpm) (test|build|check)\b', '^git (status|diff|log)\b']
 answer = "approve"
 
 [[rule]]
@@ -175,7 +178,11 @@ answer = "stop"
 ```
 
 Prefer narrow allow rules like the second one over broad ones such as
-`kind = "permission", answer = "approve"`.
+`kind = "permission", answer = "approve"`. A Pi dialog is a `permission` when its
+title starts with allow, approve, permit, run or execute, or mentions permission,
+"dangerous" or ⚠. A dialog whose title or message says "dangerous" or ⚠, like
+Pi's permission-gate example (`⚠️ Dangerous command: … Allow?`), always stops
+under `rules` with `scope:harness_warning`.
 
 ### Scope checks
 

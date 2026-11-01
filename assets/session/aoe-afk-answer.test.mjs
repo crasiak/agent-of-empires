@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { askUserMenu, createAnswerClient, dialogMenu, dialogValue, parseOnArgs, runInput, answeredBy, splitArgs, textTail, promptLike, BASH_DEFAULT_TIMEOUT_S } from "./aoe-afk-answer.mjs";
 
 test("decide maps bridge replies and never throws", async () => {
@@ -180,4 +181,15 @@ test("dialogValue maps the decision to the value Pi accepts", () => {
   assert.equal(dialogValue(input, dialogMenu(input), { text: "main" }), "main");
   assert.equal(dialogValue(input, dialogMenu(input), {}), undefined);
   assert.equal(dialogValue(input, dialogMenu(input), { text: "é".repeat(2049) }), undefined, "over 4096 bytes");
+});
+
+test("a Pi permission-gate select is a permission whose title is the subject, with a harness warning", () => {
+  const gate = JSON.parse(readFileSync(new URL("../../src/session/afk/answer/testdata/pi-permission-gate.json", import.meta.url), "utf8"));
+  assert.deepEqual(dialogMenu(gate.event), gate.menu);
+  const demo = dialogMenu({ kind: "select", title: "Dangerous command: rm -rf ~/x", options: ["Allow", "Block"] });
+  assert.equal(demo.kind, "permission"); assert.equal(demo.subject, "Dangerous command: rm -rf ~/x"); assert.deepEqual(demo.warnings, ["dialog marked dangerous"]);
+  const confirm = dialogMenu({ kind: "confirm", title: "Really?", message: "⚠ rm -rf build" });
+  assert.equal(confirm.subject, "⚠ rm -rf build"); assert.deepEqual(confirm.warnings, ["dialog marked dangerous"]);
+  assert.equal(dialogMenu({ kind: "confirm", title: "Keep going?" }).subject, "Keep going?");
+  assert.deepEqual(dialogMenu({ kind: "select", title: "Pick", options: ["a"] }).warnings, []);
 });
