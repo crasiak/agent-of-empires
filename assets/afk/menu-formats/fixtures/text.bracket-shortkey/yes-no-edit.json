@@ -1,0 +1,2 @@
+{ "schema": "aoe.afk-menu.v1", "source": "agent_text", "format": "text.bracket-shortkey", "kind": "choice", "question": "Found 3 changes.\nProceed with deploy?", "subject": null,
+  "options": [ { "key": "Y", "label": "Yes", "role": "approve" }, { "key": "N", "label": "No", "role": "deny" }, { "key": "E", "label": "Edit", "role": "revise" } ], "free_text": false, "warnings": [], "deadline_ms": null }

@@ -23,9 +23,40 @@ enum Command {
     RuntimeAck {
         ack: delegation::RuntimeAck,
     },
+    WorkPeriodReply {
+        reply: work_period::Inspection,
+    },
     Ack {
         ack: Box<Ack>,
     },
+    Recognise {
+        source: answer::Source,
+        text: String,
+    },
+    Decide {
+        run: answer::run::RunInput,
+        #[serde(default)]
+        menu: Option<answer::MenuInput>,
+        #[serde(default)]
+        text: Option<TextMenu>,
+        #[serde(default)]
+        proposal: Option<answer::Proposal>,
+    },
+    AnswerDelivered {
+        period: String,
+        answer_id: String,
+        delivered: answer::log::Delivered,
+    },
+    RulesCheck {
+        run: answer::run::RunInput,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextMenu {
+    source: answer::Source,
+    text: String,
 }
 
 pub fn run_bridge(raw: &str, generation: &str) -> Result<()> {
@@ -76,6 +107,7 @@ pub(super) fn serve(
     let (runtime, app) = runtime.map_or((None, None), |(store, app)| (Some(store), Some(app)));
     let mut meter = usage::transport::Server::new();
     let mut automatic_wake = wake::Server::new();
+    let (formats, format_warnings) = answer::Formats::load(answer::formats::user_dir().as_deref());
     loop {
         let mut line = Vec::new();
         use std::io::Read;
@@ -124,6 +156,13 @@ pub(super) fn serve(
                         &validate,
                     )?;
                     view["usage_report"] = usage_report;
+                    view["work_period_capability"] = serde_json::json!(1);
+                    view["work_period_request"] = serde_json::to_value(work_period::request(
+                        store,
+                        binding,
+                        generation,
+                        now_ms(),
+                    )?)?;
                     if let (Some(app), Some(runtime)) = (app, runtime) {
                         view["automatic_wake"] = automatic_wake.observe(
                             wake::Peer {
@@ -152,6 +191,11 @@ pub(super) fn serve(
                     now_ms(),
                     &validate,
                 ),
+                Command::WorkPeriodReply { reply } => {
+                    validate()?;
+                    work_period::acknowledge(store, binding, generation, reply, now_ms())?;
+                    Ok(serde_json::json!({"acknowledged": true}))
+                }
                 Command::RuntimeAck { ack } => {
                     let runtime = runtime.context("runtime unavailable")?;
                     let _lock = runtime.lock_existing(TIMEOUT)?;
@@ -179,6 +223,25 @@ pub(super) fn serve(
                     store.write("ack.json", &ack)?;
                     Ok(serde_json::json!({"acknowledged":true}))
                 }
+                Command::Recognise { source, text } => {
+                    Ok(serde_json::json!({ "menu": formats.recognise(source, &text) }))
+                }
+                Command::RulesCheck { run } => Ok(rules_check(&run, &format_warnings)),
+                Command::Decide {
+                    run,
+                    menu,
+                    text,
+                    proposal,
+                } => decide(store, &formats, run, menu, text, proposal),
+                Command::AnswerDelivered {
+                    period,
+                    answer_id,
+                    delivered,
+                } => {
+                    answer::log::AnswerLog::new(&store.dir, &period)?
+                        .delivered(&answer_id, delivered)?;
+                    Ok(serde_json::json!({ "recorded": true }))
+                }
             }
         });
         let value = match result {
@@ -202,6 +265,117 @@ pub(super) fn serve(
         output.write_all(b"\n")?;
         output.flush()?;
     }
+}
+
+fn load_rules(run: &answer::run::RunInput) -> Result<answer::Rules> {
+    answer::Rules::load(
+        Some(&answer::run::repo_root(&run.cwd)),
+        answer::rules::user_rules_file().as_deref(),
+        &run.rules,
+    )
+}
+
+/// A parse error is a value, not a refusal: the consent dialog shows it to the user.
+fn rules_check(run: &answer::run::RunInput, format_warnings: &[String]) -> serde_json::Value {
+    if run.policy == answer::Policy::Yolo {
+        return serde_json::json!({ "valid": true, "count": 0, "sources": [], "format_warnings": format_warnings });
+    }
+    match load_rules(run) {
+        Ok(rules) => serde_json::json!({
+            "valid": true,
+            "count": rules.rules.len(),
+            "sources": rules.sources,
+            "digest": rules.digest,
+            "format_warnings": format_warnings,
+        }),
+        Err(error) => serde_json::json!({
+            "valid": false,
+            "error": format!("{error:#}"),
+            "format_warnings": format_warnings,
+        }),
+    }
+}
+
+fn decide(
+    store: &Store,
+    formats: &answer::Formats,
+    run: answer::run::RunInput,
+    menu: Option<answer::MenuInput>,
+    text: Option<TextMenu>,
+    proposal: Option<answer::Proposal>,
+) -> Result<serde_json::Value> {
+    let log = answer::log::AnswerLog::new(&store.dir, &run.period)?;
+    let menu = match (menu, text) {
+        (Some(input), None) => answer::Menu::from_input(input, &answer::RoleWords::default())?,
+        (None, Some(text)) => match formats.recognise(text.source, &text.text) {
+            Some(menu) => menu,
+            None => {
+                let sample = log.unrecognised(&text.text)?;
+                let id = log.decision(&serde_json::json!({
+                    "run": run.period, "item": run.item, "period": run.period, "menu": null,
+                    "proposal": null, "decision": "stop", "policy": run.policy,
+                    "reason": "unrecognised_menu", "sample": sample, "delivered": "not_applicable",
+                }))?;
+                return Ok(serde_json::json!({
+                    "answer_id": id,
+                    "menu": null,
+                    "decision": {"decision": "stop", "reason": "unrecognised_menu", "checks": []},
+                    "sample": sample,
+                }));
+            }
+        },
+        _ => anyhow::bail!("decide needs exactly one of menu or text"),
+    };
+    // Rules are fixed at consent: sources that no longer load to the consented digest stop.
+    let rules = match run.policy {
+        answer::Policy::Yolo => Some(answer::Rules::empty()),
+        answer::Policy::Rules => load_rules(&run)
+            .ok()
+            .filter(|r| run.rules_digest.as_deref() == Some(r.digest.as_str())),
+    };
+    let decision = match rules {
+        Some(rules) => answer::decide(
+            &menu,
+            &answer::run::context(&run),
+            &rules,
+            proposal.as_ref(),
+        ),
+        None => answer::Decision::Stop {
+            reason: "rules_changed".into(),
+            checks: vec![],
+        },
+    };
+    let no_warnings = Vec::new();
+    let (kind, choice, text, rule, reason, warnings, checks, delivered) = match &decision {
+        answer::Decision::Answer {
+            choice,
+            text,
+            rule,
+            reason,
+            warnings,
+            checks,
+        } => (
+            "answer", choice, text, rule, reason, warnings, checks, "pending",
+        ),
+        answer::Decision::Stop { reason, checks } => (
+            "stop",
+            &None,
+            &None,
+            &None,
+            reason,
+            &no_warnings,
+            checks,
+            "not_applicable",
+        ),
+    };
+    let record = serde_json::json!({
+        "run": run.period, "item": run.item, "period": run.period, "menu": menu,
+        "proposal": proposal.as_ref().and_then(|p| p.key.clone()), "decision": kind,
+        "choice": choice, "text": text, "policy": run.policy, "rule": rule, "checks": checks,
+        "warnings": warnings, "reason": reason, "delivered": delivered,
+    });
+    let id = log.decision(&record)?;
+    Ok(serde_json::json!({ "answer_id": id, "menu": menu, "decision": decision }))
 }
 
 fn matching_probe(store: &Store, binding: &Binding, revision: u64) -> Result<Option<Probe>> {
@@ -322,5 +496,136 @@ mod tests {
             || Ok(())
         )
         .is_err());
+    }
+    #[test]
+    fn bridge_recognises_decides_and_records_answers() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path(), "test", true).unwrap();
+        let binding = Binding {
+            instance_id: "test".into(),
+            profile: "default".into(),
+            native_id: "native".into(),
+            launch_id: "launch".into(),
+        };
+        let period = "11111111-1111-1111-1111-111111111111";
+        let run = serde_json::json!({
+            "period": period, "goal": "g", "policy": "yolo", "cwd": cwd.path(),
+            "requests_used": 0, "request_limit": 4,
+        });
+        let send = |packet: serde_json::Value| {
+            let mut line = serde_json::to_vec(&packet).unwrap();
+            line.push(b'\n');
+            let mut out = Vec::new();
+            serve(
+                &store,
+                None,
+                &binding,
+                "generation",
+                std::io::Cursor::new(line),
+                &mut out,
+                || Ok(()),
+            )
+            .unwrap();
+            let reply: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(reply["ok"], true, "{reply}");
+            reply["value"].clone()
+        };
+        let recognised = send(serde_json::json!({
+            "op": "recognise", "source": "agent_text", "text": "Proceed with install? (y/N)",
+        }));
+        assert!(!recognised["menu"].is_null(), "{recognised}");
+        let decided = send(serde_json::json!({
+            "op": "decide", "run": run,
+            "menu": {
+                "source": "pi_dialog", "format": "pi.confirm", "kind": "confirm", "question": "Continue?",
+                "options": [{"key": "1", "label": "Yes"}, {"key": "2", "label": "No"}],
+            },
+        }));
+        assert_eq!(decided["decision"]["decision"], "answer", "{decided}");
+        assert_eq!(decided["decision"]["choice"], "1");
+        let recorded = send(serde_json::json!({
+            "op": "answer_delivered", "period": period,
+            "answer_id": decided["answer_id"], "delivered": "ok",
+        }));
+        assert_eq!(recorded["recorded"], true);
+        let unrecognised = send(serde_json::json!({
+            "op": "decide", "run": run,
+            "text": {"source": "agent_text", "text": "nothing to answer here"},
+        }));
+        assert!(unrecognised["menu"].is_null());
+        assert_eq!(unrecognised["decision"]["reason"], "unrecognised_menu");
+        assert!(unrecognised["sample"].is_string(), "{unrecognised}");
+    }
+    #[test]
+    #[serial_test::serial]
+    fn rules_are_fixed_at_consent_and_a_changed_source_stops_the_answer() {
+        // An isolated HOME, so the real ~/.config/aoe/afk/rules.toml is never a rule source.
+        let _home = crate::session::test_support::isolate_app_dir();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path(), "test", true).unwrap();
+        let binding = Binding {
+            instance_id: "test".into(),
+            profile: "default".into(),
+            native_id: "native".into(),
+            launch_id: "launch".into(),
+        };
+        let send = |packet: serde_json::Value| {
+            let mut line = serde_json::to_vec(&packet).unwrap();
+            line.push(b'\n');
+            let mut out = Vec::new();
+            serve(
+                &store,
+                None,
+                &binding,
+                "generation",
+                std::io::Cursor::new(line),
+                &mut out,
+                || Ok(()),
+            )
+            .unwrap();
+            let reply: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(reply["ok"], true, "{reply}");
+            reply["value"].clone()
+        };
+        let rule = "id='any', kind='confirm', answer='approve'";
+        let run = |policy: &str, digest: &str| {
+            serde_json::json!({
+                "period": "11111111-1111-1111-1111-111111111111", "goal": "g", "policy": policy,
+                "rules": [rule], "rules_digest": digest, "cwd": cwd.path(),
+                "requests_used": 0, "request_limit": 4,
+            })
+        };
+        let decide = |run: serde_json::Value| {
+            send(serde_json::json!({
+                "op": "decide", "run": run,
+                "menu": {
+                    "source": "pi_dialog", "format": "pi.confirm", "kind": "confirm", "question": "Continue?",
+                    "options": [{"key": "y", "label": "Yes"}, {"key": "n", "label": "No"}],
+                },
+            }))["decision"]
+                .clone()
+        };
+        let checked = send(serde_json::json!({"op": "rules_check", "run": run("rules", "")}));
+        let digest = checked["digest"].as_str().unwrap_or_default().to_string();
+        assert_eq!(digest.len(), 64, "{checked}");
+        assert_eq!(decide(run("rules", &digest))["decision"], "answer");
+        // The agent writes itself a repo rules file mid-period.
+        std::fs::write(
+            cwd.path().join("afk-rules.toml"),
+            "[[rule]]\nid='mine'\nanswer='approve'\n",
+        )
+        .unwrap();
+        let changed = decide(run("rules", &digest));
+        assert_eq!(changed["decision"], "stop", "{changed}");
+        assert_eq!(changed["reason"], "rules_changed");
+        let rechecked = send(serde_json::json!({"op": "rules_check", "run": run("rules", "")}));
+        assert_ne!(rechecked["digest"], checked["digest"]);
+        // An inline rule differing from consent is a change too; yolo never checks the digest.
+        let mut other = run("rules", rechecked["digest"].as_str().unwrap());
+        other["rules"] = serde_json::json!(["id='other', answer='approve'"]);
+        assert_eq!(decide(other)["reason"], "rules_changed");
+        assert_eq!(decide(run("yolo", "stale"))["decision"], "answer");
     }
 }

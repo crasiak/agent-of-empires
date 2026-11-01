@@ -1,0 +1,8 @@
+id = "text.select-prompt"
+sources = ["bash_prompt", "pane"]
+kind = "choice"
+# inquirer/prompts style: "? Pick a template ›" followed by "❯ react" / "  vue"
+trigger = '^\?\s.+(›|»|>)\s*$'
+option_pattern = '^\s*(?:❯|>|›)?\s+(?P<label>[^\s?].{0,120})$'
+options_after_trigger = true
+min_options = 2

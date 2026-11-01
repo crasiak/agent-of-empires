@@ -1,0 +1,3 @@
+Found 3 changes.
+Proceed with deploy?
+[Y]es / [N]o / [E]dit

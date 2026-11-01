@@ -1,0 +1,5 @@
+$ npm create app
+? Select a package manager »
+  npm
+❯ pnpm
+  yarn

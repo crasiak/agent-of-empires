@@ -1,0 +1,2 @@
+{ "schema": "aoe.afk-menu.v1", "source": "agent_text", "format": "text.numbered-list", "kind": "choice", "question": "Do you want to proceed?", "subject": null,
+  "options": [ { "key": "1", "label": "Yes", "role": "approve" }, { "key": "2", "label": "Yes, and don't ask again for npm commands", "role": "approve_always" }, { "key": "3", "label": "No", "role": "deny" } ], "free_text": false, "warnings": [], "deadline_ms": null }

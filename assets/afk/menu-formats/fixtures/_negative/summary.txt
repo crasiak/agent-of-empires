@@ -1,0 +1,4 @@
+Summary of changes:
+1. Fixed the parser
+2. Added a regression test
+3. Updated the docs

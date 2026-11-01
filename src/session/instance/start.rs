@@ -1414,6 +1414,7 @@ else:
             target_session_id: None,
             resolved_target_session_id: None,
             pi_pinnable: false,
+            ledger_runtime: None,
             opencode_preassign: false,
             opencode_schema: None,
             store_override: None,

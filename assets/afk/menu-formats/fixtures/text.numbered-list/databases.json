@@ -1,0 +1,2 @@
+{ "schema": "aoe.afk-menu.v1", "source": "agent_text", "format": "text.numbered-list", "kind": "choice", "question": "Which database should I use?", "subject": null,
+  "options": [ { "key": "1", "label": "Postgres", "role": "other" }, { "key": "2", "label": "SQLite", "role": "other" }, { "key": "3", "label": "Both", "role": "other" } ], "free_text": false, "warnings": [], "deadline_ms": null }

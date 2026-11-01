@@ -1,0 +1,5 @@
+Here is how the build works. The steps are described below.
+1. Compile the sources
+2. Link the objects
+3. Run the tests
+That is all there is to it. Did you want anything else?

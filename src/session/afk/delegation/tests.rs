@@ -265,7 +265,7 @@ fn real_pi_sdk_records_then_applies_through_host_bridge() {
     use std::process::{Command, Stdio};
     if std::env::var_os("AOE_PI_ROOT").is_none() && std::env::var_os("AOE_PI_SOURCE_ROOT").is_none()
     {
-        eprintln!("Set AOE_PI_ROOT or AOE_PI_SOURCE_ROOT to pinned Pi 0.87.1 for offline SDK/host integration");
+        eprintln!("Set AOE_PI_ROOT or AOE_PI_SOURCE_ROOT to qualified Pi 1.2.0 for offline SDK/host integration");
         return;
     }
     for scenario in [
@@ -315,8 +315,7 @@ fn real_pi_sdk_records_then_applies_through_host_bridge() {
             let source = std::path::PathBuf::from(source);
             command
                 .arg("--import")
-                .arg(source.join("node_modules/tsx/dist/loader.mjs"))
-                .env("TSX_TSCONFIG_PATH", source.join("tsconfig.json"));
+                .arg(source.join("packages/coding-agent/src/experimental/source-resolver.ts"));
         }
         let mut child = command
             .args(["assets/session/aoe-afk-sdk.test.mjs", "--host", scenario])
@@ -730,7 +729,7 @@ fn operator_grant_requires_two_fresh_acknowledgements_before_executable_confirma
                             usage_policy_hash: probe.usage_policy_hash,
                             usage_coverage: "native-entries-terminal-v2".into(),
                             generation: generation.clone(),
-                            sdk: "0.87.1".into(),
+                            sdk: "1.2.0".into(),
                             coverage: COVERAGE.into(),
                         };
                         let before = control.bytes("runtime-ack.json").unwrap();

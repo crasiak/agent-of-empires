@@ -902,6 +902,12 @@ impl Instance {
                     Some(execution)
                 }
                 Err(error)
+                    if crate::session::ledger_pi::profile(&self.tool, self.get_tool_command())
+                        .is_some() =>
+                {
+                    return Err(error.context("Ledger Pi native qualification failed"));
+                }
+                Err(error)
                     if self.default_selector_agent().is_some_and(|agent| {
                         agent.name == "prime-agent"
                             && self.launch_invokes_resolved_agent_directly(agent)
@@ -1541,14 +1547,16 @@ impl Instance {
             }
         } else {
             let document_chat = crate::session::tailored::document::account(self).is_some();
-            if document_chat {
+            let ledger_pi =
+                crate::session::ledger_pi::profile(&self.tool, self.get_tool_command()).is_some();
+            if document_chat || ledger_pi {
                 anyhow::ensure!(
                     identity_extension.is_some() && !self.is_sandboxed(),
-                    "Document chat requires the standard host-owned Pi identity extension"
+                    "Ledger Pi requires the standard host-owned identity extension"
                 );
                 anyhow::ensure!(
                     execution.is_some_and(|e| e.agent.name == "pi" && e.pi_pinnable),
-                    "Document chat requires a native, pinnable Pi launch"
+                    "Ledger Pi requires a qualified, native pinnable launch"
                 );
             }
             let mut cmd =
@@ -1588,8 +1596,28 @@ impl Instance {
                 }
             }
             apply_first_launch_agent_name(&mut cmd, agent, self, execution, is_existing);
+            if ledger_pi && !document_chat {
+                let native = execution.context("Ledger Pi native execution is unavailable")?;
+                let native_id = self
+                    .agent_session_id
+                    .as_deref()
+                    .context("Ledger Pi native ID is unavailable")?;
+                cmd.push_str(&crate::session::afk::launch_arguments(
+                    self,
+                    native_id,
+                    &native.inputs.launch_id,
+                )?);
+            }
             apply_ssh_prompt_suppression(&mut cmd);
             apply_no_daemon_flag(&mut cmd, agent, self, execution);
+            if ledger_pi && !document_chat {
+                let native = execution.context("Ledger Pi native execution is unavailable")?;
+                cmd = native
+                    .ledger_runtime
+                    .as_ref()
+                    .context("Ledger Pi execution lacks a guarded plan")?
+                    .guarded_command(&cmd, &native.inputs.host_environment_pairs())?;
+            }
             apply_agent_launch_env(&mut cmd, agent);
             if document_chat {
                 anyhow::ensure!(!is_existing || execution.is_some_and(|e| e.pi_transcript_path.is_some()), "Document native transcript is unavailable; refusing to start a fresh conversation");
@@ -1713,6 +1741,10 @@ mod tests {
             .unwrap();
         let command = first.command.unwrap();
         assert!(!first.is_existing);
+        assert!(
+            !command.contains("--aoe-afk-binding") && !command.contains("aoe-afk-runtime.mjs"),
+            "Document chat must not acquire the AFK runtime: {command}"
+        );
         assert_eq!(command.matches("source.txt").count(), 1, "{command}");
         assert_eq!(command.matches("Opening question, exactly once").count(), 1);
         assert!(command.contains("--no-tools") && command.contains("--no-extensions"));

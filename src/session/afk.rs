@@ -1,5 +1,6 @@
-//! Control-only presence and a separately granted, bounded delegation runtime.
+//! Presence, restricted host delegation, and separately confirmed native work periods.
 
+pub mod answer;
 pub(crate) mod authority;
 pub mod batch;
 mod bridge;
@@ -13,6 +14,7 @@ mod store;
 mod tests;
 mod usage;
 pub(crate) mod wake;
+pub mod work_period;
 
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -47,10 +49,13 @@ impl Binding {
     fn for_instance(instance: &Instance) -> Result<Self> {
         ensure!(
             instance.tool == "pi"
-                && instance.command.is_empty()
+                && (instance.command.is_empty()
+                    || (super::ledger_pi::profile(&instance.tool, instance.get_tool_command())
+                        .is_some()
+                        && super::tailored::document::account(instance).is_none()))
                 && !instance.is_structured()
                 && !instance.is_sandboxed(),
-            "unsupported: AFK requires an integrated direct host Pi launch"
+            "unsupported: AFK requires an integrated host Pi launch"
         );
         instance.ensure_startable()?;
         ensure!(
@@ -124,6 +129,22 @@ pub(crate) fn launch_arguments(
         (
             "aoe-afk-usage-guard.mjs",
             include_bytes!("../../assets/session/aoe-afk-usage-guard.mjs").as_slice(),
+        ),
+        (
+            "aoe-afk-work-state.mjs",
+            include_bytes!("../../assets/session/aoe-afk-work-state.mjs").as_slice(),
+        ),
+        (
+            "aoe-afk-work-native.mjs",
+            include_bytes!("../../assets/session/aoe-afk-work-native.mjs").as_slice(),
+        ),
+        (
+            "aoe-afk-work-period.mjs",
+            include_bytes!("../../assets/session/aoe-afk-work-period.mjs").as_slice(),
+        ),
+        (
+            "aoe-afk-answer.mjs",
+            include_bytes!("../../assets/session/aoe-afk-answer.mjs").as_slice(),
         ),
         (
             "aoe-afk-questions.mjs",
@@ -270,7 +291,7 @@ impl Report {
             if matches!(self.state, State::Pending | State::Owned) {
                 "Explicit delegation: one file cycle, finite SDK reservations"
             } else {
-                "Autonomous allowance: 0"
+                "Control-only allowance: 0; native /afk-work periods are separate"
             }
         )
     }

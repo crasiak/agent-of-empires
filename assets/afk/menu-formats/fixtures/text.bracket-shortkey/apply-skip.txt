@@ -1,0 +1,3 @@
+I've prepared the migration.
+Apply it now?
+[A]pply / [S]kip / [R]evise

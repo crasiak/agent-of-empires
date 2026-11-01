@@ -5,6 +5,11 @@ import { performance } from "node:perf_hooks";
 const LIMIT = 16 * 1024;
 const FRAME_LIMIT = 256 * 1024;
 const REMINDER = "AoE AFK control-only: the human is away. This notice grants no new decision or action authority. Preserve all existing approval and waiting requirements. Do not answer, dismiss, or bypass human questions because of this notice. Autonomous allowance: zero.";
+// Most ops must answer in 1.5 s or the bridge is closed. Answer ops wait longer for git and fsync, and a reply
+// after their deadline is discarded; a child still silent LATE_REPLY_LIMIT_MS later is closed. The grace is
+// short because polls, replies and acks queue behind the late reply, and host requests expire after 3 s.
+const DEADLINE_MS = 1500, LATE_REPLY_LIMIT_MS = DEADLINE_MS;
+const LATE_REPLY_DEADLINES = { decide: 5000, rules_check: 5000, recognise: 1500, answer_delivered: 1500 };
 const same = (a, b) => a && b && ["instance_id", "profile", "native_id", "launch_id"].every(k => typeof a[k] === "string" && a[k] === b[k]);
 const uuid = value => typeof value === "string" && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
 
@@ -44,15 +49,23 @@ export function spawnBridge(bootstrap, generation) {
   });
   let queue = Promise.resolve();
   const bridge = {
-    request(packet) {
-      if (closed || pending) return Promise.reject(new Error("AFK bridge unavailable or busy"));
+    // `reply` settles with the answer or at the op's deadline; `free` settles once the child can take the next packet.
+    send(packet) {
+      const refused = error => ({ reply: Promise.reject(error), free: Promise.resolve() });
+      if (closed || pending) return refused(new Error("AFK bridge unavailable or busy"));
       const line = JSON.stringify(packet) + "\n";
-      if (Buffer.byteLength(line) > FRAME_LIMIT) return Promise.reject(new Error("AFK packet too large"));
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(fail, 1500);
-        pending = { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } };
+      if (Buffer.byteLength(line) > FRAME_LIMIT) return refused(new Error("AFK packet too large"));
+      const late = LATE_REPLY_DEADLINES[packet?.op];
+      let answer;
+      const reply = new Promise((resolve, reject) => { answer = { resolve, reject }; });
+      const free = new Promise(done => {
+        // Past its deadline an answer op gives up but keeps the child: its late reply is read and discarded.
+        const abandon = () => { answer.reject(new Error("AFK bridge reply deadline")); timer = setTimeout(fail, LATE_REPLY_LIMIT_MS); };
+        let timer = setTimeout(late ? abandon : fail, late ?? DEADLINE_MS);
+        pending = { resolve: value => { clearTimeout(timer); answer.resolve(value); done(); }, reject: error => { clearTimeout(timer); answer.reject(error); done(); } };
         child.stdin.write(line);
       });
+      return { reply, free };
     },
     async close() {
       if (child.exitCode !== null || child.signalCode !== null) { fail(); return; }
@@ -63,12 +76,11 @@ export function spawnBridge(bootstrap, generation) {
       clearTimeout(timer);
     },
   };
+  // Each request's deadline starts when it is sent, not while it waits behind an earlier one.
   return { close: bridge.close, request(packet) {
-    let timer;
-    const deadline = new Promise((_, reject) => { timer = setTimeout(() => { fail(); reject(new Error("AFK queued RPC deadline")); }, 1500); });
-    const next = Promise.race([queue.then(() => bridge.request(packet)), deadline]).finally(() => clearTimeout(timer));
-    queue = next.catch(() => {});
-    return next;
+    const sent = queue.then(() => bridge.send(packet));
+    queue = sent.then(s => s.free);
+    return sent.then(s => s.reply);
   } };
 }
 
@@ -84,6 +96,7 @@ export function registerAfk(pi, options = {}) {
     runtime = undefined;
     if (!old) return;
     old.stop?.();
+    options.workPeriod?.shutdown(old);
     await options.delegation?.shutdown(old);
     old.state = "unavailable";
     if (old.ctx.hasUI) old.ctx.ui.setStatus("aoe-afk", undefined);
@@ -112,6 +125,7 @@ export function registerAfk(pi, options = {}) {
     }, state: "off", revision: 0, deadline: 0, lastAck: "", policy: null };
     runtime = r;
     options.delegation?.attach(r);
+    options.workPeriod?.attach(r);
     const refresh = (boundary = "poll") => {
       if (r.refreshing) return r.refreshing;
       r.refreshing = (async () => {
@@ -119,11 +133,12 @@ export function registerAfk(pi, options = {}) {
           if (runtime !== r || ctx.sessionManager.getSessionId() !== bootstrap.binding.native_id) {
             r.state = "invalidated"; return;
           }
-          const wake = options.delegation?.wakeObservation?.(r);
-          const { policy: p, probe, delegation, runtime_probe, question_guards, usage_report, automatic_wake } = await r.bridge.request({ op: "poll", usage: options.delegation?.observation?.(r, boundary), wake: wake?.request });
+          const wake = options.workPeriod?.blocked(r) ? undefined : options.delegation?.wakeObservation?.(r);
+          const { policy: p, probe, delegation, runtime_probe, question_guards, usage_report, automatic_wake, work_period_request, work_period_capability } = await r.bridge.request({ op: "poll", usage: options.delegation?.observation?.(r, boundary), wake: wake?.request });
           options.delegation?.usageReply?.(r, usage_report);
           if (runtime !== r) return;
-          await options.delegation?.poll(r, delegation, runtime_probe, question_guards);
+          const runtimeProbe = options.workPeriod ? await options.workPeriod.beforeDelegation(r, delegation, runtime_probe) : runtime_probe;
+          await options.delegation?.poll(r, delegation, runtimeProbe, question_guards);
           if (runtime !== r || ctx.sessionManager.getSessionId() !== bootstrap.binding.native_id) return;
           r.policy = p;
           if (!p) r.state = "off";
@@ -142,6 +157,7 @@ export function registerAfk(pi, options = {}) {
             if (wall() >= p.expires_at_ms || mono() >= r.deadline) r.expiredRevision = p.revision;
             r.state = r.expiredRevision === p.revision ? "expired" : "control-only";
           }
+          await options.workPeriod?.poll(r, work_period_request, work_period_capability);
           if (probe && probe.version === 1 && same(probe.binding, bootstrap.binding) && probe.revision === (p?.revision ?? 0)) {
             const ack = { version: 1, binding: bootstrap.binding, challenge: probe.challenge, generation, revision: p?.revision ?? 0,
               window: p?.window ?? null, expires_at_ms: p?.expires_at_ms ?? null, mode: "control-only", allowance: 0, state: r.state };
@@ -151,10 +167,10 @@ export function registerAfk(pi, options = {}) {
               if (runtime === r) r.lastAck = signature;
             }
           }
-          if (runtime === r && ctx.sessionManager.getSessionId() === bootstrap.binding.native_id) options.delegation?.wakeReply?.(r, automatic_wake, wake);
-        } catch { r.state = "unavailable"; options.delegation?.failed(r); }
+          if (runtime === r && ctx.sessionManager.getSessionId() === bootstrap.binding.native_id && !options.workPeriod?.blocked(r)) options.delegation?.wakeReply?.(r, automatic_wake, wake);
+        } catch { r.state = "unavailable"; options.workPeriod?.failed(r); options.delegation?.failed(r); }
         finally {
-          if (runtime === r && ctx.hasUI) ctx.ui.setStatus("aoe-afk", r.publicationWarning ?? options.delegation?.status(r) ?? (r.state === "off" ? undefined : `AFK: ${r.state} (no autonomy)`));
+          if (runtime === r && ctx.hasUI) ctx.ui.setStatus("aoe-afk", r.publicationWarning ?? options.workPeriod?.status(r) ?? options.delegation?.status(r) ?? (r.state === "off" ? undefined : `AFK: ${r.state} (no autonomy)`));
           r.refreshing = undefined;
         }
       })();
@@ -167,11 +183,14 @@ export function registerAfk(pi, options = {}) {
   pi.on("context", async (event, ctx) => {
     const r = runtime;
     let messages = event.messages.filter(m => !["aoe-afk-control", "aoe-afk-delegation"].includes(m.customType));
-    if (!r) return { messages: messages.filter(m => m.customType !== "aoe-afk-continuation") };
+    if (!r) return { messages: (options.workPeriod?.clean(messages) ?? messages).filter(m => m.customType !== "aoe-afk-continuation") };
     // An idle poll may have read its snapshot before this request boundary.
     if (r.refreshing) await r.refreshing;
-    if (runtime !== r) return { messages: messages.filter(m => m.customType !== "aoe-afk-continuation") };
+    if (runtime !== r) return { messages: (options.workPeriod?.clean(messages) ?? messages).filter(m => m.customType !== "aoe-afk-continuation") };
     await r.refresh("before_request");
+    const work = await options.workPeriod?.context(r, messages, ctx);
+    if (work) return work;
+    messages = options.workPeriod?.clean(messages) ?? messages;
     const delegated = await options.delegation?.context(r, messages, ctx);
     if (delegated) return delegated;
     messages = messages.filter(m => m.customType !== "aoe-afk-continuation");

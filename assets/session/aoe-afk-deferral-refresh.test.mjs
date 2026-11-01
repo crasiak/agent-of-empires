@@ -26,7 +26,7 @@ async function runCase(scenario, testSignal, fault) {
   const sdk = await load("packages/coding-agent/src/index.ts");
   const { loadExtensions, createExtensionRuntime } = await load("packages/coding-agent/src/core/extensions/loader.ts");
   const { AssistantMessageEventStream } = await load("packages/ai/src/utils/event-stream.ts");
-  assert.equal(sdk.VERSION, "0.87.1");
+  assert.equal(sdk.VERSION, "1.2.0");
   const target = resolve("target/deferral-refresh");
   await mkdir(target, { recursive: true });
   const cwd = await mkdtemp(join(target, "case-"));

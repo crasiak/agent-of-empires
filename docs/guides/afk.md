@@ -1,10 +1,313 @@
-# AFK control and one-cycle delegation for Pi
+# AFK control, Session work and one-cycle delegation for Pi
 
 AFK is off by default. **Control-only presence does not authorize autonomous
-work.** A separate operator grant can authorize one small file decision on the
-qualified stock Pi 0.87.1 SDK. Neither mode starts an idle agent turn. Executable
-delegation requires ordinary work already in flight; control-only presence
-remains available while idle.
+work.** Native Session work periods and restricted one-file delegation are
+separate opt-ins. Presence and one-file delegation never start an idle turn;
+a confirmed native work period can continue the task already assigned to that
+conversation.
+
+## Session-bound work periods: native start
+
+The first work-period entrypoint is the attached Pi Session, not a grant file
+or AoE transport request. The candidate requires the qualified Pi 1.2.0 runtime
+with queue-selection fences, preserving-stop, terminal-settlement, settled-input
+and exclusive UI-lifecycle hooks. Stock releases and the earlier 0.87.1 candidate
+are not qualified. A version string alone is insufficient; source validation is
+not permission to install a candidate or reopen protected history incompatibly.
+
+Canonical `ledger run pi --profile NAME --` launches additionally require the
+exact-runtime guard, an immutable core and conversation-only sharing. Direct
+and Headroom-isolated launchers are supported; the latter retains Ledger's
+managed company transport. The selected profile must pin the exact AFK entrypoint
+and its complete imported module closure. AoE uses
+the selected Ledger executable and prepared environment, binds its observed
+native namespace and refuses changed or unbound launches. Guarded v1 is for fresh
+conversations, not resume selectors. Shell wrappers and profile visibility alone
+do not establish integration. `/afk-work` must be a registered native command;
+a model asking what the command means is not an AFK status or consent dialog.
+
+1. Start the integrated Pi Session and give it the task. Let its first reply
+   persist so the conversation and native journal are observable.
+2. Enter `/afk-work on`. Choose an explicit duration and request allowance,
+   then read and confirm the native dialog. `/afk-work on 120 64` supplies the
+   two numbers but still requires the same confirmation.
+3. AoE may detach while the managed Pi agent remains alive. The existing
+   conversation carries the task, project docs, vocabulary, intent and settled
+   decisions. No independent job service, process recreation or reboot recovery
+   is introduced.
+4. Use `/afk-work` for status and `/afk-work off` to withdraw this period's
+   authority. In AoE's AFK dialog, `r` inspects native and host status, `s` stops
+   the observed native work period, and `o` is global Off with bulk exclusion.
+   Escape closes that dialog; it is not Off.
+
+Duration is 1 through 1440 minutes; allowance is 1 through 512 main-loop
+requests. Local tool admissions are bounded to `min(requests * 16, 4096)`.
+The first supported tools are normal `read`, `write`, `edit` and `bash`, plus
+`aoe_afk_work_checkpoint` and `aoe_afk_answer`. The checkpoint tool must be active before native
+consent and effect admission. An explicit tool selector must include it alongside
+the desired local tools (and `aoe_afk_answer` if the agent should answer menus); AFK never enables an operator-disabled tool. Existing
+configured permissions and approval gates remain in force. This is **not an OS
+sandbox**: Bash retains its normal ability to start processes. Worker/agent
+launching and background work are not qualified and must not be started. Hidden retries, descendant requests and billing are
+outside the counter's coverage.
+
+Verified native custom entries record consent and consumption before admission.
+Readback proves the observed append, not universal power-loss durability. Missing
+consent behind retained work instructions stays guarded rather than becoming
+ordinary automatic work. Transport can inspect or withdraw authority, never
+create it. Requests and local
+tools use the same finite period; a new call ID or repeated old observation is
+not new progress. Each owned local result appends a JSON text block such as
+`{"aoe_afk_work_evidence_ref":"call_...|fc_..."}` without changing the underlying
+result. The model copies the exact field value into the checkpoint's `evidence`
+array. This is the real tool-call ID, including any provider suffix, not a guessed
+ID or new privilege. Ordinary results are unchanged. Refs are current-period
+only, survive subsequent requests within that period, and are not restored as
+authority on reload. Replayed results do not add progress; evidence uncertainty
+or capacity overflow blocks work. Checkpoints require a nonempty `next_step` for
+`unfinished`, and `next_step: null` for both `completed` and `blocked`.
+Evidenced unfinished work can continue after early settlement.
+Completion claims, declared human requirements/dependencies, unsupported tools,
+missing or repeated progress evidence, Off, abort, expiry and exhaustion stop automatic
+work. No extra reporting request is added.
+
+By default, questions and approval gates are not answered by AFK; the opt-in
+[answer policy](#answering-menus-during-a-work-period) below changes that for
+menus a confirmed period meets. `no_human_answer` is not
+approval; already-open human prompts are retained. A checkpoint's `completed`
+status is a **model claim**, and proved terminal settlement is not independent
+acceptance of the artifacts or tests. Inspect both when returning. Checkpoint
+summaries remain private conversation data, not guaranteed secret-free output.
+
+Reload and restart restore only a protective guard, never active authority or a
+fresh allowance. Fresh proven ordinary interactive input can recover ordinary
+conversation use without restoring AFK or refunding counters; another period
+needs another native confirmation. Automatic restart wake is suppressed for
+this conversation's retained work-period history. Incompatible restoration
+remains the [preservation release blocker](#optional-already-open-question-deferral)
+described below. The legacy overview/review sections below describe host one-file
+history, not an independently durable native work-period service.
+
+## Answering menus during a work period
+
+A work period normally stops at the first menu: an `ask_user` question, a Pi
+permission dialog, a numbered list in the agent's reply, a `(y/N)` prompt from a
+command. The answer policy lets AFK answer these itself, under rules you wrote
+before leaving or under `yolo`. It applies only inside a confirmed Session work
+period and only to menus that period meets. **It answers on your behalf; read
+the policy line in the consent dialog.**
+
+### Choosing a policy
+
+```text
+/afk-work on [--policy rules|yolo] [--rule '<toml>']… [minutes] [requests]
+```
+
+- `rules` (the default) answers only what a rule allows. Anything else stops the
+  period as `blocked`, with the reason (`no_rule`, `no_proposal`, `scope:…`,
+  `rules_changed`) in the answer log.
+- `yolo` answers every menu, including permission prompts. It takes the agent's
+  proposal if there is one, otherwise the first approving option, otherwise the
+  first option. Rules are ignored and scope checks only warn. Use it for a
+  throwaway checkout, not a tree you care about.
+- `--rule` adds a rule for this period only. Pass up to 8, each at most 1024 bytes,
+  written as the inside of a rule table:
+  `--rule "id='plans', kind='choice', answer='agent'"`.
+
+Invalid rules refuse the start with the parse error, and so does a grant whose
+inline rules are too large for the record ("AFK rules too large…"). Each work
+period record is at most 8 KiB, inline rules included, so a later checkpoint
+that would not fit beside large inline rules stops the period as
+`blocked: record_capacity` instead. The consent
+dialog shows the policy and the rule count and sources; `/afk-work` status adds
+`answers: N (rules M, yolo K), stops: S`. Those counts are in memory and read
+zero after a restart.
+
+### Rules files
+
+Rules come from three places. Earlier ones win on a repeated `id`:
+
+1. `--rule` values typed at `/afk-work on`.
+2. `~/.config/aoe/afk/rules.toml`.
+3. `afk-rules.toml` at the repo root (optional).
+
+Rules are evaluated in that order and the first match wins, except that a
+matching `stop` rule always beats an allowing one. A file is at most 64 KiB. No
+matching rule stops the period with `no_rule`.
+
+**The rules are fixed at consent.** The consent check records a digest of the
+inline rules and of both files' contents (or their absence), and every decision
+re-reads the sources and compares. If the agent, or anyone, creates, edits or
+deletes either rules file mid-period, the next menu stops the period with
+`rules_changed` and nothing is answered. Under `yolo` the rules are not read.
+The repo rules file is still the repo's suggestion: review it like code before
+you start a period, and put rules you rely on in `~/.config/aoe/afk/rules.toml`
+or `--rule`.
+
+A rule matches when every field it
+sets matches:
+
+| Field | Matches |
+|---|---|
+| `kind` | `plan`, `choice`, `permission`, `confirm` or `input` |
+| `source` | `agent_text`, `ask_user`, `bash_prompt`, `pi_dialog` or `pane` |
+| `format` | The menu format id, such as `text.yes-no` or `pi.confirm` |
+| `question_matches` | Any of these regexes matches the question |
+| `subject_matches` | Any of these regexes matches the subject (a command or path) |
+| `has_role` | An option has this role: `approve`, `approve_always`, `deny`, `revise`, `other` |
+
+`answer` is `approve`, `deny`, `revise` or `other` (the first option with that
+role), `agent` (the option the agent proposed) or `stop`. A rule never picks an
+"always allow" option; that stops with `approve_always_refused`. Dependency
+changes stop unless the rule sets `allow_dependencies = true`.
+
+```toml
+# afk-rules.toml
+[[rule]]
+id = "approve-plans-in-goal"
+kind = "choice"
+answer = "agent"          # accept the agent's own pick if scope checks pass
+
+# A Pi dialog such as ctx.ui.confirm("Allow command?", "cargo test"): the subject is the
+# dialog's message, or its title when it has none.
+[[rule]]
+id = "approve-repo-tooling"
+source = "pi_dialog"
+kind = "permission"
+subject_matches = ['^(cargo|npm|pnpm) (test|build|check)\b', '^git (status|diff|log)\b']
+answer = "approve"
+
+[[rule]]
+id = "never-force-push"
+subject_matches = ['git push .*--force']
+answer = "stop"
+```
+
+Prefer narrow allow rules like the second one over broad ones such as
+`kind = "permission", answer = "approve"`. A Pi dialog is a `permission` when its
+title starts with allow, approve, permit, run or execute, or mentions permission,
+"dangerous" or ⚠. A dialog whose title or message says "dangerous" or ⚠, like
+Pi's permission-gate example (`⚠️ Dangerous command: … Allow?`), always stops
+under `rules` with `scope:harness_warning`.
+
+### Scope checks
+
+After a rule allows an answer, deterministic checks can still stop it, with
+`scope:<check>` as the reason. They are a best-effort deny-list on the menu's
+subject, **not a sandbox**: they sit behind the rule's own allow pattern, and a
+narrow rule is the real boundary. Under `yolo` a failed check only adds a warning.
+
+- `harness_warning`: the menu came with a harness warning. In this release only
+  Pi dialogs carry one: a `select` or `confirm` whose title or message says
+  "dangerous" or contains ⚠.
+- `outside_repo`: a command segment writes or deletes outside the session's repo
+  root. Commands are split on `;`, `&`, `|`, newlines, backticks and `$(`, and each
+  segment is checked. `cd` with no target, to `~`, to `-` or to a `$…` value counts
+  as outside, as do tokens with a backslash, an unresolvable leading `~` or a `$`.
+  Nested shells (`sh`, `bash`, `zsh`, `fish`, `dash`, `ksh`, `eval`) count as
+  outside, including behind `timeout`, `env`, `sudo`, `nice`, `nohup`, `xargs` and
+  `stdbuf` (checked against the command after their options) and as `find
+  -exec`/`-execdir` targets; `sudo -s`/`-i` and `env -S` count as shells.
+  `/dev/null` is allowed.
+- `dependencies`: `install` or `add` verbs of npm, pnpm, yarn and bun, and their
+  `update`/`upgrade`/`up`; `cargo add` and `cargo update`; pip, uv, poetry, pdm,
+  bundle (including `poetry update`), composer; `go get` and `go mod tidy`; and
+  edits to manifests and lockfiles.
+- `protected_push`: pushes to `main` or `master` (including refspecs like
+  `HEAD:main`), force, delete, mirror and prune pushes, and `git branch -d/-D`. A
+  bare `git push` cannot be judged without branch context and passes.
+- `request_share`: a `plan` menu after 80 % of the request allowance. Nothing in
+  this release emits `plan`-kind menus, so this applies only to user formats that
+  declare `kind = "plan"`.
+- `diff_limit`: the branch diff is measured on every decision with `git diff
+  --numstat` against the merge base with `origin/HEAD` (else `HEAD`). Once it
+  passes 1500 added plus deleted lines, every otherwise-allowed answer other than
+  a deny stops with `scope:diff_limit`; no item estimate raises the limit yet. If
+  git fails, the check is skipped.
+
+Known gaps: interpreters running inline code (`python -c`, `node -e`), `source`
+and `.`, versioned tool names such as `pip3.11`, and pushes of `HEAD` while on
+`main`.
+
+### How each menu reaches the engine
+
+- **`aoe_afk_answer` tool.** The work-period reminder tells the agent never to end
+  a turn with a menu for the human, but to call `aoe_afk_answer` with the
+  question, the options (`key` and `label`), its proposed key or `null`, and a
+  reason (up to 1024 bytes). The result is `answered_by: "afk/<policy>"` with the
+  choice and rule, or `{ stopped: reason }`, which ends the period as
+  `blocked: menu_stopped`. An explicit tool selector must include the tool; with
+  no selector it is active.
+- **Agent text.** A turn that ends without a checkpoint and whose last text a menu
+  format recognises gets one corrective continuation per period ("Resolve it with
+  `aoe_afk_answer`"). No match stops as `missing_checkpoint` and saves no sample.
+- **`ask_user`.** A single question with options is answered by the engine and
+  returned to the agent as a blocked result labelled `afk/<policy>`, so it cannot
+  be mistaken for a human answer. Batches (`questions`) and `allowMultiple` stop as
+  before (`no_human_answer`). Because `ask_user` carries no proposal, `answer =
+  "agent"` stops it with `no_proposal`; use a role answer such as
+  `source = "ask_user", answer = "other"`.
+- **Bash prompts.** Commands must not wait for input: pass answers as flags or
+  with `yes |`. Bash calls get a 600 s timeout when the agent passes none, per
+  call; there is no global setting yet. Only a result Pi marks as an error, whose
+  trailer reports a non-zero exit, a timeout, an abort or "terminated without an
+  exit code", can be a prompt, so a command that exited 0 is never treated as
+  waiting, even if its output ends in text that looks like that trailer. A recognised
+  prompt is annotated `aoe_afk_prompt_seen` and its evidence does not count for a
+  checkpoint until an `aoe_afk_answer` is answered; any answered call releases all
+  held prompts. An unrecognised prompt stops the period as
+  `blocked: unrecognised_menu` and saves the sample.
+- **Pi dialogs.** `select`, `confirm` and `input` dialogs are answered while the
+  period is owned, if the Pi runtime has the `ui_prompt_respond` hook (the Pi fork
+  commit `832d6f92`, not yet in the Ledger Pi core; without it the dialog opens and
+  stops the period as before). The engine has 4 s to decide; Pi's bound is 5 s.
+  Editor and custom dialogs, empty selects and AFK's own consent dialog are never
+  answered. An answer counts as delivered only when Pi reports the answered prompt
+  ended. If Pi drops the answer and opens the dialog, that is logged as `failed`
+  and the period stops as `human_prompt`.
+
+### Menu formats
+
+Recognition is data. Each format is a TOML file in `assets/afk/menu-formats/`
+(built in: `text.bracket-shortkey`, `text.numbered-list`, `text.select-prompt`,
+`text.yes-no`). Put your own in `~/.config/aoe/afk/menu-formats/*.toml` (at most 64
+files of 16 KiB); a file with a built-in `id` replaces that format, and an invalid
+file is skipped with a warning. A format has an `id`, `sources`, a `kind`, and
+either an `option_pattern` with named `key` and `label` groups or a `trigger` with
+fixed `[[option]]` entries. Optional keys: `options_after_trigger`, `min_options`,
+`question_lines_above`, `label_includes_key` (so `[A]pply` reads as "Apply") and
+`[roles]` word lists. For numbered lists the question line must end in `?`, or end
+in `:` and contain a choice word (choose, pick, select, which, prefer, option,
+would you like, want me to, should I); option lines are never the question and
+must be the end of the text, so "Summary of changes:" followed by a list is not a
+menu.
+
+### Answer log and unrecognised samples
+
+Every decision is appended to `afk-answers/<period-id>.jsonl` in the work
+period's transport store, under
+`<app dir>/afk-authority-v3/profiles/<profile>/transport/<instance id>/`. A
+decision line carries `delivered: "pending"`, or `"not_applicable"` for a stop; a
+separate delivery line with the same `answer_id` records `ok`, `failed` or
+`unknown`. Readers fold lines by `answer_id`. The log is append-only, with a line
+cap of 192 KiB and a file cap of 4 MiB. Unrecognised menus are saved next to it as
+`<period-id>-unrecognised-<n>.txt`.
+
+To teach AFK a new format from a sample:
+
+1. Copy the sample's menu text into
+   `assets/afk/menu-formats/fixtures/<format-id>/<case>.txt`.
+2. Write the format file `assets/afk/menu-formats/<format-id>.toml`, and register
+   it in the built-in list in `src/session/afk/answer/formats.rs`. To try it
+   without a build, drop the file in `~/.config/aoe/afk/menu-formats/`.
+3. Write the expected menu beside the sample as `<case>.json` (copy a neighbour).
+   Text that must not match goes in `fixtures/_negative/`.
+4. Run the `format_corpus_matches_expected_menus` test: it checks that every sample is recognised as
+   written and every negative sample is not.
+
+An offline end-to-end demo of both policies, driven through the pinned Pi SDK with
+a scripted model and a stub bridge, is `assets/session/aoe-afk-answer-sdk.test.mjs`
+(`AOE_PI_SOURCE_ROOT=… node --test assets/session/aoe-afk-answer-sdk.test.mjs`).
 
 ## Global read-only overview
 
@@ -398,7 +701,7 @@ marker alone remains protective until qualified ordinary recovery or a confirmed
 new handoff. Shared-policy automatic completion release is not qualified. A question not yet closed by cooperative deferral remains open. Ordinary
 recovery records no human answer, restores no AFK authority and refunds nothing.
 Unknown auxiliary work and descendants remain outside complete-account assurance;
-AFK cannot launch descendants.
+Restricted one-file delegation cannot launch descendants.
 
 Use `status`, `audit`, batch status and the global overview for the stored amounts,
 coverage, baselines/cutoffs, policies and gaps. In the global TUI overview, `u`
@@ -435,9 +738,9 @@ gate below.
 ## Control-only presence
 
 A session must have been launched by this AoE build as a direct host `pi`
-session, with its own native conversation and compatible extension. Older
-processes, custom wrappers, sandboxed sessions, ACP and other agents are not
-qualified. Do not restart an active session merely to enable AFK.
+session or guarded canonical Ledger Pi launch, with its own native conversation
+and compatible extension. Older processes, custom shell wrappers, sandboxed
+sessions, ACP and other agents are not qualified. Do not restart an active session merely to enable AFK.
 
 ```sh
 aoe session afk on SESSION --minutes 30
@@ -453,10 +756,13 @@ explicit repair rather than a guessed revision.
 
 In the TUI command palette, **AFK control-only: inspect / enable / disable**
 opens the shared status/control dialog. Enter requests control-only presence;
-`o` requests off, `r` refreshes, and Escape closes it. Delegation requires the
-separate CLI command below. An Off request during a pending operation is queued
-and survives closing the dialog. Observations become stale after five seconds.
-Closing AoE does not renew or remove the window.
+`o` requests global Off, `r` refreshes both native and host observations, `s`
+withdraws observed native work authority, and PgUp/PgDn scrolls details. Escape
+closes the dialog, not the period. Native work starts only through `/afk-work on`
+and its confirmation; one-file delegation uses the separate CLI command below.
+Off publishes independently of a pending On/status exchange and survives closing
+the dialog. Observations become stale after five seconds. Closing AoE does not
+renew or remove either period.
 
 ## Explicit one-cycle grant
 
@@ -523,8 +829,15 @@ rights; no extra reporting request is granted. Applying the one action ends
 the cycle, with a host-observed result or a conservative unknown outcome.
 
 Records retain alternatives, criteria and coarse weights/scores, evidence,
-assumptions, uncertainties, recommendation, risk and rollback. These are
-**model claims**, separate from host identity, admission, counters and outcomes.
+assumptions, uncertainties, recommendation, risk and rollback. The record tool
+advertises a typed decision: UUID `id`, two to four alternatives with **string**
+`pros`/`cons`, one to four criteria, and integer weights/scores from 1 through 5.
+Evidence, assumptions, uncertainties and dependencies are string lists. `action`
+is null or an exact `{path, expected_hash, content}` object; `expected_hash` is
+null for an absent file or its lowercase SHA-256 hash. Unknown fields are rejected.
+The host additionally checks score/criterion alignment, recommendation membership,
+UTF-8 byte limits, current authority and file preconditions before admission.
+These are **model claims**, separate from host identity, admission, counters and outcomes.
 Declared human requirements, dependencies, unknown/high risk and unsupported
 capabilities cannot obtain a mutating permit. Arbitrary natural-language scope
 and risk classification are not machine-proven safety.
@@ -549,12 +862,11 @@ unused counters, reloads, polling and model requests do not resume it.
 
 ### Optional settlement nudges
 
-**Unmodified stock Pi 0.87.1 refuses nonzero nudge grants.** The runtime requires
-an actual optional `abortPreservingQueue()` context operation before acknowledging
-such a grant. Native Pi's ordinary abort restores queued human text to the editor
-but can discard queued extension custom messages. This build's pinned runtime does not provide the required additive core
-operation. A qualified source candidate is not an installed runtime upgrade. Omit `settlement_nudges` to retain stock-supported zero-nudge
-one-file delegation; rejection does not abort unrelated ordinary work.
+Delegation, including zero-nudge grants, requires the qualified Pi 1.2.0 context
+operations and corrected queue-selection fences. Ordinary abort is not a
+queue-preserving substitute. Unsupported cores refuse acknowledgement without
+aborting unrelated ordinary work. Source qualification is not an installed
+runtime upgrade.
 
 Protocol-4 grants may explicitly specify `"settlement_nudges": 1` or `2` when a
 qualified runtime provides that operation. Omission means **zero**, and two is
@@ -661,8 +973,9 @@ that boundary. Do not install this path based on candidate test results.
 
 ### What the request bound covers
 
-The tested bound is **stock-SDK main-loop reservations on Pi 0.87.1**, not
-physical HTTP attempts or a billing ceiling. Reservations are consumed before
+The bound is **qualified native-SDK main-loop reservations on Pi 1.2.0**, not
+physical HTTP attempts or a billing ceiling. The wire assurance name
+`stock-sdk-main-loop-reservations` does not certify an unmodified stock core. Reservations are consumed before
 dispatch and never refunded on failures. Denied/failed reservations explicitly
 abort through the SDK; tool blocking alone is not a dispatch gate.
 
@@ -916,7 +1229,7 @@ substitute for the later approved experiment.
 ## Reproduce the offline qualification
 
 No npm install or provider credentials are required. Point `AOE_PI_ROOT` to an
-existing Pi **0.87.1** package root containing `dist/index.js` and its normal
+existing qualified Pi **1.2.0** package root containing `dist/index.js` and its normal
 peer dependencies. The tests load the extension through Pi's actual loader,
 including core and TypeBox imports, with in-memory settings/history and an
 offline registered provider:
@@ -933,10 +1246,9 @@ requirement; pure host and control tests still run. The SDK matrix asserts
 provider invocation counts, sibling ordering, last-slot behavior, store/lost
 acknowledgement failures, stop/input/UI interaction, idle rejection, pending
 stop/settlement races, stale-window non-human follow-ups, and warming pass-through
-after terminal states and reload. Stock SDK tests now assert nonzero-nudge
-refusal. The prepared positive/interruption/late-queue nudge matrix runs only
-when the actual loaded SDK exposes the required context operation; stock results
-are not proof of that candidate matrix or native support.
+after terminal states and reload. The positive/interruption/late-queue nudge
+matrix requires the actual qualified context operations. Stock-version results
+are not proof of preserving-stop semantics or native support.
 
 For a prepared candidate Pi source checkout with its dependencies and provider
 catalogs available, use the actual source SDK:
@@ -945,10 +1257,11 @@ catalogs available, use the actual source SDK:
 export AOE_PI_SOURCE_ROOT=/path/to/pi-source
 export AOE_ASK_USER_SOURCE_ROOT=/path/to/cooperative-question-source
 cargo test --lib afk
-TSX_TSCONFIG_PATH="$AOE_PI_SOURCE_ROOT/tsconfig.json" \
-  node --import "$AOE_PI_SOURCE_ROOT/node_modules/tsx/dist/loader.mjs" \
+node --import "$AOE_PI_SOURCE_ROOT/packages/coding-agent/src/experimental/source-resolver.ts" \
   --test assets/session/aoe-afk.test.mjs assets/session/aoe-afk-sdk.test.mjs \
-  assets/session/aoe-afk-questions.test.mjs
+  assets/session/aoe-afk-questions.test.mjs \
+  assets/session/aoe-afk-work-state.test.mjs assets/session/aoe-afk-work-native.test.mjs \
+  assets/session/aoe-afk-work-period.test.mjs assets/session/aoe-afk-work-sdk.test.mjs
 ```
 
 The question fixture uses the actual package, native components, extension runner,

@@ -560,6 +560,9 @@ impl Instance {
 
     /// Why this row can never resume; mirrors what `apply_session_flags` refuses.
     fn terminal_resume_static_unavailable(&self) -> Option<ResumeStaticUnavailable> {
+        if self.guarded_ledger_fresh_only() {
+            return Some(ResumeStaticUnavailable::Command);
+        }
         let Some(agent) = self
             .default_selector_agent()
             .filter(|agent| agent.session_support.is_some())
@@ -580,6 +583,31 @@ impl Instance {
             return Some(ResumeStaticUnavailable::Sandbox);
         }
         None
+    }
+
+    fn ensure_guarded_ledger_fresh(
+        &self,
+        execution: Option<&super::execution::NativeExecution>,
+    ) -> Result<()> {
+        if !self.guarded_ledger_fresh_only() {
+            return Ok(());
+        }
+        let never_observed = match (&self.agent_session_id, &self.agent_session_binding) {
+            (None, None) => true,
+            (Some(sid), Some(binding)) => {
+                binding.session_id == *sid
+                    && binding.provenance == ConversationProvenance::Preallocated
+            }
+            (Some(_), None) => execution.is_some_and(|native| native.target_session_id.is_none()),
+            _ => false,
+        };
+        anyhow::ensure!(
+            (matches!(self.resume_intent, ResumeIntent::Cleared)
+                || (matches!(self.resume_intent, ResumeIntent::Default) && never_observed))
+                && execution.is_none_or(|native| native.pi_transcript_path.is_none()),
+            "Guarded Ledger Pi v1 supports fresh conversations only; recorded history, resume and fork require a separately qualified contract"
+        );
+        Ok(())
     }
 
     pub(crate) fn terminal_context_resume_cached(&self) -> TerminalContextResume {
@@ -714,6 +742,7 @@ impl Instance {
             );
             return Ok(false);
         }
+        self.ensure_guarded_ledger_fresh(execution)?;
         if let Some(execution) = execution {
             if !execution.namespace_arguments.is_empty() {
                 cmd.push(' ');
@@ -796,6 +825,7 @@ impl Instance {
         let explicitly_pinned = matches!(self.resume_intent, ResumeIntent::Use(_));
         let (mut session_id, is_existing, native_created) =
             self.acquire_session_id(execution, launch_context);
+        self.ensure_guarded_ledger_fresh(execution)?;
 
         if let Some(path) = execution.and_then(|execution| execution.pi_transcript_path.as_ref()) {
             self.set_agent_conversation(
@@ -1774,6 +1804,7 @@ work-opencode = "opencode"
             capture: None,
             pi_transcript_path: None,
             pi_pinnable: false,
+            ledger_runtime: None,
             target_session_id: None,
             resolved_target_session_id: None,
             opencode_preassign: false,
