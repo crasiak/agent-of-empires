@@ -120,7 +120,10 @@ export function createWorkPeriod({ binding, generation, journal, wall = Date.now
         requests_used: 0, tools_used: 0, checkpoint_count: 0, continuations_used: 0, status: "pending", reason: null, action: "start", checkpoint: null,
         policy, rules: [...rules], menu_nudges: 0 };
       // Refuse an oversized grant here; a store-time size failure would poison the whole runtime.
-      check(Buffer.byteLength(JSON.stringify(record)) <= 8192, "invalid work-period answer policy");
+      // Measure the largest checkpoint-free row this period can write, not the smaller start row.
+      const largest = { ...record, revision: MAX_RECORDS, requests_used: grant.requests, tools_used: toolLimit, checkpoint_count: grant.requests * 2,
+        continuations_used: grant.requests, status: "interrupted", reason: "x".repeat(128), action: "checkpoint", menu_nudges: 1 };
+      check(Buffer.byteLength(JSON.stringify(largest)) <= 8192, "work-period grant too large");
       const result = store(record);
       known.add(grant.id); deadline = mono() + grant.minutes * 60000; progress.clear(); lastSettlement = { request: 0, checkpoint: 0 }; active = true;
       return result;

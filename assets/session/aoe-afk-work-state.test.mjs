@@ -176,9 +176,24 @@ test("grant carries policy and inline rules into every snapshot", () => {
 });
 
 test("invalid policy or oversized rules refuse the grant", () => {
-  for (const extra of [{ policy: "review" }, { rules: Array(9).fill("id='x', answer='stop'") }, { rules: ["x".repeat(1025)] }, { rules: [""] }, { rules: "id='x'" }, { rules: Array(8).fill("x".repeat(1024)) }]) {
+  for (const extra of [{ policy: "review" }, { rules: Array(9).fill("id='x', answer='stop'") }, { rules: ["x".repeat(1025)] }, { rules: [""] }, { rules: "id='x'" }]) {
     const f = fixture();
     assert.throws(() => f.period.start({ ...f.grant, ...extra })); assert.equal(f.records.length, 0); assert.equal(f.period.failure, undefined);
+  }
+});
+
+test("grant size leaves room for the largest later row, so a bound-size period stops cleanly", () => {
+  const rules = n => [...Array(7).fill("r".repeat(1024)), "r".repeat(n)];
+  const accepts = n => { const f = fixture(); try { f.period.start({ ...f.grant, rules: rules(n) }); return true; } catch (error) { assert.match(error.message, /grant too large/); assert.equal(f.records.length, 0); assert.equal(f.period.failure, undefined); return false; } };
+  let low = 1, high = 1024;
+  assert.equal(accepts(low), true); assert.equal(accepts(high), false);
+  while (high - low > 1) { const mid = (low + high) >> 1; if (accepts(mid)) low = mid; else high = mid; }
+  assert.equal(accepts(low + 1), false, "one byte over the bound is refused");
+  for (const finish of [f => f.period.stop("operator_stop"), f => assert.throws(() => f.period.reserve(), /exhausted/)]) {
+    const f = fixture(); f.grant.requests = 1; f.period.start({ ...f.grant, rules: rules(low) });
+    f.period.reserve(); finish(f);
+    assert.equal(f.period.failure, undefined); assert.equal(f.period.active, false);
+    assert.equal(f.records.at(-1).action, "stop"); assert.equal(createWorkPeriod(f.options).failure, undefined);
   }
 });
 
