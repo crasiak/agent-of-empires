@@ -115,7 +115,10 @@ the policy line in the consent dialog.**
   `--rule "id='plans', kind='choice', answer='agent'"`.
 
 Invalid rules refuse the start with the parse error, and so does a grant whose
-inline rules are too large for the record ("AFK rules too large…"). The consent
+inline rules are too large for the record ("AFK rules too large…"). Each work
+period record is at most 8 KiB, inline rules included, so a later checkpoint
+that would not fit beside large inline rules stops the period as
+`blocked: record_capacity` instead. The consent
 dialog shows the policy and the rule count and sources; `/afk-work` status adds
 `answers: N (rules M, yolo K), stops: S`. Those counts are in memory and read
 zero after a restart.

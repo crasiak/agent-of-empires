@@ -294,3 +294,32 @@ test("v1 rows with v2 fields, or unknown versions, fail closed", () => {
     assert.ok(createWorkPeriod({ ...options, journal: { load: () => rows, append() {} } }).failure);
   }
 });
+
+test("a row with no room left for its stop row stops as record_capacity instead of poisoning the runtime", () => {
+  // The review probe: in-limit inline rules pass the start guard, then an ordinary checkpoint outgrows the record.
+  const f = fixture(); f.period.start({ ...f.grant, rules: Array(8).fill("r".repeat(760)) }); f.period.reserve();
+  const s = f.period.checkpoint(checkpoint("unfinished", ["one"], { summary: "s".repeat(1600) }), [evidence("one")]);
+  assert.equal(s.status, "blocked"); assert.equal(s.reason, "record_capacity"); assert.equal(s.checkpoint, null);
+  assert.equal(f.period.failure, undefined); assert.equal(f.period.active, false);
+  assert.deepEqual([f.records.at(-1).action, f.records.at(-1).status, f.records.at(-1).reason], ["stop", "blocked", "record_capacity"]);
+  assert.ok(f.records.every(r => Buffer.byteLength(JSON.stringify(r)) <= 8192));
+  const reloaded = createWorkPeriod(f.options);
+  assert.equal(reloaded.failure, undefined); assert.equal(reloaded.snapshot().reason, "record_capacity");
+});
+
+test("record capacity refuses a continuation or nudge cleanly", () => {
+  // Five tool rows put the checkpoint at revision 8, so the row after it is revision 9 and its stop row revision 10.
+  const big = () => { const f = fixture(); f.period.start({ ...f.grant, rules: Array(8).fill("r".repeat(760)) }); f.period.reserve(); for (let i = 0; i < 5; i++) assert.ok(f.period.allowTool("read")); return f; };
+  const fill = (f, size) => f.period.checkpoint(checkpoint("unfinished", ["one"], { summary: "s".repeat(size) }), [evidence("one")]);
+  // The largest checkpoint that still fits leaves its stop row at exactly 8192 bytes, one short for the next row's.
+  let low = 1, high = 2048;
+  while (high - low > 1) { const mid = (low + high) >> 1, f = big(); if (fill(f, mid).status === "owned") low = mid; else high = mid; }
+  const settled = big(); fill(settled, low);
+  assert.equal(settled.period.settle().continue, false);
+  const nudged = big(); fill(nudged, low);
+  assert.equal(nudged.period.nudge("You ended with a menu. Resolve it with aoe_afk_answer.").continue, false);
+  for (const f of [settled, nudged]) {
+    assert.equal(f.period.failure, undefined); assert.equal(f.period.snapshot().reason, "record_capacity");
+    assert.equal(createWorkPeriod(f.options).failure, undefined);
+  }
+});

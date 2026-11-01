@@ -563,6 +563,21 @@ test("bad /afk-work on arguments and oversized rule grants refuse the start", as
   }
 });
 
+test("a checkpoint too large for the record stops the period as record_capacity, shown to the operator", async () => {
+  const f = await fixture();
+  try {
+    await f.native(`on ${Array.from({ length: 8 }, (_, i) => `--rule "id='r${i}', question_matches=['${"q".repeat(730)}'], answer='stop'"`).join(" ")} 120 8`);
+    assert.equal(f.snapshots().length, 1, f.notices.at(-1));
+    f.begin(); await f.ownedContext(); await f.call("read", "r1", { path: "a" });
+    const out = await f.checkpoint("unfinished", ["r1"], { summary: "s".repeat(1600) });
+    assert.equal(out.details.status, "blocked"); assert.equal(out.details.reason, "record_capacity");
+    assert.equal(f.snapshots().at(-1).action, "stop"); assert.equal(f.snapshots().at(-1).reason, "record_capacity");
+    assert.match(f.api.status(f.r), /AFK work period: blocked; .*; record_capacity;/);
+    await f.native("status");
+    assert.match(f.notices.at(-1), /"reason":"record_capacity"/);
+  } finally { f.close(); }
+});
+
 test("aoe_afk_answer is admitted without counting a tool and refused outside an owned period", async () => {
   const f = await fixture();
   try {

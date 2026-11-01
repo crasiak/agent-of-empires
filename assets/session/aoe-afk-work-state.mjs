@@ -8,7 +8,7 @@ const POLICIES = new Set(["rules", "yolo"]);
 const GRANT = ["id", "minutes", "requests", "task", "tools"];
 const BINDING = ["instance_id", "profile", "native_id", "launch_id"];
 const CHECKPOINT = ["status", "summary", "next_step", "evidence", "human_required", "depends_on"];
-const MAX_RECORDS = 8192;
+const MAX_RECORDS = 8192, ROW_BYTES = 8192, CAPACITY = "work-period record capacity";
 const clone = value => structuredClone(value);
 const keys = (value, expected) => value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join(",") === [...expected].sort().join(",");
 const uuid = value => typeof value === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
@@ -31,7 +31,7 @@ function validCheckpoint(c) {
 }
 
 function validate(s, binding, requireScope = true) {
-  check(keys(s, FIELDS) && Buffer.byteLength(JSON.stringify(s)) <= 8192 && s.version === 2 && s.consent === "native-interactive-confirm-v1"
+  check(keys(s, FIELDS) && Buffer.byteLength(JSON.stringify(s)) <= ROW_BYTES && s.version === 2 && s.consent === "native-interactive-confirm-v1"
     && keys(s.binding, BINDING) && (!requireScope || scope(s.binding, binding)) && text(s.binding.instance_id, 256) && text(s.binding.profile, 256)
     && uuid(s.binding.native_id) && uuid(s.binding.launch_id) && uuid(s.generation) && uuid(s.id)
     && integer(s.revision, 1, MAX_RECORDS) && text(s.task, 2048) && integer(s.issued_at_ms, 0, Number.MAX_SAFE_INTEGER)
@@ -92,7 +92,15 @@ export function createWorkPeriod({ binding, generation, journal, wall = Date.now
       return clone(current);
     } catch (error) { remember(error); throw error; }
   };
-  const update = (action, changes) => store({ ...current, revision: current.revision + 1, action, ...changes });
+  // A work row must leave room for the stop row that can follow it (a 128-byte reason, the longest terminal status);
+  // one that doesn't is replaced by a journalled record_capacity stop, so an oversized row never poisons the runtime.
+  const fitsStop = s => Buffer.byteLength(JSON.stringify({ ...s, revision: s.revision + 1, action: "stop", status: "interrupted", reason: "x".repeat(128) })) <= ROW_BYTES;
+  const update = (action, changes) => {
+    const next = { ...current, revision: current.revision + 1, action, ...changes };
+    if (!["stop", "recover"].includes(action) && !fitsStop(next)) { stop("record_capacity", "blocked"); throw Error(CAPACITY); }
+    return store(next);
+  };
+  const atCapacity = write => { try { write(); return false; } catch (error) { if (error.message === CAPACITY) return true; throw error; } };
   const stop = (reason, status = "interrupted") => {
     if (!active || failure) return;
     const result = update("stop", { status, reason }); active = false; return result;
@@ -125,7 +133,7 @@ export function createWorkPeriod({ binding, generation, journal, wall = Date.now
       // Measure the largest checkpoint-free row this period can write, not the smaller start row.
       const largest = { ...record, revision: MAX_RECORDS, requests_used: grant.requests, tools_used: toolLimit, checkpoint_count: grant.requests * 2,
         continuations_used: grant.requests, status: "interrupted", reason: "x".repeat(128), action: "checkpoint", menu_nudges: 1 };
-      check(Buffer.byteLength(JSON.stringify(largest)) <= 8192, "work-period grant too large");
+      check(Buffer.byteLength(JSON.stringify(largest)) <= ROW_BYTES, "work-period grant too large");
       const result = store(record);
       known.add(grant.id); deadline = mono() + grant.minutes * 60000; progress.clear(); lastSettlement = { request: 0, checkpoint: 0 }; active = true;
       return result;
@@ -142,7 +150,7 @@ export function createWorkPeriod({ binding, generation, journal, wall = Date.now
       if (current.status !== "owned") return false;
       if (!current.tools.includes(name)) { stop(name === "ask_user" ? "human_required" : "unsupported_tool", "blocked"); return false; }
       if (current.tools_used >= current.tool_limit) { stop("tools_exhausted", "exhausted"); return false; }
-      update("tool", { tools_used: current.tools_used + 1, checkpoint: null }); return true;
+      return !atCapacity(() => update("tool", { tools_used: current.tools_used + 1, checkpoint: null }));
     },
     checkpoint(input, observations) {
       requireActive(); check(current.status === "owned", "checkpoint requires an admitted request");
@@ -158,7 +166,8 @@ export function createWorkPeriod({ binding, generation, journal, wall = Date.now
       else if (input.status === "blocked") { status = "blocked"; reason = "model_blocked"; }
       else if (input.status === "completed") { status = "completed"; reason = "model_completed"; }
       else if (!fingerprints.some(fingerprint => !progress.has(fingerprint))) { status = "blocked"; reason = "no_progress"; }
-      const result = update("checkpoint", { status, reason, checkpoint_count: current.checkpoint_count + 1, checkpoint: { ...clone(input), evidence: fingerprints } });
+      let result;
+      if (atCapacity(() => { result = update("checkpoint", { status, reason, checkpoint_count: current.checkpoint_count + 1, checkpoint: { ...clone(input), evidence: fingerprints } }); })) return clone(current);
       if (status === "owned") for (const fingerprint of fingerprints) progress.add(fingerprint);
       else active = false;
       return result;
@@ -171,7 +180,7 @@ export function createWorkPeriod({ binding, generation, journal, wall = Date.now
       if (current.requests_used >= current.request_limit) { stop("requests_exhausted", "exhausted"); return { continue: false }; }
       if (lastSettlement.request === current.requests_used) return { continue: false };
       if (lastSettlement.checkpoint === current.checkpoint_count) { stop("no_new_checkpoint", "blocked"); return { continue: false }; }
-      update("continue", { continuations_used: current.continuations_used + 1 });
+      if (atCapacity(() => update("continue", { continuations_used: current.continuations_used + 1 }))) return { continue: false };
       lastSettlement = { request: current.requests_used, checkpoint: current.checkpoint_count };
       return { continue: true, id: current.id, request: current.requests_used, admission: randomUUID(), next_step: current.checkpoint.next_step };
     },
@@ -180,7 +189,7 @@ export function createWorkPeriod({ binding, generation, journal, wall = Date.now
       try { requireActive(); } catch { return { continue: false }; }
       if (current.status !== "owned" || current.menu_nudges >= 1 || current.requests_used >= current.request_limit
         || lastSettlement.request === current.requests_used) return { continue: false };
-      update("nudge", { continuations_used: current.continuations_used + 1, menu_nudges: 1 });
+      if (atCapacity(() => update("nudge", { continuations_used: current.continuations_used + 1, menu_nudges: 1 }))) return { continue: false };
       lastSettlement = { request: current.requests_used, checkpoint: current.checkpoint_count };
       return { continue: true, id: current.id, request: current.requests_used, admission: randomUUID(), next_step: textValue };
     },
