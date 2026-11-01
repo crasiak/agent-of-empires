@@ -3,7 +3,9 @@ import { performance } from "node:perf_hooks";
 
 const TOOLS = new Set(["read", "write", "edit", "bash"]);
 const TERMINAL = new Set(["completed", "blocked", "expired", "exhausted", "interrupted"]);
-const FIELDS = ["version", "consent", "binding", "generation", "id", "revision", "task", "issued_at_ms", "expires_at_ms", "request_limit", "tool_limit", "tools", "requests_used", "tools_used", "checkpoint_count", "continuations_used", "status", "reason", "action", "checkpoint"];
+const FIELDS = ["version", "consent", "binding", "generation", "id", "revision", "task", "issued_at_ms", "expires_at_ms", "request_limit", "tool_limit", "tools", "requests_used", "tools_used", "checkpoint_count", "continuations_used", "status", "reason", "action", "checkpoint", "policy", "rules", "menu_nudges"];
+const POLICIES = new Set(["rules", "yolo"]);
+const GRANT = ["id", "minutes", "requests", "task", "tools"];
 const BINDING = ["instance_id", "profile", "native_id", "launch_id"];
 const CHECKPOINT = ["status", "summary", "next_step", "evidence", "human_required", "depends_on"];
 const MAX_RECORDS = 8192;
@@ -14,7 +16,10 @@ const text = (value, max) => typeof value === "string" && Buffer.byteLength(valu
 const integer = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
 const check = (condition, message) => { if (!condition) throw Error(message); };
 const scope = (a, b) => ["instance_id", "profile", "native_id"].every(key => a?.[key] === b?.[key]);
-const identity = s => JSON.stringify([s.binding, s.generation, s.id, s.task, s.issued_at_ms, s.expires_at_ms, s.request_limit, s.tool_limit, s.tools]);
+const identity = s => JSON.stringify([s.binding, s.generation, s.id, s.task, s.issued_at_ms, s.expires_at_ms, s.request_limit, s.tool_limit, s.tools, s.policy, s.rules]);
+const validRules = r => Array.isArray(r) && r.length <= 8 && r.every(x => text(x, 1024));
+// Version 1 rows predate answer policy; they load as the default rules policy with no nudge spent.
+const upgrade = s => s?.version === 1 && !("policy" in s) && !("rules" in s) && !("menu_nudges" in s) ? { ...s, version: 2, policy: "rules", rules: [], menu_nudges: 0 } : s;
 
 function validCheckpoint(c) {
   return keys(c, CHECKPOINT) && ["unfinished", "completed", "blocked"].includes(c.status) && text(c.summary, 2048)
@@ -24,7 +29,7 @@ function validCheckpoint(c) {
 }
 
 function validate(s, binding, requireScope = true) {
-  check(keys(s, FIELDS) && Buffer.byteLength(JSON.stringify(s)) <= 8192 && s.version === 1 && s.consent === "native-interactive-confirm-v1"
+  check(keys(s, FIELDS) && Buffer.byteLength(JSON.stringify(s)) <= 8192 && s.version === 2 && s.consent === "native-interactive-confirm-v1"
     && keys(s.binding, BINDING) && (!requireScope || scope(s.binding, binding)) && text(s.binding.instance_id, 256) && text(s.binding.profile, 256)
     && uuid(s.binding.native_id) && uuid(s.binding.launch_id) && uuid(s.generation) && uuid(s.id)
     && integer(s.revision, 1, MAX_RECORDS) && text(s.task, 2048) && integer(s.issued_at_ms, 0, Number.MAX_SAFE_INTEGER)
@@ -35,19 +40,22 @@ function validate(s, binding, requireScope = true) {
     && integer(s.checkpoint_count, 0, s.request_limit * 2) && integer(s.continuations_used, 0, s.request_limit)
     && ["pending", "owned", "recovered", ...TERMINAL].includes(s.status)
     && (["pending", "owned"].includes(s.status) ? s.reason === null : text(s.reason, 128))
-    && ["start", "request", "tool", "checkpoint", "continue", "stop", "recover"].includes(s.action)
+    && POLICIES.has(s.policy) && validRules(s.rules) && (s.menu_nudges === 0 || s.menu_nudges === 1)
+    && ["start", "request", "tool", "checkpoint", "continue", "nudge", "stop", "recover"].includes(s.action)
     && (s.checkpoint === null || validCheckpoint(s.checkpoint) && s.checkpoint.evidence.every(x => /^[0-9a-f]{64}$/.test(x))), "invalid native work-period snapshot");
 }
 
 function transition(old, next) {
   check(next.revision === old.revision + 1 && identity(next) === identity(old), "conflicting work-period identity/revision");
   const changes = [next.requests_used - old.requests_used, next.tools_used - old.tools_used, next.checkpoint_count - old.checkpoint_count, next.continuations_used - old.continuations_used];
-  const expected = { request: [1, 0, 0, 0], tool: [0, 1, 0, 0], checkpoint: [0, 0, 1, 0], continue: [0, 0, 0, 1], stop: [0, 0, 0, 0], recover: [0, 0, 0, 0] }[next.action];
+  const expected = { request: [1, 0, 0, 0], tool: [0, 1, 0, 0], checkpoint: [0, 0, 1, 0], continue: [0, 0, 0, 1], nudge: [0, 0, 0, 1], stop: [0, 0, 0, 0], recover: [0, 0, 0, 0] }[next.action];
   check(expected && changes.every((n, i) => n === expected[i]), "invalid work-period consumption");
+  check(next.menu_nudges === old.menu_nudges + (next.action === "nudge" ? 1 : 0), "invalid menu nudge consumption");
+  if (next.action === "nudge") check(old.status === "owned" && next.status === "owned", "menu nudge requires an owned request");
   if (next.action === "recover") check(TERMINAL.has(old.status) || ["pending", "owned"].includes(old.status), "unmatched ordinary recovery");
   else check(["pending", "owned"].includes(old.status), "work-period authority cannot be restored");
   if (next.action === "recover") check(next.status === "recovered", "invalid recovery state");
-  if (["request", "tool", "continue"].includes(next.action)) check(next.status === "owned" && next.requests_used > 0, "work requires an admitted request");
+  if (["request", "tool", "continue", "nudge"].includes(next.action)) check(next.status === "owned" && next.requests_used > 0, "work requires an admitted request");
   if (next.action === "stop") check(TERMINAL.has(next.status), "invalid terminal state");
   if (next.action === "request") check(JSON.stringify(next.checkpoint) === JSON.stringify(old.checkpoint), "request changed checkpoint provenance");
   if (next.action === "tool") check(next.checkpoint === null, "local work requires a new checkpoint");
@@ -61,11 +69,12 @@ export function createWorkPeriod({ binding, generation, journal, wall = Date.now
   try {
     check(keys(binding, BINDING) && uuid(binding.native_id) && uuid(binding.launch_id) && uuid(generation), "invalid work-period runtime binding");
     const entries = journal.load(); check(Array.isArray(entries) && entries.length <= MAX_RECORDS, "work-period history capacity");
-    for (const s of entries) {
+    for (const raw of entries) {
+      const s = upgrade(raw);
       validate(s, binding, false);
       if (!current || current.id !== s.id) {
         check((!current || current.status === "recovered") && !known.has(s.id) && known.size < 64 && s.action === "start" && s.status === "pending" && s.revision === 1
-          && s.requests_used === 0 && s.tools_used === 0 && s.checkpoint_count === 0 && s.continuations_used === 0 && s.checkpoint === null, "invalid work-period start history");
+          && s.requests_used === 0 && s.tools_used === 0 && s.checkpoint_count === 0 && s.continuations_used === 0 && s.menu_nudges === 0 && s.checkpoint === null, "invalid work-period start history");
         known.add(s.id);
       } else transition(current, s);
       current = clone(s); records++;
@@ -97,15 +106,22 @@ export function createWorkPeriod({ binding, generation, journal, wall = Date.now
     snapshot() { return current && clone(current); },
     start(grant) {
       check(!failure, failure); check(!active && (!current || current.status === "recovered"), "explicit ordinary recovery required before another period");
-      check(keys(grant, ["id", "minutes", "requests", "task", "tools"]) && uuid(grant.id) && integer(grant.minutes, 1, 1440) && integer(grant.requests, 1, 512)
+      check(grant && typeof grant === "object" && !Array.isArray(grant) && GRANT.every(key => key in grant)
+        && Object.keys(grant).every(key => GRANT.includes(key) || key === "policy" || key === "rules") && uuid(grant.id) && integer(grant.minutes, 1, 1440) && integer(grant.requests, 1, 512)
         && text(grant.task, 2048) && Array.isArray(grant.tools) && grant.tools.length > 0 && new Set(grant.tools).size === grant.tools.length && grant.tools.every(x => TOOLS.has(x)), "invalid work-period grant");
+      const policy = grant.policy ?? "rules", rules = grant.rules ?? [];
+      check(POLICIES.has(policy) && validRules(rules), "invalid work-period answer policy");
       check(!known.has(grant.id), "work-period grant cannot be replayed");
       const toolLimit = Math.min(grant.requests * 16, 4096);
       check(known.size < 64 && records + grant.requests * 4 + toolLimit + 4 <= MAX_RECORDS, "work-period history capacity");
       const issued = wall();
-      const result = store({ version: 1, consent: "native-interactive-confirm-v1", binding: clone(binding), generation, id: grant.id, revision: 1, task: grant.task,
+      const record = { version: 2, consent: "native-interactive-confirm-v1", binding: clone(binding), generation, id: grant.id, revision: 1, task: grant.task,
         issued_at_ms: issued, expires_at_ms: issued + grant.minutes * 60000, request_limit: grant.requests, tool_limit: toolLimit, tools: [...grant.tools].sort(),
-        requests_used: 0, tools_used: 0, checkpoint_count: 0, continuations_used: 0, status: "pending", reason: null, action: "start", checkpoint: null });
+        requests_used: 0, tools_used: 0, checkpoint_count: 0, continuations_used: 0, status: "pending", reason: null, action: "start", checkpoint: null,
+        policy, rules: [...rules], menu_nudges: 0 };
+      // Refuse an oversized grant here; a store-time size failure would poison the whole runtime.
+      check(Buffer.byteLength(JSON.stringify(record)) <= 8192, "invalid work-period answer policy");
+      const result = store(record);
       known.add(grant.id); deadline = mono() + grant.minutes * 60000; progress.clear(); lastSettlement = { request: 0, checkpoint: 0 }; active = true;
       return result;
     },
@@ -153,6 +169,15 @@ export function createWorkPeriod({ binding, generation, journal, wall = Date.now
       update("continue", { continuations_used: current.continuations_used + 1 });
       lastSettlement = { request: current.requests_used, checkpoint: current.checkpoint_count };
       return { continue: true, id: current.id, request: current.requests_used, admission: randomUUID(), next_step: current.checkpoint.next_step };
+    },
+    nudge(textValue) {
+      if (!active) return { continue: false };
+      try { requireActive(); } catch { return { continue: false }; }
+      if (current.status !== "owned" || current.menu_nudges >= 1 || current.requests_used >= current.request_limit
+        || lastSettlement.request === current.requests_used) return { continue: false };
+      update("nudge", { continuations_used: current.continuations_used + 1, menu_nudges: 1 });
+      lastSettlement = { request: current.requests_used, checkpoint: current.checkpoint_count };
+      return { continue: true, id: current.id, request: current.requests_used, admission: randomUUID(), next_step: textValue };
     },
     observe() {
       if (active && (wall() >= current.expires_at_ms || mono() >= deadline)) stop("deadline", "expired");

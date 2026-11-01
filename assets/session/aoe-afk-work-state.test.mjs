@@ -104,7 +104,7 @@ test("unverified journal writes withhold admission and poison further work", () 
 
 test("malformed or conflicting native snapshots fail closed rather than disappearing", () => {
   const f = fixture(); f.start();
-  for (const mutate of [x => x.version = 2, x => x.extra = true, x => x.requests_used = -1, x => x.binding.native_id = randomUUID(), x => x.revision = 2]) {
+  for (const mutate of [x => x.version = 3, x => x.version = 1, x => x.policy = "review", x => x.rules = Array(9).fill("x"), x => x.menu_nudges = 1, x => x.extra = true, x => x.requests_used = -1, x => x.binding.native_id = randomUUID(), x => x.revision = 2]) {
     const rows = structuredClone(f.records); mutate(rows[0]);
     const restored = createWorkPeriod({ ...f.options, journal: { load: () => rows, append() { assert.fail("invalid history must never be repaired"); } } });
     assert.equal(restored.guarded, true); assert.equal(restored.active, false); assert.throws(() => restored.start({ ...f.grant, id: randomUUID() }));
@@ -156,4 +156,113 @@ test("fully recovered inherited history carries no authority into a new native c
   assert.equal(next.active, false); assert.equal(next.guarded, false);
   next.start({ ...f.grant, id: randomUUID() });
   assert.deepEqual(next.snapshot().binding, binding); assert.equal(next.snapshot().requests_used, 0);
+});
+
+const v1 = rows => rows.map(({ policy, rules, menu_nudges, ...row }) => ({ ...row, version: 1 }));
+function v1History(steps = f => f.period.reserve()) {
+  const f = fixture(); f.start(); steps(f);
+  return { rows: v1(f.records), options: f.options, grant: f.grant };
+}
+
+test("grant carries policy and inline rules into every snapshot", () => {
+  const f = fixture();
+  const s = f.period.start({ ...f.grant, policy: "yolo", rules: ["id='p', kind='plan', answer='agent'"] });
+  assert.equal(s.version, 2); assert.equal(s.policy, "yolo");
+  assert.deepEqual(s.rules, ["id='p', kind='plan', answer='agent'"]); assert.equal(s.menu_nudges, 0);
+  f.period.reserve();
+  assert.equal(f.period.snapshot().policy, "yolo"); assert.deepEqual(f.period.snapshot().rules, s.rules);
+  const plain = fixture(); plain.start();
+  assert.equal(plain.period.snapshot().policy, "rules"); assert.deepEqual(plain.period.snapshot().rules, []);
+});
+
+test("invalid policy or oversized rules refuse the grant", () => {
+  for (const extra of [{ policy: "review" }, { rules: Array(9).fill("id='x', answer='stop'") }, { rules: ["x".repeat(1025)] }, { rules: [""] }, { rules: "id='x'" }, { rules: Array(8).fill("x".repeat(1024)) }]) {
+    const f = fixture();
+    assert.throws(() => f.period.start({ ...f.grant, ...extra })); assert.equal(f.records.length, 0); assert.equal(f.period.failure, undefined);
+  }
+});
+
+test("policy and rules cannot change mid-period in the journal", () => {
+  for (const mutate of [x => x.policy = "yolo", x => x.rules = ["id='x', answer='stop'"]]) {
+    const f = fixture(); f.start(); f.period.reserve();
+    const rows = structuredClone(f.records); mutate(rows[1]);
+    const restored = createWorkPeriod({ ...f.options, journal: { load: () => rows, append() { assert.fail("invalid history must never be repaired"); } } });
+    assert.ok(restored.failure);
+  }
+});
+
+test("menu nudge continues once without a checkpoint", () => {
+  const f = fixture(); f.start(); f.period.reserve();
+  const first = f.period.nudge("You ended with a menu. Resolve it with aoe_afk_answer.");
+  assert.equal(first.continue, true); assert.equal(first.id, f.grant.id); assert.equal(first.request, 1);
+  assert.equal(first.next_step, "You ended with a menu. Resolve it with aoe_afk_answer.");
+  assert.equal(f.period.snapshot().menu_nudges, 1); assert.equal(f.period.snapshot().continuations_used, 1);
+  assert.equal(f.period.snapshot().action, "nudge"); assert.equal(f.period.snapshot().status, "owned");
+  f.period.reserve();
+  assert.deepEqual(f.period.nudge("again"), { continue: false });
+  assert.equal(f.period.active, true);
+  const restored = createWorkPeriod(f.options);
+  assert.equal(restored.failure, undefined); assert.equal(restored.snapshot().menu_nudges, 1);
+});
+
+test("menu nudge shares settlement bookkeeping and needs an owned request", () => {
+  const pending = fixture(); pending.start();
+  assert.deepEqual(pending.period.nudge("menu"), { continue: false });
+  const settled = fixture(); settled.start(); settled.period.reserve();
+  settled.period.checkpoint(checkpoint("unfinished", ["one"]), [evidence("one")]);
+  assert.equal(settled.period.settle().continue, true);
+  assert.deepEqual(settled.period.nudge("menu"), { continue: false }, "one continuation per request");
+  const nudged = fixture(); nudged.start(); nudged.period.reserve();
+  nudged.period.checkpoint(checkpoint("unfinished", ["one"]), [evidence("one")]);
+  assert.equal(nudged.period.nudge("menu").continue, true);
+  assert.equal(nudged.period.settle().continue, false, "nudge consumed this request's settlement");
+  const last = fixture(); last.grant.requests = 1; last.start(); last.period.reserve();
+  assert.deepEqual(last.period.nudge("menu"), { continue: false });
+});
+
+test("forged nudge rows fail closed on load", () => {
+  for (const mutate of [x => x.menu_nudges = 2, x => x.continuations_used = 0, x => x.status = "pending"]) {
+    const f = fixture(); f.start(); f.period.reserve(); f.period.nudge("menu");
+    const rows = structuredClone(f.records); mutate(rows[2]);
+    assert.ok(createWorkPeriod({ ...f.options, journal: { load: () => rows, append() {} } }).failure);
+  }
+  const f = fixture(); f.start(); f.period.reserve();
+  const rows = structuredClone(f.records); rows[1].menu_nudges = 1;
+  assert.ok(createWorkPeriod({ ...f.options, journal: { load: () => rows, append() {} } }).failure, "only a nudge may set menu_nudges");
+});
+
+test("v1 journal rows load as rules policy", () => {
+  const { rows, options } = v1History();
+  const period = createWorkPeriod({ ...options, journal: { load: () => rows, append: r => rows.push(r) } });
+  assert.equal(period.failure, undefined);
+  assert.equal(period.snapshot().version, 2); assert.equal(period.snapshot().policy, "rules");
+  assert.deepEqual(period.snapshot().rules, []); assert.equal(period.snapshot().menu_nudges, 0);
+});
+
+test("v1 mid-period and terminal histories replay, recover and accept a v2 period", () => {
+  const histories = [
+    f => f.period.reserve(),
+    f => { f.period.reserve(); f.period.allowTool("read"); f.period.checkpoint(checkpoint("unfinished", ["one"]), [evidence("one")]); f.period.settle(); f.period.reserve(); },
+    f => { f.period.reserve(); f.period.checkpoint(checkpoint("completed", [], {}), []); },
+    f => { f.period.reserve(); f.period.stop("operator_stop"); },
+    f => { f.period.reserve(); f.period.stop("operator_stop"); f.period.recover({ interactive: true, settled: true, transformed: false, handled: false, failed: false, new_user_entry: true }); },
+  ];
+  for (const steps of histories) {
+    const { rows, options, grant } = v1History(steps);
+    const period = createWorkPeriod({ ...options, journal: { load: () => structuredClone(rows), append: r => rows.push(structuredClone(r)) } });
+    assert.equal(period.failure, undefined);
+    period.recover({ interactive: true, settled: true, transformed: false, handled: false, failed: false, new_user_entry: true });
+    assert.throws(() => period.start(grant), /replayed/);
+    period.start({ ...grant, id: randomUUID() });
+    assert.ok(rows.slice(rows.findIndex(r => r.version === 2)).every(r => r.version === 2));
+    const reloaded = createWorkPeriod({ ...options, journal: { load: () => structuredClone(rows), append() {} } });
+    assert.equal(reloaded.failure, undefined); assert.equal(reloaded.snapshot().version, 2);
+  }
+});
+
+test("v1 rows with v2 fields, or unknown versions, fail closed", () => {
+  for (const mutate of [x => x.policy = "rules", x => x.menu_nudges = 0, x => x.version = 3]) {
+    const { rows, options } = v1History(); mutate(rows[0]);
+    assert.ok(createWorkPeriod({ ...options, journal: { load: () => rows, append() {} } }).failure);
+  }
 });

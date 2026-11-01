@@ -19,7 +19,7 @@ function fixture(kind = "normal") {
     appendFileSync(file, JSON.stringify(row) + "\n");
     if (kind === "extra") appendFileSync(file, JSON.stringify({ type: "custom", id: "foreign" }) + "\n");
   } };
-  return { root, file, native, rows, manager, pi, journal: createNativeWorkJournal(pi, { sessionManager: manager }), data: { version: 1, binding: { native_id: native }, status: "pending" }, close: () => rmSync(root, { recursive: true, force: true }) };
+  return { root, file, native, rows, manager, pi, journal: createNativeWorkJournal(pi, { sessionManager: manager }), data: { version: 2, binding: { native_id: native }, status: "pending" }, close: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 test("native work-period admission requires the exact physically appended entry", () => {
@@ -60,7 +60,7 @@ test("unrelated custom entries stay outside the work-period journal; malformed w
   try {
     f.rows.push({ type: "custom", customType: "other", data: { unrelated: true } });
     assert.deepEqual(f.journal.load(), []);
-    f.rows.push({ type: "custom", customType: WORK_PERIOD_MARKER, data: { version: 2 } });
-    assert.deepEqual(f.journal.load(), [{ version: 2 }], "the state validator must see and refuse unknown versions");
+    f.rows.push({ type: "custom", customType: WORK_PERIOD_MARKER, data: { version: 3 } });
+    assert.deepEqual(f.journal.load(), [{ version: 3 }], "the state validator must see and refuse unknown versions");
   } finally { f.close(); }
 });

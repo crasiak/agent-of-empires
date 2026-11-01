@@ -32,7 +32,7 @@ export function createNativeWorkJournal(pi, ctx) {
       try {
         available();
         const file = manager.getSessionFile(), native = manager.getSessionId(), parent = manager.getLeafId();
-        check(typeof file === "string" && isAbsolute(file) && value?.version === 1 && value.binding?.native_id === native
+        check(typeof file === "string" && isAbsolute(file) && value?.version === 2 && value.binding?.native_id === native
           && Buffer.byteLength(JSON.stringify(value)) <= MAX_MARKER, "persistent exact native work-period scope required");
         fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
         const before = fstatSync(fd), path = lstatSync(file);
