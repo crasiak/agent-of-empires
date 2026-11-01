@@ -558,7 +558,10 @@ mod tests {
         assert!(unrecognised["sample"].is_string(), "{unrecognised}");
     }
     #[test]
+    #[serial_test::serial]
     fn rules_are_fixed_at_consent_and_a_changed_source_stops_the_answer() {
+        // An isolated HOME, so the real ~/.config/aoe/afk/rules.toml is never a rule source.
+        let _home = crate::session::test_support::isolate_app_dir();
         let root = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let store = Store::open(root.path(), "test", true).unwrap();
