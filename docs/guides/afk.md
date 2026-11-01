@@ -130,7 +130,15 @@ Rules come from three places. Earlier ones win on a repeated `id`:
 
 Rules are evaluated in that order and the first match wins, except that a
 matching `stop` rule always beats an allowing one. A file is at most 64 KiB. No
-matching rule stops the period with `no_rule`. A rule matches when every field it
+matching rule stops the period with `no_rule`.
+
+**The repo rules file is re-read from the working tree on every decision**, so the
+agent can write or edit it mid-period and the change applies to later menus. It
+cannot override a `stop` rule or a rule from a higher-precedence source, but it can
+fill a `no_rule` gap. Put rules you rely on in `~/.config/aoe/afk/rules.toml` or
+`--rule`, treat a repo rules file as the repo's suggestion, and review it like code.
+
+A rule matches when every field it
 sets matches:
 
 | Field | Matches |
@@ -189,9 +197,14 @@ narrow rule is the real boundary. Under `yolo` a failed check only adds a warnin
 - `protected_push`: pushes to `main` or `master` (including refspecs like
   `HEAD:main`), force, delete, mirror and prune pushes, and `git branch -d/-D`. A
   bare `git push` cannot be judged without branch context and passes.
-- `request_share`: a `plan` menu after 80 % of the request allowance.
-- `diff_limit`: applies only when the run supplies a diff size, which a work period
-  does not.
+- `request_share`: a `plan` menu after 80 % of the request allowance. Nothing in
+  this release emits `plan`-kind menus, so this applies only to user formats that
+  declare `kind = "plan"`.
+- `diff_limit`: the branch diff is measured on every decision with `git diff
+  --numstat` against the merge base with `origin/HEAD` (else `HEAD`). Once it
+  passes 1500 added plus deleted lines, every otherwise-allowed answer other than
+  a deny stops with `scope:diff_limit`; no item estimate raises the limit yet. If
+  git fails, the check is skipped.
 
 Known gaps: shells behind wrappers (`timeout`, `env`, `sudo`, `xargs`,
 `find -exec`), `npm update`, `go mod tidy`, and pushes of `HEAD` while on `main`.
