@@ -1,9 +1,12 @@
 //! The answer engine: decides under the run's policy whether AFK answers a recognised menu, and with what.
-use super::menu::{Kind, Menu, Role};
+use super::menu::{bounded, Kind, Menu, Role};
 use super::rules::{RuleAnswer, Rules};
 use super::scope::run_checks;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Matches the `aoe_afk_answer` tool schema; longer reasons are cut, never refused.
+const REASON_MAX: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,7 +90,10 @@ pub fn decide(
     let text = proposal
         .and_then(|p| p.text.clone())
         .filter(|t| !t.is_empty() && t.len() <= 1024);
-    let reason = proposal.and_then(|p| p.reason.clone()).unwrap_or_default();
+    let reason = proposal
+        .and_then(|p| p.reason.as_deref())
+        .map(|r| bounded(r, REASON_MAX))
+        .unwrap_or_default();
     match run.policy {
         Policy::Yolo => {
             if menu.kind == Kind::Input && menu.options.is_empty() {

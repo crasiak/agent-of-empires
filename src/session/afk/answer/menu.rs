@@ -154,7 +154,7 @@ pub fn role_for(label: &str, words: &RoleWords) -> Role {
     Role::Other
 }
 
-fn bounded(s: &str, max: usize) -> String {
+pub(super) fn bounded(s: &str, max: usize) -> String {
     let mut end = s.len().min(max);
     while !s.is_char_boundary(end) {
         end -= 1;

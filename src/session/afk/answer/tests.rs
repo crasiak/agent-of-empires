@@ -363,6 +363,31 @@ mod decide {
     const TOOLING: &str = "[[rule]]\nid='tooling'\nkind='permission'\nsubject_matches=['^Bash command: cargo']\nanswer='approve'";
 
     #[test]
+    fn long_proposal_reason_is_truncated_not_refused() {
+        let m = menu(Kind::Confirm, None, &["Yes", "No"]);
+        let proposal = Proposal {
+            key: Some("1".into()),
+            text: None,
+            // Three-byte chars, so 1024 is not a char boundary.
+            reason: Some("\u{20ac}".repeat(100 * 1024 / 3)),
+        };
+        let d = decide(&m, &run(Policy::Yolo), &Rules::empty(), Some(&proposal));
+        let Decision::Answer { choice, reason, .. } = &d else {
+            panic!("expected an answer: {d:?}");
+        };
+        assert_eq!(choice.as_deref(), Some("1"));
+        assert_eq!(reason.len(), 1023);
+        assert!(reason.chars().all(|c| c == '\u{20ac}'));
+        let dir = tempfile::tempdir().unwrap();
+        let anchored = crate::session::anchored_fs::AnchoredDir::open(dir.path()).unwrap();
+        let log =
+            super::super::log::AnswerLog::new(&anchored, "11111111-1111-1111-1111-111111111111")
+                .unwrap();
+        log.decision(&serde_json::json!({ "menu": m, "decision": d, "reason": reason }))
+            .unwrap();
+    }
+
+    #[test]
     fn rules_without_match_stops() {
         assert_eq!(
             stop(&decide(
