@@ -55,13 +55,34 @@ export function askUserMenu(input) {
     free_text: input.allowFreeform !== false, raw: JSON.stringify(input).slice(0, 4096) };
 }
 
+const PERMISSION = /^(allow|approve|permit|run|execute)\b|permission/i;
+// Pi select/confirm/input dialogs offered through ui_prompt_respond; editor and custom dialogs stay with the human.
+export function dialogMenu(e) {
+  const kind = e?.kind, title = String(e?.title ?? "").slice(0, 2048) || "(untitled dialog)", raw = JSON.stringify(e).slice(0, 4096);
+  if (kind === "select" && Array.isArray(e.options) && e.options.length)
+    return { source: "pi_dialog", format: "pi.select", kind: PERMISSION.test(title) ? "permission" : "choice", question: title, subject: e.message ?? null,
+      options: e.options.slice(0, 32).map((label, i) => ({ key: String(i + 1), label: String(label).slice(0, 256) })), raw };
+  if (kind === "confirm")
+    return { source: "pi_dialog", format: "pi.confirm", kind: PERMISSION.test(title) ? "permission" : "confirm", question: title, subject: e.message ?? null,
+      options: [{ key: "y", label: "Yes" }, { key: "n", label: "No" }], raw };
+  if (kind === "input") return { source: "pi_dialog", format: "pi.input", kind: "input", question: title, free_text: true, options: [], raw };
+  return null;
+}
+
+// The value Pi accepts for the dialog, or undefined. A select answer is the original option: labels are cut to 256 characters.
+export function dialogValue(e, menu, d) {
+  if (e.kind === "select") { const i = menu.options.findIndex(o => o.key === d.choice); return i < 0 ? undefined : e.options[i]; }
+  if (e.kind === "confirm") return d.choice === "y";
+  return typeof d.text === "string" && Buffer.byteLength(d.text) <= FRAME_TEXT_MAX ? d.text : undefined;
+}
+
 export function createAnswerClient(bridge, { timeoutMs = DECIDE_TIMEOUT_MS } = {}) {
   return {
-    async decide({ run, menu, text, proposal }) {
+    async decide({ run, menu, text, proposal, timeoutMs: ms = timeoutMs }) {
       try {
         const packet = { op: "decide", run, ...(menu ? { menu: { ...menu, ...("raw" in menu ? { raw: bounded(menu.raw) } : {}) } } : {}),
           ...(text ? { text: { ...text, text: bounded(text.text) } } : {}), ...(proposal ? { proposal } : {}) };
-        const reply = await withTimeout(bridge.request(packet), timeoutMs);
+        const reply = await withTimeout(bridge.request(packet), ms);
         if (!reply?.decision || !["answer", "stop"].includes(reply.decision.decision)) throw Error("malformed decision");
         return reply;
       } catch { return { menu: menu ?? null, decision: STOP("engine_unavailable") }; }

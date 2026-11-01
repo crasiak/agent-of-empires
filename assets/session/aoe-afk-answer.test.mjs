@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { askUserMenu, createAnswerClient, parseOnArgs, runInput, answeredBy, splitArgs, textTail, promptLike, BASH_DEFAULT_TIMEOUT_S } from "./aoe-afk-answer.mjs";
+import { askUserMenu, createAnswerClient, dialogMenu, dialogValue, parseOnArgs, runInput, answeredBy, splitArgs, textTail, promptLike, BASH_DEFAULT_TIMEOUT_S } from "./aoe-afk-answer.mjs";
 
 test("decide maps bridge replies and never throws", async () => {
   const ok = createAnswerClient({ request: async p => ({ answer_id: "a", menu: { kind: "choice" }, decision: { decision: "answer", choice: "1" } }) });
@@ -32,6 +32,16 @@ test("decide cuts menu.raw and text.text to 4096 bytes on a code point boundary"
     assert.ok(!value.includes("�"));
     assert.ok(long.startsWith(value));
   }
+});
+
+test("decide takes a per-call timeout", async () => {
+  const slow = createAnswerClient({ request: () => new Promise(() => {}) });
+  const started = Date.now();
+  assert.equal((await slow.decide({ run: {}, menu: {}, timeoutMs: 20 })).decision.reason, "engine_unavailable");
+  assert.ok(Date.now() - started < 1000);
+  const sent = [];
+  await createAnswerClient({ request: async p => { sent.push(p); return { decision: { decision: "stop", reason: "x" } }; } }).decide({ run: {}, menu: {}, timeoutMs: 20 });
+  assert.ok(!("timeoutMs" in sent[0]));
 });
 
 test("delivered, recognise and rulesCheck use the bridge ops", async () => {
@@ -139,4 +149,35 @@ test("promptLike keeps the last 12 non-empty lines", () => {
   assert.equal(tail.split("\n").length, 12);
   assert.equal(tail.split("\n")[0], "line 9");
   assert.equal(tail.split("\n").at(-1), "Continue? (y/N)");
+});
+
+test("dialogMenu maps select, confirm and input, and skips editor/custom", () => {
+  assert.equal(dialogMenu({ kind: "select", title: "Pick", options: ["a", "b"] }).options[1].label, "b");
+  const c = dialogMenu({ kind: "confirm", title: "Allow bash command?", message: "Bash command: cargo test" });
+  assert.equal(c.kind, "permission"); assert.equal(c.subject, "Bash command: cargo test");
+  assert.equal(dialogMenu({ kind: "input", title: "Branch name" }).free_text, true);
+  assert.equal(dialogMenu({ kind: "editor", title: "x" }), null);
+  assert.equal(dialogMenu({ kind: "custom" }), null);
+  assert.equal(dialogMenu({ kind: "select", title: "Pick", options: [] }), null);
+  const s = dialogMenu({ kind: "select", title: "Run migration?", options: ["a", "b"] });
+  assert.equal(s.kind, "permission"); assert.equal(s.source, "pi_dialog"); assert.equal(s.format, "pi.select");
+  assert.deepEqual(s.options.map(o => o.key), ["1", "2"]);
+  assert.equal(dialogMenu({ kind: "confirm", title: "Keep going?" }).kind, "confirm");
+  assert.deepEqual(dialogMenu({ kind: "confirm", title: "Keep going?" }).options, [{ key: "y", label: "Yes" }, { key: "n", label: "No" }]);
+  assert.equal(dialogMenu({ kind: "select", title: "Needs permission", options: ["x"] }).kind, "permission");
+  assert.equal(dialogMenu({ kind: "input" }).question, "(untitled dialog)");
+});
+
+test("dialogValue maps the decision to the value Pi accepts", () => {
+  const long = "x".repeat(300), select = { kind: "select", title: "Pick", options: ["a", long] };
+  assert.equal(dialogValue(select, dialogMenu(select), { choice: "1" }), "a");
+  assert.equal(dialogValue(select, dialogMenu(select), { choice: "2" }), long, "the original option, not the cut label");
+  assert.equal(dialogValue(select, dialogMenu(select), { choice: "9" }), undefined);
+  const confirm = { kind: "confirm", title: "Allow?" };
+  assert.equal(dialogValue(confirm, dialogMenu(confirm), { choice: "y" }), true);
+  assert.equal(dialogValue(confirm, dialogMenu(confirm), { choice: "n" }), false);
+  const input = { kind: "input", title: "Branch" };
+  assert.equal(dialogValue(input, dialogMenu(input), { text: "main" }), "main");
+  assert.equal(dialogValue(input, dialogMenu(input), {}), undefined);
+  assert.equal(dialogValue(input, dialogMenu(input), { text: "é".repeat(2049) }), undefined, "over 4096 bytes");
 });

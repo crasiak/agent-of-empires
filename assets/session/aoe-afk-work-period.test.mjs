@@ -77,7 +77,7 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
     confirm: (value, hook, onMessage) => { answer = value; confirmHook = hook; confirmMessage = onMessage; },
     decideReply: value => decideReply = value, recogniseReply: value => recogniseReply = value, rulesCheckError: error => rulesCheck = { valid: false, error, format_warnings: [] },
     activeTools: value => activeTools = value, get confirmations() { return confirmations; },
-    memoryOnly: () => memoryOnly = true, advance: (w, m) => { wall += w; mono += m; }, get aborted() { return aborted; }, get ended() { return ended; }, close: () => rmSync(root, { recursive: true, force: true }) };
+    memoryOnly: () => memoryOnly = true, tick: () => new Promise(r => setImmediate(r)), advance: (w, m) => { wall += w; mono += m; }, get aborted() { return aborted; }, get ended() { return ended; }, close: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 function continuation(entry) { return { role: "custom", customType: entry.customType, content: entry.content, details: entry.details }; }
@@ -808,5 +808,110 @@ test("an answered aoe_afk_answer releases the prompt evidence", async () => {
     const out = await f.checkpoint("unfinished", ["b4"]);
     assert.equal(out.details.status, "owned");
     assert.equal(out.details.ignored_evidence, undefined);
+  } finally { f.close(); }
+});
+
+const yes = id => ({ answer_id: id, menu: {}, decision: { decision: "answer", choice: "y", rule: "r", reason: "", warnings: [], checks: [] } });
+const respond = (f, extra = {}) => f.emit("ui_prompt_respond", { type: "ui_prompt_respond", kind: "confirm", title: "Allow?", message: "Bash command: cargo test", ...extra });
+const delivered = (f, id) => f.packets.filter(p => p.op === "answer_delivered" && p.answer_id === id).map(p => p.delivered);
+
+test("an owned period answers a confirm dialog and does not stop on the answered prompt events", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply(yes("d1"));
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const answer = await respond(f);
+    assert.deepEqual(answer, { value: true, answered_by: "afk/rules" });
+    const decide = f.packets.find(p => p.op === "decide");
+    assert.equal(decide.menu.source, "pi_dialog"); assert.equal(decide.menu.kind, "permission"); assert.equal(decide.run.policy, "rules");
+    await f.emit("ui_prompt_start", { kind: "confirm", answered_by: "afk/rules" });
+    await f.emit("ui_prompt_end", { kind: "confirm", answered_by: "afk/rules" });
+    assert.equal(f.snapshots().at(-1).status, "owned");
+    assert.deepEqual(delivered(f, "d1"), ["ok"]);
+    assert.equal(f.aborted, 0);
+    await f.native("status");
+    assert.match(f.notices.at(-1), /answers: 1 \(rules 1, yolo 0\), stops: 0/);
+    assert.equal((await f.ownedContext()).messages.at(-1).customType, "aoe-afk-work-instructions", "an answered dialog leaves no open human prompt");
+  } finally { f.close(); }
+});
+
+test("a select dialog is answered with the chosen option", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply({ answer_id: "d5", menu: {}, decision: { decision: "answer", choice: "2", rule: "r", reason: "", warnings: [], checks: [] } });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    assert.deepEqual(await f.emit("ui_prompt_respond", { type: "ui_prompt_respond", kind: "select", title: "Pick", options: ["a", "b"] }), { value: "b", answered_by: "afk/rules" });
+  } finally { f.close(); }
+});
+
+test("a stop leaves the dialog to the human and the period stops as today", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply({ answer_id: "d2", menu: {}, decision: { decision: "stop", reason: "no_rule", checks: [] } });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    assert.equal(await respond(f), undefined);
+    await f.emit("ui_prompt_start", { kind: "confirm" });
+    assert.equal(f.snapshots().at(-1).reason, "human_prompt");
+    assert.deepEqual(delivered(f, "d2"), []);
+  } finally { f.close(); }
+});
+
+test("the consent dialog and unowned periods are never answered", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply(yes("d4"));
+    assert.equal(await respond(f), undefined, "no period");
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    assert.equal(await respond(f, { owner: { namespace: "aoe-afk-work-consent-v1", id: "i" } }), undefined, "consent namespace while owned");
+    assert.ok(!f.packets.some(p => p.op === "decide"));
+    assert.equal(await f.emit("ui_prompt_respond", { type: "ui_prompt_respond", kind: "editor", title: "x" }), undefined, "editor is never answered");
+    assert.ok(!f.packets.some(p => p.op === "decide"));
+  } finally { f.close(); }
+});
+
+test("an answer that arrives after the period stopped is logged failed and not returned", async () => {
+  const f = await fixture();
+  try {
+    // Another prompt opens while the engine decides.
+    f.decideReply(() => { void f.emit("ui_prompt_start", { kind: "input" }); return yes("d6"); });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    assert.equal(await respond(f), undefined);
+    assert.deepEqual(delivered(f, "d6"), ["failed"]);
+    assert.equal(f.snapshots().at(-1).reason, "human_prompt");
+  } finally { f.close(); }
+});
+
+test("an answered dialog whose prompt never ends records delivery unknown and stops", async t => {
+  const f = await fixture();
+  try {
+    f.decideReply(yes("d3"));
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    await respond(f);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    await f.emit("ui_prompt_start", { kind: "confirm", answered_by: "afk/rules" });
+    t.mock.timers.tick(1999); await f.tick();
+    assert.equal(f.snapshots().at(-1).status, "owned");
+    t.mock.timers.tick(1001); await f.tick();                 // no ui_prompt_end within the delivery window
+    assert.equal(f.snapshots().at(-1).reason, "delivery_unknown");
+    assert.deepEqual(delivered(f, "d3"), ["unknown"]);
+    assert.equal(f.aborted, 1);
+    await f.emit("ui_prompt_end", { kind: "confirm", answered_by: "afk/rules" });
+    assert.deepEqual(delivered(f, "d3"), ["unknown"], "a late end does not log twice");
+  } finally { f.close(); }
+});
+
+test("an answer Pi discards for its native dialog is logged failed and the human prompt stops the period", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply(yes("d7"));
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    assert.deepEqual(await respond(f), { value: true, answered_by: "afk/rules" });
+    await f.emit("ui_prompt_start", { kind: "confirm" });          // Pi's bound passed: the native dialog opened instead
+    assert.deepEqual(delivered(f, "d7"), ["failed"]);
+    assert.equal(f.snapshots().at(-1).reason, "human_prompt");
+    await f.native("status");
+    assert.match(f.notices.at(-1), /answers: 0 \(rules 0, yolo 0\)/);
+    await f.emit("ui_prompt_end", { kind: "confirm" });
+    assert.deepEqual(delivered(f, "d7"), ["failed"]);
   } finally { f.close(); }
 });

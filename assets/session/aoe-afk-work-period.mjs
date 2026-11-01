@@ -2,12 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createWorkPeriod } from "./aoe-afk-work-state.mjs";
 import { createNativeWorkJournal } from "./aoe-afk-work-native.mjs";
-import { ANSWER_TOOL, BASH_DEFAULT_TIMEOUT_S, askUserMenu, createAnswerClient, promptLike, runInput, answeredBy, parseOnArgs, splitArgs, textTail } from "./aoe-afk-answer.mjs";
+import { ANSWER_TOOL, BASH_DEFAULT_TIMEOUT_S, askUserMenu, createAnswerClient, dialogMenu, dialogValue, promptLike, runInput, answeredBy, parseOnArgs, splitArgs, textTail } from "./aoe-afk-answer.mjs";
 
 export const WORK_CHECKPOINT_TOOL = "aoe_afk_work_checkpoint";
 export const MENU_NUDGE = "You ended with a menu. Resolve it with aoe_afk_answer.";
 const START = "aoe-afk-work-start", CONTINUATION = "aoe-afk-work-continuation", INSTRUCTIONS = "aoe-afk-work-instructions";
 const OWN = new Set([START, CONTINUATION, INSTRUCTIONS]);
+const CONSENT_NAMESPACE = "aoe-afk-work-consent-v1";
+// Pi drops a dialog answer after 5 s; decide inside that bound. An answered prompt must end within the delivery window.
+const DIALOG_DECIDE_TIMEOUT_MS = 4000, DELIVERY_WINDOW_MS = 2000;
 const LOCAL_TOOLS = ["read", "write", "edit", "bash"];
 const uuid = x => typeof x === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(x);
 const sameBinding = (a, b) => ["instance_id", "profile", "native_id", "launch_id"].every(k => a?.[k] === b?.[k]);
@@ -194,7 +197,7 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
       }
       const sources = Array.isArray(ruleInfo.sources) ? ruleInfo.sources : [], formatWarnings = Array.isArray(ruleInfo.format_warnings) ? ruleInfo.format_warnings : [];
       const consent = { revision: w.r.revision, external: w.lastExternal, native: nativeExternal(ctx), tools: LOCAL_TOOLS.filter(t => pi.getActiveTools().includes(t)), cancelled: false,
-        owner: { namespace: "aoe-afk-work-consent-v1", id: randomUUID() } };
+        owner: { namespace: CONSENT_NAMESPACE, id: randomUUID() } };
       w.pendingConsent = consent;
       const show = async (kind, run) => {
         let resolve, timer, value, fault;
@@ -417,7 +420,37 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
     }
   });
   pi.on("user_bash", () => { stop(current, "human_bash"); });
+  pi.on("ui_prompt_respond", async (event, ctx) => {
+    const w = current;
+    if (!owned(w, ctx) || !w.client || w.pendingConsent || event.owner?.namespace === CONSENT_NAMESPACE) return;
+    const menu = dialogMenu(event);
+    if (!menu) return;
+    const s = w.period.snapshot();
+    const { answer_id, decision } = await w.client.decide({ run: runInput(s, ctx.cwd), menu, timeoutMs: DIALOG_DECIDE_TIMEOUT_MS });
+    if (decision.decision !== "answer") { w.answers.stops++; return; }
+    if (!owned(w, ctx) || w.answering) { void w.client.delivered(s.id, answer_id, "failed"); return; }
+    const value = dialogValue(event, menu, decision);
+    if (value === undefined) { w.answers.stops++; void w.client.delivered(s.id, answer_id, "failed"); return; }
+    w.answers[s.policy]++;
+    w.answering = { answer_id, period: s.id, policy: s.policy, by: answeredBy(s.policy), timer: undefined };
+    return { value, answered_by: w.answering.by };
+  });
   pi.on("ui_prompt_start", event => {
+    const w = current, a = w?.answering;
+    if (a && !a.timer) {
+      if (event.answered_by === a.by) {
+        a.timer = setTimeout(() => {
+          if (current !== w || w.answering !== a) return;
+          w.answering = undefined;
+          void w.client.delivered(a.period, a.answer_id, "unknown");
+          stop(w, "delivery_unknown", "blocked"); if (w.signal && !w.signal.aborted) abort(w);
+        }, DELIVERY_WINDOW_MS);
+        return;
+      }
+      // Pi discarded the answer (its bound passed, or another prompt opened first); this prompt is the human's.
+      w.answering = undefined; if (w.period?.snapshot()?.id === a.period) w.answers[a.policy]--;
+      void w.client.delivered(a.period, a.answer_id, "failed");
+    }
     uiDepth++;
     const consent = current?.pendingConsent;
     if (consent?.dialog && event.owner?.namespace === consent.owner.namespace && event.owner.id === consent.owner.id && event.kind === consent.dialog.kind) consent.dialog.started = true;
@@ -425,6 +458,12 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
     stop(current, "human_prompt", "blocked");
   });
   pi.on("ui_prompt_end", (event, ctx) => {
+    const a = current?.answering;
+    if (a?.timer && event.answered_by === a.by) {
+      current.answering = undefined; clearTimeout(a.timer);
+      void current.client.delivered(a.period, a.answer_id, "ok");
+      return;
+    }
     uiDepth = Math.max(0, uiDepth - 1);
     const consent = current?.pendingConsent;
     if (consent?.dialog) {
