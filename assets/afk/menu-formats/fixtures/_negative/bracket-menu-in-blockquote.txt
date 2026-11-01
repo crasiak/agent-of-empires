@@ -1,0 +1,4 @@
+The previous prompt was:
+> Report: /tmp/report.md
+> [A] Approve checkpoint  [R] Revise  [N] New session → /continue
+> Pick A/R/N, or tell me what to change.

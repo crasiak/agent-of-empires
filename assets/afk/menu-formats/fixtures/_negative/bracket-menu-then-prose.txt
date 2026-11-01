@@ -1,0 +1,3 @@
+Report: /tmp/report.md
+[A] Approve checkpoint  [R] Revise  [N] New session → /continue
+I will wait here until you have had a look.

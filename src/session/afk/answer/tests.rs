@@ -197,7 +197,7 @@ fn format_corpus_matches_expected_menus() {
             checked += 1;
         }
     }
-    assert!(checked >= 9, "corpus too small: {checked}");
+    assert!(checked >= 15, "corpus too small: {checked}");
 }
 
 #[test]
@@ -307,6 +307,81 @@ option_pattern='\[(?P<key>\d)\](?P<label>\w+)'"
         .unwrap();
     let labels: Vec<_> = m.options.iter().map(|o| o.label.as_str()).collect();
     assert_eq!(labels, ["Yes", "No"]);
+}
+
+#[test]
+fn live_menu_after_a_fenced_example_is_still_recognised() {
+    let (f, _) = Formats::load(None);
+    let text =
+        "Example of a prompt:\n```\n[X] Old one  [Y] Old two\n```\nShip it?\n[A]pply / [S]kip";
+    let m = f.recognise(Source::AgentText, text).unwrap();
+    let labels: Vec<_> = m.options.iter().map(|o| o.label.as_str()).collect();
+    assert_eq!(labels, ["Apply", "Skip"]);
+    assert_eq!(m.question, "Example of a prompt:\nShip it?");
+    // An unclosed fence hides everything after it, and ~~~ fences count too.
+    assert!(f
+        .recognise(Source::AgentText, "```\nShip it?\n[A]pply / [S]kip")
+        .is_none());
+    assert!(f
+        .recognise(Source::AgentText, "~~~\nShip it?\n[A]pply / [S]kip\n~~~")
+        .is_none());
+}
+
+#[test]
+fn footer_pattern_needs_option_pattern() {
+    let files = vec![(
+        "f.toml".to_string(),
+        r"id='f'
+sources=['agent_text']
+kind='confirm'
+trigger='\?$'
+footer_pattern='^Pick'
+[[option]]
+key='y'
+label='Yes'"
+            .to_string(),
+    )];
+    let (f, warnings) = Formats::from_sources(&files);
+    assert!(f.ids().is_empty());
+    assert!(warnings[0].contains("footer_pattern"), "{warnings:?}");
+}
+
+#[test]
+fn footer_variants_are_accepted_and_other_trailing_lines_are_not() {
+    let (f, _) = Formats::load(None);
+    let menu = "Done.\n[A] Approve  [R] Revise\n";
+    for footer in [
+        "Pick A or R.",
+        "Choose one.",
+        "Reply with A or R.",
+        "(or tell me what to change)",
+    ] {
+        let text = format!("{menu}{footer}");
+        assert!(f.recognise(Source::AgentText, &text).is_some(), "{footer}");
+    }
+    for footer in ["Thanks!", "I picked A for you."] {
+        let text = format!("{menu}{footer}");
+        assert!(f.recognise(Source::AgentText, &text).is_none(), "{footer}");
+    }
+}
+
+#[test]
+fn spaced_labels_end_at_separators_and_never_double_the_key() {
+    let (f, _) = Formats::load(None);
+    let labels = |text: &str| -> Vec<String> {
+        f.recognise(Source::AgentText, text)
+            .unwrap()
+            .options
+            .iter()
+            .map(|o| o.label.clone())
+            .collect()
+    };
+    assert_eq!(
+        labels("Go?\n[A] Apply now / [S] Skip it | [R] Revise -> /next"),
+        ["Apply now", "Skip it", "Revise"]
+    );
+    assert_eq!(labels("Go?\n[A]Apply [S]Skip"), ["Apply", "Skip"]);
+    assert_eq!(labels("Go?\n[a]pply [s]kip"), ["apply", "skip"]);
 }
 
 mod rules {
@@ -632,6 +707,70 @@ mod decide {
         } else {
             None
         }
+    }
+
+    fn sage_menu() -> Menu {
+        let text = std::fs::read_to_string(
+            super::corpus().join("text.bracket-shortkey/sage-checkpoint.txt"),
+        )
+        .unwrap();
+        let (f, _) = Formats::load(None);
+        f.recognise(Source::AgentText, &text).unwrap()
+    }
+
+    #[test]
+    fn sage_checkpoint_under_rules_without_a_rule_stops_and_keeps_the_menu() {
+        let m = sage_menu();
+        let d = decide(&m, &run(Policy::Rules), &Rules::empty(), None);
+        assert_eq!(stop(&d), Some("no_rule"));
+        let keys: Vec<_> = m.options.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(keys, ["A", "R", "N"]);
+        assert!(m.question.contains("Report:"));
+    }
+
+    #[test]
+    fn sage_checkpoint_narrow_rule_answers_a() {
+        let r = rules(
+            "[[rule]]\nid='sage-checkpoint'\nkind='choice'\nquestion_matches=['Approve checkpoint']\nanswer='approve'",
+        );
+        // question_matches sees the question lines above the options, not the option labels.
+        let (f, _) = Formats::load(None);
+        let m = f
+            .recognise(
+                Source::AgentText,
+                "Approve checkpoint for the helper change?\n[A] Approve checkpoint  [R] Revise  [N] New session \u{2192} /continue\nPick A/R/N, or tell me what to change.",
+            )
+            .unwrap();
+        let Decision::Answer { choice, rule, .. } = decide(&m, &run(Policy::Rules), &r, None)
+        else {
+            panic!("expected an answer");
+        };
+        assert_eq!(choice.as_deref(), Some("A"));
+        assert_eq!(rule.as_deref(), Some("sage-checkpoint"));
+    }
+
+    #[test]
+    fn sage_new_session_is_other_and_never_an_approve_choice() {
+        let m = sage_menu();
+        let n = m.options.iter().find(|o| o.key == "N").unwrap();
+        assert_eq!(n.label, "New session");
+        assert_eq!(n.role, Role::Other);
+        let r = rules("[[rule]]\nid='any'\nanswer='approve'");
+        assert_eq!(
+            choice(&decide(&m, &run(Policy::Rules), &r, None)),
+            Some("A")
+        );
+        let only_other = menu(Kind::Choice, None, &["New session", "Revise"]);
+        assert_eq!(
+            stop(&decide(&only_other, &run(Policy::Rules), &r, None)),
+            Some("no_option_for_role")
+        );
+    }
+
+    #[test]
+    fn sage_checkpoint_under_yolo_picks_the_first_approve_option() {
+        let d = decide(&sage_menu(), &run(Policy::Yolo), &Rules::empty(), None);
+        assert_eq!(choice(&d), Some("A"));
     }
 
     const TOOLING: &str = "[[rule]]\nid='tooling'\nkind='permission'\nsubject_matches=['^Bash command: cargo']\nanswer='approve'";

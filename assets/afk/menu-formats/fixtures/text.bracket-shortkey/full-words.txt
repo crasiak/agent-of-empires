@@ -1,0 +1,3 @@
+The checkpoint is ready.
+[A]Approve [R]Revise [N]New
+Choose A, R or N.

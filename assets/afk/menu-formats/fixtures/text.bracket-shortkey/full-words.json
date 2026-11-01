@@ -1,0 +1,2 @@
+{ "schema": "aoe.afk-menu.v1", "source": "agent_text", "format": "text.bracket-shortkey", "kind": "choice", "question": "The checkpoint is ready.", "subject": null,
+  "options": [ { "key": "A", "label": "Approve", "role": "approve" }, { "key": "R", "label": "Revise", "role": "revise" }, { "key": "N", "label": "New", "role": "other" } ], "free_text": false, "warnings": [], "deadline_ms": null }
