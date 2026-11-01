@@ -197,7 +197,9 @@ After a rule allows an answer, deterministic checks can still stop it, with
 subject, **not a sandbox**: they sit behind the rule's own allow pattern, and a
 narrow rule is the real boundary. Under `yolo` a failed check only adds a warning.
 
-- `harness_warning`: the menu came with a harness warning.
+- `harness_warning`: the menu came with a harness warning. In this release only
+  Pi dialogs carry one: a `select` or `confirm` whose title or message says
+  "dangerous" or contains ⚠.
 - `outside_repo`: a command segment writes or deletes outside the session's repo
   root. Commands are split on `;`, `&`, `|`, newlines, backticks and `$(`, and each
   segment is checked. `cd` with no target, to `~`, to `-` or to a `$…` value counts

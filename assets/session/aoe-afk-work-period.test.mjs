@@ -579,6 +579,14 @@ test("a checkpoint too large for the record stops the period as record_capacity,
   } finally { f.close(); }
 });
 
+test("the work-period reminder lists aoe_afk_answer among the supported tools", async () => {
+  const f = await fixture();
+  try {
+    await f.native("on 120 8");
+    assert.match(f.messages.at(-1).content, /The initial supported tools are read\/write\/edit\/bash plus aoe_afk_work_checkpoint and aoe_afk_answer\./);
+  } finally { f.close(); }
+});
+
 test("aoe_afk_answer is admitted without counting a tool and refused outside an owned period", async () => {
   const f = await fixture();
   try {
