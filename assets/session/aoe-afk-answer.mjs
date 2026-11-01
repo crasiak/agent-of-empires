@@ -1,5 +1,6 @@
 export const ANSWER_TOOL = "aoe_afk_answer";
 export const DECIDE_TIMEOUT_MS = 5000;
+export const BASH_DEFAULT_TIMEOUT_S = 600;
 const FRAME_TEXT_MAX = 4096;
 const STOP = reason => ({ decision: "stop", reason, checks: [] });
 
@@ -31,6 +32,14 @@ export const textTail = value => {
   while ((bytes[start] & 0xc0) === 0x80) start++;
   return bytes.subarray(start).toString();
 };
+
+// A bash result whose last line asks for input; returns its last 12 non-empty lines.
+const PROMPT_END = /\?\s*$|\((?:y\/N|Y\/n|y\/n)\)|\[(?:y\/N|Y\/n)\]|Password:\s*$|›\s*$/;
+export function promptLike(text) {
+  const lines = String(text ?? "").split("\n").map(l => l.trimEnd()).filter(l => l.trim());
+  if (!lines.length || !PROMPT_END.test(lines.at(-1))) return null;
+  return lines.slice(-12).join("\n");
+}
 
 export function askUserMenu(input) {
   if (!input || typeof input.question !== "string" || input.questions || input.allowMultiple || !Array.isArray(input.options) || !input.options.length) return null;

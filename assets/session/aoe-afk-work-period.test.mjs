@@ -59,19 +59,20 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   const native = async (args = "on 120 8") => { await api.poll(r, null, 1); await commands.get("afk-work").handler(args, ctx); };
   const begin = () => { idle = false; signal = new AbortController(); };
   const ownedContext = async (extra = []) => api.context(r, [...context(), ...extra], ctx);
-  const call = async (name, id, input, effect) => {
+  const callWithOutput = async (name, id, input, text, effect) => {
     const blocked = await emit("tool_call", { toolName: name, toolCallId: id, input });
     if (blocked?.block) return blocked;
     effect?.();
-    const event = { toolName: name, toolCallId: id, input, content: [{ type: "text", text: "observed local effect" }], details: null, isError: false };
+    const event = { toolName: name, toolCallId: id, input, content: [{ type: "text", text }], details: null, isError: false };
     return { ...event, ...await emit("tool_result", event) };
   };
+  const call = (name, id, input, effect) => callWithOutput(name, id, input, "observed local effect", effect);
   const checkpoint = (status, ids = [], extra = {}) => tools.get(WORK_CHECKPOINT_TOOL).execute("checkpoint", { status,
     summary: status === "completed" ? "Both files and validation complete" : "A real unit changed; next unit remains", next_step: status === "unfinished" ? "Complete and validate the remaining unit" : null,
     evidence: ids, human_required: false, depends_on: [], ...extra }, ctx.signal, undefined, ctx);
   const answerTool = input => tools.get(ANSWER_TOOL).execute("id", input, ctx.signal, undefined, ctx);
   const boundary = () => ({ outcome: "completed", continue: false, entries: [], context: { pendingMessages: [], contextMessages: context() } });
-  return { root, file, binding, generation, rows, r, ctx, api, packets, messages, notices, native, emit, request, rpc, begin, ownedContext, call, checkpoint, answer: answerTool, boundary, context, user,
+  return { root, file, binding, generation, rows, r, ctx, api, packets, messages, notices, native, emit, request, rpc, begin, ownedContext, call, callWithOutput, checkpoint, answer: answerTool, boundary, context, user,
     snapshots: () => rows.filter(e => e.type === "custom" && e.customType === WORK_PERIOD_MARKER).map(e => e.data),
     confirm: (value, hook, onMessage) => { answer = value; confirmHook = hook; confirmMessage = onMessage; },
     decideReply: value => decideReply = value, recogniseReply: value => recogniseReply = value, rulesCheckError: error => rulesCheck = { valid: false, error, format_warnings: [] },
@@ -266,7 +267,8 @@ test("owned results expose bounded exact refs without altering arbitrary underly
       await f.native(); f.begin(); const context = await f.ownedContext();
       assert.match(context.messages.at(-1).content, /aoe_afk_work_evidence_ref/);
       assert.match(context.messages.at(-1).content, /completed.*blocked.*null/);
-      await f.emit("tool_call", { toolName: name, toolCallId: id, input });
+      // tool_call may set bash defaults in place; the result event carries its own copy.
+      await f.emit("tool_call", { toolName: name, toolCallId: id, input: structuredClone(input) });
       const patch = await f.emit("tool_result", event);
       assert.deepEqual(event, original, "hook must not mutate the original tool result");
       assert.deepEqual(patch, { content: [...content, { type: "text", text: JSON.stringify({ aoe_afk_work_evidence_ref: id }) }] });
@@ -664,5 +666,94 @@ test("an ask_user answer decided after the period ended is logged as failed deli
     assert.ok(!f.packets.some(p => p.op === "answer_delivered" && p.delivered === "ok"));
     assert.equal(f.snapshots().at(-1).reason, "native_abort");
     assert.deepEqual((await f.rpc(f.request("inspect"))).period.answers, { rules: 0, yolo: 0, stops: 0 });
+  } finally { f.close(); }
+});
+
+test("bash without timeout gets the 600 s default; explicit timeout is kept", async () => {
+  const f = await fixture();
+  try {
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const a = { command: "ls" }, b = { command: "cargo build", timeout: 1800 };
+    await f.call("bash", "b1", a); await f.call("bash", "b2", b);
+    assert.equal(a.timeout, 600);
+    assert.equal(b.timeout, 1800);
+  } finally { f.close(); }
+});
+
+test("a bash result ending in a prompt is annotated and not progress until answered", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply({ kind: "confirm", question: "Ok to proceed? (y/N)" });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const r = await f.callWithOutput("bash", "b3", { command: "npx create-vite" }, "Need to install\nOk to proceed? (y/N)");
+    assert.ok(r.content.some(b => b.type === "text" && b.text.includes("aoe_afk_prompt_seen")));
+    assert.ok(f.packets.some(p => p.op === "recognise" && p.source === "bash_prompt"));
+    const out = await f.checkpoint("unfinished", ["b3"]);
+    assert.equal(out.details.status, "blocked");
+    assert.equal(out.details.reason, "no_progress");
+    assert.deepEqual(out.details.ignored_evidence, ["b3"]);
+    assert.equal(out.details.ignored_reason, "prompt_seen_not_answered");
+  } finally { f.close(); }
+});
+
+test("a prompt-annotated bash result replays idempotently", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply({ kind: "confirm" });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const event = { toolName: "bash", toolCallId: "b6", input: { command: "x" }, content: [{ type: "text", text: "Continue? (y/N)" }], details: null, isError: false };
+    await f.emit("tool_call", { toolName: "bash", toolCallId: "b6", input: event.input });
+    const first = await f.emit("tool_result", event);
+    assert.equal(await f.emit("tool_result", { ...event, content: first.content }), undefined);
+    assert.equal(f.snapshots().at(-1).status, "owned");
+  } finally { f.close(); }
+});
+
+test("a prompt-like bash tail that no format recognises stops as unrecognised_menu and saves the sample", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply(null);
+    f.decideReply({ answer_id: "u1", menu: null, decision: { decision: "stop", reason: "unrecognised_menu", checks: [] }, sample: "p-unrecognised-1.txt" });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    await f.callWithOutput("bash", "b5", { command: "x" }, "Enter the magic word?");
+    assert.ok(f.packets.some(p => p.op === "decide" && p.text?.source === "bash_prompt"));
+    assert.equal(f.snapshots().at(-1).reason, "unrecognised_menu");
+    assert.equal(f.snapshots().at(-1).status, "blocked");
+    assert.deepEqual((await f.rpc(f.request("inspect"))).period.answers, { rules: 0, yolo: 0, stops: 1 });
+  } finally { f.close(); }
+});
+
+test("bash output that does not end in a prompt is not sent to the recogniser", async () => {
+  const f = await fixture();
+  try {
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const r = await f.callWithOutput("bash", "b7", { command: "cargo test" }, "All tests passed.\n");
+    assert.ok(!r.content.some(b => b.text?.includes("aoe_afk_prompt_seen")));
+    assert.ok(!f.packets.some(p => p.op === "recognise"));
+  } finally { f.close(); }
+});
+
+test("the bash prompt recogniser gets the tail of long output", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply({ kind: "confirm" });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    await f.callWithOutput("bash", "b8", { command: "x" }, "é".repeat(5000) + "\nContinue? (y/N)");
+    const sent = f.packets.find(p => p.op === "recognise");
+    assert.ok(sent.text.endsWith("Continue? (y/N)"));
+  } finally { f.close(); }
+});
+
+test("an answered aoe_afk_answer releases the prompt evidence", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply({ kind: "confirm" });
+    f.decideReply({ answer_id: "x", menu: {}, decision: { decision: "answer", choice: "y", reason: "", warnings: [], checks: [] } });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    await f.callWithOutput("bash", "b4", { command: "x" }, "Continue? (y/N)");
+    await f.answer({ question: "Continue?", options: [{ key: "y", label: "Yes" }, { key: "n", label: "No" }], proposal: "y", reason: "" });
+    const out = await f.checkpoint("unfinished", ["b4"]);
+    assert.equal(out.details.status, "owned");
+    assert.equal(out.details.ignored_evidence, undefined);
   } finally { f.close(); }
 });

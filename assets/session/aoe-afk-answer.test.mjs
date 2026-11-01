@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { askUserMenu, createAnswerClient, parseOnArgs, runInput, answeredBy, splitArgs, textTail } from "./aoe-afk-answer.mjs";
+import { askUserMenu, createAnswerClient, parseOnArgs, runInput, answeredBy, splitArgs, textTail, promptLike, BASH_DEFAULT_TIMEOUT_S } from "./aoe-afk-answer.mjs";
 
 test("decide maps bridge replies and never throws", async () => {
   const ok = createAnswerClient({ request: async p => ({ answer_id: "a", menu: { kind: "choice" }, decision: { decision: "answer", choice: "1" } }) });
@@ -94,4 +94,23 @@ test("textTail keeps the last 4096 bytes without splitting a character", () => {
   const tail = textTail(long);
   assert.ok(Buffer.byteLength(tail) <= 4096); assert.ok(long.endsWith(tail)); assert.ok(!tail.includes("\uFFFD"));
   assert.equal(tail.length, 1365);
+});
+
+test("promptLike flags prompt endings only", () => {
+  assert.ok(promptLike("Installing…\nOk to proceed? (y/N)"));
+  assert.ok(promptLike("Password:"));
+  assert.ok(promptLike("Overwrite? [Y/n] "));
+  assert.ok(promptLike("Select a framework: ›"));
+  assert.equal(promptLike("All tests passed.\n"), null);
+  assert.equal(promptLike(""), null);
+  assert.equal(promptLike(undefined), null);
+  assert.equal(BASH_DEFAULT_TIMEOUT_S, 600);
+});
+
+test("promptLike keeps the last 12 non-empty lines", () => {
+  const lines = Array.from({ length: 20 }, (_, i) => `line ${i}`);
+  const tail = promptLike([...lines, "", "Continue? (y/N)  ", ""].join("\n"));
+  assert.equal(tail.split("\n").length, 12);
+  assert.equal(tail.split("\n")[0], "line 9");
+  assert.equal(tail.split("\n").at(-1), "Continue? (y/N)");
 });
