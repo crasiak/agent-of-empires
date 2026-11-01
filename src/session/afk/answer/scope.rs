@@ -466,6 +466,16 @@ fn unescaped(token: &str) -> String {
     out
 }
 
+/// Whether a `$` in `token` starts an expansion (`a/$X/b`) rather than ending a regex (`s/x$//`).
+fn expands(token: &str) -> bool {
+    token.match_indices('$').any(|(i, _)| {
+        token[i + 1..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || "_@*#?!$-".contains(c))
+    })
+}
+
 /// Unresolvable paths (`$VAR`, `~user`, `~` without `home`) and unresolvable segments count as
 /// outside. A relative path is judged from the repo root, `..` resolved by name.
 pub(super) fn outside_repo(subject: &str, roots: &[PathBuf], home: Option<&Path>) -> bool {
@@ -488,7 +498,7 @@ pub(super) fn outside_repo(subject: &str, roots: &[PathBuf], home: Option<&Path>
                 _ => t,
             };
             let t = unescaped(t);
-            if t.starts_with('$') {
+            if t.starts_with('$') || expands(&t) {
                 return true;
             }
             let p = match t.strip_prefix('~') {

@@ -1157,6 +1157,8 @@ mod decide {
                 "scope:outside_repo",
             ),
             ("Bash command: cd ..", "scope:outside_repo"),
+            ("Bash command: rm -rf a/../$X", "scope:outside_repo"),
+            ("Bash command: rm -rf src/$DIR/x", "scope:outside_repo"),
             (
                 "Bash command: bash +x -c 'make deploy'",
                 "scope:outside_repo",
@@ -1693,6 +1695,24 @@ mod log {
             Some(7),
             "the PR so far, not just the unpushed part"
         );
+    }
+
+    #[test]
+    fn a_command_that_overruns_its_deadline_counts_as_failed() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+        let run = |program: &str, arg: &str, ms: u64| {
+            let mut c = Command::new(program);
+            c.arg(arg);
+            let started = Instant::now();
+            let out = super::super::run::run_within(c, Duration::from_millis(ms));
+            (out, started.elapsed())
+        };
+        let (out, took) = run("sleep", "5", 100);
+        assert_eq!(out, None);
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        assert_eq!(run("echo", "hi", 5000).0.as_deref(), Some("hi"));
+        assert_eq!(run("false", "", 5000).0, None);
     }
 
     #[test]

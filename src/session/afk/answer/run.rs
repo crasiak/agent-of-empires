@@ -1,8 +1,10 @@
 //! The run an answer belongs to, as the extension describes it, and the repo facts checks need.
 use super::decide::{Policy, RunContext};
 use serde::Deserialize;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const MAX_DIFF_LINES: u64 = 1500;
 
@@ -24,18 +26,54 @@ pub struct RunInput {
     pub request_limit: u32,
 }
 
+/// How long one git call may run: a decide makes several inside its 5 s budget.
+const GIT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Run `command` and return its trimmed stdout if it exits successfully within `timeout`; a
+/// command that overruns is killed and counts as failed.
+fn output_within(mut command: Command, timeout: Duration) -> Option<String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // Drain stdout on its own thread so a large result cannot fill the pipe and stall the child.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let bytes = reader.join().ok()?;
+    status
+        .filter(|s| s.success())
+        .map(|_| String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
 /// Read-only git. `--no-optional-locks` means these reads never take the index lock, so they cannot block the agent's own git commands.
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("--no-optional-locks")
         .arg("-C")
         .arg(dir)
-        .args(args)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .args(args);
+    output_within(command, GIT_TIMEOUT)
 }
 
 /// The git toplevel containing `cwd`, else `cwd` itself.
@@ -78,6 +116,11 @@ fn protected_branches(root: &Path) -> Vec<String> {
         branches.push(default);
     }
     branches
+}
+
+#[cfg(test)]
+pub(super) fn run_within(command: Command, timeout: Duration) -> Option<String> {
+    output_within(command, timeout)
 }
 
 pub fn context(input: &RunInput) -> RunContext {
