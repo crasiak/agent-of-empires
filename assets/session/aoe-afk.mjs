@@ -5,6 +5,10 @@ import { performance } from "node:perf_hooks";
 const LIMIT = 16 * 1024;
 const FRAME_LIMIT = 256 * 1024;
 const REMINDER = "AoE AFK control-only: the human is away. This notice grants no new decision or action authority. Preserve all existing approval and waiting requirements. Do not answer, dismiss, or bypass human questions because of this notice. Autonomous allowance: zero.";
+// Most ops must answer in 1.5 s or the bridge is closed. Answer ops wait longer for git and fsync, and a reply
+// after their deadline is discarded; only a child silent past LATE_REPLY_LIMIT_MS is closed.
+const DEADLINE_MS = 1500, LATE_REPLY_LIMIT_MS = 30000;
+const LATE_REPLY_DEADLINES = { decide: 5000, rules_check: 5000, recognise: 1500, answer_delivered: 1500 };
 const same = (a, b) => a && b && ["instance_id", "profile", "native_id", "launch_id"].every(k => typeof a[k] === "string" && a[k] === b[k]);
 const uuid = value => typeof value === "string" && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
 
@@ -44,15 +48,23 @@ export function spawnBridge(bootstrap, generation) {
   });
   let queue = Promise.resolve();
   const bridge = {
-    request(packet) {
-      if (closed || pending) return Promise.reject(new Error("AFK bridge unavailable or busy"));
+    // `reply` settles with the answer or at the op's deadline; `free` settles once the child can take the next packet.
+    send(packet) {
+      const refused = error => ({ reply: Promise.reject(error), free: Promise.resolve() });
+      if (closed || pending) return refused(new Error("AFK bridge unavailable or busy"));
       const line = JSON.stringify(packet) + "\n";
-      if (Buffer.byteLength(line) > FRAME_LIMIT) return Promise.reject(new Error("AFK packet too large"));
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(fail, 1500);
-        pending = { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } };
+      if (Buffer.byteLength(line) > FRAME_LIMIT) return refused(new Error("AFK packet too large"));
+      const late = LATE_REPLY_DEADLINES[packet?.op];
+      let answer;
+      const reply = new Promise((resolve, reject) => { answer = { resolve, reject }; });
+      const free = new Promise(done => {
+        // Past its deadline an answer op gives up but keeps the child: its late reply is read and discarded.
+        const abandon = () => { answer.reject(new Error("AFK bridge reply deadline")); timer = setTimeout(fail, LATE_REPLY_LIMIT_MS); };
+        let timer = setTimeout(late ? abandon : fail, late ?? DEADLINE_MS);
+        pending = { resolve: value => { clearTimeout(timer); answer.resolve(value); done(); }, reject: error => { clearTimeout(timer); answer.reject(error); done(); } };
         child.stdin.write(line);
       });
+      return { reply, free };
     },
     async close() {
       if (child.exitCode !== null || child.signalCode !== null) { fail(); return; }
@@ -63,12 +75,11 @@ export function spawnBridge(bootstrap, generation) {
       clearTimeout(timer);
     },
   };
+  // Each request's deadline starts when it is sent, not while it waits behind an earlier one.
   return { close: bridge.close, request(packet) {
-    let timer;
-    const deadline = new Promise((_, reject) => { timer = setTimeout(() => { fail(); reject(new Error("AFK queued RPC deadline")); }, 1500); });
-    const next = Promise.race([queue.then(() => bridge.request(packet)), deadline]).finally(() => clearTimeout(timer));
-    queue = next.catch(() => {});
-    return next;
+    const sent = queue.then(() => bridge.send(packet));
+    queue = sent.then(s => s.free);
+    return sent.then(s => s.reply);
   } };
 }
 

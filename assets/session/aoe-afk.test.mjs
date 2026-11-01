@@ -4,7 +4,9 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { registerAfk, spawnBridge } from "./aoe-afk.mjs";
+import { createAnswerClient } from "./aoe-afk-answer.mjs";
 
 function fixture(flag = true, delegation) {
   const binding = { instance_id: "instance", profile: "default", native_id: "native", launch_id: randomUUID() };
@@ -160,4 +162,56 @@ test("stdio bridge rejects broken, oversized and unresponsive helpers and reaps 
       await bridge.close();
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// A helper that answers each packet after its `delay` (or `run.delay` for decide) milliseconds.
+const DELAYED_HELPER = `let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", data => {
+  buffer += data;
+  for (let end; (end = buffer.indexOf("\\n")) >= 0; buffer = buffer.slice(end + 1)) {
+    const packet = JSON.parse(buffer.slice(0, end));
+    const value = packet.op === "decide" ? { answer_id: "a1", menu: null, decision: { decision: "answer", choice: "1", rule: "r", reason: "", warnings: [], checks: [] } } : { op: packet.op, n: packet.n };
+    setTimeout(() => process.stdout.write(JSON.stringify({ ok: true, value }) + "\\n"), packet.run?.delay ?? packet.delay ?? 0);
+  }
+});`;
+
+async function delayedBridge(t) {
+  const dir = mkdtempSync(join(tmpdir(), "aoe-afk-test-")), exe = join(dir, "helper");
+  writeFileSync(exe, `#!${process.execPath}\n${DELAYED_HELPER}\n`); chmodSync(exe, 0o700);
+  const bridge = spawnBridge({ aoe_bin: exe }, randomUUID());
+  t.after(async () => { await bridge.close(); rmSync(dir, { recursive: true, force: true }); });
+  return bridge;
+}
+const menu = { source: "pi_dialog", format: "pi.confirm", kind: "confirm", question: "Q?", options: [{ key: "y", label: "Yes" }, { key: "n", label: "No" }] };
+
+test("a decide slower than 1.5 s is answered, and a poll queued behind it keeps the bridge", async t => {
+  const bridge = await delayedBridge(t), client = createAnswerClient(bridge);
+  const decided = client.decide({ run: { delay: 2000 }, menu }), polled = bridge.request({ op: "poll", n: 1 });
+  assert.equal((await decided).decision.decision, "answer");
+  assert.deepEqual(await polled, { op: "poll", n: 1 });
+});
+
+test("a decide past its 5 s deadline stops as engine_unavailable without killing the bridge", async t => {
+  const bridge = await delayedBridge(t), client = createAnswerClient(bridge), started = performance.now();
+  assert.equal((await client.decide({ run: { delay: 6000 }, menu })).decision.reason, "engine_unavailable");
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed >= 4900 && elapsed < 5900, `decide gave up after ${elapsed} ms`);
+  assert.deepEqual(await bridge.request({ op: "poll", n: 2 }), { op: "poll", n: 2 }, "the late decide reply is discarded");
+});
+
+test("the dialog path's 4 s decide timeout applies and a late reply is discarded", async t => {
+  const bridge = await delayedBridge(t), client = createAnswerClient(bridge), started = performance.now();
+  assert.equal((await client.decide({ run: { delay: 4500 }, menu, timeoutMs: 4000 })).decision.reason, "engine_unavailable");
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed >= 3900 && elapsed < 4400, `decide gave up after ${elapsed} ms`);
+  assert.deepEqual(await bridge.request({ op: "poll", n: 3 }), { op: "poll", n: 3 });
+});
+
+test("existing ops still time out at 1.5 s and close the bridge", async t => {
+  const bridge = await delayedBridge(t), started = performance.now();
+  await assert.rejects(bridge.request({ op: "poll", delay: 2000 }));
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed >= 1400 && elapsed < 1900, `poll gave up after ${elapsed} ms`);
+  await assert.rejects(bridge.request({ op: "poll" }), /unavailable/);
 });

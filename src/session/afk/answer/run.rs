@@ -21,8 +21,10 @@ pub struct RunInput {
     pub request_limit: u32,
 }
 
+/// Read-only git. `--no-optional-locks` means these reads never take the index lock, so they cannot block the agent's own git commands.
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
+        .arg("--no-optional-locks")
         .arg("-C")
         .arg(dir)
         .args(args)
