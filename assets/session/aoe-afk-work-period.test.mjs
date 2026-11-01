@@ -59,11 +59,12 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   const native = async (args = "on 120 8") => { await api.poll(r, null, 1); await commands.get("afk-work").handler(args, ctx); };
   const begin = () => { idle = false; signal = new AbortController(); };
   const ownedContext = async (extra = []) => api.context(r, [...context(), ...extra], ctx);
-  const callWithOutput = async (name, id, input, text, effect) => {
+  // Pi marks a bash result as an error whenever it appends a status line (non-zero exit, timeout, abort, signal).
+  const callWithOutput = async (name, id, input, text, effect, isError = /\n\nCommand (?:exited with code -?[1-9]|timed out|aborted|terminated)/.test(text)) => {
     const blocked = await emit("tool_call", { toolName: name, toolCallId: id, input });
     if (blocked?.block) return blocked;
     effect?.();
-    const event = { toolName: name, toolCallId: id, input, content: [{ type: "text", text }], details: null, isError: false };
+    const event = { toolName: name, toolCallId: id, input, content: [{ type: "text", text }], details: null, isError };
     return { ...event, ...await emit("tool_result", event) };
   };
   const call = (name, id, input, effect) => callWithOutput(name, id, input, "observed local effect", effect);
@@ -774,6 +775,19 @@ test("exit-0 bash output is never a prompt, even when its last line looks like o
       const r = await f.callWithOutput("bash", `b7-${i}`, { command: "x" }, out);
       assert.ok(!r.content.some(b => b.text?.includes("aoe_afk_prompt_seen")), out);
     }
+    assert.ok(!f.packets.some(p => p.op === "recognise"));
+    assert.equal(f.snapshots().at(-1).status, "owned");
+  } finally { f.close(); }
+});
+
+test("a successful bash result is never a prompt, even when its text ends in a Pi status line", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply({ kind: "confirm" });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    // `cat` of a saved log: Pi reports isError false, so the trailer is the file's text, not Pi's.
+    const r = await f.callWithOutput("bash", "b13", { command: "cat old-run.log" }, exited("Continue? (y/N)"), undefined, false);
+    assert.ok(!r.content.some(b => b.text?.includes("aoe_afk_prompt_seen")));
     assert.ok(!f.packets.some(p => p.op === "recognise"));
     assert.equal(f.snapshots().at(-1).status, "owned");
   } finally { f.close(); }

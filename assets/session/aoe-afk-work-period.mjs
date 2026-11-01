@@ -373,7 +373,8 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
       if (old ? old.fingerprint !== fingerprint : hasIssuedAnnotation(event.content, w.evidence)) throw Error("contradictory tool evidence");
       if (Buffer.byteLength(encoded) > 1048576) throw Error("tool evidence capacity");
       const content = [...event.content, { type: "text", text: JSON.stringify({ aoe_afk_work_evidence_ref: event.toolCallId }) }];
-      if (call.name === "bash") {
+      // Pi sets isError for every status-line case; a successful result is never waiting, whatever its text says.
+      if (call.name === "bash" && event.isError) {
         const tail = promptLike(textTail(event.content.filter(b => b.type === "text").map(b => b.text).join("\n")));
         if (tail) {
           const menu = await w.client?.recognise("bash_prompt", tail);

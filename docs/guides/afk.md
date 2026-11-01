@@ -247,9 +247,10 @@ and `.`, versioned tool names such as `pip3.11`, and pushes of `HEAD` while on
   `source = "ask_user", answer = "other"`.
 - **Bash prompts.** Commands must not wait for input: pass answers as flags or
   with `yes |`. Bash calls get a 600 s timeout when the agent passes none, per
-  call; there is no global setting yet. Only output whose Pi trailer reports a
-  non-zero exit, a timeout, an abort or "terminated without an exit code" can be a
-  prompt, so a command that exited 0 is never treated as waiting. A recognised
+  call; there is no global setting yet. Only a result Pi marks as an error, whose
+  trailer reports a non-zero exit, a timeout, an abort or "terminated without an
+  exit code", can be a prompt, so a command that exited 0 is never treated as
+  waiting, even if its output ends in text that looks like that trailer. A recognised
   prompt is annotated `aoe_afk_prompt_seen` and its evidence does not count for a
   checkpoint until an `aoe_afk_answer` is answered; any answered call releases all
   held prompts. An unrecognised prompt stops the period as
