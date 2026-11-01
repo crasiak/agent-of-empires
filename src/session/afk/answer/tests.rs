@@ -197,7 +197,7 @@ fn format_corpus_matches_expected_menus() {
             checked += 1;
         }
     }
-    assert!(checked >= 15, "corpus too small: {checked}");
+    assert!(checked >= 17, "corpus too small: {checked}");
 }
 
 #[test]

@@ -1,0 +1,2 @@
+{ "schema": "aoe.afk-menu.v1", "source": "bash_prompt", "format": "text.numbered-list", "kind": "choice", "question": "Do you want to proceed?", "subject": null,
+  "options": [ { "key": "1", "label": "Yes", "role": "approve" }, { "key": "2", "label": "No", "role": "deny" } ], "free_text": false, "warnings": [], "deadline_ms": null }

@@ -200,7 +200,8 @@ impl Formats {
 
     /// First match wins, in load order. A recogniser that can't build a valid menu is no match.
     pub fn recognise(&self, source: Source, text: &str) -> Option<Menu> {
-        // Fenced and blockquoted text is quoted data, never a live menu.
+        // Fenced text is quoted data, never a live menu. So is a `>` blockquote in agent text; in a
+        // prompt or pane `>` is a selection cursor and its row is an option.
         let mut fence: Option<&str> = None;
         let lines: Vec<&str> = text
             .lines()
@@ -213,7 +214,10 @@ impl Formats {
                     (Some(open), Some(m)) if open == m => fence = None,
                     _ => {}
                 }
-                fence.is_none() && marker.is_none() && !t.is_empty() && !t.starts_with('>')
+                fence.is_none()
+                    && marker.is_none()
+                    && !t.is_empty()
+                    && !(source == Source::AgentText && t.starts_with('>'))
             })
             .collect();
         let window = &lines[lines.len().saturating_sub(WINDOW)..];
