@@ -29,6 +29,8 @@ pub struct RunContext {
     pub home: Option<PathBuf>,
     /// Branches a push must not touch: `main` and `master`, plus the repo's default branch.
     pub protected_branches: Vec<String>,
+    /// False when the default branch could not be looked up in time; every `git push` then stops.
+    pub protected_branches_known: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

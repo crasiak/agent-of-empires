@@ -107,6 +107,9 @@ static DEPENDENCY_TOOLS: &[DependencyTool] = &[
         groups: &[],
     },
 ];
+/// Any `git push`, for when the protected branches are unknown.
+static ANY_PUSH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bgit\b[^\n;&|]*\bpush\b").unwrap());
 // A bare `git push` (no refspec) can't be judged without branch context, so it passes.
 fn push_regex(protected: &[String]) -> Regex {
     let branches = protected
@@ -556,7 +559,10 @@ pub fn run_checks(menu: &Menu, run: &RunContext, allow_dependencies: bool) -> Ve
         },
         Check {
             id: "protected_push",
-            result: fail(push_regex(&protected).is_match(subject)),
+            result: fail(
+                push_regex(&protected).is_match(subject)
+                    || (!run.protected_branches_known && ANY_PUSH.is_match(subject)),
+            ),
         },
         Check {
             id: "request_share",

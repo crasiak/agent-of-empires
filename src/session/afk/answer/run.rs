@@ -156,20 +156,26 @@ pub(super) fn diff_lines_with(git: &dyn Fn(&[&str]) -> Outcome) -> Option<u64> {
     )
 }
 
-/// `main` and `master`, plus the repo's default branch when `origin/HEAD` names one.
-fn protected_branches(root: &Path, budget: &GitBudget) -> Vec<String> {
+/// `main` and `master`, plus the repo's default branch when `origin/HEAD` names one. The flag is
+/// false when git ran out of time, so the default branch is unknown; a repo with no `origin/HEAD`
+/// is known to have none.
+pub(super) fn protected_branches_with(git: &dyn Fn(&[&str]) -> Outcome) -> (Vec<String>, bool) {
     let mut branches = vec!["main".to_string(), "master".to_string()];
-    let default = git(root, &["symbolic-ref", "refs/remotes/origin/HEAD"], budget)
-        .and_then(|r| r.strip_prefix("refs/remotes/origin/").map(str::to_string));
+    let default = match git(&["symbolic-ref", "refs/remotes/origin/HEAD"]) {
+        Outcome::Output(r) => r.strip_prefix("refs/remotes/origin/").map(str::to_string),
+        Outcome::Failed => None,
+        Outcome::TimedOut => return (branches, false),
+    };
     if let Some(default) = default.filter(|d| !d.is_empty() && !branches.contains(d)) {
         branches.push(default);
     }
-    branches
+    (branches, true)
 }
 
 pub fn context(input: &RunInput, budget: &GitBudget) -> RunContext {
     let root = repo_root(&input.cwd, budget);
-    let protected_branches = protected_branches(&root, budget);
+    let (protected_branches, protected_branches_known) =
+        protected_branches_with(&|args| git_outcome(&root, args, budget));
     RunContext {
         goal: input.goal.clone(),
         policy: input.policy,
@@ -181,5 +187,6 @@ pub fn context(input: &RunInput, budget: &GitBudget) -> RunContext {
         estimate_diff_lines: None,
         home: std::env::var_os("HOME").map(PathBuf::from),
         protected_branches,
+        protected_branches_known,
     }
 }

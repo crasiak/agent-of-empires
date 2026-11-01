@@ -601,6 +601,7 @@ mod decide {
             estimate_diff_lines: None,
             home: None,
             protected_branches: vec!["main".into(), "master".into()],
+            protected_branches_known: true,
         }
     }
     fn rules(text: &str) -> Rules {
@@ -1422,6 +1423,43 @@ mod decide {
     }
 
     #[test]
+    fn unknown_protected_branches_stop_every_push() {
+        let allow_all = rules("[[rule]]\nid='all'\nkind='permission'\nanswer='approve'");
+        let mut r = run(Policy::Rules);
+        r.protected_branches_known = false;
+        for subject in [
+            "Bash command: git push origin trunk",
+            "Bash command: git push origin feature/x",
+            "Bash command: git push",
+        ] {
+            assert_eq!(
+                stop(&decide(&perm(subject), &r, &allow_all, None)),
+                Some("scope:protected_push"),
+                "{subject}"
+            );
+        }
+        assert_eq!(
+            choice(&decide(
+                &perm("Bash command: git status"),
+                &r,
+                &allow_all,
+                None
+            )),
+            Some("1")
+        );
+        r.protected_branches_known = true;
+        assert_eq!(
+            choice(&decide(
+                &perm("Bash command: git push origin feature/x"),
+                &r,
+                &allow_all,
+                None
+            )),
+            Some("1")
+        );
+    }
+
+    #[test]
     fn tilde_resolves_against_the_runs_home() {
         let allow_all = rules("[[rule]]\nid='all'\nkind='permission'\nanswer='approve'");
         let subject = perm("Bash command: rm ~/x");
@@ -1770,6 +1808,65 @@ mod log {
             }
         };
         assert_eq!(diff_lines_with(&missing), Some(3));
+    }
+
+    #[test]
+    fn protected_branches_fail_closed_when_the_lookup_times_out() {
+        use super::super::decide::{decide, Decision};
+        use super::super::menu::Kind;
+        use super::super::rules::Rules;
+        use super::super::run::protected_branches_with;
+        let lookup = |outcome: fn() -> Outcome| move |_: &[&str]| outcome();
+        let (branches, known) = protected_branches_with(&lookup(|| Outcome::TimedOut));
+        assert!(!known);
+        assert_eq!(branches, ["main", "master"]);
+        // No origin/HEAD is an answer, not a failure to ask.
+        let (branches, known) = protected_branches_with(&lookup(|| Outcome::Failed));
+        assert!(known);
+        assert_eq!(branches, ["main", "master"]);
+        let (branches, known) = protected_branches_with(&lookup(|| {
+            Outcome::Output("refs/remotes/origin/trunk".into())
+        }));
+        assert!(known);
+        assert_eq!(branches, ["main", "master", "trunk"]);
+
+        // End to end: a repo whose budget is spent before the lookup.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_in(&root, &["init", "-q"]);
+        let spent = GitBudget::new(std::time::Duration::ZERO);
+        let ctx = super::super::run::context(&run_input(&root), &spent);
+        assert!(!ctx.protected_branches_known);
+        let allow_all = Rules {
+            rules: Rules::parse(
+                "t",
+                "[[rule]]\nid='all'\nkind='permission'\nanswer='approve'",
+            )
+            .unwrap(),
+            ..Rules::default()
+        };
+        let menu = super::rules::menu(
+            Kind::Permission,
+            Some("Bash command: git push origin trunk"),
+            &["Yes", "No"],
+        );
+        let d = decide(&menu, &ctx, &allow_all, None);
+        assert!(
+            matches!(&d, Decision::Stop { reason, .. } if reason == "scope:protected_push"),
+            "{d:?}"
+        );
+        // With time to ask, a repo without origin/HEAD lets a feature push through.
+        let ctx = super::super::run::context(&run_input(&root), &GitBudget::standard());
+        assert!(ctx.protected_branches_known);
+        let menu = super::rules::menu(
+            Kind::Permission,
+            Some("Bash command: git push origin feature/x"),
+            &["Yes", "No"],
+        );
+        assert!(matches!(
+            decide(&menu, &ctx, &allow_all, None),
+            Decision::Answer { .. }
+        ));
     }
 
     #[test]
