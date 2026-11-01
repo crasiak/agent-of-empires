@@ -76,9 +76,9 @@ struct Period {
     completion_basis: Option<String>,
     settlement_status: String,
     /// Absent from extensions that predate menu answering.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     policy: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     answers: Option<Answers>,
 }
 
@@ -335,6 +335,8 @@ mod tests {
         };
         assert!(reply.valid(&request, &generation, 1200));
         assert!(reply.describe().contains("no active authority"));
+        let period = serde_json::to_value(&reply).unwrap()["period"].clone();
+        assert!(period.get("policy").is_none() && period.get("answers").is_none());
         for mutation in ["start", "expired", "generation", "binding", "counter"] {
             let mut req = serde_json::to_value(&request).unwrap();
             let mut value = reply.clone();
