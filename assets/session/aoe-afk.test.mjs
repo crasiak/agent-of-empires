@@ -164,7 +164,7 @@ test("stdio bridge rejects broken, oversized and unresponsive helpers and reaps 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-// A helper that answers each packet after its `delay` (or `run.delay` for decide) milliseconds.
+// A helper that answers each packet after its `delay` (or `run.delay` for decide) milliseconds; a negative delay never answers.
 const DELAYED_HELPER = `let buffer = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", data => {
@@ -172,7 +172,8 @@ process.stdin.on("data", data => {
   for (let end; (end = buffer.indexOf("\\n")) >= 0; buffer = buffer.slice(end + 1)) {
     const packet = JSON.parse(buffer.slice(0, end));
     const value = packet.op === "decide" ? { answer_id: "a1", menu: null, decision: { decision: "answer", choice: "1", rule: "r", reason: "", warnings: [], checks: [] } } : { op: packet.op, n: packet.n };
-    setTimeout(() => process.stdout.write(JSON.stringify({ ok: true, value }) + "\\n"), packet.run?.delay ?? packet.delay ?? 0);
+    const delay = packet.run?.delay ?? packet.delay ?? 0;
+    if (delay >= 0) setTimeout(() => process.stdout.write(JSON.stringify({ ok: true, value }) + "\\n"), delay);
   }
 });`;
 
@@ -214,4 +215,14 @@ test("existing ops still time out at 1.5 s and close the bridge", async t => {
   const elapsed = performance.now() - started;
   assert.ok(elapsed >= 1400 && elapsed < 1900, `poll gave up after ${elapsed} ms`);
   await assert.rejects(bridge.request({ op: "poll" }), /unavailable/);
+});
+
+test("a decide that never answers holds a queued poll for seconds, not tens of seconds", async t => {
+  const bridge = await delayedBridge(t), client = createAnswerClient(bridge), started = performance.now();
+  const decided = client.decide({ run: { delay: -1 }, menu });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const polled = await bridge.request({ op: "poll", n: 4 }).then(() => "answered", () => "refused");
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed < 7000, `queued poll ${polled} after ${elapsed} ms`);
+  assert.equal((await decided).decision.reason, "engine_unavailable");
 });

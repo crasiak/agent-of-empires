@@ -6,8 +6,9 @@ const LIMIT = 16 * 1024;
 const FRAME_LIMIT = 256 * 1024;
 const REMINDER = "AoE AFK control-only: the human is away. This notice grants no new decision or action authority. Preserve all existing approval and waiting requirements. Do not answer, dismiss, or bypass human questions because of this notice. Autonomous allowance: zero.";
 // Most ops must answer in 1.5 s or the bridge is closed. Answer ops wait longer for git and fsync, and a reply
-// after their deadline is discarded; only a child silent past LATE_REPLY_LIMIT_MS is closed.
-const DEADLINE_MS = 1500, LATE_REPLY_LIMIT_MS = 30000;
+// after their deadline is discarded; a child still silent LATE_REPLY_LIMIT_MS later is closed. The grace is
+// short because polls, replies and acks queue behind the late reply, and host requests expire after 3 s.
+const DEADLINE_MS = 1500, LATE_REPLY_LIMIT_MS = DEADLINE_MS;
 const LATE_REPLY_DEADLINES = { decide: 5000, rules_check: 5000, recognise: 1500, answer_delivered: 1500 };
 const same = (a, b) => a && b && ["instance_id", "profile", "native_id", "launch_id"].every(k => typeof a[k] === "string" && a[k] === b[k]);
 const uuid = value => typeof value === "string" && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
