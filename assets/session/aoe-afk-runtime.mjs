@@ -8,6 +8,7 @@ import { createCollector } from "./aoe-afk-usage.mjs";
 import { createUsageWitness, USAGE_COVERAGE } from "./aoe-afk-usage-guard.mjs";
 import { automaticWake } from "./aoe-afk-wake.mjs";
 import { workPeriodRuntime, workCheckpointParameters } from "./aoe-afk-work-period.mjs";
+import { answerParameters } from "./aoe-afk-answer.mjs";
 
 const COVERAGE = "stock-sdk-main-loop-reservations";
 const NAMES = ["aoe_afk_read", "aoe_afk_record", "aoe_afk_apply", "aoe_afk_checkpoint"];
@@ -420,6 +421,6 @@ export function delegationRuntime(pi) {
 
 export default function (pi) {
   const delegation = delegationRuntime(pi);
-  const workPeriod = workPeriodRuntime(pi, { version: VERSION, parameters: workCheckpointParameters(Type) });
+  const workPeriod = workPeriodRuntime(pi, { version: VERSION, parameters: workCheckpointParameters(Type), answerParameters: answerParameters(Type) });
   registerAfk(pi, { protocol: 6, delegation, workPeriod });
 }

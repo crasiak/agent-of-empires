@@ -18,7 +18,7 @@ const capture = () => { const lines = []; return { lines, trace: createTrace(lin
 test("copied observer entry initializes through the actual source loader outside node_modules", () => {
   const dir = mkdtempSync(join(tmpdir(), "observer-entry-"));
   try {
-    for (const file of ["aoe-afk-observer-entry-fixture.mjs", "aoe-afk-observer-fixture.mjs", "aoe-afk-observer-audit.mjs", "aoe-afk-observer-probes.mjs", "aoe-afk.mjs", "aoe-afk-runtime.mjs", "aoe-afk-work-period.mjs", "aoe-afk-work-state.mjs", "aoe-afk-work-native.mjs", "aoe-afk-questions.mjs", "aoe-afk-usage.mjs", "aoe-afk-usage-guard.mjs", "aoe-afk-wake.mjs"]) {
+    for (const file of ["aoe-afk-observer-entry-fixture.mjs", "aoe-afk-observer-fixture.mjs", "aoe-afk-observer-audit.mjs", "aoe-afk-observer-probes.mjs", "aoe-afk.mjs", "aoe-afk-runtime.mjs", "aoe-afk-work-period.mjs", "aoe-afk-answer.mjs", "aoe-afk-work-state.mjs", "aoe-afk-work-native.mjs", "aoe-afk-questions.mjs", "aoe-afk-usage.mjs", "aoe-afk-usage-guard.mjs", "aoe-afk-wake.mjs"]) {
       writeFileSync(join(dir, file), readFileSync(resolve("assets/session", file)));
     }
     const script = `import assert from 'node:assert/strict';

@@ -43,15 +43,17 @@ async function runNativeSdk(early, missingCheckpoint = false, fourSlot = false) 
     Object.assign(fixture, { binding, capture(api, r) { fixture.api = api; fixture.r = r; }, replies: [], command: null,
       bridge() { return { async request(p) {
         if (p.op === "poll") return { policy: null, probe: null, delegation: null, runtime_probe: null, work_period_capability: 1, work_period_request: fixture.command };
+        if (p.op === "rules_check") return { valid: true, count: 0, sources: [], format_warnings: [] };
         fixture.replies.push(p); return {};
       }, async close() {} }; } });
     const extension = join(cwd, "extension.mjs");
     await writeFile(extension, `import { VERSION } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { workPeriodRuntime,workCheckpointParameters } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk-work-period.mjs")).href)};
+import { answerParameters } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk-answer.mjs")).href)};
 import { registerAfk } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk.mjs")).href)};
 import { delegationRuntime } from ${JSON.stringify(pathToFileURL(resolve("assets/session/aoe-afk-runtime.mjs")).href)};
-export default function(pi){const f=globalThis[${JSON.stringify(key)}];const delegation=delegationRuntime(pi);const api=workPeriodRuntime(pi,{version:VERSION,parameters:workCheckpointParameters(Type)});
+export default function(pi){const f=globalThis[${JSON.stringify(key)}];const delegation=delegationRuntime(pi);const api=workPeriodRuntime(pi,{version:VERSION,parameters:workCheckpointParameters(Type),answerParameters:answerParameters(Type)});
 registerAfk(pi,{protocol:6,delegation,workPeriod:{...api,attach(r){api.attach(r);f.capture(api,r);}},bridge:f.bridge,schedule:()=>()=>{}});}
 `);
     const extensionRuntime = createExtensionRuntime(); extensionRuntime.flagValues.set("aoe-afk-binding", JSON.stringify(bootstrap));

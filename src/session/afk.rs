@@ -143,6 +143,10 @@ pub(crate) fn launch_arguments(
             include_bytes!("../../assets/session/aoe-afk-work-period.mjs").as_slice(),
         ),
         (
+            "aoe-afk-answer.mjs",
+            include_bytes!("../../assets/session/aoe-afk-answer.mjs").as_slice(),
+        ),
+        (
             "aoe-afk-questions.mjs",
             include_bytes!("../../assets/session/aoe-afk-questions.mjs").as_slice(),
         ),

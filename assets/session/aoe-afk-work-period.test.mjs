@@ -6,13 +6,15 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { workPeriodRuntime, WORK_CHECKPOINT_TOOL } from "./aoe-afk-work-period.mjs";
 import { WORK_PERIOD_MARKER } from "./aoe-afk-work-native.mjs";
+import { ANSWER_TOOL } from "./aoe-afk-answer.mjs";
 
 async function fixture({ version = "1.2.0", preserving = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), "aoe-work-runtime-")), file = join(root, "native.jsonl");
   const binding = { instance_id: "test", profile: "default", native_id: randomUUID(), launch_id: randomUUID() }, generation = randomUUID();
   let wall = 100000, mono = 0, idle = true, signal, leaf = "root", sequence = 0, memoryOnly = false, aborted = 0, ended = 0, atTurnEnd = false;
   const rows = [], handlers = new Map(), tools = new Map(), commands = new Map(), packets = [], messages = [], notices = [];
-  let answer = true, confirmHook, confirmations = 0, activeTools = ["read", "write", "edit", "bash", WORK_CHECKPOINT_TOOL];
+  let answer = true, confirmHook, confirmMessage, confirmations = 0, decideReply = { decision: { decision: "stop", reason: "no_rule", checks: [] } },
+    rulesCheck = { valid: true, count: 1, sources: ["inline rule 1"], format_warnings: [] }, activeTools = ["read", "write", "edit", "bash", WORK_CHECKPOINT_TOOL];
   writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: binding.native_id }) + "\n", { mode: 0o600 });
   const append = row => {
     const entry = { ...row, id: `entry-${++sequence}`, parentId: leaf }; rows.push(entry); leaf = entry.id;
@@ -25,8 +27,8 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   const manager = { getSessionId: () => binding.native_id, getSessionFile: () => file, getLeafId: () => leaf, getEntries: () => rows, getBranch: () => rows };
   const ctx = { mode: "tui", hasUI: true, cwd: root, inputProvenance: "pipeline-v1", sessionManager: manager, get signal() { return signal?.signal; }, isIdle: () => idle,
     hasPendingMessages: () => false, abort: () => { aborted++; signal?.abort(); }, ui: { uiPromptOwnership: "exclusive-v1", setStatus() {}, getEditorText: () => "", notify: text => notices.push(text),
-      confirm: async (_title, _message, options) => {
-        confirmations++; await emit("ui_prompt_start", { kind: "confirm", owner: options.owner }); await confirmHook?.();
+      confirm: async (_title, message, options) => {
+        confirmations++; confirmMessage?.(message); await emit("ui_prompt_start", { kind: "confirm", owner: options.owner }); await confirmHook?.();
         void emit("ui_prompt_end", { kind: "confirm", owner: options.owner }); return answer;
       } },
     endRunPreservingQueue: () => { if (!atTurnEnd) return; ended++; return { version: 1, isCurrent: () => true, completion: Promise.resolve(true) }; } };
@@ -43,7 +45,10 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   const api = workPeriodRuntime(pi, { version, parameters: { type: "object" }, wall: () => wall, mono: () => mono });
   await emit("session_start");
   const r = { ctx, bootstrap: { binding }, generation, revision: 0, state: "off", view: null, restoredGuards: new Map(), questionGuards: [],
-    bridge: { async request(packet) { packets.push(structuredClone(packet)); return {}; } } };
+    bridge: { async request(packet) {
+      packets.push(structuredClone(packet));
+      return packet.op === "decide" ? (typeof decideReply === "function" ? decideReply() : structuredClone(decideReply)) : packet.op === "rules_check" ? structuredClone(rulesCheck) : {};
+    } } };
   api.attach(r);
   const context = () => rows.filter(e => e.type === "message" && e.message.role === "user").map(e => e.message);
   await api.context(r, context(), ctx);
@@ -63,10 +68,12 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   const checkpoint = (status, ids = [], extra = {}) => tools.get(WORK_CHECKPOINT_TOOL).execute("checkpoint", { status,
     summary: status === "completed" ? "Both files and validation complete" : "A real unit changed; next unit remains", next_step: status === "unfinished" ? "Complete and validate the remaining unit" : null,
     evidence: ids, human_required: false, depends_on: [], ...extra }, ctx.signal, undefined, ctx);
+  const answerTool = input => tools.get(ANSWER_TOOL).execute("id", input, ctx.signal, undefined, ctx);
   const boundary = () => ({ outcome: "completed", continue: false, entries: [], context: { pendingMessages: [], contextMessages: context() } });
-  return { root, file, binding, generation, rows, r, ctx, api, packets, messages, notices, native, emit, request, rpc, begin, ownedContext, call, checkpoint, boundary, context, user,
+  return { root, file, binding, generation, rows, r, ctx, api, packets, messages, notices, native, emit, request, rpc, begin, ownedContext, call, checkpoint, answer: answerTool, boundary, context, user,
     snapshots: () => rows.filter(e => e.type === "custom" && e.customType === WORK_PERIOD_MARKER).map(e => e.data),
-    confirm: (value, hook) => { answer = value; confirmHook = hook; },
+    confirm: (value, hook, onMessage) => { answer = value; confirmHook = hook; confirmMessage = onMessage; },
+    decideReply: value => decideReply = value, rulesCheckError: error => rulesCheck = { valid: false, error, format_warnings: [] },
     activeTools: value => activeTools = value, get confirmations() { return confirmations; },
     memoryOnly: () => memoryOnly = true, advance: (w, m) => { wall += w; mono += m; }, get aborted() { return aborted; }, get ended() { return ended; }, close: () => rmSync(root, { recursive: true, force: true }) };
 }
@@ -444,4 +451,107 @@ test("checkpoint must be active before consent and remain active before effects"
       assert.match(f.notices.at(-1), /checkpoint|started/);
     } finally { f.close(); }
   }
+});
+
+test("aoe_afk_answer returns the engine decision labelled afk/<policy> and logs delivery", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply({ answer_id: "a1", menu: {}, decision: { decision: "answer", choice: "2", rule: "r", reason: "ok", warnings: [], checks: [] } });
+    await f.native("on --policy rules 120 8"); f.begin(); await f.ownedContext();
+    const out = await f.answer({ question: "Which?", options: [{ key: "1", label: "A" }, { key: "2", label: "B" }], proposal: "2", reason: "B fits" });
+    assert.deepEqual(out.details, { answered_by: "afk/rules", choice: "2", rule: "r", reason: "ok" });
+    const decide = f.packets.find(p => p.op === "decide");
+    assert.deepEqual(decide.proposal, { key: "2", reason: "B fits" });
+    assert.equal(decide.run.policy, "rules"); assert.equal(decide.run.cwd, f.root); assert.equal(decide.menu.format, "tool.aoe_afk_answer");
+    assert.ok(f.packets.some(p => p.op === "answer_delivered" && p.answer_id === "a1" && p.delivered === "ok"));
+    assert.equal(f.snapshots().at(-1).status, "owned");
+  } finally { f.close(); }
+});
+
+test("a stopped aoe_afk_answer ends the period as menu_stopped", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply({ answer_id: "a2", menu: {}, decision: { decision: "stop", reason: "no_rule", checks: [] } });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const out = await f.answer({ question: "Q?", options: [{ key: "1", label: "Yes" }], proposal: null, reason: "" });
+    assert.deepEqual(out.details, { stopped: "no_rule" });
+    assert.equal(f.snapshots().at(-1).reason, "menu_stopped");
+    assert.equal(f.packets.find(p => p.op === "decide").proposal.key, undefined);
+    assert.ok(!f.packets.some(p => p.op === "answer_delivered"));
+  } finally { f.close(); }
+});
+
+test("consent shows the yolo warning and status counts answers", async () => {
+  const f = await fixture();
+  try {
+    let message;
+    f.confirm(true, undefined, m => message = m);
+    await f.native("on --policy yolo 120 8");
+    assert.match(message, /YOLO: AFK will answer every menu, including permission prompts\. Scope checks only warn\./);
+    assert.match(message, /policy: yolo/);
+    assert.ok(!f.packets.some(p => p.op === "rules_check"), "yolo needs no rule check");
+    assert.equal(f.snapshots().at(-1).policy, "yolo");
+    f.decideReply({ answer_id: "a3", menu: {}, decision: { decision: "answer", choice: "1", rule: null, reason: "yolo", warnings: [], checks: [] } });
+    f.begin(); await f.ownedContext();
+    assert.equal((await f.answer({ question: "Q?", options: [{ key: "1", label: "Yes" }], proposal: "1", reason: "go" })).details.answered_by, "afk/yolo");
+    await f.native("status");
+    assert.match(f.notices.at(-1), /answers: 1 \(rules 0, yolo 1\), stops: 0/);
+    assert.deepEqual((await f.rpc(f.request("inspect"))).period.answers, { rules: 0, yolo: 1, stops: 0 });
+  } finally { f.close(); }
+});
+
+test("consent shows the rule count and sources under rules", async () => {
+  const f = await fixture();
+  try {
+    let message;
+    f.confirm(true, undefined, m => message = m);
+    await f.native(`on --rule "id='a', answer='stop'" 120 8`);
+    assert.match(message, /policy: rules; rules: 1 \(inline rule 1\)/);
+    assert.doesNotMatch(message, /YOLO/);
+    assert.deepEqual(f.packets.find(p => p.op === "rules_check").run.rules, ["id='a', answer='stop'"]);
+    assert.deepEqual(f.snapshots().at(-1).rules, ["id='a', answer='stop'"]);
+  } finally { f.close(); }
+});
+
+test("invalid rules refuse the start under rules", async () => {
+  const f = await fixture();
+  try {
+    f.rulesCheckError("afk-rules.toml: invalid rules file");
+    await f.native("on 120 8");
+    assert.ok(f.notices.some(n => n.includes("afk-rules.toml")));
+    assert.equal(f.snapshots().length, 0);
+  } finally { f.close(); }
+});
+
+test("bad /afk-work on arguments and oversized rule grants refuse the start", async () => {
+  for (const args of ["on --policy review 120 8", "on 1 2 3", `on ${Array.from({ length: 8 }, () => `--rule "${"x".repeat(1024)}"`).join(" ")} 120 8`]) {
+    const f = await fixture();
+    try {
+      await f.native(args);
+      assert.equal(f.snapshots().length, 0, args); assert.equal(f.messages.length, 0, args);
+      assert.match(f.notices.at(-1), args.includes("--rule") ? /rules too large.*no authority created/ : /no authority created/, args);
+    } finally { f.close(); }
+  }
+});
+
+test("aoe_afk_answer is admitted without counting a tool and refused outside an owned period", async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.emit("tool_call", { toolName: ANSWER_TOOL, toolCallId: "early", input: {} }))?.block, true);
+    await assert.rejects(f.answer({ question: "Q?", options: [{ key: "1", label: "Yes" }], proposal: null, reason: "" }), /No owned/);
+    await f.native(); f.begin(); await f.ownedContext();
+    assert.equal(await f.emit("tool_call", { toolName: ANSWER_TOOL, toolCallId: "owned", input: {} }), undefined);
+    assert.equal(f.snapshots().at(-1).tools_used, 0);
+  } finally { f.close(); }
+});
+
+test("an answer decided after the period ended is logged as failed delivery", async () => {
+  const f = await fixture();
+  try {
+    await f.native(); f.begin(); await f.ownedContext();
+    f.decideReply(() => { f.ctx.abortPreservingQueue(); return { answer_id: "a4", menu: {}, decision: { decision: "answer", choice: "1", rule: "r", reason: "ok", warnings: [], checks: [] } }; });
+    await assert.rejects(f.answer({ question: "Q?", options: [{ key: "1", label: "Yes" }], proposal: "1", reason: "go" }), /ended before the answer/);
+    assert.ok(f.packets.some(p => p.op === "answer_delivered" && p.answer_id === "a4" && p.delivered === "failed"));
+    assert.deepEqual((await f.rpc(f.request("inspect"))).period.answers, { rules: 0, yolo: 0, stops: 0 });
+  } finally { f.close(); }
 });

@@ -75,6 +75,19 @@ struct Period {
     next_step: Option<String>,
     completion_basis: Option<String>,
     settlement_status: String,
+    /// Absent from extensions that predate menu answering.
+    #[serde(default)]
+    policy: Option<String>,
+    #[serde(default)]
+    answers: Option<Answers>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Answers {
+    rules: u32,
+    yolo: u32,
+    stops: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -144,6 +157,9 @@ impl Inspection {
                         p.settlement_status.as_str(),
                         "proved" | "pending" | "not_proved"
                     )
+                    && p.policy
+                        .as_deref()
+                        .is_none_or(|s| matches!(s, "rules" | "yolo"))
             })
     }
 
@@ -156,6 +172,17 @@ impl Inspection {
             p.requests_used, p.request_limit, p.tools_used, p.tool_limit, p.expires_at_ms, p.settlement_status,
             p.reason.as_deref().unwrap_or("current task"), p.summary.as_deref().unwrap_or("No checkpoint yet"),
             p.next_step.as_deref().unwrap_or("none recorded"), self.detail)
+            + &match (&p.policy, &p.answers) {
+                (Some(policy), Some(a)) => format!(
+                    "\nAnswer policy: {policy}; answers: {} (rules {}, yolo {}), stops: {}",
+                    a.rules.saturating_add(a.yolo),
+                    a.rules,
+                    a.yolo,
+                    a.stops
+                ),
+                (Some(policy), None) => format!("\nAnswer policy: {policy}"),
+                _ => String::new(),
+            }
     }
 }
 
@@ -300,6 +327,8 @@ mod tests {
                 next_step: None,
                 completion_basis: None,
                 settlement_status: "not_proved".into(),
+                policy: None,
+                answers: None,
             }),
         };
         assert!(reply.valid(&request, &generation, 1200));
@@ -328,6 +357,31 @@ mod tests {
                 _ => unreachable!(),
             }
         }
+        let mut answered = serde_json::to_value(&reply).unwrap();
+        answered["period"]["policy"] = serde_json::json!("yolo");
+        answered["period"]["answers"] = serde_json::json!({"rules": 0, "yolo": 2, "stops": 1});
+        let parsed: Inspection = serde_json::from_value(answered.clone()).unwrap();
+        assert!(parsed.valid(&request, &generation, 1200));
+        assert!(parsed
+            .describe()
+            .contains("Answer policy: yolo; answers: 2 (rules 0, yolo 2), stops: 1"));
+        let mut older = answered.clone();
+        let period = older["period"].as_object_mut().unwrap();
+        period.remove("policy");
+        period.remove("answers");
+        let older: Inspection = serde_json::from_value(older).unwrap();
+        assert!(older.valid(&request, &generation, 1200));
+        assert!(!older.describe().contains("Answer policy"));
+        let mut bad = answered.clone();
+        bad["period"]["policy"] = serde_json::json!("review");
+        assert!(!serde_json::from_value::<Inspection>(bad).unwrap().valid(
+            &request,
+            &generation,
+            1200
+        ));
+        let mut bad = answered;
+        bad["period"]["answers"]["asks"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<Inspection>(bad).is_err());
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path(), "test", true).unwrap();
         store.write(REQUEST, &request).unwrap();
