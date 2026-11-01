@@ -60,7 +60,7 @@ async function runAnswerDemo(policy, dialog) {
     Object.assign(fixture, { binding, capture(api, r) { fixture.api = api; fixture.r = r; }, command: null,
       bridge() { return { async request(p) {
         if (p.op === "poll") return { policy: null, probe: null, delegation: null, runtime_probe: null, work_period_capability: 1, work_period_request: fixture.command };
-        if (p.op === "rules_check") return { valid: true, count: p.run.rules.length, sources: p.run.rules.map((_, i) => `inline rule ${i + 1}`), format_warnings: [] };
+        if (p.op === "rules_check") return { valid: true, count: p.run.rules.length, sources: p.run.rules.map((_, i) => `inline rule ${i + 1}`), format_warnings: [], digest: "d".repeat(64) };
         if (p.op === "recognise") { const menu = stubRecognise(p.source, p.text); recognised.push({ source: p.source, matched: !!menu }); return { menu }; }
         if (p.op === "decide") {
           const menu = p.menu ?? stubRecognise(p.text.source, p.text.text);

@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 
 const TOOLS = new Set(["read", "write", "edit", "bash"]);
 const TERMINAL = new Set(["completed", "blocked", "expired", "exhausted", "interrupted"]);
-const FIELDS = ["version", "consent", "binding", "generation", "id", "revision", "task", "issued_at_ms", "expires_at_ms", "request_limit", "tool_limit", "tools", "requests_used", "tools_used", "checkpoint_count", "continuations_used", "status", "reason", "action", "checkpoint", "policy", "rules", "menu_nudges"];
+const FIELDS = ["version", "consent", "binding", "generation", "id", "revision", "task", "issued_at_ms", "expires_at_ms", "request_limit", "tool_limit", "tools", "requests_used", "tools_used", "checkpoint_count", "continuations_used", "status", "reason", "action", "checkpoint", "policy", "rules", "rules_digest", "menu_nudges"];
 const POLICIES = new Set(["rules", "yolo"]);
 const GRANT = ["id", "minutes", "requests", "task", "tools"];
 const BINDING = ["instance_id", "profile", "native_id", "launch_id"];
@@ -16,10 +16,12 @@ const text = (value, max) => typeof value === "string" && Buffer.byteLength(valu
 const integer = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
 const check = (condition, message) => { if (!condition) throw Error(message); };
 const scope = (a, b) => ["instance_id", "profile", "native_id"].every(key => a?.[key] === b?.[key]);
-const identity = s => JSON.stringify([s.binding, s.generation, s.id, s.task, s.issued_at_ms, s.expires_at_ms, s.request_limit, s.tool_limit, s.tools, s.policy, s.rules]);
+const identity = s => JSON.stringify([s.binding, s.generation, s.id, s.task, s.issued_at_ms, s.expires_at_ms, s.request_limit, s.tool_limit, s.tools, s.policy, s.rules, s.rules_digest]);
 const validRules = r => Array.isArray(r) && r.length <= 8 && r.every(x => text(x, 1024));
+// The rules engine's digest of the rule sources at consent; only the rules policy has one.
+const validDigest = (policy, d) => d === null || policy === "rules" && typeof d === "string" && /^[0-9a-f]{64}$/.test(d);
 // Version 1 rows predate answer policy; they load as the default rules policy with no nudge spent.
-const upgrade = s => s?.version === 1 && !("policy" in s) && !("rules" in s) && !("menu_nudges" in s) ? { ...s, version: 2, policy: "rules", rules: [], menu_nudges: 0 } : s;
+const upgrade = s => s?.version === 1 && !("policy" in s) && !("rules" in s) && !("rules_digest" in s) && !("menu_nudges" in s) ? { ...s, version: 2, policy: "rules", rules: [], rules_digest: null, menu_nudges: 0 } : s;
 
 function validCheckpoint(c) {
   return keys(c, CHECKPOINT) && ["unfinished", "completed", "blocked"].includes(c.status) && text(c.summary, 2048)
@@ -40,7 +42,7 @@ function validate(s, binding, requireScope = true) {
     && integer(s.checkpoint_count, 0, s.request_limit * 2) && integer(s.continuations_used, 0, s.request_limit)
     && ["pending", "owned", "recovered", ...TERMINAL].includes(s.status)
     && (["pending", "owned"].includes(s.status) ? s.reason === null : text(s.reason, 128))
-    && POLICIES.has(s.policy) && validRules(s.rules) && (s.menu_nudges === 0 || s.menu_nudges === 1)
+    && POLICIES.has(s.policy) && validRules(s.rules) && validDigest(s.policy, s.rules_digest) && (s.menu_nudges === 0 || s.menu_nudges === 1)
     && ["start", "request", "tool", "checkpoint", "continue", "nudge", "stop", "recover"].includes(s.action)
     && (s.checkpoint === null || validCheckpoint(s.checkpoint) && s.checkpoint.evidence.every(x => /^[0-9a-f]{64}$/.test(x))), "invalid native work-period snapshot");
 }
@@ -107,10 +109,10 @@ export function createWorkPeriod({ binding, generation, journal, wall = Date.now
     start(grant) {
       check(!failure, failure); check(!active && (!current || current.status === "recovered"), "explicit ordinary recovery required before another period");
       check(grant && typeof grant === "object" && !Array.isArray(grant) && GRANT.every(key => key in grant)
-        && Object.keys(grant).every(key => GRANT.includes(key) || key === "policy" || key === "rules") && uuid(grant.id) && integer(grant.minutes, 1, 1440) && integer(grant.requests, 1, 512)
+        && Object.keys(grant).every(key => GRANT.includes(key) || ["policy", "rules", "rules_digest"].includes(key)) && uuid(grant.id) && integer(grant.minutes, 1, 1440) && integer(grant.requests, 1, 512)
         && text(grant.task, 2048) && Array.isArray(grant.tools) && grant.tools.length > 0 && new Set(grant.tools).size === grant.tools.length && grant.tools.every(x => TOOLS.has(x)), "invalid work-period grant");
-      const policy = grant.policy ?? "rules", rules = grant.rules ?? [];
-      check(POLICIES.has(policy) && validRules(rules), "invalid work-period answer policy");
+      const policy = grant.policy ?? "rules", rules = grant.rules ?? [], rulesDigest = grant.rules_digest ?? null;
+      check(POLICIES.has(policy) && validRules(rules) && validDigest(policy, rulesDigest), "invalid work-period answer policy");
       check(!known.has(grant.id), "work-period grant cannot be replayed");
       const toolLimit = Math.min(grant.requests * 16, 4096);
       check(known.size < 64 && records + grant.requests * 4 + toolLimit + 4 <= MAX_RECORDS, "work-period history capacity");
@@ -118,7 +120,7 @@ export function createWorkPeriod({ binding, generation, journal, wall = Date.now
       const record = { version: 2, consent: "native-interactive-confirm-v1", binding: clone(binding), generation, id: grant.id, revision: 1, task: grant.task,
         issued_at_ms: issued, expires_at_ms: issued + grant.minutes * 60000, request_limit: grant.requests, tool_limit: toolLimit, tools: [...grant.tools].sort(),
         requests_used: 0, tools_used: 0, checkpoint_count: 0, continuations_used: 0, status: "pending", reason: null, action: "start", checkpoint: null,
-        policy, rules: [...rules], menu_nudges: 0 };
+        policy, rules: [...rules], rules_digest: rulesDigest, menu_nudges: 0 };
       // Refuse an oversized grant here; a store-time size failure would poison the whole runtime.
       // Measure the largest checkpoint-free row this period can write, not the smaller start row.
       const largest = { ...record, revision: MAX_RECORDS, requests_used: grant.requests, tools_used: toolLimit, checkpoint_count: grant.requests * 2,

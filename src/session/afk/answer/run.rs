@@ -16,6 +16,9 @@ pub struct RunInput {
     pub policy: Policy,
     #[serde(default)]
     pub rules: Vec<String>,
+    /// The `rules_check` digest the human consented to; `rules` decisions stop if the sources changed.
+    #[serde(default)]
+    pub rules_digest: Option<String>,
     pub cwd: PathBuf,
     pub requests_used: u32,
     pub request_limit: u32,

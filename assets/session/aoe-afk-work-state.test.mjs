@@ -158,7 +158,7 @@ test("fully recovered inherited history carries no authority into a new native c
   assert.deepEqual(next.snapshot().binding, binding); assert.equal(next.snapshot().requests_used, 0);
 });
 
-const v1 = rows => rows.map(({ policy, rules, menu_nudges, ...row }) => ({ ...row, version: 1 }));
+const v1 = rows => rows.map(({ policy, rules, rules_digest, menu_nudges, ...row }) => ({ ...row, version: 1 }));
 function v1History(steps = f => f.period.reserve()) {
   const f = fixture(); f.start(); steps(f);
   return { rows: v1(f.records), options: f.options, grant: f.grant };
@@ -203,6 +203,19 @@ test("policy and rules cannot change mid-period in the journal", () => {
     const rows = structuredClone(f.records); mutate(rows[1]);
     const restored = createWorkPeriod({ ...f.options, journal: { load: () => rows, append() { assert.fail("invalid history must never be repaired"); } } });
     assert.ok(restored.failure);
+  }
+});
+
+test("the rules digest is fixed at the grant and cannot change mid-period in the journal", () => {
+  const digest = "a".repeat(64), f = fixture();
+  assert.equal(f.period.start({ ...f.grant, rules_digest: digest }).rules_digest, digest);
+  f.period.reserve(); assert.equal(f.period.snapshot().rules_digest, digest);
+  const rows = structuredClone(f.records); rows[1].rules_digest = "b".repeat(64);
+  assert.ok(createWorkPeriod({ ...f.options, journal: { load: () => rows, append() { assert.fail("invalid history must never be repaired"); } } }).failure);
+  const plain = fixture(); plain.start(); assert.equal(plain.period.snapshot().rules_digest, null);
+  for (const extra of [{ rules_digest: "xyz" }, { rules_digest: 7 }, { policy: "yolo", rules_digest: digest }]) {
+    const g = fixture();
+    assert.throws(() => g.period.start({ ...g.grant, ...extra })); assert.equal(g.records.length, 0);
   }
 });
 
@@ -276,7 +289,7 @@ test("v1 mid-period and terminal histories replay, recover and accept a v2 perio
 });
 
 test("v1 rows with v2 fields, or unknown versions, fail closed", () => {
-  for (const mutate of [x => x.policy = "rules", x => x.menu_nudges = 0, x => x.version = 3]) {
+  for (const mutate of [x => x.policy = "rules", x => x.menu_nudges = 0, x => x.rules_digest = null, x => x.version = 3]) {
     const { rows, options } = v1History(); mutate(rows[0]);
     assert.ok(createWorkPeriod({ ...options, journal: { load: () => rows, append() {} } }).failure);
   }

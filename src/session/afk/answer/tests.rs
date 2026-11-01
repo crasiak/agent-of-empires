@@ -228,6 +228,7 @@ answer = "stop"
         let rules = Rules {
             rules: Rules::parse("t", FILE).unwrap(),
             sources: vec![],
+            digest: String::new(),
         };
         let m = menu(
             Kind::Permission,
@@ -297,6 +298,36 @@ answer = "stop"
     }
 
     #[test]
+    fn digest_covers_inline_rules_and_both_files_and_their_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let inline = vec!["id='a', answer='stop'".to_string()];
+        let digest = |inline: &[String]| {
+            Rules::load(Some(dir.path()), Some(&user), inline)
+                .unwrap()
+                .digest
+        };
+        let mut seen = vec![digest(&inline)];
+        assert_eq!(seen[0].len(), 64);
+        assert_eq!(digest(&inline), seen[0], "stable for unchanged sources");
+        seen.push(digest(&[]));
+        std::fs::write(&user, "").unwrap();
+        seen.push(digest(&inline));
+        std::fs::write(&user, "[[rule]]\nid='u'\nanswer='stop'").unwrap();
+        seen.push(digest(&inline));
+        std::fs::write(dir.path().join("afk-rules.toml"), "").unwrap();
+        seen.push(digest(&inline));
+        std::fs::write(
+            dir.path().join("afk-rules.toml"),
+            "[[rule]]\nid='r'\nanswer='approve'",
+        )
+        .unwrap();
+        seen.push(digest(&inline));
+        let unique: std::collections::HashSet<_> = seen.iter().collect();
+        assert_eq!(unique.len(), seen.len(), "every change moves the digest");
+    }
+
+    #[test]
     fn inline_rule_regex_may_contain_spaces() {
         let rules = Rules::load(
             None,
@@ -336,6 +367,7 @@ mod decide {
         Rules {
             rules: Rules::parse("t", text).unwrap(),
             sources: vec![],
+            digest: String::new(),
         }
     }
     fn perm(subject: &str) -> Menu {
@@ -991,6 +1023,7 @@ mod log {
             goal: "g".into(),
             policy: Policy::Rules,
             rules: vec![],
+            rules_digest: None,
             cwd: dir.path().to_path_buf(),
             requests_used: 0,
             request_limit: 4,
@@ -1027,6 +1060,7 @@ mod log {
             goal: "g".into(),
             policy: Policy::Rules,
             rules: vec![],
+            rules_digest: None,
             cwd: root.join("sub"),
             requests_used: 0,
             request_limit: 4,

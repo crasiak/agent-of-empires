@@ -104,8 +104,8 @@ the policy line in the consent dialog.**
 ```
 
 - `rules` (the default) answers only what a rule allows. Anything else stops the
-  period as `blocked`, with the reason (`no_rule`, `no_proposal`, `scope:…`) in
-  the answer log.
+  period as `blocked`, with the reason (`no_rule`, `no_proposal`, `scope:…`,
+  `rules_changed`) in the answer log.
 - `yolo` answers every menu, including permission prompts. It takes the agent's
   proposal if there is one, otherwise the first approving option, otherwise the
   first option. Rules are ignored and scope checks only warn. Use it for a
@@ -132,11 +132,14 @@ Rules are evaluated in that order and the first match wins, except that a
 matching `stop` rule always beats an allowing one. A file is at most 64 KiB. No
 matching rule stops the period with `no_rule`.
 
-**The repo rules file is re-read from the working tree on every decision**, so the
-agent can write or edit it mid-period and the change applies to later menus. It
-cannot override a `stop` rule or a rule from a higher-precedence source, but it can
-fill a `no_rule` gap. Put rules you rely on in `~/.config/aoe/afk/rules.toml` or
-`--rule`, treat a repo rules file as the repo's suggestion, and review it like code.
+**The rules are fixed at consent.** The consent check records a digest of the
+inline rules and of both files' contents (or their absence), and every decision
+re-reads the sources and compares. If the agent, or anyone, creates, edits or
+deletes either rules file mid-period, the next menu stops the period with
+`rules_changed` and nothing is answered. Under `yolo` the rules are not read.
+The repo rules file is still the repo's suggestion: review it like code before
+you start a period, and put rules you rely on in `~/.config/aoe/afk/rules.toml`
+or `--rule`.
 
 A rule matches when every field it
 sets matches:

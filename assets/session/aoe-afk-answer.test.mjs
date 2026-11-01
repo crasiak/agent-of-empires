@@ -70,8 +70,8 @@ test("parseOnArgs handles policy, repeated rules and positional limits", () => {
 });
 
 test("runInput and answeredBy", () => {
-  const s = { id: "p", task: "t", policy: "rules", rules: [], requests_used: 1, request_limit: 4 };
-  assert.deepEqual(runInput(s, "/r"), { period: "p", item: null, goal: "t", policy: "rules", rules: [], cwd: "/r", requests_used: 1, request_limit: 4 });
+  const s = { id: "p", task: "t", policy: "rules", rules: [], rules_digest: "d".repeat(64), requests_used: 1, request_limit: 4 };
+  assert.deepEqual(runInput(s, "/r"), { period: "p", item: null, goal: "t", policy: "rules", rules: [], rules_digest: "d".repeat(64), cwd: "/r", requests_used: 1, request_limit: 4 });
   assert.equal(answeredBy("yolo"), "afk/yolo");
 });
 

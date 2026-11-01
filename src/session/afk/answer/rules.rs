@@ -3,6 +3,7 @@ use super::menu::{Kind, Menu, Role, Source};
 use anyhow::{bail, ensure, Context, Result};
 use regex::Regex;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 const RULE_ID_MAX: usize = 128;
@@ -62,6 +63,22 @@ pub struct Rule {
 pub struct Rules {
     pub rules: Vec<Rule>,
     pub sources: Vec<String>,
+    /// SHA-256 over every rule source as loaded: each inline rule, then the user and repo files'
+    /// contents or their absence. Consent pins it, so a source edited mid-period is detected.
+    pub digest: String,
+}
+
+/// Feed one rule source to the digest, length-framed so sources cannot run together.
+fn digest_source(digest: &mut Sha256, label: &str, contents: Option<&str>) {
+    digest.update(label.as_bytes());
+    match contents {
+        Some(text) => {
+            digest.update(b"\0present\0");
+            digest.update((text.len() as u64).to_le_bytes());
+            digest.update(text.as_bytes());
+        }
+        None => digest.update(b"\0absent\0"),
+    }
 }
 
 pub fn user_rules_file() -> Option<PathBuf> {
@@ -151,6 +168,7 @@ impl Rules {
         inline: &[String],
     ) -> Result<Rules> {
         let mut out = Rules::default();
+        let mut digest = Sha256::new();
         for (i, body) in inline.iter().enumerate() {
             ensure!(
                 body.len() <= INLINE_RULE_MAX,
@@ -158,18 +176,20 @@ impl Rules {
                 i + 1
             );
             let origin = format!("inline rule {}", i + 1);
+            digest_source(&mut digest, "inline", Some(body));
             // `rule = [{ … }]` is the same array-of-tables as `[[rule]]`, written inline.
             let rules = Self::parse(&origin, &format!("rule = [{{ {body} }}]"))?;
             add(&mut out, origin, rules);
         }
-        let files = user_file
-            .map(Path::to_path_buf)
-            .into_iter()
-            .chain(repo_root.map(|r| r.join("afk-rules.toml")));
-        for path in files {
-            if !path.exists() {
+        let files = [
+            ("user", user_file.map(Path::to_path_buf)),
+            ("repo", repo_root.map(|r| r.join("afk-rules.toml"))),
+        ];
+        for (label, path) in files {
+            let Some(path) = path.filter(|p| p.exists()) else {
+                digest_source(&mut digest, label, None);
                 continue;
-            }
+            };
             let origin = path.display().to_string();
             let text =
                 std::fs::read_to_string(&path).with_context(|| format!("{origin}: unreadable"))?;
@@ -177,9 +197,15 @@ impl Rules {
                 text.len() <= RULES_FILE_MAX,
                 "{origin}: rules file too large"
             );
+            digest_source(&mut digest, label, Some(&text));
             let rules = Self::parse(&origin, &text)?;
             add(&mut out, origin, rules);
         }
+        out.digest = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         Ok(out)
     }
 

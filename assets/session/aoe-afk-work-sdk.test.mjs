@@ -43,7 +43,7 @@ async function runNativeSdk(early, missingCheckpoint = false, fourSlot = false) 
     Object.assign(fixture, { binding, capture(api, r) { fixture.api = api; fixture.r = r; }, replies: [], command: null,
       bridge() { return { async request(p) {
         if (p.op === "poll") return { policy: null, probe: null, delegation: null, runtime_probe: null, work_period_capability: 1, work_period_request: fixture.command };
-        if (p.op === "rules_check") return { valid: true, count: 0, sources: [], format_warnings: [] };
+        if (p.op === "rules_check") return { valid: true, count: 0, sources: [], format_warnings: [], digest: "d".repeat(64) };
         fixture.replies.push(p); return {};
       }, async close() {} }; } });
     const extension = join(cwd, "extension.mjs");

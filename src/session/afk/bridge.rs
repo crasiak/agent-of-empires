@@ -285,6 +285,7 @@ fn rules_check(run: &answer::run::RunInput, format_warnings: &[String]) -> serde
             "valid": true,
             "count": rules.rules.len(),
             "sources": rules.sources,
+            "digest": rules.digest,
             "format_warnings": format_warnings,
         }),
         Err(error) => serde_json::json!({
@@ -325,16 +326,25 @@ fn decide(
         },
         _ => anyhow::bail!("decide needs exactly one of menu or text"),
     };
+    // Rules are fixed at consent: sources that no longer load to the consented digest stop.
     let rules = match run.policy {
-        answer::Policy::Yolo => answer::Rules::empty(),
-        answer::Policy::Rules => load_rules(&run)?,
+        answer::Policy::Yolo => Some(answer::Rules::empty()),
+        answer::Policy::Rules => load_rules(&run)
+            .ok()
+            .filter(|r| run.rules_digest.as_deref() == Some(r.digest.as_str())),
     };
-    let decision = answer::decide(
-        &menu,
-        &answer::run::context(&run),
-        &rules,
-        proposal.as_ref(),
-    );
+    let decision = match rules {
+        Some(rules) => answer::decide(
+            &menu,
+            &answer::run::context(&run),
+            &rules,
+            proposal.as_ref(),
+        ),
+        None => answer::Decision::Stop {
+            reason: "rules_changed".into(),
+            checks: vec![],
+        },
+    };
     let no_warnings = Vec::new();
     let (kind, choice, text, rule, reason, warnings, checks, delivered) = match &decision {
         answer::Decision::Answer {
@@ -546,5 +556,73 @@ mod tests {
         assert!(unrecognised["menu"].is_null());
         assert_eq!(unrecognised["decision"]["reason"], "unrecognised_menu");
         assert!(unrecognised["sample"].is_string(), "{unrecognised}");
+    }
+    #[test]
+    fn rules_are_fixed_at_consent_and_a_changed_source_stops_the_answer() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path(), "test", true).unwrap();
+        let binding = Binding {
+            instance_id: "test".into(),
+            profile: "default".into(),
+            native_id: "native".into(),
+            launch_id: "launch".into(),
+        };
+        let send = |packet: serde_json::Value| {
+            let mut line = serde_json::to_vec(&packet).unwrap();
+            line.push(b'\n');
+            let mut out = Vec::new();
+            serve(
+                &store,
+                None,
+                &binding,
+                "generation",
+                std::io::Cursor::new(line),
+                &mut out,
+                || Ok(()),
+            )
+            .unwrap();
+            let reply: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(reply["ok"], true, "{reply}");
+            reply["value"].clone()
+        };
+        let rule = "id='any', kind='confirm', answer='approve'";
+        let run = |policy: &str, digest: &str| {
+            serde_json::json!({
+                "period": "11111111-1111-1111-1111-111111111111", "goal": "g", "policy": policy,
+                "rules": [rule], "rules_digest": digest, "cwd": cwd.path(),
+                "requests_used": 0, "request_limit": 4,
+            })
+        };
+        let decide = |run: serde_json::Value| {
+            send(serde_json::json!({
+                "op": "decide", "run": run,
+                "menu": {
+                    "source": "pi_dialog", "format": "pi.confirm", "kind": "confirm", "question": "Continue?",
+                    "options": [{"key": "y", "label": "Yes"}, {"key": "n", "label": "No"}],
+                },
+            }))["decision"]
+                .clone()
+        };
+        let checked = send(serde_json::json!({"op": "rules_check", "run": run("rules", "")}));
+        let digest = checked["digest"].as_str().unwrap_or_default().to_string();
+        assert_eq!(digest.len(), 64, "{checked}");
+        assert_eq!(decide(run("rules", &digest))["decision"], "answer");
+        // The agent writes itself a repo rules file mid-period.
+        std::fs::write(
+            cwd.path().join("afk-rules.toml"),
+            "[[rule]]\nid='mine'\nanswer='approve'\n",
+        )
+        .unwrap();
+        let changed = decide(run("rules", &digest));
+        assert_eq!(changed["decision"], "stop", "{changed}");
+        assert_eq!(changed["reason"], "rules_changed");
+        let rechecked = send(serde_json::json!({"op": "rules_check", "run": run("rules", "")}));
+        assert_ne!(rechecked["digest"], checked["digest"]);
+        // An inline rule differing from consent is a change too; yolo never checks the digest.
+        let mut other = run("rules", rechecked["digest"].as_str().unwrap());
+        other["rules"] = serde_json::json!(["id='other', answer='approve'"]);
+        assert_eq!(decide(other)["reason"], "rules_changed");
+        assert_eq!(decide(run("yolo", "stale"))["decision"], "answer");
     }
 }

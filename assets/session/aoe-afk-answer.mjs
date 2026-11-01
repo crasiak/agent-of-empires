@@ -105,7 +105,7 @@ export function createAnswerClient(bridge, { timeoutMs = DECIDE_TIMEOUT_MS } = {
 
 export const answeredBy = policy => `afk/${policy}`;
 
-export const runInput = (s, cwd) => ({ period: s.id, item: null, goal: s.task, policy: s.policy, rules: s.rules, cwd,
+export const runInput = (s, cwd) => ({ period: s.id, item: null, goal: s.task, policy: s.policy, rules: s.rules, rules_digest: s.rules_digest, cwd,
   requests_used: s.requests_used, request_limit: s.request_limit });
 
 export function splitArgs(s) {

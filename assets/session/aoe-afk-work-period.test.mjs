@@ -14,7 +14,7 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   let wall = 100000, mono = 0, idle = true, signal, leaf = "root", sequence = 0, memoryOnly = false, aborted = 0, ended = 0, atTurnEnd = false;
   const rows = [], handlers = new Map(), tools = new Map(), commands = new Map(), packets = [], messages = [], notices = [];
   let answer = true, confirmHook, confirmMessage, confirmations = 0, decideReply = { decision: { decision: "stop", reason: "no_rule", checks: [] } }, recogniseReply = null,
-    rulesCheck = { valid: true, count: 1, sources: ["inline rule 1"], format_warnings: [] }, activeTools = ["read", "write", "edit", "bash", WORK_CHECKPOINT_TOOL];
+    rulesCheck = { valid: true, count: 1, sources: ["inline rule 1"], format_warnings: [], digest: "d".repeat(64) }, activeTools = ["read", "write", "edit", "bash", WORK_CHECKPOINT_TOOL];
   writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: binding.native_id }) + "\n", { mode: 0o600 });
   const append = row => {
     const entry = { ...row, id: `entry-${++sequence}`, parentId: leaf }; rows.push(entry); leaf = entry.id;
@@ -75,7 +75,7 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   return { root, file, binding, generation, rows, r, ctx, api, packets, messages, notices, native, emit, request, rpc, begin, ownedContext, call, callWithOutput, checkpoint, answer: answerTool, boundary, context, user,
     snapshots: () => rows.filter(e => e.type === "custom" && e.customType === WORK_PERIOD_MARKER).map(e => e.data),
     confirm: (value, hook, onMessage) => { answer = value; confirmHook = hook; confirmMessage = onMessage; },
-    decideReply: value => decideReply = value, recogniseReply: value => recogniseReply = value, rulesCheckError: error => rulesCheck = { valid: false, error, format_warnings: [] },
+    decideReply: value => decideReply = value, recogniseReply: value => recogniseReply = value, rulesCheckError: error => rulesCheck = { valid: false, error, format_warnings: [] }, rulesCheckReply: value => rulesCheck = value,
     activeTools: value => activeTools = value, get confirmations() { return confirmations; },
     memoryOnly: () => memoryOnly = true, tick: () => new Promise(r => setImmediate(r)), advance: (w, m) => { wall += w; mono += m; }, get aborted() { return aborted; }, get ended() { return ended; }, close: () => rmSync(root, { recursive: true, force: true }) };
 }
@@ -517,6 +517,28 @@ test("consent shows the rule count and sources under rules", async () => {
     assert.doesNotMatch(message, /YOLO/);
     assert.deepEqual(f.packets.find(p => p.op === "rules_check").run.rules, ["id='a', answer='stop'"]);
     assert.deepEqual(f.snapshots().at(-1).rules, ["id='a', answer='stop'"]);
+  } finally { f.close(); }
+});
+
+test("the rules digest from consent is kept and sent with every decide; yolo keeps none", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply({ answer_id: "a1", menu: {}, decision: { decision: "answer", choice: "1", rule: "r", reason: "ok", warnings: [], checks: [] } });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    assert.equal(f.snapshots().at(-1).rules_digest, "d".repeat(64));
+    await f.answer({ question: "Which?", options: [{ key: "1", label: "A" }], proposal: "1", reason: "A" });
+    assert.equal(f.packets.find(p => p.op === "decide").run.rules_digest, "d".repeat(64));
+  } finally { f.close(); }
+  const yolo = await fixture();
+  try { await yolo.native("on --policy yolo 120 8"); assert.equal(yolo.snapshots().at(-1).rules_digest, null); } finally { yolo.close(); }
+});
+
+test("a rules check without a digest refuses the start", async () => {
+  const f = await fixture();
+  try {
+    f.rulesCheckReply({ valid: true, count: 0, sources: [], format_warnings: [] });
+    await f.native("on 120 8");
+    assert.equal(f.snapshots().length, 0); assert.match(f.notices.at(-1), /no authority created/);
   } finally { f.close(); }
 });
 

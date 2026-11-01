@@ -194,6 +194,7 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
         try { ruleInfo = await w.client.rulesCheck({ period: randomUUID(), item: null, goal: "consent", policy: "rules", rules: parsed.rules, cwd: ctx.cwd, requests_used: 0, request_limit: 1 }); }
         catch { notify("AFK rules could not be checked (engine unavailable); no authority created", "warning"); return; }
         if (!ruleInfo?.valid) { notify(`AFK rules invalid; no authority created: ${ruleInfo?.error}`, "warning"); return; }
+        if (!/^[0-9a-f]{64}$/.test(ruleInfo.digest ?? "")) { notify("AFK rules could not be pinned (engine too old); no authority created", "warning"); return; }
       }
       const sources = Array.isArray(ruleInfo.sources) ? ruleInfo.sources : [], formatWarnings = Array.isArray(ruleInfo.format_warnings) ? ruleInfo.format_warnings : [];
       const consent = { revision: w.r.revision, external: w.lastExternal, native: nativeExternal(ctx), tools: LOCAL_TOOLS.filter(t => pi.getActiveTools().includes(t)), cancelled: false,
@@ -237,7 +238,7 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
       try {
         try {
           w.period.start({ id: randomUUID(), minutes, requests, task: "Continue the existing assigned Session task using its current context", tools: consent.tools,
-            policy: parsed.policy, rules: parsed.rules });
+            policy: parsed.policy, rules: parsed.rules, rules_digest: parsed.policy === "rules" ? ruleInfo.digest : null });
         } catch (error) {
           // A refused grant writes nothing; only an unverified write needs the stop path below.
           if (error.message === "work-period grant too large" && !w.period.failure) { notify("AFK rules too large for the work-period record; no authority created", "warning"); return; }
