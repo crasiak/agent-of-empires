@@ -838,6 +838,60 @@ mod log {
     }
 
     #[test]
+    fn answer_log_fits_a_maximal_worst_case_escaped_menu() {
+        use super::super::menu::{InputOption, Kind, Menu, MenuInput, RoleWords, Source};
+        // Control bytes escape to `\u00XX`, six bytes each: the worst case for every text field.
+        let worst = |n: usize| {
+            let mut s = String::from("\"\\");
+            s.push_str(&"\u{1}".repeat(n - 2));
+            s
+        };
+        let menu = Menu::from_input(
+            MenuInput {
+                source: Source::PiDialog,
+                format: worst(128),
+                kind: Kind::Choice,
+                question: worst(2048),
+                subject: Some(worst(2048)),
+                options: (0..32)
+                    .map(|i| InputOption {
+                        key: format!("{i:02}{}", "\u{1}".repeat(62)),
+                        label: worst(256),
+                        role: None,
+                    })
+                    .collect(),
+                free_text: true,
+                warnings: vec![worst(512); 8],
+                deadline_ms: Some(u64::MAX),
+                raw: worst(4096),
+            },
+            &RoleWords::default(),
+        )
+        .unwrap();
+        assert_eq!(menu.raw.len(), super::super::menu::RAW_MAX);
+        let record = serde_json::json!({
+            "run": PERIOD, "item": PERIOD, "period": PERIOD, "menu": menu,
+            "proposal": menu.options[0].key, "decision": "answer", "choice": menu.options[0].key,
+            "text": worst(1024), "policy": "rules", "rule": worst(128),
+            "checks": [{"id": "outside_repo", "result": "pass"}], "warnings": menu.warnings,
+            "reason": worst(512), "delivered": "pending",
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let log = AnswerLog::new(&AnchoredDir::open(dir.path()).unwrap(), PERIOD).unwrap();
+        log.decision(&record).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(format!("afk-answers/{PERIOD}.jsonl")))
+            .unwrap();
+        assert!(
+            text.len() > 16 * 1024 * 6,
+            "record is not worst case: {}",
+            text.len()
+        );
+        assert!(text.len() <= LINE_MAX, "{} > {LINE_MAX}", text.len());
+        let line: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(line["menu"]["raw"], serde_json::json!(menu.raw));
+    }
+
+    #[test]
     fn unrecognised_samples_are_numbered() {
         let dir = tempfile::tempdir().unwrap();
         let log = AnswerLog::new(&AnchoredDir::open(dir.path()).unwrap(), PERIOD).unwrap();

@@ -7,7 +7,10 @@ use std::path::Path;
 
 pub const ANSWER_SCHEMA: &str = "aoe.afk-answer.v1";
 const FILE_MAX: u64 = 4 * 1024 * 1024;
-const LINE_MAX: usize = 16 * 1024;
+/// A decide record embeds the whole menu, `raw` included, as audit evidence. The largest menu
+/// `Menu::from_input` accepts is about 22 KiB, and JSON escapes a control byte to six bytes, so the
+/// worst case is about 136 KiB; this leaves margin for the rest of the record.
+pub const LINE_MAX: usize = 192 * 1024;
 const SAMPLES_MAX: u32 = 256;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
