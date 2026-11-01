@@ -59,7 +59,7 @@ function transition(old, next) {
   if (next.action === "recover") check(next.status === "recovered", "invalid recovery state");
   if (["request", "tool", "continue", "nudge"].includes(next.action)) check(next.status === "owned" && next.requests_used > 0, "work requires an admitted request");
   if (next.action === "stop") check(TERMINAL.has(next.status), "invalid terminal state");
-  if (next.action === "request") check(JSON.stringify(next.checkpoint) === JSON.stringify(old.checkpoint), "request changed checkpoint provenance");
+  if (["request", "nudge"].includes(next.action)) check(JSON.stringify(next.checkpoint) === JSON.stringify(old.checkpoint), `${next.action} changed checkpoint provenance`);
   if (next.action === "tool") check(next.checkpoint === null, "local work requires a new checkpoint");
   if (next.action === "continue") check(next.checkpoint?.status === "unfinished", "continuation requires unfinished work");
 }
