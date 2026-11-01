@@ -33,10 +33,16 @@ export const textTail = value => {
   return bytes.subarray(start).toString();
 };
 
-// A bash result whose last line asks for input; returns its last 12 non-empty lines.
-const PROMPT_END = /\?\s*$|\((?:y\/N|Y\/n|y\/n)\)|\[(?:y\/N|Y\/n)\]|Password:\s*$|›\s*$/;
+// Pi's bash result ends with a status line on a non-zero exit, timeout or abort, after an optional truncation line
+// (pi coding-agent core/tools/bash.ts). Exit 0 has no status line: the command finished, so it is not waiting.
+const PI_WAIT_STATUS = /(?:^|\n\n)(?:Command exited with code -?[1-9]\d*|Command timed out after \d+ seconds|Command aborted)$/;
+const PI_TRUNCATION = /(?:^|\n\n)\[Showing (?:lines \d+-\d+ of \d+(?: \([^)\n]* limit\))?|last [^\n]* of line \d+ \(line is [^)\n]*\))\. Full output: [^\n]*\]$/;
+const PROMPT_END = /\?\s*$|(?:\((?:y\/N|Y\/n|y\/n)\)|\[(?:y\/N|Y\/n)\])[\s:?]*$|Password:\s*$|›\s*$/;
+// The last 12 non-empty output lines when Pi's trailer says the command did not finish and its last line asks for input.
 export function promptLike(text) {
-  const lines = String(text ?? "").split("\n").map(l => l.trimEnd()).filter(l => l.trim());
+  const body = String(text ?? "").replace(/\s+$/u, "");
+  if (!PI_WAIT_STATUS.test(body)) return null;
+  const lines = body.replace(PI_WAIT_STATUS, "").replace(PI_TRUNCATION, "").split("\n").map(l => l.trimEnd()).filter(l => l.trim());
   if (!lines.length || !PROMPT_END.test(lines.at(-1))) return null;
   return lines.slice(-12).join("\n");
 }

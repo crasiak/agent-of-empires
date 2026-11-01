@@ -96,20 +96,41 @@ test("textTail keeps the last 4096 bytes without splitting a character", () => {
   assert.equal(tail.length, 1365);
 });
 
-test("promptLike flags prompt endings only", () => {
-  assert.ok(promptLike("Installing…\nOk to proceed? (y/N)"));
-  assert.ok(promptLike("Password:"));
-  assert.ok(promptLike("Overwrite? [Y/n] "));
-  assert.ok(promptLike("Select a framework: ›"));
-  assert.equal(promptLike("All tests passed.\n"), null);
+// Pi bash result shapes (pi coding-agent core/tools/bash.ts formatOutput/appendStatus).
+const piStatus = (text, status) => `${text ? `${text}\n\n` : ""}${status}`;
+const exited = (text, code = 1) => piStatus(text, `Command exited with code ${code}`);
+const timedOut = (text, secs = 600) => piStatus(text, `Command timed out after ${secs} seconds`);
+const truncated = (text, a, b) => `${text}\n\n[Showing lines ${a}-${b} of ${b}. Full output: /tmp/pi-bash-1.log]`;
+
+test("promptLike flags prompts only when Pi reports a non-zero exit, timeout or abort", () => {
+  assert.equal(promptLike(exited("Need to install the following packages:\ncreate-vite@5.2.0\nOk to proceed? (y/N)")),
+    "Need to install the following packages:\ncreate-vite@5.2.0\nOk to proceed? (y/N)");
+  assert.equal(promptLike(timedOut("Password:")), "Password:");
+  assert.ok(promptLike(timedOut("The authenticity of host 'h (10.0.0.1)' can't be established.\nAre you sure you want to continue connecting (yes/no/[fingerprint])?")));
+  assert.ok(promptLike(piStatus("Overwrite? [Y/n] ", "Command aborted")));
+  assert.ok(promptLike(exited("? Select a framework: ›", 130)));
+  assert.ok(promptLike(timedOut(truncated("x\nOk to proceed? (y/N)", 1, 2))));
+  assert.ok(promptLike(timedOut("Continue? [y/N]:")));
+  assert.equal(promptLike(timedOut("")), null);
+  assert.equal(promptLike(exited("error: could not compile `aoe`")), null);
   assert.equal(promptLike(""), null);
   assert.equal(promptLike(undefined), null);
   assert.equal(BASH_DEFAULT_TIMEOUT_S, 600);
 });
 
+test("promptLike never flags exit-0 output, even when it ends like a prompt", () => {
+  for (const out of ['assets/session/x.test.mjs:12:    "Ok to proceed? (y/N)"', "        let reply = client.request(packet).await?", "## Why not anchor the regex?",
+    "ℹ tests 274\nℹ pass 271\nℹ fail 1", "Ok to proceed? (y/N)", "Password:", truncated("Continue? (y/N)", 1, 1)]) assert.equal(promptLike(out), null, out);
+});
+
+test("promptLike anchors yes/no markers to the line end", () => {
+  assert.equal(promptLike(exited('src/x.rs:4: "(y/N)" is matched here')), null);
+  assert.equal(promptLike(exited("found [Y/n] marker in docs")), null);
+});
+
 test("promptLike keeps the last 12 non-empty lines", () => {
   const lines = Array.from({ length: 20 }, (_, i) => `line ${i}`);
-  const tail = promptLike([...lines, "", "Continue? (y/N)  ", ""].join("\n"));
+  const tail = promptLike(exited([...lines, "", "Continue? (y/N)  ", ""].join("\n")));
   assert.equal(tail.split("\n").length, 12);
   assert.equal(tail.split("\n")[0], "line 9");
   assert.equal(tail.split("\n").at(-1), "Continue? (y/N)");

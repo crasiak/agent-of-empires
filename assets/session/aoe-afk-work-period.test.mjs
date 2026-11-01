@@ -253,6 +253,10 @@ test("ended work releases no authority; only settled fresh ordinary input recove
   } finally { f.close(); }
 });
 
+// Pi bash result shapes (pi coding-agent core/tools/bash.ts formatOutput/appendStatus).
+const exited = (text, code = 1) => `${text}\n\nCommand exited with code ${code}`;
+const timedOut = (text, secs = 600) => `${text}\n\nCommand timed out after ${secs} seconds`;
+
 const evidenceRef = event => JSON.parse(event.content.at(-1).text).aoe_afk_work_evidence_ref;
 
 test("owned results expose bounded exact refs without altering arbitrary underlying content; ordinary results are untouched", async () => {
@@ -685,7 +689,7 @@ test("a bash result ending in a prompt is annotated and not progress until answe
   try {
     f.recogniseReply({ kind: "confirm", question: "Ok to proceed? (y/N)" });
     await f.native("on 120 8"); f.begin(); await f.ownedContext();
-    const r = await f.callWithOutput("bash", "b3", { command: "npx create-vite" }, "Need to install\nOk to proceed? (y/N)");
+    const r = await f.callWithOutput("bash", "b3", { command: "npx create-vite" }, exited("Need to install the following packages:\ncreate-vite@5.2.0\nOk to proceed? (y/N)"));
     assert.ok(r.content.some(b => b.type === "text" && b.text.includes("aoe_afk_prompt_seen")));
     assert.ok(f.packets.some(p => p.op === "recognise" && p.source === "bash_prompt"));
     const out = await f.checkpoint("unfinished", ["b3"]);
@@ -701,7 +705,7 @@ test("a prompt-annotated bash result replays idempotently", async () => {
   try {
     f.recogniseReply({ kind: "confirm" });
     await f.native("on 120 8"); f.begin(); await f.ownedContext();
-    const event = { toolName: "bash", toolCallId: "b6", input: { command: "x" }, content: [{ type: "text", text: "Continue? (y/N)" }], details: null, isError: false };
+    const event = { toolName: "bash", toolCallId: "b6", input: { command: "x" }, content: [{ type: "text", text: exited("Continue? (y/N)") }], details: null, isError: true };
     await f.emit("tool_call", { toolName: "bash", toolCallId: "b6", input: event.input });
     const first = await f.emit("tool_result", event);
     assert.equal(await f.emit("tool_result", { ...event, content: first.content }), undefined);
@@ -715,7 +719,7 @@ test("a prompt-like bash tail that no format recognises stops as unrecognised_me
     f.recogniseReply(null);
     f.decideReply({ answer_id: "u1", menu: null, decision: { decision: "stop", reason: "unrecognised_menu", checks: [] }, sample: "p-unrecognised-1.txt" });
     await f.native("on 120 8"); f.begin(); await f.ownedContext();
-    await f.callWithOutput("bash", "b5", { command: "x" }, "Enter the magic word?");
+    await f.callWithOutput("bash", "b5", { command: "x" }, timedOut("Enter the magic word?"));
     assert.ok(f.packets.some(p => p.op === "decide" && p.text?.source === "bash_prompt"));
     assert.equal(f.snapshots().at(-1).reason, "unrecognised_menu");
     assert.equal(f.snapshots().at(-1).status, "blocked");
@@ -723,13 +727,40 @@ test("a prompt-like bash tail that no format recognises stops as unrecognised_me
   } finally { f.close(); }
 });
 
-test("bash output that does not end in a prompt is not sent to the recogniser", async () => {
+test("exit-0 bash output is never a prompt, even when its last line looks like one", async () => {
   const f = await fixture();
   try {
-    await f.native("on 120 8"); f.begin(); await f.ownedContext();
-    const r = await f.callWithOutput("bash", "b7", { command: "cargo test" }, "All tests passed.\n");
-    assert.ok(!r.content.some(b => b.text?.includes("aoe_afk_prompt_seen")));
+    await f.native("on 120 16"); f.begin(); await f.ownedContext();
+    const outputs = ['assets/session/x.test.mjs:12:    "Ok to proceed? (y/N)"', "src/bridge.rs:40:        let reply = client.request(packet).await?",
+      "## Why not anchor the regex?", "ℹ tests 274\nℹ pass 271\nℹ fail 1", exited("error: could not compile")];
+    for (const [i, out] of outputs.entries()) {
+      const r = await f.callWithOutput("bash", `b7-${i}`, { command: "x" }, out);
+      assert.ok(!r.content.some(b => b.text?.includes("aoe_afk_prompt_seen")), out);
+    }
     assert.ok(!f.packets.some(p => p.op === "recognise"));
+    assert.equal(f.snapshots().at(-1).status, "owned");
+  } finally { f.close(); }
+});
+
+test("a waiting ssh host-key prompt that hits the bash timeout is recognised", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply({ kind: "confirm" });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const r = await f.callWithOutput("bash", "b9", { command: "ssh host" },
+      timedOut("The authenticity of host 'host (10.0.0.1)' can't be established.\nAre you sure you want to continue connecting (yes/no/[fingerprint])?"));
+    assert.ok(r.content.some(b => b.text?.includes("aoe_afk_prompt_seen")));
+    assert.ok(f.packets.find(p => p.op === "recognise").text.endsWith("(yes/no/[fingerprint])?"));
+  } finally { f.close(); }
+});
+
+test("a truncated bash output whose last real line is a prompt is recognised", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply({ kind: "confirm" });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    await f.callWithOutput("bash", "b10", { command: "x" }, timedOut("lots of output\nOk to proceed? (y/N)\n\n[Showing lines 1999-4000 of 4000 (50.0KB limit). Full output: /tmp/pi-bash-1.log]"));
+    assert.ok(f.packets.find(p => p.op === "recognise").text.endsWith("Ok to proceed? (y/N)"));
   } finally { f.close(); }
 });
 
@@ -738,9 +769,9 @@ test("the bash prompt recogniser gets the tail of long output", async () => {
   try {
     f.recogniseReply({ kind: "confirm" });
     await f.native("on 120 8"); f.begin(); await f.ownedContext();
-    await f.callWithOutput("bash", "b8", { command: "x" }, "é".repeat(5000) + "\nContinue? (y/N)");
+    await f.callWithOutput("bash", "b8", { command: "x" }, exited("é".repeat(5000) + "\nContinue? (y/N)"));
     const sent = f.packets.find(p => p.op === "recognise");
-    assert.ok(sent.text.endsWith("Continue? (y/N)"));
+    assert.ok(sent.text.endsWith("Continue? (y/N)")); assert.ok(!sent.text.includes("Command exited"));
   } finally { f.close(); }
 });
 
@@ -750,7 +781,7 @@ test("an answered aoe_afk_answer releases the prompt evidence", async () => {
     f.recogniseReply({ kind: "confirm" });
     f.decideReply({ answer_id: "x", menu: {}, decision: { decision: "answer", choice: "y", reason: "", warnings: [], checks: [] } });
     await f.native("on 120 8"); f.begin(); await f.ownedContext();
-    await f.callWithOutput("bash", "b4", { command: "x" }, "Continue? (y/N)");
+    await f.callWithOutput("bash", "b4", { command: "x" }, timedOut("Continue? (y/N)"));
     await f.answer({ question: "Continue?", options: [{ key: "y", label: "Yes" }, { key: "n", label: "No" }], proposal: "y", reason: "" });
     const out = await f.checkpoint("unfinished", ["b4"]);
     assert.equal(out.details.status, "owned");
