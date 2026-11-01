@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { askUserMenu, createAnswerClient, dialogMenu, dialogValue, parseOnArgs, runInput, answeredBy, splitArgs, textTail, promptLike, BASH_DEFAULT_TIMEOUT_S } from "./aoe-afk-answer.mjs";
 
 test("decide maps bridge replies and never throws", async () => {
-  const ok = createAnswerClient({ request: async p => ({ answer_id: "a", menu: { kind: "choice" }, decision: { decision: "answer", choice: "1" } }) });
+  const ok = createAnswerClient({ request: async _p => ({ answer_id: "a", menu: { kind: "choice" }, decision: { decision: "answer", choice: "1" } }) });
   assert.equal((await ok.decide({ run: {}, menu: {} })).decision.choice, "1");
   const broken = createAnswerClient({ request: async () => { throw Error("bridge gone"); } });
   assert.deepEqual((await broken.decide({ run: {}, menu: { q: 1 } })).decision, { decision: "stop", reason: "engine_unavailable", checks: [] });
@@ -56,7 +56,9 @@ test("delivered, recognise and rulesCheck use the bridge ops", async () => {
   assert.deepEqual(sent[0], { op: "answer_delivered", period: "p", answer_id: "a1", delivered: "ok" });
   const gone = createAnswerClient({ request: async () => { throw Error("bridge gone"); } });
   await gone.delivered("p", "a1", "ok");
-  assert.equal(await gone.recognise("agent_text", "x"), null);
+  assert.deepEqual(await gone.recognise("agent_text", "x"), { error: true }, "an unavailable engine is not a missing format");
+  const none = createAnswerClient({ request: async () => ({ menu: null }) });
+  assert.equal(await none.recognise("agent_text", "x"), null);
   await assert.rejects(gone.rulesCheck({}), /bridge gone/);
 });
 
@@ -67,6 +69,7 @@ test("parseOnArgs handles policy, repeated rules and positional limits", () => {
   assert.ok(parseOnArgs(["1", "2", "3"]).error);
   assert.ok(parseOnArgs(["--rule"]).error);
   assert.deepEqual(parseOnArgs([]), { policy: "rules", rules: [] });
+  assert.match(parseOnArgs(["--policy", "yolo", "--rule", "id='a', answer='stop'"]).error, /--rule has no effect under yolo/);
 });
 
 test("runInput and answeredBy", () => {
@@ -80,6 +83,7 @@ test("splitArgs keeps quoted rule bodies whole", () => {
   assert.deepEqual(splitArgs("  status  "), ["status"]);
   assert.deepEqual(splitArgs(""), []);
   assert.deepEqual(splitArgs(`on --rule ''`), ["on", "--rule", ""]);
+  assert.throws(() => splitArgs(`on --rule "id='a'`), /Unterminated quote/);
 });
 
 test("ask_user maps a single question with options", () => {
@@ -105,6 +109,8 @@ test("textTail keeps the last 4096 bytes without splitting a character", () => {
   const tail = textTail(long);
   assert.ok(Buffer.byteLength(tail) <= 4096); assert.ok(long.endsWith(tail)); assert.ok(!tail.includes("\uFFFD"));
   assert.equal(tail.length, 1365);
+  const lone = textTail("x\uD800" + "y".repeat(4093));
+  assert.equal(lone, "\uFFFD" + "y".repeat(4093), "a lone surrogate is replaced, so the tail is no longer a suffix");
 });
 
 // Pi bash result shapes (pi coding-agent core/tools/bash.ts formatOutput/appendStatus).

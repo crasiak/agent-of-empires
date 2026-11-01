@@ -21,6 +21,17 @@ const nativeExternal = ctx => JSON.stringify(ctx.sessionManager.getBranch().filt
 const clean = messages => messages.filter(m => !OWN.has(m.customType));
 const external = messages => JSON.stringify(clean(messages).filter(m => ["user", "custom"].includes(m.role)));
 const result = value => ({ content: [{ type: "text", text: JSON.stringify(value) }], details: value });
+const clearAnswering = w => {
+  if (w?.answering) clearTimeout(w.answering.timer);
+  if (w) { w.answering = undefined; w.answeredEnded = undefined; }
+};
+// One shape for every admitted continuation; context() compares it byte for byte with the entry that comes back.
+function continuationResult(w, event, admitted, lead) {
+  const content = `[AoE bounded work continuation] ${lead} No new scope, privilege or allowance. ${REMINDER}`;
+  w.expected = { ...admitted, before: JSON.stringify(clean(event.context.contextMessages).filter(m => m.role !== "system")), content };
+  return { entries: [...event.entries, { type: "custom_message", customType: CONTINUATION, content, display: true,
+    details: { period: admitted.id, request: admitted.request, admission: admitted.admission } }], continue: true };
+}
 const completionFor = (w, id) => w.completion?.period === id ? w.completion : undefined;
 function hasIssuedAnnotation(content, evidence) {
   for (const block of content) {
@@ -169,8 +180,10 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
   const answerCounts = a => `answers: ${a.rules + a.yolo} (rules ${a.rules}, yolo ${a.yolo}), stops: ${a.stops}`;
   pi.registerCommand("afk-work", { description: "Inspect, stop, or explicitly confirm a Session-bound local work period: /afk-work on [--policy rules|yolo] [--rule '<toml>']… [minutes] [requests]",
     async handler(args, ctx) {
-      const tokens = splitArgs(args), action = tokens.shift() ?? "status", w = current;
       const notify = (text, kind = "info") => ctx.ui.notify(text, kind);
+      let tokens;
+      try { tokens = splitArgs(args); } catch (error) { notify(`${error.message}; no authority created`, "warning"); return; }
+      const action = tokens.shift() ?? "status", w = current;
       if (action === "status" && !tokens.length) {
         const p = w?.r && projection(w);
         notify(w?.r ? (p ? `${JSON.stringify(p)}\n${answerCounts(p.answers)}` : `No work period. ${eligibility(w) ?? "Ready for explicit native confirmation"}`) : "No current AoE work-period binding"); return;
@@ -189,14 +202,7 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
       await w.r.refresh?.();
       const denied = eligibility(w);
       if (denied) { notify(denied, "warning"); return; }
-      let ruleInfo = { count: 0, sources: [], format_warnings: [] };
-      if (parsed.policy === "rules") {
-        try { ruleInfo = await w.client.rulesCheck({ period: randomUUID(), item: null, goal: "consent", policy: "rules", rules: parsed.rules, cwd: ctx.cwd, requests_used: 0, request_limit: 1 }); }
-        catch { notify("AFK rules could not be checked (engine unavailable); no authority created", "warning"); return; }
-        if (!ruleInfo?.valid) { notify(`AFK rules invalid; no authority created: ${ruleInfo?.error}`, "warning"); return; }
-        if (!/^[0-9a-f]{64}$/.test(ruleInfo.digest ?? "")) { notify("AFK rules could not be pinned (engine too old); no authority created", "warning"); return; }
-      }
-      const sources = Array.isArray(ruleInfo.sources) ? ruleInfo.sources : [], formatWarnings = Array.isArray(ruleInfo.format_warnings) ? ruleInfo.format_warnings : [];
+      // Claimed before the rules check, so a second start is refused and an off cancels this one.
       const consent = { revision: w.r.revision, external: w.lastExternal, native: nativeExternal(ctx), tools: LOCAL_TOOLS.filter(t => pi.getActiveTools().includes(t)), cancelled: false,
         owner: { namespace: CONSENT_NAMESPACE, id: randomUUID() } };
       w.pendingConsent = consent;
@@ -211,8 +217,17 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
           return value;
         } finally { clearTimeout(timer); if (consent.dialog === dialog) consent.dialog = undefined; }
       };
-      let confirmed = false, minutes, requests;
+      let confirmed = false, minutes, requests, ruleInfo = { count: 0, sources: [], format_warnings: [], rule_warnings: [] };
       try {
+        if (parsed.policy === "rules") {
+          try { ruleInfo = await w.client.rulesCheck({ period: randomUUID(), item: null, goal: "consent", policy: "rules", rules: parsed.rules, cwd: ctx.cwd, requests_used: 0, request_limit: 1 }); }
+          catch { notify("AFK rules could not be checked (engine unavailable); no authority created", "warning"); return; }
+          if (current !== w || consent.cancelled) { notify("Cancelled; no work authority created"); return; }
+          if (!ruleInfo?.valid) { notify(`AFK rules invalid; no authority created: ${ruleInfo?.error}`, "warning"); return; }
+          if (!/^[0-9a-f]{64}$/.test(ruleInfo.digest ?? "")) { notify("AFK rules could not be pinned (engine too old); no authority created", "warning"); return; }
+        }
+        const sources = Array.isArray(ruleInfo.sources) ? ruleInfo.sources : [], formatWarnings = Array.isArray(ruleInfo.format_warnings) ? ruleInfo.format_warnings : [];
+        const ruleWarnings = Array.isArray(ruleInfo.rule_warnings) ? ruleInfo.rule_warnings : [];
         const duration = parsed.minutes ?? await show("input", options => ctx.ui.input("AFK work period: minutes (1..1440)", "120", options));
         if (duration === undefined || consent.cancelled || current !== w) { notify("Cancelled; no work authority created"); return; }
         const allowance = parsed.requests ?? await show("input", options => ctx.ui.input("AFK work period: main-loop requests (1..512)", "64", options));
@@ -226,7 +241,8 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
           `${minutes} minutes; ${requests} main-loop requests; ${Math.min(requests * 16, 4096)} local tool admissions.\nUse only ${consent.tools.join("/")} and work checkpoints. Existing permissions and approval gates remain. No worker launching; this is NOT an OS sandbox or a descendant/billing cap.\nContinues while this managed agent lives, even with AoE detached. No automatic restart/restoration. Stops for completion claims, human/dependency gates, no progress, Off or limits.\nConfirming here is the start consent; AoE transport cannot grant work.`
             + `\npolicy: ${parsed.policy}; rules: ${ruleInfo.count ?? 0}${sources.length ? ` (${sources.join(", ")})` : ""}`
             + (parsed.policy === "yolo" ? "\nYOLO: AFK will answer every menu, including permission prompts. Scope checks only warn." : "")
-            + (formatWarnings.length ? `\nSkipped menu formats: ${formatWarnings.length}` : ""), options)) === true;
+            + (formatWarnings.length ? `\nSkipped menu formats: ${formatWarnings.length}` : "")
+            + ruleWarnings.map(x => `\nWarning: ${x}`).join(""), options)) === true;
       } catch { notify("Native confirmation unavailable; no work authority created", "warning"); return; }
       finally { if (w.pendingConsent === consent) w.pendingConsent = undefined; }
       if (!confirmed) { notify("Cancelled; no work authority created"); return; }
@@ -244,7 +260,7 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
           if (error.message === "work-period grant too large" && !w.period.failure) { notify("AFK rules too large for the work-period record; no authority created", "warning"); return; }
           throw error;
         }
-        w.completion = undefined; w.evidence.clear(); w.calls.clear(); w.pendingPrompts.clear(); w.answers = { rules: 0, yolo: 0, stops: 0 };
+        w.completion = undefined; w.evidence.clear(); w.calls.clear(); w.pendingPrompts.clear(); w.answers = { rules: 0, yolo: 0, stops: 0 }; clearAnswering(w);
         w.controlRevision = w.r.revision; w.baseline = consent.external; w.nativeBaseline = consent.native; w.initialIssued = false;
         if (w.ctx.isIdle()) {
           w.initialIssued = true; const entry = startEntry(w);
@@ -272,7 +288,7 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
         ...(ignored.length ? { ignored_evidence: ignored, ignored_reason: "prompt_seen_not_answered" } : {}) });
     },
   });
-  pi.registerTool({ name: ANSWER_TOOL, label: "AFK answer", description: "Resolve a choice you would otherwise ask the human. The AFK engine decides under the run policy; the result says who answered.",
+  pi.registerTool({ name: ANSWER_TOOL, label: "AFK answer", description: "Only for AFK work periods: resolve a choice you would otherwise ask the human. The AFK engine decides under the run policy; the result says who answered.",
     parameters: answerParams, executionMode: "sequential",
     async execute(_id, input, _signal, _update, ctx) {
       const w = current;
@@ -293,12 +309,11 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
       w.answers[s.policy]++; w.pendingPrompts.clear();
       const value = { answered_by: answeredBy(s.policy), choice: decision.choice ?? null, rule: decision.rule ?? null, reason: decision.reason };
       void w.client.delivered(s.id, answer_id, "ok");
-      if (input.proposal) w.lastAnswerAt = wall();
       return result(value);
     },
   });
   pi.on("session_start", (_event, ctx) => {
-    forgetSignal(current); current = undefined; uiDepth = 0;
+    forgetSignal(current); clearAnswering(current); current = undefined; uiDepth = 0;
     try {
       const journal = journalFactory(pi, ctx), rows = journal.load();
       assertInstructionHistory(ctx, rows);
@@ -326,7 +341,7 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
       const menu = askUserMenu(event.input), s = w.period.snapshot();
       if (menu && w.client) {
         const { answer_id, decision } = await w.client.decide({ run: runInput(s, ctx.cwd), menu });
-        if (!owned(w, ctx)) {
+        if (!owned(w, ctx) || !pi.getActiveTools().includes(WORK_CHECKPOINT_TOOL)) {
           if (decision.decision === "answer") void w.client.delivered(s.id, answer_id, "failed");
           stop(w, "operation_changed"); abort(w, ctx); return { block: true, reason: "AFK operation identity changed" };
         }
@@ -379,6 +394,7 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
         if (tail) {
           const menu = await w.client?.recognise("bash_prompt", tail);
           if (!owned(w, ctx) || w.calls.get(event.toolCallId) !== call) return;
+          if (menu?.error) { w.answers.stops++; stop(w, "engine_unavailable", "blocked"); abort(w, ctx); return; }
           if (!menu) {
             // decide with text saves the unrecognised sample; an unrecognised wait always stops.
             await w.client?.decide({ run: runInput(w.period.snapshot(), ctx.cwd), text: { source: "bash_prompt", text: tail } });
@@ -433,12 +449,14 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
     if (!owned(w, ctx) || w.answering) { void w.client.delivered(s.id, answer_id, "failed"); return; }
     const value = dialogValue(event, menu, decision);
     if (value === undefined) { w.answers.stops++; void w.client.delivered(s.id, answer_id, "failed"); return; }
-    w.answers[s.policy]++;
+    w.answers[s.policy]++; w.answeredEnded = undefined;
     w.answering = { answer_id, period: s.id, policy: s.policy, by: answeredBy(s.policy), timer: undefined };
     return { value, answered_by: w.answering.by };
   });
   pi.on("ui_prompt_start", event => {
     const w = current, a = w?.answering;
+    // The answered end came first (an async start handler ahead of ours): the delivery is already logged.
+    if (w?.answeredEnded && event.answered_by === w.answeredEnded) { w.answeredEnded = undefined; return; }
     if (a && !a.timer) {
       if (event.answered_by === a.by) {
         a.timer = setTimeout(() => {
@@ -461,8 +479,9 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
   });
   pi.on("ui_prompt_end", (event, ctx) => {
     const a = current?.answering;
-    if (a?.timer && event.answered_by === a.by) {
+    if (a && event.answered_by === a.by) {
       current.answering = undefined; clearTimeout(a.timer);
+      if (!a.timer) current.answeredEnded = a.by;
       void current.client.delivered(a.period, a.answer_id, "ok");
       return;
     }
@@ -488,23 +507,17 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
       if (w.client && s.status === "owned" && s.checkpoint?.status !== "unfinished" && s.menu_nudges === 0) {
         const last = [...event.context.contextMessages].reverse().find(m => m.role === "assistant");
         const textValue = (last?.content ?? []).filter(b => b.type === "text").map(b => b.text).join("\n");
-        if (textValue && await w.client.recognise("agent_text", textTail(textValue))) {
+        const menu = textValue ? await w.client.recognise("agent_text", textTail(textValue)) : null;
+        // The await let queued work or a human prompt in; nothing is persisted for them.
+        if (ctx.hasPendingMessages() || uiDepth > 0) { stop(w, "competing_work"); return; }
+        if (menu && !menu.error) {
           const nudge = w.period.nudge(MENU_NUDGE);
-          if (nudge.continue) {
-            const content = `[AoE bounded work continuation] ${MENU_NUDGE} No new scope, privilege or allowance. ${REMINDER}`;
-            w.expected = { ...nudge, before: JSON.stringify(clean(event.context.contextMessages).filter(m => m.role !== "system")), content };
-            return { entries: [...event.entries, { type: "custom_message", customType: CONTINUATION, content, display: true,
-              details: { period: nudge.id, request: nudge.request, admission: nudge.admission } }], continue: true };
-          }
+          if (nudge.continue) return continuationResult(w, event, nudge, MENU_NUDGE);
         }
       }
       const next = w.period.settle();
       if (!next.continue) return;
-      const content = `[AoE bounded work continuation] ${next.next_step}. No new scope, privilege or allowance. ${REMINDER}`;
-      w.expected = { ...next, before: JSON.stringify(clean(event.context.contextMessages).filter(m => m.role !== "system")), content };
-      return { entries: [...event.entries, { type: "custom_message", customType: CONTINUATION,
-        content,
-        display: true, details: { period: next.id, request: next.request, admission: next.admission } }], continue: true };
+      return continuationResult(w, event, next, `${next.next_step}.`);
     } catch { w.orphanFailure = "Native continuation admission unverified"; abort(w, ctx); }
   });
   pi.on("agent_settled", () => { stop(current, "settled"); forgetSignal(current); if (current) current.expected = undefined; });
