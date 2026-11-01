@@ -2,9 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createWorkPeriod } from "./aoe-afk-work-state.mjs";
 import { createNativeWorkJournal } from "./aoe-afk-work-native.mjs";
-import { ANSWER_TOOL, createAnswerClient, runInput, answeredBy, parseOnArgs, splitArgs } from "./aoe-afk-answer.mjs";
+import { ANSWER_TOOL, askUserMenu, createAnswerClient, runInput, answeredBy, parseOnArgs, splitArgs, textTail } from "./aoe-afk-answer.mjs";
 
 export const WORK_CHECKPOINT_TOOL = "aoe_afk_work_checkpoint";
+export const MENU_NUDGE = "You ended with a menu. Resolve it with aoe_afk_answer.";
 const START = "aoe-afk-work-start", CONTINUATION = "aoe-afk-work-continuation", INSTRUCTIONS = "aoe-afk-work-instructions";
 const OWN = new Set([START, CONTINUATION, INSTRUCTIONS]);
 const LOCAL_TOOLS = ["read", "write", "edit", "bash"];
@@ -300,7 +301,7 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
     } catch { current = { ctx, orphanFailure: "Native work-period provenance unavailable" }; }
   });
   pi.on("session_shutdown", () => { stop(current, "shutdown"); });
-  pi.on("tool_call", (event, ctx) => {
+  pi.on("tool_call", async (event, ctx) => {
     const w = current;
     if ([WORK_CHECKPOINT_TOOL, ANSWER_TOOL].includes(event.toolName) && !owned(w, ctx)) return { block: true, reason: "No owned AFK work period" };
     if (!protectedWork(w)) return;
@@ -313,6 +314,24 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
       stop(w, "checkpoint_unavailable", "blocked"); abort(w, ctx); return { block: true, reason: "Required aoe_afk_work_checkpoint tool is not active" };
     }
     if (event.toolName === WORK_CHECKPOINT_TOOL || event.toolName === ANSWER_TOOL) return;
+    if (event.toolName === "ask_user") {
+      const menu = askUserMenu(event.input), s = w.period.snapshot();
+      if (menu && w.client) {
+        const { answer_id, decision } = await w.client.decide({ run: runInput(s, ctx.cwd), menu });
+        if (!owned(w, ctx)) {
+          if (decision.decision === "answer") void w.client.delivered(s.id, answer_id, "failed");
+          stop(w, "operation_changed"); abort(w, ctx); return { block: true, reason: "AFK operation identity changed" };
+        }
+        if (decision.decision === "answer") {
+          w.answers[s.policy]++;
+          void w.client.delivered(s.id, answer_id, "ok");
+          const label = menu.options.find(o => o.key === decision.choice)?.label ?? null;
+          return { block: true, reason: JSON.stringify({ answered_by: answeredBy(s.policy), choice: decision.choice, label, rule: decision.rule ?? null, reason: decision.reason }) };
+        }
+        w.answers.stops++;
+      }
+      // Fall through: allowTool("ask_user") stops human_required, and the block reason stays no_human_answer.
+    }
     try {
       if (w.period.allowTool(event.toolName)) {
         if (typeof event.toolCallId !== "string" || !event.toolCallId.length || Buffer.byteLength(event.toolCallId) > 512
@@ -393,7 +412,7 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
     }
     if (!uiDepth && protectedWork(current) && current.signal && !current.signal.aborted) abort(current, ctx);
   });
-  pi.on("agent_before_settle", (event, ctx) => {
+  pi.on("agent_before_settle", async (event, ctx) => {
     const w = current;
     if (!w?.period?.active) return;
     const competing = event.outcome !== "completed" || event.continue || event.entries.length > 0 || event.context.pendingMessages.length > 0 || ctx.hasPendingMessages() || uiDepth > 0;
@@ -402,6 +421,20 @@ export function workPeriodRuntime(pi, { version, parameters, answerParameters: a
       w.period.observe();
       if (!w.period.active) return;
       if (w.period.snapshot().status === "pending" && !w.initialIssued) { w.initialIssued = true; return { entries: [...event.entries, startEntry(w)], continue: true }; }
+      const s = w.period.snapshot();
+      if (w.client && s.status === "owned" && s.checkpoint?.status !== "unfinished" && s.menu_nudges === 0) {
+        const last = [...event.context.contextMessages].reverse().find(m => m.role === "assistant");
+        const textValue = (last?.content ?? []).filter(b => b.type === "text").map(b => b.text).join("\n");
+        if (textValue && await w.client.recognise("agent_text", textTail(textValue))) {
+          const nudge = w.period.nudge(MENU_NUDGE);
+          if (nudge.continue) {
+            const content = `[AoE bounded work continuation] ${MENU_NUDGE} No new scope, privilege or allowance. ${REMINDER}`;
+            w.expected = { ...nudge, before: JSON.stringify(clean(event.context.contextMessages).filter(m => m.role !== "system")), content };
+            return { entries: [...event.entries, { type: "custom_message", customType: CONTINUATION, content, display: true,
+              details: { period: nudge.id, request: nudge.request, admission: nudge.admission } }], continue: true };
+          }
+        }
+      }
       const next = w.period.settle();
       if (!next.continue) return;
       const content = `[AoE bounded work continuation] ${next.next_step}. No new scope, privilege or allowance. ${REMINDER}`;

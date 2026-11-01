@@ -23,6 +23,22 @@ const bounded = value => {
   return Buffer.from(value).subarray(0, FRAME_TEXT_MAX).toString().replace(/�$/u, "");
 };
 
+// Menus sit at the end of agent text: keep its last bytes, starting on a character boundary.
+export const textTail = value => {
+  const bytes = Buffer.from(value);
+  if (bytes.length <= FRAME_TEXT_MAX) return value;
+  let start = bytes.length - FRAME_TEXT_MAX;
+  while ((bytes[start] & 0xc0) === 0x80) start++;
+  return bytes.subarray(start).toString();
+};
+
+export function askUserMenu(input) {
+  if (!input || typeof input.question !== "string" || input.questions || input.allowMultiple || !Array.isArray(input.options) || !input.options.length) return null;
+  return { source: "ask_user", format: "tool.ask_user", kind: "choice", question: input.question, subject: input.context ?? null,
+    options: input.options.slice(0, 32).map((o, i) => ({ key: String(i + 1), label: String(o.title ?? "").slice(0, 256) })),
+    free_text: input.allowFreeform !== false, raw: JSON.stringify(input).slice(0, 4096) };
+}
+
 export function createAnswerClient(bridge, { timeoutMs = DECIDE_TIMEOUT_MS } = {}) {
   return {
     async decide({ run, menu, text, proposal }) {

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createAnswerClient, parseOnArgs, runInput, answeredBy, splitArgs } from "./aoe-afk-answer.mjs";
+import { askUserMenu, createAnswerClient, parseOnArgs, runInput, answeredBy, splitArgs, textTail } from "./aoe-afk-answer.mjs";
 
 test("decide maps bridge replies and never throws", async () => {
   const ok = createAnswerClient({ request: async p => ({ answer_id: "a", menu: { kind: "choice" }, decision: { decision: "answer", choice: "1" } }) });
@@ -69,4 +69,29 @@ test("splitArgs keeps quoted rule bodies whole", () => {
   assert.deepEqual(splitArgs("  status  "), ["status"]);
   assert.deepEqual(splitArgs(""), []);
   assert.deepEqual(splitArgs(`on --rule ''`), ["on", "--rule", ""]);
+});
+
+test("ask_user maps a single question with options", () => {
+  assert.deepEqual(askUserMenu({ question: "Which DB?", context: "storage", options: [{ title: "SQLite" }, { title: "Postgres" }], allowFreeform: false }), {
+    source: "ask_user", format: "tool.ask_user", kind: "choice", question: "Which DB?", subject: "storage",
+    options: [{ key: "1", label: "SQLite" }, { key: "2", label: "Postgres" }], free_text: false,
+    raw: JSON.stringify({ question: "Which DB?", context: "storage", options: [{ title: "SQLite" }, { title: "Postgres" }], allowFreeform: false }) });
+  assert.equal(askUserMenu({ question: "Q?", options: [{ title: "A" }] }).free_text, true);
+  assert.equal(askUserMenu({ question: "Q?", options: [{ title: "A" }] }).subject, null);
+});
+
+test("ask_user batches are not mapped", () => {
+  assert.equal(askUserMenu({ questions: [{ question: "a" }, { question: "b" }] }), null);
+  assert.equal(askUserMenu({ question: "a", options: [{ title: "x" }], allowMultiple: true }), null);
+  assert.equal(askUserMenu({ question: "a", options: [] }), null);
+  assert.equal(askUserMenu({ question: "a" }), null);
+  assert.equal(askUserMenu(undefined), null);
+});
+
+test("textTail keeps the last 4096 bytes without splitting a character", () => {
+  assert.equal(textTail("short"), "short");
+  const long = "x" + "€".repeat(2000);
+  const tail = textTail(long);
+  assert.ok(Buffer.byteLength(tail) <= 4096); assert.ok(long.endsWith(tail)); assert.ok(!tail.includes("\uFFFD"));
+  assert.equal(tail.length, 1365);
 });

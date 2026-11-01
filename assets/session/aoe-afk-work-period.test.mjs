@@ -13,7 +13,7 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   const binding = { instance_id: "test", profile: "default", native_id: randomUUID(), launch_id: randomUUID() }, generation = randomUUID();
   let wall = 100000, mono = 0, idle = true, signal, leaf = "root", sequence = 0, memoryOnly = false, aborted = 0, ended = 0, atTurnEnd = false;
   const rows = [], handlers = new Map(), tools = new Map(), commands = new Map(), packets = [], messages = [], notices = [];
-  let answer = true, confirmHook, confirmMessage, confirmations = 0, decideReply = { decision: { decision: "stop", reason: "no_rule", checks: [] } },
+  let answer = true, confirmHook, confirmMessage, confirmations = 0, decideReply = { decision: { decision: "stop", reason: "no_rule", checks: [] } }, recogniseReply = null,
     rulesCheck = { valid: true, count: 1, sources: ["inline rule 1"], format_warnings: [] }, activeTools = ["read", "write", "edit", "bash", WORK_CHECKPOINT_TOOL];
   writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: binding.native_id }) + "\n", { mode: 0o600 });
   const append = row => {
@@ -47,7 +47,8 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   const r = { ctx, bootstrap: { binding }, generation, revision: 0, state: "off", view: null, restoredGuards: new Map(), questionGuards: [],
     bridge: { async request(packet) {
       packets.push(structuredClone(packet));
-      return packet.op === "decide" ? (typeof decideReply === "function" ? decideReply() : structuredClone(decideReply)) : packet.op === "rules_check" ? structuredClone(rulesCheck) : {};
+      return packet.op === "decide" ? (typeof decideReply === "function" ? decideReply() : structuredClone(decideReply)) : packet.op === "rules_check" ? structuredClone(rulesCheck)
+        : packet.op === "recognise" ? { menu: structuredClone(recogniseReply) } : {};
     } } };
   api.attach(r);
   const context = () => rows.filter(e => e.type === "message" && e.message.role === "user").map(e => e.message);
@@ -73,7 +74,7 @@ async function fixture({ version = "1.2.0", preserving = true } = {}) {
   return { root, file, binding, generation, rows, r, ctx, api, packets, messages, notices, native, emit, request, rpc, begin, ownedContext, call, checkpoint, answer: answerTool, boundary, context, user,
     snapshots: () => rows.filter(e => e.type === "custom" && e.customType === WORK_PERIOD_MARKER).map(e => e.data),
     confirm: (value, hook, onMessage) => { answer = value; confirmHook = hook; confirmMessage = onMessage; },
-    decideReply: value => decideReply = value, rulesCheckError: error => rulesCheck = { valid: false, error, format_warnings: [] },
+    decideReply: value => decideReply = value, recogniseReply: value => recogniseReply = value, rulesCheckError: error => rulesCheck = { valid: false, error, format_warnings: [] },
     activeTools: value => activeTools = value, get confirmations() { return confirmations; },
     memoryOnly: () => memoryOnly = true, advance: (w, m) => { wall += w; mono += m; }, get aborted() { return aborted; }, get ended() { return ended; }, close: () => rmSync(root, { recursive: true, force: true }) };
 }
@@ -552,6 +553,116 @@ test("an answer decided after the period ended is logged as failed delivery", as
     f.decideReply(() => { f.ctx.abortPreservingQueue(); return { answer_id: "a4", menu: {}, decision: { decision: "answer", choice: "1", rule: "r", reason: "ok", warnings: [], checks: [] } }; });
     await assert.rejects(f.answer({ question: "Q?", options: [{ key: "1", label: "Yes" }], proposal: "1", reason: "go" }), /ended before the answer/);
     assert.ok(f.packets.some(p => p.op === "answer_delivered" && p.answer_id === "a4" && p.delivered === "failed"));
+    assert.deepEqual((await f.rpc(f.request("inspect"))).period.answers, { rules: 0, yolo: 0, stops: 0 });
+  } finally { f.close(); }
+});
+
+const menuText = text => ({ role: "assistant", content: [{ type: "text", text }] });
+const menuBoundary = (f, text) => ({ ...f.boundary(), context: { pendingMessages: [], contextMessages: [...f.context(), menuText(text)] } });
+
+test("a turn that ends with a recognised text menu gets one corrective continuation", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply({ kind: "choice" });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const b = menuBoundary(f, "[A]pply / [S]kip");
+    const first = await f.emit("agent_before_settle", b);
+    assert.equal(first.continue, true);
+    assert.match(first.entries.at(-1).content, /Resolve it with aoe_afk_answer/);
+    assert.deepEqual(f.packets.find(p => p.op === "recognise"), { op: "recognise", source: "agent_text", text: "[A]pply / [S]kip" });
+    assert.equal(f.snapshots().at(-1).menu_nudges, 1);
+    await f.ownedContext([menuText("[A]pply / [S]kip"), continuation(first.entries.at(-1))]);
+    assert.equal(f.snapshots().at(-1).status, "owned");
+    const second = await f.emit("agent_before_settle", b);
+    assert.equal(second, undefined);
+    assert.equal(f.snapshots().at(-1).reason, "missing_checkpoint");
+  } finally { f.close(); }
+});
+
+test("no recognised menu at settle stops as missing_checkpoint", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply(null);
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    assert.equal(await f.emit("agent_before_settle", menuBoundary(f, "Done for now.")), undefined);
+    assert.equal(f.snapshots().at(-1).reason, "missing_checkpoint");
+    assert.equal(f.snapshots().at(-1).menu_nudges, 0);
+  } finally { f.close(); }
+});
+
+test("an unfinished checkpoint continues without asking the recogniser", async () => {
+  const f = await fixture();
+  try {
+    f.recogniseReply({ kind: "choice" });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    await f.call("read", "unit", { path: "unit" }); await f.checkpoint("unfinished", ["unit"]);
+    const next = await f.emit("agent_before_settle", menuBoundary(f, "[A]pply / [S]kip"));
+    assert.equal(next.continue, true); assert.doesNotMatch(next.entries.at(-1).content, /Resolve it with/);
+    assert.ok(!f.packets.some(p => p.op === "recognise"));
+  } finally { f.close(); }
+});
+
+test("the settle recogniser gets the byte-bounded tail of long agent text", async () => {
+  const f = await fixture();
+  try {
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const text = "é".repeat(3000) + "\n[A]pply / [S]kip";
+    await f.emit("agent_before_settle", menuBoundary(f, text));
+    const sent = f.packets.find(p => p.op === "recognise").text;
+    assert.ok(Buffer.byteLength(sent) <= 4096); assert.ok(Buffer.byteLength(sent) >= 4095);
+    assert.ok(text.endsWith(sent)); assert.ok(sent.endsWith("[A]pply / [S]kip"));
+  } finally { f.close(); }
+});
+
+test("ask_user is answered by the engine with an afk-labelled blocked result", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply({ answer_id: "q1", menu: {}, decision: { decision: "answer", choice: "2", rule: "r", reason: "ok", warnings: [], checks: [] } });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    let effects = 0;
+    const out = await f.call("ask_user", "c1", { question: "Which DB?", options: [{ title: "SQLite" }, { title: "Postgres" }] }, () => effects++);
+    assert.equal(out.block, true); assert.equal(effects, 0);
+    assert.deepEqual(JSON.parse(out.reason), { answered_by: "afk/rules", choice: "2", label: "Postgres", rule: "r", reason: "ok" });
+    assert.equal(f.snapshots().at(-1).status, "owned"); assert.equal(f.snapshots().at(-1).tools_used, 0);
+    assert.equal(f.packets.find(p => p.op === "decide").menu.format, "tool.ask_user");
+    assert.ok(f.packets.some(p => p.op === "answer_delivered" && p.answer_id === "q1" && p.delivered === "ok"));
+    assert.deepEqual((await f.rpc(f.request("inspect"))).period.answers, { rules: 1, yolo: 0, stops: 0 });
+  } finally { f.close(); }
+});
+
+test("ask_user stop keeps today's no_human_answer behaviour", async () => {
+  const f = await fixture();
+  try {
+    f.decideReply({ answer_id: "q2", menu: {}, decision: { decision: "stop", reason: "no_rule", checks: [] } });
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const out = await f.call("ask_user", "c2", { question: "Q?", options: [{ title: "A" }] });
+    assert.match(out.reason, /no_human_answer/);
+    assert.equal(f.snapshots().at(-1).reason, "human_required");
+    assert.deepEqual((await f.rpc(f.request("inspect"))).period.answers, { rules: 0, yolo: 0, stops: 1 });
+  } finally { f.close(); }
+});
+
+test("an unmappable ask_user batch goes straight to no_human_answer", async () => {
+  const f = await fixture();
+  try {
+    await f.native("on 120 8"); f.begin(); await f.ownedContext();
+    const out = await f.call("ask_user", "c3", { questions: [{ question: "a" }, { question: "b" }] });
+    assert.match(out.reason, /no_human_answer/);
+    assert.ok(!f.packets.some(p => p.op === "decide"));
+    assert.equal(f.snapshots().at(-1).reason, "human_required");
+  } finally { f.close(); }
+});
+
+test("an ask_user answer decided after the period ended is logged as failed delivery", async () => {
+  const f = await fixture();
+  try {
+    await f.native(); f.begin(); await f.ownedContext();
+    f.decideReply(() => { f.ctx.abortPreservingQueue(); return { answer_id: "q4", menu: {}, decision: { decision: "answer", choice: "1", rule: "r", reason: "ok", warnings: [], checks: [] } }; });
+    const out = await f.call("ask_user", "c4", { question: "Q?", options: [{ title: "Yes" }] });
+    assert.equal(out.block, true); assert.match(out.reason, /operation identity changed/);
+    assert.ok(f.packets.some(p => p.op === "answer_delivered" && p.answer_id === "q4" && p.delivered === "failed"));
+    assert.ok(!f.packets.some(p => p.op === "answer_delivered" && p.delivered === "ok"));
+    assert.equal(f.snapshots().at(-1).reason, "native_abort");
     assert.deepEqual((await f.rpc(f.request("inspect"))).period.answers, { rules: 0, yolo: 0, stops: 0 });
   } finally { f.close(); }
 });
