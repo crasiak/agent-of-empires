@@ -282,12 +282,13 @@ fn without_commit_messages(command: &str) -> String {
 /// an option may be that option's value, so it is checked and the scan goes on.
 fn dependency_verb(tool: &DependencyTool, args: &[&str]) -> Option<usize> {
     if !tool.first_word {
-        // `npm run build -- install` passes the rest to the script; any other `--` only ends
-        // the options, so the verb can follow it (`npm -- install x`).
+        // `npm run build -- install` passes the rest to the script, but only when the runner is
+        // the tool's very next word: `npm --prefix x -- install y` runs `install`. Any other `--`
+        // only ends the options, so the verb can follow it (`npm -- install x`).
         let runner = args
             .iter()
             .position(|a| *a == "--")
-            .filter(|&i| args[..i].iter().any(|a| RUNNERS.contains(a)));
+            .filter(|_| args.first().is_some_and(|a| RUNNERS.contains(a)));
         let scanned = &args[..runner.unwrap_or(args.len())];
         return scanned.iter().position(|a| tool.verbs.contains(a));
     }

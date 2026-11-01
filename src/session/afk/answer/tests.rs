@@ -1157,6 +1157,30 @@ mod decide {
                 "scope:outside_repo",
             ),
             ("Bash command: cd ..", "scope:outside_repo"),
+            (
+                "Bash command: npm --prefix x -- install lodash",
+                "scope:dependencies",
+            ),
+            (
+                "Bash command: npm --prefix test -- install lodash",
+                "scope:dependencies",
+            ),
+            (
+                "Bash command: npm -w start -- install lodash",
+                "scope:dependencies",
+            ),
+            (
+                "Bash command: pnpm --filter test -- add lodash",
+                "scope:dependencies",
+            ),
+            (
+                "Bash command: yarn --cwd run -- add lodash",
+                "scope:dependencies",
+            ),
+            (
+                "Bash command: pip3 --log run -- install x",
+                "scope:dependencies",
+            ),
             ("Bash command: rm -rf a/../$X", "scope:outside_repo"),
             ("Bash command: rm -rf src/$DIR/x", "scope:outside_repo"),
             (
@@ -1471,6 +1495,7 @@ mod decide {
 mod log {
     use super::super::decide::Policy;
     use super::super::log::*;
+    use super::super::run::{diff_lines_with, output_by, GitBudget, Outcome};
     use crate::session::anchored_fs::AnchoredDir;
 
     const PERIOD: &str = "11111111-1111-1111-1111-111111111111";
@@ -1613,7 +1638,7 @@ mod log {
             requests_used: 0,
             request_limit: 4,
         };
-        let ctx = super::super::run::context(&input);
+        let ctx = super::super::run::context(&input, &GitBudget::standard());
         assert_eq!(ctx.repo_roots, vec![dir.path().canonicalize().unwrap()]);
         assert_eq!(ctx.diff_lines, None);
         assert_eq!(ctx.max_diff_lines, 1500);
@@ -1663,7 +1688,7 @@ mod log {
         std::fs::write(root.join("b.txt"), "1\n2\n3\n4\n5\n").unwrap();
         git_in(&root, &["add", "b.txt"]);
         git_in(&root, &["commit", "-q", "-m", "more"]);
-        let ctx = super::super::run::context(&run_input(&root));
+        let ctx = super::super::run::context(&run_input(&root), &GitBudget::standard());
         assert_eq!(ctx.diff_lines, Some(5));
     }
 
@@ -1689,7 +1714,7 @@ mod log {
         std::fs::write(root.join("c.txt"), "1\n2\n3\n").unwrap();
         git_in(&root, &["add", "c.txt"]);
         git_in(&root, &["commit", "-q", "-m", "local"]);
-        let ctx = super::super::run::context(&run_input(&root));
+        let ctx = super::super::run::context(&run_input(&root), &GitBudget::standard());
         assert_eq!(
             ctx.diff_lines,
             Some(7),
@@ -1698,21 +1723,53 @@ mod log {
     }
 
     #[test]
-    fn a_command_that_overruns_its_deadline_counts_as_failed() {
+    fn git_calls_share_one_deadline_and_a_slow_one_counts_as_timed_out() {
         use std::process::Command;
         use std::time::{Duration, Instant};
-        let run = |program: &str, arg: &str, ms: u64| {
-            let mut c = Command::new(program);
-            c.arg(arg);
-            let started = Instant::now();
-            let out = super::super::run::run_within(c, Duration::from_millis(ms));
-            (out, started.elapsed())
+        let sleep = |deadline| {
+            let mut c = Command::new("sleep");
+            c.arg("5");
+            output_by(c, deadline)
         };
-        let (out, took) = run("sleep", "5", 100);
-        assert_eq!(out, None);
-        assert!(took < Duration::from_secs(2), "{took:?}");
-        assert_eq!(run("echo", "hi", 5000).0.as_deref(), Some("hi"));
-        assert_eq!(run("false", "", 5000).0, None);
+        // Three slow calls against one deadline take about one deadline, not three.
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(300);
+        for _ in 0..3 {
+            assert_eq!(sleep(deadline), Outcome::TimedOut);
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        let soon = Instant::now() + Duration::from_secs(5);
+        let mut echo = Command::new("echo");
+        echo.arg("hi");
+        assert_eq!(output_by(echo, soon), Outcome::Output("hi".into()));
+        assert_eq!(output_by(Command::new("false"), soon), Outcome::Failed);
+    }
+
+    #[test]
+    fn a_timed_out_merge_base_gives_no_count_rather_than_a_head_based_one() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let timed_out = |args: &[&str]| {
+            calls.borrow_mut().push(args.join(" "));
+            match args[0] {
+                "merge-base" => Outcome::TimedOut,
+                _ => Outcome::Output("9\t9\tf".into()),
+            }
+        };
+        assert_eq!(diff_lines_with(&timed_out), None);
+        assert_eq!(calls.borrow().len(), 1, "no fall-through to the next base");
+        // A base that simply does not exist still falls through, to HEAD at the end.
+        let missing = |args: &[&str]| match args[0] {
+            "merge-base" => Outcome::Failed,
+            _ => {
+                assert_eq!(args, ["diff", "--numstat", "HEAD"]);
+                Outcome::Output("2\t1\tf\n-\t-\tbin".into())
+            }
+        };
+        assert_eq!(diff_lines_with(&missing), Some(3));
     }
 
     #[test]
@@ -1727,7 +1784,7 @@ mod log {
         std::fs::write(root.join("b.txt"), "1\n2\n3\n").unwrap();
         git_in(&root, &["add", "b.txt"]);
         git_in(&root, &["commit", "-q", "-m", "more"]);
-        let ctx = super::super::run::context(&run_input(&root));
+        let ctx = super::super::run::context(&run_input(&root), &GitBudget::standard());
         assert_eq!(ctx.diff_lines, Some(3));
     }
 
@@ -1736,7 +1793,7 @@ mod log {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         git_in(&root, &["init", "-q"]);
-        let ctx = super::super::run::context(&run_input(&root));
+        let ctx = super::super::run::context(&run_input(&root), &GitBudget::standard());
         assert_eq!(ctx.protected_branches, ["main", "master"]);
         git_in(
             &root,
@@ -1746,7 +1803,7 @@ mod log {
                 "refs/remotes/origin/trunk",
             ],
         );
-        let ctx = super::super::run::context(&run_input(&root));
+        let ctx = super::super::run::context(&run_input(&root), &GitBudget::standard());
         assert_eq!(ctx.protected_branches, ["main", "master", "trunk"]);
         git_in(
             &root,
@@ -1756,7 +1813,7 @@ mod log {
                 "refs/remotes/origin/main",
             ],
         );
-        let ctx = super::super::run::context(&run_input(&root));
+        let ctx = super::super::run::context(&run_input(&root), &GitBudget::standard());
         assert_eq!(ctx.protected_branches, ["main", "master"]);
     }
 
@@ -1791,7 +1848,7 @@ mod log {
             requests_used: 0,
             request_limit: 4,
         };
-        let ctx = super::super::run::context(&input);
+        let ctx = super::super::run::context(&input, &GitBudget::standard());
         assert_eq!(ctx.repo_roots, vec![root]);
         // One line deleted, two added; no origin/HEAD, so the base is HEAD.
         assert_eq!(ctx.diff_lines, Some(3));

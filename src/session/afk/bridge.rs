@@ -273,9 +273,12 @@ pub(super) fn serve(
     }
 }
 
-fn load_rules(run: &answer::run::RunInput) -> Result<answer::Rules> {
+fn load_rules(
+    run: &answer::run::RunInput,
+    budget: &answer::run::GitBudget,
+) -> Result<answer::Rules> {
     answer::Rules::load(
-        Some(&answer::run::repo_root(&run.cwd)),
+        Some(&answer::run::repo_root(&run.cwd, budget)),
         answer::rules::user_rules_file().as_deref(),
         &run.rules,
     )
@@ -288,7 +291,7 @@ fn rules_check(run: &answer::run::RunInput, format_warnings: &[String]) -> serde
             "valid": true, "count": 0, "sources": [], "format_warnings": format_warnings, "rule_warnings": [],
         });
     }
-    match load_rules(run) {
+    match load_rules(run, &answer::run::GitBudget::standard()) {
         Ok(rules) => serde_json::json!({
             "valid": true,
             "count": rules.rules.len(),
@@ -314,6 +317,8 @@ fn decide(
     text: Option<TextMenu>,
     proposal: Option<answer::Proposal>,
 ) -> Result<serde_json::Value> {
+    // One deadline for every git call this decide makes.
+    let budget = answer::run::GitBudget::standard();
     let log = answer::log::AnswerLog::new(&store.dir, &run.period)?;
     let menu = match (menu, text) {
         (Some(input), None) => answer::Menu::from_input(input, &answer::RoleWords::default())?,
@@ -345,12 +350,17 @@ fn decide(
     // Rules are fixed at consent: sources that no longer load to the consented digest stop.
     let rules = match run.policy {
         answer::Policy::Yolo => Some(answer::Rules::empty()),
-        answer::Policy::Rules => load_rules(&run)
+        answer::Policy::Rules => load_rules(&run, &budget)
             .ok()
             .filter(|r| run.rules_digest.as_deref() == Some(r.digest.as_str())),
     };
     let decision = match &rules {
-        Some(rules) => answer::decide(&menu, &answer::run::context(&run), rules, proposal.as_ref()),
+        Some(rules) => answer::decide(
+            &menu,
+            &answer::run::context(&run, &budget),
+            rules,
+            proposal.as_ref(),
+        ),
         None => answer::Decision::Stop {
             reason: "rules_changed".into(),
             checks: vec![],
