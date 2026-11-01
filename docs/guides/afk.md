@@ -123,9 +123,10 @@ inline rules are too large for the record ("AFK rules too large…"). Each work
 period record is at most 8 KiB, inline rules included, so a later checkpoint
 that would not fit beside large inline rules stops the period as
 `blocked: record_capacity` instead. The consent
-dialog shows the policy, the rule count and sources, and one `Warning:` line for
-each rule the engine dropped or shadowed (for example a stop rule in
-`afk-rules.toml` that an inline rule with the same id hides); `/afk-work` status adds
+dialog shows the policy, the rule count and sources, and a `Warning:` line for
+a rule id defined more than once in the same source (only the first applies) and
+for a `stop` rule dropped because a higher-precedence source defines the same id.
+A shadowed `approve`, `deny` or other non-stop rule is dropped silently. `/afk-work` status adds
 `answers: N (rules M, yolo K), stops: S`. Those counts are in memory and read
 zero after a restart.
 
@@ -325,13 +326,15 @@ pinned Pi SDK with a scripted model, is `assets/session/aoe-afk-answer-sdk.test.
 
 Work-period rows written by this release are version 2 (they carry the answer
 policy, the rules and the nudge count). An older build reads only version 1, so
-it treats a Session with v2 rows as unreadable history: it fails closed, refuses
-every new period ("Native work-period evidence unavailable; inspect retained
-history") and blocks dispatch, and fresh ordinary input does not recover it.
-Nothing in the code resets that state; there is no `/afk-work` reset command.
-After downgrading, start a new Pi Session for the work instead of resuming one
-that has v2 rows. This release reads version 1 rows (they load as the `rules`
-policy with no rules), so upgrading needs no step.
+a Session that wrote v2 rows is unreadable history to it, and the build fails
+closed: it refuses every new period ("Native work-period evidence unavailable;
+inspect retained history"), aborts every turn and blocks every tool in that
+Session, so ordinary work fails too, and it cancels `/new`, `/resume`, `/fork`,
+compaction and tree navigation from inside the pane. Fresh ordinary input does not
+recover it, and there is no `/afk-work` reset command. After a downgrade, such a
+Session cannot do any work. Launch a fresh AoE session for the work, or upgrade aoe
+again: this release reads v2 rows normally, and reads version 1 rows too (they load
+as the `rules` policy with no rules).
 
 ## Global read-only overview
 
