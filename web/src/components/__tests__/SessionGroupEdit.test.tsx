@@ -20,14 +20,17 @@ function deferred() {
 beforeEach(() => {
   patches = [];
   load = async () => jsonResponse(groups);
-  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
-    if (url === "/api/groups") return load();
-    if (init?.method === "PATCH") {
-      patches.push({ url, body: JSON.parse(init.body as string) });
-      return jsonResponse({ id: "s1" });
-    }
-    return jsonResponse({});
-  }));
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/groups") return load();
+      if (init?.method === "PATCH") {
+        patches.push({ url, body: JSON.parse(init.body as string) });
+        return jsonResponse({ id: "s1" });
+      }
+      return jsonResponse({});
+    }),
+  );
 });
 afterEach(() => {
   cleanup();
@@ -91,7 +94,7 @@ describe("session group chooser PATCH contract", () => {
     renderRow(workspace("s1", "  stale / group  "));
     open();
     await screen.findByRole("option", { name: '"Review/Done"' });
-    expect((chooser().selectedOptions[0]!).textContent).toContain('"  stale / group  "');
+    expect(chooser().selectedOptions[0]!.textContent).toContain('"  stale / group  "');
     if (action === "Cancel") {
       select("Review/Done");
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -107,8 +110,10 @@ describe("session group chooser PATCH contract", () => {
     load = state === "empty" ? async () => jsonResponse([]) : async () => jsonResponse({}, 500);
     renderRow(workspace());
     open();
-    await screen.findByText(state === "empty" ? "No existing groups." : "Could not load groups. Enter a group manually.");
-    expect((chooser().selectedOptions[0]!).textContent).toContain('"old/stale"');
+    await screen.findByText(
+      state === "empty" ? "No existing groups." : "Could not load groups. Enter a group manually.",
+    );
+    expect(chooser().selectedOptions[0]!.textContent).toContain('"old/stale"');
     fireEvent.change(input(), { target: { value: "  recovery  " } });
     save();
     await closed();
@@ -123,7 +128,7 @@ describe("session group chooser PATCH contract", () => {
     open();
     await waitFor(() => expect(started).toHaveBeenCalledTimes(1));
     expect(screen.getByText("Loading groups...")).toBeTruthy();
-    expect((chooser().selectedOptions[0]!).textContent).toContain('"old/stale"');
+    expect(chooser().selectedOptions[0]!.textContent).toContain('"old/stale"');
     fireEvent.change(input(), { target: { value: "  chosen / now  " } });
     await act(async () => request.resolve(jsonResponse(groups)));
     await screen.findByRole("option", { name: '"Review/Done"' });

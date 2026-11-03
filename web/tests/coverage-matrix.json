@@ -2345,6 +2345,25 @@
       ]
     },
     {
+      "id": "session.existing-group-chooser",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": [
+        "src/components/__tests__/SessionGroupEdit.test.tsx",
+        "src/components/__tests__/SessionGroupModal.test.tsx"
+      ],
+      "components": ["web/src/components/SessionGroupModal.tsx", "web/src/components/sidebar/SessionActions.tsx"],
+      "notes": "Exact lookalike and whitespace path PATCH payloads, manual creation and clear, unchanged and cancel, load failure, stale current group, and late-load session isolation."
+    },
+    {
+      "id": "session.existing-group-chooser-keyboard",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/session-group-chooser.spec.ts"],
+      "components": ["web/src/components/SessionGroupModal.tsx", "web/src/components/sidebar/SessionActions.tsx"],
+      "notes": "Native labelled chooser distinguishes Review/Done from Review / Done; keyboard focus, Save, Escape, and unchanged save preserve request semantics."
+    },
+    {
       "id": "session.delete-dialog-keyboard",
       "kind": "vitest",
       "risk": "low",

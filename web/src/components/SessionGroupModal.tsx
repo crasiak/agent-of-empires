@@ -1,6 +1,7 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { fetchGroups } from "../lib/api";
 import { CancelButton, ConfirmButton, Dialog } from "./Dialog";
-import { useDialogFocus } from "./dialogHooks";
+import { useConfirmKeys, useDialogFocus } from "./dialogHooks";
 
 const DIALOG_ID = "session-group-modal";
 const PROMPT_ID = `${DIALOG_ID}-prompt`;
@@ -15,14 +16,36 @@ interface Props {
 
 export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose }: Props) {
   const [value, setValue] = useState(currentGroup);
+  const [manual, setManual] = useState(false);
+  const [groups, setGroups] = useState<string[]>([]);
+  const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   useDialogFocus(inputRef, true);
 
+  useEffect(() => {
+    let active = true;
+    void fetchGroups().then(
+      (loaded) => {
+        if (!active) return;
+        setGroups(loaded.map((group) => group.path).filter(Boolean));
+        setLoadState("loaded");
+      },
+      () => {
+        if (active) setLoadState("error");
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const options = [...new Set([currentGroup, ...groups].filter(Boolean))];
   const handleSave = async () => {
-    // A blank value ungroups; paths are sent as-is, with no slash normalization.
-    const next = value.trim();
+    if (saving) return;
+    // Existing paths are identifiers; only manually entered paths are trimmed.
+    const next = manual ? value.trim() : value;
     if (next === currentGroup) return onClose();
     setSaving(true);
     setError(null);
@@ -31,6 +54,11 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
     setError(next ? "Failed to update group." : "Failed to clear group.");
     inputRef.current?.focus();
   };
+  useConfirmKeys(
+    () => !saving && onClose(),
+    () => void handleSave(),
+    saving,
+  );
 
   return (
     <Dialog
@@ -56,12 +84,51 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
       <p id={PROMPT_ID} className="text-[13px] text-text-secondary">
         Move <span className="text-text-primary">{sessionTitle}</span> to a group.
       </p>
+      <label htmlFor={`${DIALOG_ID}-existing`} className="block text-[12px] text-text-secondary">
+        Existing group
+      </label>
+      <select
+        id={`${DIALOG_ID}-existing`}
+        value={manual ? "manual" : value ? `group:${value}` : ""}
+        disabled={saving}
+        onChange={(e) => {
+          const selected = e.target.value;
+          setManual(selected === "manual");
+          if (selected !== "manual") setValue(selected ? selected.slice("group:".length) : "");
+          setError(null);
+          if (selected === "manual") inputRef.current?.focus();
+        }}
+        className="w-full bg-surface-900 border border-surface-700 rounded px-2 py-1.5 text-[13px] font-mono text-text-primary focus:outline-none focus:border-brand-600"
+      >
+        <option value="">No group</option>
+        {options.map((path) => (
+          <option key={path} value={`group:${path}`}>
+            {JSON.stringify(path)}
+          </option>
+        ))}
+        <option value="manual">New group or manual path</option>
+      </select>
+      <p role={loadState === "error" ? "alert" : "status"} className="text-[12px] text-text-secondary">
+        {loadState === "loading"
+          ? "Loading groups..."
+          : loadState === "error"
+            ? "Could not load groups. Enter a group manually."
+            : groups.length === 0
+              ? "No existing groups."
+              : "Choose an exact path, or enter one below."}
+      </p>
+      <label htmlFor={`${DIALOG_ID}-input`} className="block text-[12px] text-text-secondary">
+        New group or manual path
+      </label>
       <input
+        id={`${DIALOG_ID}-input`}
         ref={inputRef}
+        disabled={saving}
         type="text"
         value={value}
         onChange={(e) => {
           setValue(e.target.value);
+          setManual(true);
           setError(null);
         }}
         onKeyDown={(e) => {
@@ -69,7 +136,6 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
             e.preventDefault();
             if (!saving) void handleSave();
           }
-          if (e.key === "Escape" && !saving) onClose();
         }}
         placeholder="Group (blank to ungroup)"
         data-testid="session-group-modal-input"
