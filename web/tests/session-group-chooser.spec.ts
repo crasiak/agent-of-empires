@@ -1,14 +1,21 @@
 import { test, expect } from "./helpers/mockedTest";
 import { installSidebarMocks } from "./helpers/sidebarMocks";
 
-const paths = ["Review/Done", "Review / Done"];
+const choices = [
+  { path: "Review/Done", label: '"Review/Done"' },
+  { path: "Review / Done", label: '"Review / Done"' },
+  { path: " a ", label: '" a "' },
+  { path: "  a  ", label: String.raw`"\u0020\u0020a\u0020\u0020"` },
+  { path: "a b", label: '"a b"' },
+  { path: "a  b", label: String.raw`"a\u0020\u0020b"` },
+];
 
 test("existing group paths stay distinct through selection, Save, and keyboard cancellation", async ({ page }) => {
   await installSidebarMocks(page, {
     sessions: [{ id: "s1", title: "group-source", project_path: "/tmp/repo", branch: null, group: "stale" }],
   });
   await page.route("**/api/groups", (route) =>
-    route.fulfill({ json: paths.map((path) => ({ path, session_count: 1 })) }),
+    route.fulfill({ json: choices.map(({ path }) => ({ path, session_count: 1 })) }),
   );
   const patches: unknown[] = [];
   await page.route("**/api/sessions/s1/group", (route) => {
@@ -25,12 +32,14 @@ test("existing group paths stay distinct through selection, Save, and keyboard c
   };
   const chooser = page.getByRole("combobox", { name: "Existing group" });
   const dialog = page.getByRole("dialog", { name: "Edit group" });
-  for (const path of paths) {
+  for (const { path, label } of choices) {
     await open();
-    for (const label of paths) {
-      await expect(chooser.getByRole("option", { name: JSON.stringify(label), exact: true })).toHaveCount(1);
+    for (const choice of choices) {
+      const option = chooser.getByRole("option", { name: choice.label, exact: true });
+      await expect(option).toHaveCount(1);
+      expect(await option.evaluate((el) => (el as HTMLOptionElement).label)).toBe(choice.label);
     }
-    await chooser.selectOption({ label: JSON.stringify(path) });
+    await chooser.selectOption({ label });
     await expect(chooser).toHaveValue(`group:${path}`);
     await chooser.focus();
     await page.keyboard.press("Tab");
@@ -43,15 +52,15 @@ test("existing group paths stay distinct through selection, Save, and keyboard c
     await expect(dialog).toBeHidden();
     expect(patches.at(-1)).toEqual({ group: path });
   }
-  expect(patches).toHaveLength(2);
+  expect(patches).toHaveLength(choices.length);
   await open();
-  await chooser.selectOption({ label: JSON.stringify(paths[0]) });
+  await chooser.selectOption({ label: choices[0]!.label });
   await chooser.focus();
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
-  expect(patches).toHaveLength(2);
+  expect(patches).toHaveLength(choices.length);
   await open();
   await dialog.getByRole("button", { name: "Save" }).click();
   await expect(dialog).toBeHidden();
-  expect(patches).toHaveLength(2);
+  expect(patches).toHaveLength(choices.length);
 });

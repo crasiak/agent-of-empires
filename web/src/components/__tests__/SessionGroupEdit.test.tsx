@@ -5,12 +5,14 @@ import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react
 import { jsonResponse, makeSession, makeWorkspace, renderRow } from "./fixtures";
 
 const paths = ["Review/Done", "Review / Done", "  raw / path  "];
+const label = (path: string) => path === paths[2] ? String.raw`"\u0020\u0020raw / path\u0020\u0020"` : JSON.stringify(path);
 const groups = paths.map((path) => ({ path, session_count: 1 }));
 const workspace = (id = "s1", group_path = "old/stale") =>
   makeWorkspace("w", [makeSession({ id, title: id, group_path })]);
 let patches: Array<{ url: string; body: unknown }>;
 let load: () => Promise<Response>;
 let patchStatus: number;
+let patchResult: (() => Promise<Response>) | undefined;
 
 function deferred() {
   let resolve!: (response: Response) => void;
@@ -21,6 +23,7 @@ function deferred() {
 beforeEach(() => {
   patches = [];
   patchStatus = 200;
+  patchResult = undefined;
   load = async () => jsonResponse(groups);
   vi.stubGlobal(
     "fetch",
@@ -28,7 +31,7 @@ beforeEach(() => {
       if (url === "/api/groups") return load();
       if (init?.method === "PATCH") {
         patches.push({ url, body: JSON.parse(init.body as string) });
-        return jsonResponse({ id: "s1" }, patchStatus);
+        return patchResult ? patchResult() : jsonResponse({ id: "s1" }, patchStatus);
       }
       return jsonResponse({});
     }),
@@ -49,7 +52,7 @@ const input = () => screen.getByTestId("session-group-modal-input");
 const save = () => fireEvent.click(screen.getByTestId("session-group-modal-save"));
 function select(path: string) {
   const option = screen.getByRole("option", {
-    name: (_name, element) => element.textContent === JSON.stringify(path),
+    name: label(path),
   }) as HTMLOptionElement;
   fireEvent.change(chooser(), { target: { value: option.value } });
 }
@@ -61,7 +64,7 @@ describe("session group chooser PATCH contract", () => {
   it.each(paths)("sends the exact selected raw path %j", async (path) => {
     renderRow(workspace());
     open();
-    await screen.findByRole("option", { name: (_name, element) => element.textContent === JSON.stringify(path) });
+    await screen.findByRole("option", { name: label(path) });
     expect(screen.getByRole("option", { name: '"Review/Done"', exact: true }).textContent).not.toBe(
       screen.getByRole("option", { name: '"Review / Done"', exact: true }).textContent,
     );
@@ -173,6 +176,29 @@ describe("session group chooser PATCH contract", () => {
     save();
     await closed();
     expect(patches).toEqual([{ url: "/api/sessions/s1/group", body: { group: "chosen / now" } }]);
+  });
+
+  it.each([200, 500])("ignores the previous session's late PATCH completion (%i)", async (status) => {
+    const request = deferred();
+    patchResult = () => request.promise;
+    const row = renderRow(workspace("s1", "first"));
+    open();
+    fireEvent.change(input(), { target: { value: "first-destination" } });
+    save();
+    await waitFor(() => expect(patches).toHaveLength(1));
+    row.rerenderRow(workspace("s2", "second"));
+    fireEvent.change(input(), { target: { value: "second-draft" } });
+    patchResult = undefined;
+    await act(async () => request.resolve(jsonResponse({ id: "s1" }, status)));
+    expect(screen.getByRole("dialog", { name: "Edit group" })).toBeTruthy();
+    expect((input() as HTMLInputElement).value).toBe("second-draft");
+    expect(screen.queryByText("Failed to update group.")).toBeNull();
+    save();
+    await closed();
+    expect(patches).toEqual([
+      { url: "/api/sessions/s1/group", body: { group: "first-destination" } },
+      { url: "/api/sessions/s2/group", body: { group: "second-draft" } },
+    ]);
   });
 
   it("isolates a different session and ignores the previous session's late request", async () => {
