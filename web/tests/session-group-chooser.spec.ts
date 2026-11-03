@@ -10,7 +10,9 @@ const choices = [
   { path: "a  b", label: String.raw`"a\u0020\u0020b"` },
 ];
 
-test("existing group paths stay distinct through selection, Save, and keyboard cancellation", async ({ page }) => {
+test("existing group paths stay distinct through selection, Save, and keyboard cancellation", async ({
+  page,
+}, testInfo) => {
   await installSidebarMocks(page, {
     sessions: [{ id: "s1", title: "group-source", project_path: "/tmp/repo", branch: null, group: "stale" }],
   });
@@ -41,6 +43,7 @@ test("existing group paths stay distinct through selection, Save, and keyboard c
     }
     await chooser.selectOption({ label });
     await expect(chooser).toHaveValue(`group:${path}`);
+    if (path === "Review / Done") await page.screenshot({ path: testInfo.outputPath("existing-group-chooser.png") });
     await chooser.focus();
     await page.keyboard.press("Tab");
     await expect(page.getByLabel("New group or manual path", { exact: true })).toBeFocused();

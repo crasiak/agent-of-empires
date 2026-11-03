@@ -82,7 +82,10 @@ test.describe("rename (#1220)", () => {
 });
 
 test.describe("group edit (#1726)", () => {
-  test("choosing Beta's exact existing group combines Alpha and Beta after reload", async ({ page, spawnServe }) => {
+  test("choosing Beta's exact existing group combines Alpha and Beta after reload", async ({
+    page,
+    spawnServe,
+  }, testInfo) => {
     const serve = await spawnServe({
       seedFn: (env) => {
         seedSessionViaAoeAdd({ title: "Alpha", subdir: "alpha" })(env);
@@ -101,7 +104,7 @@ test.describe("group edit (#1726)", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ group }),
       });
-      expect(response.ok()).toBe(true);
+      expect(response.ok).toBe(true);
     }
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.goto(`${serve.baseUrl}/`);
@@ -142,6 +145,7 @@ test.describe("group edit (#1726)", () => {
     await assertCombined();
     const groups = await fetch(`${serve.baseUrl}/api/groups`).then((response) => response.json());
     expect(groups).toEqual([{ path: "Review/Done", session_count: 2 }]);
+    await page.screenshot({ path: testInfo.outputPath("combined-existing-group.png") });
   });
 
   async function saveGroup(page: Page, sessionId: string, value: string, prefilled = "") {
