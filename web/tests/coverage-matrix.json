@@ -2342,7 +2342,32 @@
         "web/src/components/WorkspaceSidebar.tsx",
         "web/src/components/SessionGroupModal.tsx",
         "web/src/lib/api.ts"
-      ]
+      ],
+      "notes": "Live new/clear group updates and Alpha/Beta lookalike consolidation through the existing-group chooser, with combined membership and one exact destination after reload."
+    },
+    {
+      "id": "session.existing-group-chooser",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": [
+        "src/components/__tests__/SessionGroupEdit.test.tsx",
+        "src/components/__tests__/SessionGroupModal.test.tsx",
+        "src/lib/api.test.ts"
+      ],
+      "components": [
+        "web/src/components/SessionGroupModal.tsx",
+        "web/src/components/sidebar/SessionActions.tsx",
+        "web/src/lib/api.ts"
+      ],
+      "notes": "Exact lookalike and whitespace path PATCH payloads, manual creation and clear, unchanged and cancel, load failure, stale current group, and late GET/PATCH session isolation."
+    },
+    {
+      "id": "session.existing-group-chooser-keyboard",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/session-group-chooser.spec.ts"],
+      "components": ["web/src/components/SessionGroupModal.tsx", "web/src/components/sidebar/SessionActions.tsx"],
+      "notes": "Native option labels distinguish Review/Done from Review / Done and repeated edge/internal spaces; keyboard focus, Save, Escape, and unchanged save preserve request semantics."
     },
     {
       "id": "session.delete-dialog-keyboard",
