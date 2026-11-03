@@ -32,6 +32,21 @@ const bodyOf = (init: RequestInit | undefined) => JSON.parse(init!.body as strin
 /** `["METHOD /url", call, expectations]`; a missing `body` asserts none was sent. */
 type RequestCase = [string, () => Promise<unknown>, { body?: unknown; respond?: Response; result?: unknown }?];
 
+it("fetchGroups distinguishes empty results from failures only when requested", async () => {
+  fetchSpy.mockResolvedValueOnce(json([]));
+  await expect(api.fetchGroups({ throwOnError: true })).resolves.toEqual([]);
+  for (const response of [() => json({}, 500), () => empty()]) {
+    fetchSpy.mockResolvedValueOnce(response());
+    await expect(api.fetchGroups({ throwOnError: true })).rejects.toThrow("Could not load groups");
+    fetchSpy.mockResolvedValueOnce(response());
+    await expect(api.fetchGroups()).resolves.toEqual([]);
+  }
+  offline();
+  await expect(api.fetchGroups({ throwOnError: true })).rejects.toThrow("Could not load groups");
+  offline();
+  await expect(api.fetchGroups()).resolves.toEqual([]);
+});
+
 const session = { id: "s1" };
 const plugins = { plugins: [], load_errors: [] };
 const hit = { session_id: "s1", seq: 3, kind: "agent", snippet: "hit", match_count: 2 };

@@ -2350,9 +2350,14 @@
       "risk": "high",
       "specs": [
         "src/components/__tests__/SessionGroupEdit.test.tsx",
-        "src/components/__tests__/SessionGroupModal.test.tsx"
+        "src/components/__tests__/SessionGroupModal.test.tsx",
+        "src/lib/api.test.ts"
       ],
-      "components": ["web/src/components/SessionGroupModal.tsx", "web/src/components/sidebar/SessionActions.tsx"],
+      "components": [
+        "web/src/components/SessionGroupModal.tsx",
+        "web/src/components/sidebar/SessionActions.tsx",
+        "web/src/lib/api.ts"
+      ],
       "notes": "Exact lookalike and whitespace path PATCH payloads, manual creation and clear, unchanged and cancel, load failure, stale current group, and late-load session isolation."
     },
     {

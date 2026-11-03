@@ -26,7 +26,7 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
 
   useEffect(() => {
     let active = true;
-    void fetchGroups().then(
+    void fetchGroups({ throwOnError: true }).then(
       (loaded) => {
         if (!active) return;
         setGroups(loaded.map((group) => group.path).filter(Boolean));
@@ -45,7 +45,7 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
   const handleSave = async () => {
     if (saving) return;
     // Existing paths are identifiers; only manually entered paths are trimmed.
-    const next = manual ? value.trim() : value;
+    const next = manual && value !== currentGroup ? value.trim() : value;
     if (next === currentGroup) return onClose();
     setSaving(true);
     setError(null);

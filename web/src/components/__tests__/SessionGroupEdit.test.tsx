@@ -10,6 +10,7 @@ const workspace = (id = "s1", group_path = "old/stale") =>
   makeWorkspace("w", [makeSession({ id, title: id, group_path })]);
 let patches: Array<{ url: string; body: unknown }>;
 let load: () => Promise<Response>;
+let patchStatus: number;
 
 function deferred() {
   let resolve!: (response: Response) => void;
@@ -19,6 +20,7 @@ function deferred() {
 
 beforeEach(() => {
   patches = [];
+  patchStatus = 200;
   load = async () => jsonResponse(groups);
   vi.stubGlobal(
     "fetch",
@@ -26,7 +28,7 @@ beforeEach(() => {
       if (url === "/api/groups") return load();
       if (init?.method === "PATCH") {
         patches.push({ url, body: JSON.parse(init.body as string) });
-        return jsonResponse({ id: "s1" });
+        return jsonResponse({ id: "s1" }, patchStatus);
       }
       return jsonResponse({});
     }),
@@ -46,7 +48,9 @@ const chooser = () => screen.getByRole("combobox", { name: "Existing group" }) a
 const input = () => screen.getByTestId("session-group-modal-input");
 const save = () => fireEvent.click(screen.getByTestId("session-group-modal-save"));
 function select(path: string) {
-  const option = screen.getByRole("option", { name: JSON.stringify(path), exact: true }) as HTMLOptionElement;
+  const option = screen.getByRole("option", {
+    name: (_name, element) => element.textContent === JSON.stringify(path),
+  }) as HTMLOptionElement;
   fireEvent.change(chooser(), { target: { value: option.value } });
 }
 async function closed() {
@@ -57,7 +61,7 @@ describe("session group chooser PATCH contract", () => {
   it.each(paths)("sends the exact selected raw path %j", async (path) => {
     renderRow(workspace());
     open();
-    await screen.findByRole("option", { name: JSON.stringify(path), exact: true });
+    await screen.findByRole("option", { name: (_name, element) => element.textContent === JSON.stringify(path) });
     expect(screen.getByRole("option", { name: '"Review/Done"', exact: true }).textContent).not.toBe(
       screen.getByRole("option", { name: '"Review / Done"', exact: true }).textContent,
     );
@@ -118,6 +122,39 @@ describe("session group chooser PATCH contract", () => {
     save();
     await closed();
     expect(patches).toEqual([{ url: "/api/sessions/s1/group", body: { group: "recovery" } }]);
+  });
+
+  it("retains an exact existing destination after a failed PATCH and retries it unchanged", async () => {
+    patchStatus = 500;
+    renderRow(workspace());
+    open();
+    await screen.findByRole("option", { name: '"Review / Done"' });
+    select("Review / Done");
+    save();
+    await screen.findByText("Failed to update group.");
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(chooser().value).toBe("group:Review / Done");
+    patchStatus = 200;
+    save();
+    await closed();
+    expect(patches).toEqual([
+      { url: "/api/sessions/s1/group", body: { group: "Review / Done" } },
+      { url: "/api/sessions/s1/group", body: { group: "Review / Done" } },
+    ]);
+  });
+
+  it("unchanged Save preserves a stale current path while loading", async () => {
+    const request = deferred();
+    const started = vi.fn(() => request.promise);
+    load = started;
+    renderRow(workspace("s1", "  stale  "));
+    open();
+    await waitFor(() => expect(started).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("Loading groups...")).toBeTruthy();
+    save();
+    await closed();
+    await act(async () => request.resolve(jsonResponse(groups)));
+    expect(patches).toEqual([]);
   });
 
   it("keeps the current group and newer manual choice across a delayed load", async () => {

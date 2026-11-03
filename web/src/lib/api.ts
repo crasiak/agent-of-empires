@@ -1406,8 +1406,10 @@ export async function browseFilesystem(
   return { ...data, ok: true };
 }
 
-export async function fetchGroups(): Promise<GroupInfo[]> {
-  return (await fetchJson<GroupInfo[]>("/api/groups")) ?? [];
+export async function fetchGroups({ throwOnError = false }: { throwOnError?: boolean } = {}): Promise<GroupInfo[]> {
+  const groups = await fetchJson<GroupInfo[]>("/api/groups");
+  if (groups === null && throwOnError) throw new Error("Could not load groups");
+  return groups ?? [];
 }
 
 /** Resolve a plugin `dynamic_select` widget's options; `depends` holds sibling values in order. */
