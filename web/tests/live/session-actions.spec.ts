@@ -145,7 +145,7 @@ test.describe("group edit (#1726)", () => {
     await assertCombined();
     const groups = await fetch(`${serve.baseUrl}/api/groups`).then((response) => response.json());
     expect(groups).toEqual([{ path: "Review/Done", session_count: 2 }]);
-    await page.screenshot({ path: testInfo.outputPath("combined-existing-group.png") });
+    await page.screenshot({ path: testInfo.outputPath("combined-existing-group.png"), animations: "disabled" });
   });
 
   async function saveGroup(page: Page, sessionId: string, value: string, prefilled = "") {

@@ -43,7 +43,8 @@ test("existing group paths stay distinct through selection, Save, and keyboard c
     }
     await chooser.selectOption({ label });
     await expect(chooser).toHaveValue(`group:${path}`);
-    if (path === "Review / Done") await page.screenshot({ path: testInfo.outputPath("existing-group-chooser.png") });
+    if (path === "Review / Done")
+      await page.screenshot({ path: testInfo.outputPath("existing-group-chooser.png"), animations: "disabled" });
     await chooser.focus();
     await page.keyboard.press("Tab");
     await expect(page.getByLabel("New group or manual path", { exact: true })).toBeFocused();
