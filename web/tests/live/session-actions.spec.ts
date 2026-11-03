@@ -133,7 +133,7 @@ test.describe("group edit (#1726)", () => {
     const assertCombined = async () => {
       await expect(headers).toHaveCount(1, { timeout: 10_000 });
       await expect(headers).toHaveAttribute("data-group-id", "Review/Done");
-      await expect(headers.getByTestId("sidebar-group-session-count")).toHaveText("2");
+      await expect(headers.getByTestId("sidebar-group-session-count")).toHaveText("(2)");
       await expect(page.getByTestId("sidebar-session-row").filter({ hasText: "Alpha" })).toBeVisible();
       await expect(page.getByTestId("sidebar-session-row").filter({ hasText: "Beta" })).toBeVisible();
     };
