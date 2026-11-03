@@ -2358,7 +2358,7 @@
         "web/src/components/sidebar/SessionActions.tsx",
         "web/src/lib/api.ts"
       ],
-      "notes": "Exact lookalike and whitespace path PATCH payloads, manual creation and clear, unchanged and cancel, load failure, stale current group, and late-load session isolation."
+      "notes": "Exact lookalike and whitespace path PATCH payloads, manual creation and clear, unchanged and cancel, load failure, stale current group, and late GET/PATCH session isolation."
     },
     {
       "id": "session.existing-group-chooser-keyboard",
@@ -2366,7 +2366,7 @@
       "risk": "medium",
       "specs": ["tests/session-group-chooser.spec.ts"],
       "components": ["web/src/components/SessionGroupModal.tsx", "web/src/components/sidebar/SessionActions.tsx"],
-      "notes": "Native labelled chooser distinguishes Review/Done from Review / Done; keyboard focus, Save, Escape, and unchanged save preserve request semantics."
+      "notes": "Native option labels distinguish Review/Done from Review / Done and repeated edge/internal spaces; keyboard focus, Save, Escape, and unchanged save preserve request semantics."
     },
     {
       "id": "session.delete-dialog-keyboard",

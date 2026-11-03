@@ -5,6 +5,8 @@ import { useConfirmKeys, useDialogFocus } from "./dialogHooks";
 
 const DIALOG_ID = "session-group-modal";
 const PROMPT_ID = `${DIALOG_ID}-prompt`;
+const groupLabel = (path: string) =>
+  JSON.stringify(path).replace(/ {2,}/g, (spaces) => "\\u0020".repeat(spaces.length));
 
 interface Props {
   sessionTitle: string;
@@ -22,9 +24,11 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const mounted = useRef(false);
   useDialogFocus(inputRef, true);
 
   useEffect(() => {
+    mounted.current = true;
     let active = true;
     void fetchGroups({ throwOnError: true }).then(
       (loaded) => {
@@ -38,6 +42,7 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
     );
     return () => {
       active = false;
+      mounted.current = false;
     };
   }, []);
 
@@ -49,7 +54,9 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
     if (next === currentGroup) return onClose();
     setSaving(true);
     setError(null);
-    if (await onSave(next)) return onClose();
+    const saved = await onSave(next);
+    if (!mounted.current) return;
+    if (saved) return onClose();
     setSaving(false);
     setError(next ? "Failed to update group." : "Failed to clear group.");
     inputRef.current?.focus();
@@ -103,7 +110,7 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
         <option value="">No group</option>
         {options.map((path) => (
           <option key={path} value={`group:${path}`}>
-            {JSON.stringify(path)}
+            {groupLabel(path)}
           </option>
         ))}
         <option value="manual">New group or manual path</option>
@@ -143,7 +150,8 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
       />
       <p className="text-[12px] text-text-dim">
         Leave blank to ungroup. Use <span className="font-mono">/</span> for hierarchy, for example{" "}
-        <span className="font-mono">work/projects</span>.
+        <span className="font-mono">work/projects</span>. Repeated spaces in choices appear as{" "}
+        <span className="font-mono">\u0020</span>.
       </p>
       {error && (
         <p data-testid="session-group-modal-error" className="text-[12px] text-status-error">

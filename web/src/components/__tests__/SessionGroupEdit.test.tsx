@@ -5,7 +5,8 @@ import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react
 import { jsonResponse, makeSession, makeWorkspace, renderRow } from "./fixtures";
 
 const paths = ["Review/Done", "Review / Done", "  raw / path  "];
-const label = (path: string) => path === paths[2] ? String.raw`"\u0020\u0020raw / path\u0020\u0020"` : JSON.stringify(path);
+const label = (path: string) =>
+  path === paths[2] ? String.raw`"\u0020\u0020raw / path\u0020\u0020"` : JSON.stringify(path);
 const groups = paths.map((path) => ({ path, session_count: 1 }));
 const workspace = (id = "s1", group_path = "old/stale") =>
   makeWorkspace("w", [makeSession({ id, title: id, group_path })]);
