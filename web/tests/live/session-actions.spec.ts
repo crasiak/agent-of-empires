@@ -82,6 +82,68 @@ test.describe("rename (#1220)", () => {
 });
 
 test.describe("group edit (#1726)", () => {
+  test("choosing Beta's exact existing group combines Alpha and Beta after reload", async ({ page, spawnServe }) => {
+    const serve = await spawnServe({
+      seedFn: (env) => {
+        seedSessionViaAoeAdd({ title: "Alpha", subdir: "alpha" })(env);
+        seedSessionViaAoeAdd({ title: "Beta", subdir: "beta" })(env);
+      },
+    });
+    const sessions = await listSessions(serve.baseUrl);
+    const alpha = sessions.find((session) => session.title === "Alpha")!;
+    const beta = sessions.find((session) => session.title === "Beta")!;
+    for (const [id, group] of [
+      [alpha.id, "Review / Done"],
+      [beta.id, "Review/Done"],
+    ]) {
+      const response = await fetch(`${serve.baseUrl}/api/sessions/${id}/group`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ group }),
+      });
+      expect(response.ok()).toBe(true);
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto(`${serve.baseUrl}/`);
+    const toggle = page.getByTestId("sidebar-axis-toggle");
+    for (let i = 0; i < 3 && (await toggle.getAttribute("data-axis")) !== "group"; i++) {
+      const previous = await toggle.getAttribute("data-axis");
+      await toggle.click();
+      await expect(toggle).not.toHaveAttribute("data-axis", previous!);
+    }
+    await expect(toggle).toHaveAttribute("data-axis", "group");
+    const headers = page.getByTestId("sidebar-group-header");
+    await expect(headers).toHaveCount(2);
+    await page.getByTestId("sidebar-session-row").filter({ hasText: "Alpha" }).click({ button: "right" });
+    await menuItem(page, "more").click();
+    await menuItem(page, "edit-group").click();
+    const chooser = page.getByRole("combobox", { name: "Existing group" });
+    await chooser.selectOption({ label: '"Review/Done"' });
+    const patch = page.waitForResponse(
+      (response) =>
+        response.url().endsWith(`/api/sessions/${alpha.id}/group`) && response.request().method() === "PATCH",
+    );
+    await page.getByTestId("session-group-modal-save").click();
+    const saved = await patch;
+    expect(saved.ok()).toBe(true);
+    expect(saved.request().postDataJSON()).toEqual({ group: "Review/Done" });
+    const assertCombined = async () => {
+      await expect(headers).toHaveCount(1, { timeout: 10_000 });
+      await expect(headers).toHaveAttribute("data-group-id", "Review/Done");
+      await expect(headers.getByTestId("sidebar-group-session-count")).toHaveText("2");
+      await expect(page.getByTestId("sidebar-session-row").filter({ hasText: "Alpha" })).toBeVisible();
+      await expect(page.getByTestId("sidebar-session-row").filter({ hasText: "Beta" })).toBeVisible();
+    };
+    await assertCombined();
+    await expect
+      .poll(async () => (await listSessions(serve.baseUrl)).map((session) => session.group_path))
+      .toEqual(["Review/Done", "Review/Done"]);
+    await page.reload();
+    await assertCombined();
+    const groups = await fetch(`${serve.baseUrl}/api/groups`).then((response) => response.json());
+    expect(groups).toEqual([{ path: "Review/Done", session_count: 2 }]);
+  });
+
   async function saveGroup(page: Page, sessionId: string, value: string, prefilled = "") {
     const patch = page.waitForResponse(
       (res) => res.url().endsWith(`/api/sessions/${sessionId}/group`) && res.request().method() === "PATCH",

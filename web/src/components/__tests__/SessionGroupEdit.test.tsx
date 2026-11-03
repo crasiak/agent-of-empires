@@ -102,7 +102,7 @@ describe("session group chooser PATCH contract", () => {
     renderRow(workspace("s1", "  stale / group  "));
     open();
     await screen.findByRole("option", { name: '"Review/Done"' });
-    expect(chooser().selectedOptions[0]!.textContent).toContain('"  stale / group  "');
+    expect(chooser().selectedOptions[0]!.label).toBe(String.raw`"\u0020\u0020stale / group\u0020\u0020"`);
     if (action === "Cancel") {
       select("Review/Done");
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
