@@ -49,9 +49,10 @@ foreground input recipient. Do not remove it as an automatic error fallback.
 
 For Structured view, AoE reports **Sent**, **Steered into**, or **Queued**.
 An idle worker can receive a prompt immediately; a running turn may be steered
-if supported, or the prompt may wait in the Queue. Cancelling, compacting and
-worker-unavailable cases can also queue. The caller does not select queue-only
-or steer-only behavior through `send`.
+if supported, or the prompt may wait in the Queue. Cancelling and compacting
+can also queue. With `--no-revive`, an unavailable worker is refused rather
+than queued. The caller does not select queue-only or steer-only behavior
+through `send`.
 
 These results describe admission/forwarding, not task completion. A queued
 prompt is not proof of execution. The CLI prints human-readable output, not a
