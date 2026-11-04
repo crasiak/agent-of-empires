@@ -3128,6 +3128,31 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn unguardable_ledger_pi_profiles_launch_as_ordinary_wrappers() {
+        use crate::session::test_support::{install_login_shell_path_command, isolate_app_dir_at};
+        let temp = tempfile::tempdir().unwrap();
+        let _app = isolate_app_dir_at(temp.path());
+        let root = temp.path().canonicalize().unwrap();
+        let _ledger = install_login_shell_path_command(&root, "ledger", "#!/bin/sh\nexit 93\n");
+        let _unguardable =
+            crate::session::ledger_pi::test_support::UnguardableProfile::new("capture");
+        let command = "ledger run pi --profile capture --";
+        assert!(crate::session::ledger_pi::profile("pi", command).is_none());
+        let mut instance =
+            crate::session::instance::test_helpers::tool_instance("pi", root.to_str().unwrap());
+        instance.command = command.into();
+        assert!(!instance.guarded_ledger_fresh_only());
+        let launch = instance
+            .prepare_launch_command(instance.conversation_state())
+            .unwrap()
+            .command
+            .unwrap();
+        assert!(launch.contains(command), "{launch}");
+        assert!(!launch.contains("--expect-launch"), "{launch}");
+    }
+
+    #[test]
     #[ignore = "subprocess helper invoked by ledger_pi_launch_binds_the_qualified_store_and_native_afk_command"]
     fn ledger_pi_metadata_helper() {
         let root = std::path::PathBuf::from(std::env::var_os("AOE_LEDGER_FIXTURE_ROOT").unwrap());
