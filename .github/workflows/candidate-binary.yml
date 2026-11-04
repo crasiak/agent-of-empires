@@ -39,9 +39,9 @@ jobs:
           shared-key: candidate-macos-arm64-web
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build web-enabled candidate
-        env:
-          GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: cargo build --locked --profile dev-release --features web --bin aoe --target aarch64-apple-darwin
+        run: |
+          export GITHUB_SHA="$(git rev-parse HEAD)"
+          cargo build --locked --profile dev-release --features web --bin aoe --target aarch64-apple-darwin
       - name: Package binary and provenance
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
