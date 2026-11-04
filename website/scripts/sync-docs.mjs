@@ -104,6 +104,13 @@ const PAGES = [
       "Persist, resume, fork, and import agent conversations across reboots, upgrades, and runtime rotations.",
   },
   {
+    source: "docs/guides/sending-prompts.md",
+    dest: "guides/sending-prompts.md",
+    title: "Send a Prompt to an Existing Session",
+    description:
+      "Safely send a prompt to an existing Session with the CLI, verify the target, and interpret delivery receipts.",
+  },
+  {
     source: "docs/guides/multi-repo-workspaces.md",
     dest: "guides/multi-repo-workspaces.md",
     title: "Multi-Repo Workspaces",
