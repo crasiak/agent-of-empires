@@ -39,6 +39,8 @@ jobs:
           shared-key: candidate-macos-arm64-web
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build web-enabled candidate
+        env:
+          GITHUB_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: cargo build --locked --profile dev-release --features web --bin aoe --target aarch64-apple-darwin
       - name: Package binary and provenance
         env:
@@ -48,7 +50,12 @@ jobs:
           cp target/aarch64-apple-darwin/dev-release/aoe candidate/aoe
           file candidate/aoe | tee candidate/file.txt
           grep -q arm64 candidate/file.txt
-          git rev-parse HEAD > candidate/source-sha.txt
+          source_sha=$(git rev-parse HEAD)
+          printf '%s\n' "$source_sha" > candidate/source-sha.txt
+          package_version=$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)
+          build_id="${package_version}+g${source_sha:0:12}"
+          strings candidate/aoe | grep -F "$build_id" > /dev/null
+          printf '%s\n' "$build_id" > candidate/build-id.txt
           printf 'target=aarch64-apple-darwin\nprofile=dev-release\nfeatures=web\nrun=%s\n' "$RUN_URL" > candidate/build-info.txt
           cp LICENSE THIRD_PARTY_NOTICES.md candidate/
           cp -R licenses candidate/licenses
