@@ -239,6 +239,7 @@ function RowModals({
   if (modal === "group") {
     return createPortal(
       <SessionGroupModal
+        key={sessionId}
         sessionTitle={model.sessionTitle || label}
         currentGroup={model.firstSession?.group_path ?? ""}
         onSave={async (group) => (sessionId ? updateSessionGroup(sessionId, group) : false)}

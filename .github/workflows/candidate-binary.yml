@@ -1,0 +1,68 @@
+name: Candidate Binary
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/candidate-binary.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+      - 'web/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: Candidate Mac arm64 binary
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'deploy/')
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/rust-toolchain
+      - name: Install arm64 target
+        run: rustup target add aarch64-apple-darwin
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: candidate-macos-arm64-web
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build web-enabled candidate
+        run: |
+          export GITHUB_SHA="$(git rev-parse HEAD)"
+          cargo build --locked --profile dev-release --features web --bin aoe --target aarch64-apple-darwin
+      - name: Package binary and provenance
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p candidate
+          cp target/aarch64-apple-darwin/dev-release/aoe candidate/aoe
+          file candidate/aoe | tee candidate/file.txt
+          grep -q arm64 candidate/file.txt
+          source_sha=$(git rev-parse HEAD)
+          printf '%s\n' "$source_sha" > candidate/source-sha.txt
+          package_version=$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)
+          build_id="${package_version}+g${source_sha:0:12}"
+          strings candidate/aoe | grep -F "$build_id" > /dev/null
+          printf '%s\n' "$build_id" > candidate/build-id.txt
+          printf 'target=aarch64-apple-darwin\nprofile=dev-release\nfeatures=web\nrun=%s\n' "$RUN_URL" > candidate/build-info.txt
+          cp LICENSE THIRD_PARTY_NOTICES.md candidate/
+          cp -R licenses candidate/licenses
+          (cd candidate && shasum -a 256 aoe > aoe.sha256)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: candidate-macos-arm64
+          path: candidate/
+          retention-days: 14
+          if-no-files-found: error

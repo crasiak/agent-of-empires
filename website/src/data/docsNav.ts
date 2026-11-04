@@ -34,6 +34,7 @@ export const docsNav: NavSection[] = [
       { title: "Tool Sessions", href: "/guides/tool-sessions/", description: "Run plain shell or tool sessions alongside your agents." },
       { title: "MCP Servers", href: "/guides/mcp-servers/", description: "Forward configured MCP servers to structured-view agents." },
       { title: "Session Resume & Forking", href: "/guides/session-resume/", description: "Resume, fork, or import an agent conversation in a session." },
+      { title: "Send a Prompt", href: "/guides/sending-prompts/", description: "Target an existing session safely and interpret CLI delivery receipts." },
       { title: "Shell Completions", href: "/guides/shell-completions/", description: "Install and refresh tab-completion for the aoe CLI." },
       { title: "Sound Effects", href: "/docs/sounds/", description: "Play sounds when agents need input or finish work." },
       { title: "Push Notifications", href: "/docs/push-notifications/", description: "Get notified when a session needs your attention." },
