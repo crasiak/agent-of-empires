@@ -130,7 +130,15 @@ impl Runtime {
     }
 }
 
+/// The profile of a canonical Ledger Pi launch that Ledger can guard. A profile
+/// whose Lock the run guard refuses (any sharing beyond conversations, or none)
+/// launches as an ordinary wrapper command, as it did before the guard existed.
 pub(crate) fn profile(tool: &str, command: &str) -> Option<String> {
+    let (program, profile) = command_profile(tool, command)?;
+    guardable(&program, &profile).then_some(profile)
+}
+
+fn command_profile(tool: &str, command: &str) -> Option<(String, String)> {
     if tool != "pi" || super::Instance::contains_active_shell_syntax(command) {
         return None;
     }
@@ -153,7 +161,50 @@ pub(crate) fn profile(tool: &str, command: &str) -> Option<String> {
     {
         return None;
     }
-    Some(name.clone())
+    Some((program.clone(), name.clone()))
+}
+
+/// Whether the profile's current Lock passes the checks `qualify` starts with.
+/// Callers sit on render paths, so the answer is cached briefly; `qualify`
+/// still re-checks the Lock at launch.
+#[cfg(not(test))]
+fn guardable(program: &str, profile: &str) -> bool {
+    use std::sync::{LazyLock, Mutex};
+    use std::time::Instant;
+    const FRESH: Duration = Duration::from_secs(60);
+    static CACHE: LazyLock<Mutex<BTreeMap<(String, String), (Instant, bool)>>> =
+        LazyLock::new(|| Mutex::new(BTreeMap::new()));
+    let key = (program.to_owned(), profile.to_owned());
+    if let Some((at, answer)) = CACHE.lock().ok().and_then(|c| c.get(&key).copied()) {
+        if at.elapsed() < FRESH {
+            return answer;
+        }
+    }
+    let answer = (|| -> Result<bool> {
+        let ledger = which::which(program)?;
+        let lock = bounded(std::process::Command::new(ledger).args([
+            "lock",
+            "show",
+            "--profile",
+            profile,
+            "--harness",
+            "pi",
+        ]))?;
+        Ok(core(&lock, profile, Path::new("/nix/store")).is_ok())
+    })()
+    .unwrap_or_else(|error| {
+        tracing::debug!(target: "session.store", %error, profile, "Ledger Pi Lock unreadable; launching unguarded");
+        false
+    });
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.insert(key, (Instant::now(), answer));
+    }
+    answer
+}
+
+#[cfg(test)]
+fn guardable(_program: &str, profile: &str) -> bool {
+    test_support::guardable(profile)
 }
 
 #[derive(Deserialize)]
@@ -415,6 +466,25 @@ pub(crate) mod test_support {
             .unwrap()
             .get(&cwd.canonicalize().ok()?)
             .cloned()
+    }
+
+    static UNGUARDABLE: LazyLock<Mutex<std::collections::BTreeSet<String>>> =
+        LazyLock::new(|| Mutex::new(std::collections::BTreeSet::new()));
+    /// Makes Ledger refuse to guard `profile` for the fixture's lifetime.
+    pub(crate) struct UnguardableProfile(String);
+    impl UnguardableProfile {
+        pub(crate) fn new(profile: &str) -> Self {
+            UNGUARDABLE.lock().unwrap().insert(profile.to_owned());
+            Self(profile.to_owned())
+        }
+    }
+    impl Drop for UnguardableProfile {
+        fn drop(&mut self) {
+            UNGUARDABLE.lock().unwrap().remove(&self.0);
+        }
+    }
+    pub(super) fn guardable(profile: &str) -> bool {
+        !UNGUARDABLE.lock().unwrap().contains(profile)
     }
 }
 
