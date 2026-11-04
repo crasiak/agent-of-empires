@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { SessionGroupModal } from "../SessionGroupModal";
@@ -28,7 +28,16 @@ const pending = () => {
   return { onSave, resolve: (ok: boolean) => resolve(ok) };
 };
 
-afterEach(cleanup);
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response(JSON.stringify([]))),
+  );
+});
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("SessionGroupModal", () => {
   it("is a modal named by its title with the current group focused", () => {
