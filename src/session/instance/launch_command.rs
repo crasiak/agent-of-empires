@@ -901,9 +901,7 @@ impl Instance {
                     }
                     Some(execution)
                 }
-                Err(error)
-                    if error.is::<container_config::SandboxPiIntegrationPolicyError>() =>
-                {
+                Err(error) if error.is::<container_config::SandboxPiIntegrationPolicyError>() => {
                     return Err(error);
                 }
                 Err(error)
@@ -1841,7 +1839,10 @@ mod tests {
             )
             .err()
             .unwrap();
-        assert!(error.to_string().contains("session.pi_integration"), "{error}");
+        assert!(
+            error.to_string().contains("session.pi_integration"),
+            "{error}"
+        );
         native.inputs.identity_extension = identity;
         native.inputs.pi_integration = crate::session::config::PiIntegration::Identity;
         let first = instance
@@ -1942,11 +1943,8 @@ mod tests {
             set_pi_integration(&inst, policy);
             admit_sandbox_fixture(&inst);
             let config = inst.build_container_config().unwrap();
-            let _transport = install_container_transport(
-                home.path(),
-                "aoe-pi-policy-conflict",
-                &config.volumes,
-            );
+            let _transport =
+                install_container_transport(home.path(), "aoe-pi-policy-conflict", &config.volumes);
             let root = config
                 .volumes
                 .iter()

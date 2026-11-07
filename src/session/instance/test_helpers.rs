@@ -59,11 +59,8 @@ pub(super) fn set_pi_integration(inst: &Instance, policy: &str) {
         "session".into(),
         serde_json::json!({ "pi_integration": policy }),
     );
-    crate::session::config::profile_config::save_profile_config(
-        &inst.effective_profile(),
-        &config,
-    )
-    .unwrap();
+    crate::session::config::profile_config::save_profile_config(&inst.effective_profile(), &config)
+        .unwrap();
 }
 
 /// A path's identity for assertions: a symlinked temp or home root spells the

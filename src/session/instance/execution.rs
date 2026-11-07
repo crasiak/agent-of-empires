@@ -3129,7 +3129,8 @@ mod tests {
                 .iter()
                 .find(|v| v.container_path == "/root/.pi")
                 .unwrap();
-            let extension = PathBuf::from(&root.host_path).join("agent/extensions/aoe-session-id.js");
+            let extension =
+                PathBuf::from(&root.host_path).join("agent/extensions/aoe-session-id.js");
             let _transport = install_container_transport(
                 home.path(),
                 "aoe-pi-policy-snapshot",
