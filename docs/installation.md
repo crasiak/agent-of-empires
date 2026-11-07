@@ -33,6 +33,62 @@ LIBGIT2_NO_VENDOR=1 cargo build --release --no-default-features --features defau
 
 A source build leaves the binary at `target/release/aoe`. Verify any install with `aoe --version`.
 
+## Shared native Nix builds and retained configuration
+
+Pin one reviewed commit of `crasiak/agent-of-empires` in the hosts' flake inputs.
+Use its `packages.<system>.default` on each native builder: `aarch64-darwin`,
+`x86_64-linux` and `aarch64-linux` use the same source and build recipe, not the
+same binary. `aoe-with-web` is the optional dashboard variant. Evaluate and test
+both selected platforms before promoting a source update.
+
+Each Nix package includes `share/aoe/pi-integration/manifest.json` and the exact
+identity and AFK assets embedded by that build. The inventory records native
+binary and asset hashes plus the source revision when available. It is not a
+Ledger admission, import resolver or permission to load an extension. Existing
+launch, ownership, hash and full import-closure checks still apply. Ordinary Pi
+needs none of these assets; see [Pi integration](guides/session-resume.md).
+
+The optional `homeManagerModules.default` module puts the native package and
+explicitly selected profile configurations in one Home Manager generation:
+
+```nix
+# Import aoe.homeManagerModules.default from the pinned AoE flake input.
+{
+  programs.aoe = {
+    enable = true;
+    # Select the actual app directory, not a guessed alternate namespace.
+    appDirectory = ".config/agent-of-empires"; # Linux; inspect macOS's existing layout
+    profiles.work.session.pi_integration = "none";
+  };
+}
+```
+
+`profiles` defaults to empty, so package installation adopts no configuration.
+Opting in declares exclusive ownership of those profiles' `config.toml` files
+only. Their directories, sessions, credentials, databases, schema cursors and
+AFK authority remain mutable and unmanaged. Keep credentials out of declarative
+configuration because its contents are readable in the Nix store. Existing-file
+collisions must be reviewed; the module never requests forced replacement.
+Edit managed settings in Nix, not the TUI: native configuration writers can
+replace their symlinks and create drift.
+
+Retain the last verified generation and its Git/flake inputs until the next
+candidate is qualified. Do not expire it or remove its roots during promotion.
+A failed candidate check is not permission to activate it. Before a switch or
+rollback, quiesce configuration writers through the normal lifecycle without
+killing unrelated Sessions. Inspect `home-manager generations`, then run the
+selected retained generation's `activate` script to restore its package and
+managed configuration links. This affects the whole selected home generation,
+so inspect unrelated managed-file changes too. Activation is not a transaction
+across all live processes; it does not restart Sessions or daemons for you.
+
+A package/configuration rollback is **not** a data downgrade. Do not restore
+schema cursors, sessions, databases, migration evidence or active AFK ledgers.
+A previous binary may safely refuse newer or incompatible state. Preserve that
+refusal and use qualified recovery rather than lowering a schema number or
+replaying old authority. The tarball updater does not provide this Nix
+package/configuration retention contract.
+
 ## Updating
 
 ```bash

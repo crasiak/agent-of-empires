@@ -5,11 +5,19 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crane.url = "github:ipetkov/crane";
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = inputs @ { flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
+
+      flake.homeManagerModules.default = import ./nix/home-manager.nix {
+        aoePackageFor = system: inputs.self.packages.${system}.default;
+      };
 
       perSystem = { config, self', inputs', pkgs, system, ... }:
         let
@@ -22,11 +30,20 @@
             perl
             cmake
             installShellFiles
+            python3
           ];
 
           buildInputs = with pkgs; [
             zlib # required by vendored libgit2
           ];
+
+          installIntegration = ''
+            ${pkgs.python3}/bin/python3 -P ${./scripts/export-pi-integration.py} \
+              --source "$src" --binary "$out/bin/aoe" \
+              --system ${pkgs.lib.escapeShellArg system} \
+              ${pkgs.lib.optionalString (inputs.self ? rev) "--revision ${pkgs.lib.escapeShellArg inputs.self.rev}"} \
+              --output "$out/share/aoe/pi-integration"
+          '';
 
           commonArgs = {
             # Cargo source filtering keeps only *.rs, *.toml and Cargo.lock, so
@@ -73,6 +90,8 @@
             inherit cargoArtifacts;
             cargoExtraArgs = "--package agent-of-empires";
             doCheck = false;
+            postPhases = [ "exportIntegrationPhase" ];
+            exportIntegrationPhase = installIntegration;
             postInstall = ''
               installShellCompletion --cmd aoe \
                 --bash <($out/bin/aoe completion bash) \
@@ -133,6 +152,8 @@
             # Point build.rs at the pre-built frontend; it will copy dist/ into
             # place and skip running npm entirely (see build.rs AOE_WEB_DIST handling).
             AOE_WEB_DIST = "${webFrontend}/dist";
+            postPhases = [ "exportIntegrationPhase" ];
+            exportIntegrationPhase = installIntegration;
             postInstall = ''
               installShellCompletion --cmd aoe \
                 --bash <($out/bin/aoe completion bash) \
@@ -161,6 +182,36 @@
             # Build the packages as checks too
             inherit aoe;
             inherit aoeWithWeb;
+
+            aoe-integration-final = pkgs.runCommand "aoe-integration-final" {
+              nativeBuildInputs = [ pkgs.python3 ];
+            } ''
+              python3 - <<'PY'
+              import hashlib, json
+              from pathlib import Path
+              package = Path("${aoe}")
+              assets = package / "share/aoe/pi-integration"
+              manifest = json.loads((assets / "manifest.json").read_text())
+              assert manifest["binary"]["sha256"] == hashlib.sha256((package / "bin/aoe").read_bytes()).hexdigest()
+              for bundle in manifest["bundles"].values():
+                  for name, digest in bundle["files"].items():
+                      assert digest == hashlib.sha256((assets / name).read_bytes()).hexdigest()
+              PY
+              touch "$out"
+            '';
+            aoe-home-manager = import ./nix/test-home-manager.nix {
+              inherit pkgs;
+              inherit (inputs) home-manager;
+              aoeModule = inputs.self.homeManagerModules.default;
+            };
+            aoe-integration-inventory = pkgs.runCommand "aoe-integration-inventory" {
+              nativeBuildInputs = [ pkgs.python3 ];
+            } ''
+              cp ${./scripts/export-pi-integration.py} export-pi-integration.py
+              cp ${./scripts/test-export-pi-integration.py} test-export-pi-integration.py
+              python3 -P test-export-pi-integration.py -v
+              touch "$out"
+            '';
 
             aoe-clippy = craneLib.cargoClippy (commonArgs // {
               inherit cargoArtifacts;
