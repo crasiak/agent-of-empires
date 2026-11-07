@@ -902,6 +902,11 @@ impl Instance {
                     Some(execution)
                 }
                 Err(error)
+                    if error.is::<container_config::SandboxPiIntegrationPolicyError>() =>
+                {
+                    return Err(error);
+                }
+                Err(error)
                     if crate::session::ledger_pi::profile(&self.tool, self.get_tool_command())
                         .is_some() =>
                 {
@@ -1130,27 +1135,35 @@ impl Instance {
                 .map(|snapshot| snapshot.id.as_str())
                 .or(fallback_container_name.as_deref())
                 .context("sandbox identity is missing")?;
-            let fallback_identity = execution
+            let fallback_config = execution
                 .is_none()
-                .then(|| self.identity_extension_launch())
+                .then(|| {
+                    crate::session::config::repo_config::resolve_config_with_repo(
+                        &self.effective_profile(),
+                        std::path::Path::new(&self.project_path),
+                    )
+                })
+                .transpose()?;
+            let fallback_identity = fallback_config
+                .as_ref()
+                .map(|config| self.identity_extension_launch_from(config))
+                .transpose()?
                 .flatten();
             let identity_extension = execution
                 .and_then(|execution| execution.inputs.identity_extension.as_ref())
                 .or(fallback_identity.as_ref());
-            let fallback_environment = if execution.is_none() {
-                Some(self.sandbox_launch_environment(
-                    agent,
-                    identity_extension,
-                    &self.effective_profile(),
-                    None,
-                    &crate::session::config::repo_config::resolve_config_with_repo(
+            let fallback_environment = fallback_config
+                .as_ref()
+                .map(|config| {
+                    self.sandbox_launch_environment(
+                        agent,
+                        identity_extension,
                         &self.effective_profile(),
-                        std::path::Path::new(&self.project_path),
-                    )?,
-                )?)
-            } else {
-                None
-            };
+                        None,
+                        config,
+                    )
+                })
+                .transpose()?;
             let env_info = execution
                 .and_then(|execution| execution.inputs.docker_env.as_ref())
                 .or(fallback_environment.as_ref())
@@ -1349,6 +1362,7 @@ impl Instance {
         let fallback_identity = execution
             .is_none()
             .then(|| self.identity_extension_launch())
+            .transpose()?
             .flatten();
         let identity_extension = execution
             .and_then(|execution| execution.inputs.identity_extension.as_ref())
@@ -1480,7 +1494,11 @@ impl Instance {
                         if let (Some(execution), Some(native_id)) =
                             (execution, self.agent_session_id.as_deref())
                         {
-                            if execution.agent.name == "pi" && execution.pi_pinnable {
+                            if execution.agent.name == "pi"
+                                && execution.pi_pinnable
+                                && execution.inputs.pi_integration
+                                    == crate::session::config::PiIntegration::Afk
+                            {
                                 cmd.push_str(&crate::session::afk::launch_arguments(
                                     self,
                                     native_id,
@@ -1549,11 +1567,14 @@ impl Instance {
             let document_chat = crate::session::tailored::document::account(self).is_some();
             let ledger_pi =
                 crate::session::ledger_pi::profile(&self.tool, self.get_tool_command()).is_some();
-            if document_chat || ledger_pi {
+            if document_chat {
                 anyhow::ensure!(
                     identity_extension.is_some() && !self.is_sandboxed(),
-                    "Ledger Pi requires the standard host-owned identity extension"
+                    "Document chat requires session.pi_integration = 'identity' (or 'afk') in the selected AoE profile; policy 'none' is not overridden"
                 );
+            }
+            if document_chat || ledger_pi {
+                anyhow::ensure!(!self.is_sandboxed(), "Ledger Pi requires a host launch");
                 anyhow::ensure!(
                     execution.is_some_and(|e| e.agent.name == "pi" && e.pi_pinnable),
                     "Ledger Pi requires a qualified, native pinnable launch"
@@ -1596,7 +1617,12 @@ impl Instance {
                 }
             }
             apply_first_launch_agent_name(&mut cmd, agent, self, execution, is_existing);
-            if ledger_pi && !document_chat {
+            if ledger_pi
+                && !document_chat
+                && execution.is_some_and(|e| {
+                    e.inputs.pi_integration == crate::session::config::PiIntegration::Afk
+                })
+            {
                 let native = execution.context("Ledger Pi native execution is unavailable")?;
                 let native_id = self
                     .agent_session_id
@@ -1700,6 +1726,78 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn pi_integration_policy_is_explicit_and_frozen() {
+        for policy in ["none", "identity", "afk"] {
+            let home = tempfile::tempdir().unwrap();
+            let _app = crate::session::test_support::isolate_app_dir_at(home.path());
+            crate::session::afk::authority::migration::initialize_test(
+                &crate::session::get_app_dir().unwrap(),
+            );
+            crate::agents::forget_agent_help_for_test();
+            let _env = EnvGuard::unset(&["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"]);
+            let _pi = crate::session::test_support::install_login_shell_path_command(
+                home.path(),
+                "pi",
+                "#!/bin/sh\nprintf '%s\\n' '--session-id --session --extension'\n",
+            );
+            let project = home.path().join("project");
+            std::fs::create_dir(&project).unwrap();
+            let mut inst = tool_instance("pi", project.to_str().unwrap());
+            if policy != "none" {
+                set_pi_integration(&inst, policy);
+            }
+            let native = inst.resolve_native_execution(None).unwrap();
+            set_pi_integration(&inst, if policy == "none" { "afk" } else { "none" });
+            let command = inst
+                .build_host_command(
+                    inst.resolved_agent(),
+                    Some(&native),
+                    &mut inst.conversation_state(),
+                )
+                .unwrap()
+                .command
+                .unwrap();
+            assert_eq!(
+                command.contains("pi-aoe-session-id.js"),
+                policy != "none",
+                "{command}"
+            );
+            assert_eq!(
+                command.contains("AOE_SESSION_ID_FILE="),
+                policy != "none",
+                "{command}"
+            );
+            assert_eq!(
+                command.contains("--aoe-afk-binding"),
+                policy == "afk",
+                "{command}"
+            );
+            let app = crate::session::get_app_dir().unwrap();
+            assert_eq!(
+                app.join("agent-extensions/pi-aoe-session-id.js").exists(),
+                policy != "none"
+            );
+            assert_eq!(
+                app.join("agent-extensions/aoe-afk-runtime.mjs").exists(),
+                policy == "afk"
+            );
+            let snapshot = app
+                .join("afk-authority-v3/profiles")
+                .join(inst.effective_profile())
+                .join("snapshot.json");
+            if policy == "afk" {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(snapshot).unwrap()).unwrap();
+                let session = value["sessions"].get(&inst.id).unwrap();
+                assert!(session["policy"].is_null());
+            } else {
+                assert!(!snapshot.exists());
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn document_native_command_attaches_once_and_resumes_without_source_or_new_turn() {
         let home = tempfile::tempdir().unwrap();
         let _app = crate::session::test_support::isolate_app_dir_at(home.path());
@@ -1718,6 +1816,7 @@ mod tests {
         let scratch = home.path().join("scratch-fixture");
         std::fs::create_dir(&scratch).unwrap();
         let mut instance = tool_instance("pi", scratch.to_str().unwrap());
+        set_pi_integration(&instance, "identity");
         let mut native = instance.resolve_native_execution(None).unwrap();
         native.pi_pinnable = true;
         native.program = home.path().join("bin/ledger");
@@ -1732,6 +1831,19 @@ mod tests {
             .collect();
         std::fs::write(scratch.join("source.txt"), text).unwrap();
         std::fs::write(scratch.join("provenance.json"), serde_json::to_vec(&serde_json::json!({"source_url":"https://example.org/a.md", "final_url":"https://example.org/a.md", "retrieved_at":chrono::Utc::now(), "media_type":"text/markdown", "extractor":"UTF-8 identity", "raw_bytes":text.len(), "text_bytes":text.len(), "raw_sha256":hash, "text_sha256":hash, "opening_question":"Opening question, exactly once"})).unwrap()).unwrap();
+        let identity = native.inputs.identity_extension.take();
+        native.inputs.pi_integration = crate::session::config::PiIntegration::None;
+        let error = instance
+            .build_host_command(
+                instance.resolved_agent(),
+                Some(&native),
+                &mut instance.conversation_state(),
+            )
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("session.pi_integration"), "{error}");
+        native.inputs.identity_extension = identity;
+        native.inputs.pi_integration = crate::session::config::PiIntegration::Identity;
         let first = instance
             .build_host_command(
                 instance.resolved_agent(),
@@ -1816,64 +1928,136 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn sandbox_pi_policy_conflict_refuses_prepared_launch() {
+        for policy in ["none", "identity"] {
+            let (_guard, _base, _tmp) = crate::hooks::test_support::BaseGuard::ready();
+            let home = tempfile::tempdir().unwrap();
+            let _home = crate::session::test_support::isolate_home(home.path());
+            let project = home.path().join("project");
+            std::fs::create_dir(&project).unwrap();
+            let mut inst = tool_instance("pi", project.to_str().unwrap());
+            inst.sandbox_info = Some(test_sandbox("aoe-pi-policy-conflict", Some("/workspace")));
+            set_pi_integration(&inst, policy);
+            admit_sandbox_fixture(&inst);
+            let config = inst.build_container_config().unwrap();
+            let _transport = install_container_transport(
+                home.path(),
+                "aoe-pi-policy-conflict",
+                &config.volumes,
+            );
+            let root = config
+                .volumes
+                .iter()
+                .find(|v| v.container_path == "/root/.pi")
+                .unwrap();
+            let leaf = Path::new(&root.host_path).join("agent/extensions/aoe-session-id.js");
+            std::fs::create_dir_all(leaf.parent().unwrap()).unwrap();
+            // A hook can change the leaf after the initial container preparation.
+            std::fs::write(&leaf, "conflicting extension").unwrap();
+            for native_unavailable in [false, true] {
+                super::super::execution::FAIL_NEXT_NATIVE_RESOLUTION
+                    .with(|fail| fail.set(native_unavailable));
+                let error = inst
+                    .prepare_launch_command(inst.conversation_state())
+                    .err()
+                    .unwrap();
+                assert!(error.is::<container_config::SandboxPiIntegrationPolicyError>());
+                assert!(
+                    format!("{error:#}").contains("session.pi_integration"),
+                    "{error:#}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&leaf).unwrap(),
+                    "conflicting extension"
+                );
+            }
+            std::fs::remove_file(&leaf).unwrap();
+            super::super::execution::FAIL_NEXT_NATIVE_RESOLUTION.with(|fail| fail.set(true));
+            let fallback = inst
+                .prepare_launch_command(inst.conversation_state())
+                .expect("an unrelated native capture failure may use a policy-safe fallback");
+            assert!(fallback.execution.is_none());
+            assert_eq!(inst.pi_extension_launched, policy != "none");
+            assert_eq!(leaf.exists(), policy != "none");
+        }
+    }
+
     // The sidecar env var has to survive into the docker argv; no CI container would catch it.
     #[test]
     #[serial_test::serial]
     fn sandboxed_pi_publishes_through_env_without_a_command_line_extension() {
-        let (_guard, _base, _tmp) = crate::hooks::test_support::BaseGuard::ready();
-        let temp_home = tempfile::tempdir().unwrap();
-        let _home = crate::session::test_support::isolate_home(temp_home.path());
-        let project = temp_home.path().join("proj");
-        std::fs::create_dir_all(&project).unwrap();
-        let mut inst = tool_instance("pi", project.to_str().unwrap());
-        let mut sandbox = test_sandbox("aoe-pi-argv", Some("/workspace"));
-        sandbox.extra_env = Some(vec![
-            "PI_CODING_AGENT_SESSION_DIR=/root/.pi/agent/sessions".to_string()
-        ]);
-        inst.sandbox_info = Some(sandbox);
-        admit_sandbox_fixture(&inst);
-        let config = inst.build_container_config().unwrap();
-        let _transport =
-            install_container_transport(temp_home.path(), "aoe-pi-argv", &config.volumes);
-        std::fs::copy(
-            temp_home.path().join("native-bin/prime-agent"),
-            temp_home.path().join("native-bin/pi"),
-        )
-        .unwrap();
-        let sidecar = format!(
-            "AOE_SESSION_ID_FILE={}/{}/session_id",
-            crate::session::config::container_config::PI_SIDECAR_DIR_IN_CONTAINER,
-            inst.id
-        );
+        for policy in ["none", "identity", "afk"] {
+            let (_guard, _base, _tmp) = crate::hooks::test_support::BaseGuard::ready();
+            let temp_home = tempfile::tempdir().unwrap();
+            let _home = crate::session::test_support::isolate_home(temp_home.path());
+            let project = temp_home.path().join("proj");
+            std::fs::create_dir_all(&project).unwrap();
+            let mut inst = tool_instance("pi", project.to_str().unwrap());
+            let mut sandbox = test_sandbox("aoe-pi-argv", Some("/workspace"));
+            sandbox.extra_env = Some(vec![
+                "PI_CODING_AGENT_SESSION_DIR=/root/.pi/agent/sessions".to_string()
+            ]);
+            inst.sandbox_info = Some(sandbox);
+            if policy != "none" {
+                set_pi_integration(&inst, policy);
+            }
+            admit_sandbox_fixture(&inst);
+            let config = inst.build_container_config().unwrap();
+            let _transport =
+                install_container_transport(temp_home.path(), "aoe-pi-argv", &config.volumes);
+            std::fs::copy(
+                temp_home.path().join("native-bin/prime-agent"),
+                temp_home.path().join("native-bin/pi"),
+            )
+            .unwrap();
+            let sidecar = format!(
+                "AOE_SESSION_ID_FILE={}/{}/session_id",
+                crate::session::config::container_config::PI_SIDECAR_DIR_IN_CONTAINER,
+                inst.id
+            );
 
-        let execution = inst.resolve_native_execution(None).unwrap();
-        let docker_env = execution.inputs.docker_env.as_ref().unwrap();
-        let value = |key| {
-            docker_env
-                .env
-                .iter()
-                .rev()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value.as_str())
-        };
-        assert_eq!(
-            value("AOE_SESSION_ID_FILE"),
-            Some(sidecar.split_once('=').unwrap().1)
-        );
-        assert_eq!(value("AOE_HOOK_BASE"), Some("/root/.pi/aoe-session"));
-        assert_eq!(value("AOE_PI_WAITING_TOOLS"), Some("ask_user"));
-        assert_eq!(
-            value("AOE_PI_EXTENSION_PID"),
-            Some(""),
-            "the env-file clears the extension's owner claim"
-        );
+            let execution = inst.resolve_native_execution(None).unwrap();
+            let docker_env = execution.inputs.docker_env.as_ref().unwrap();
+            let value = |key| {
+                docker_env
+                    .env
+                    .iter()
+                    .rev()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.as_str())
+            };
+            if policy == "none" {
+                assert_eq!(value("AOE_SESSION_ID_FILE"), None);
+                assert_eq!(value("AOE_PI_WAITING_TOOLS"), None);
+            } else {
+                assert_eq!(
+                    value("AOE_SESSION_ID_FILE"),
+                    Some(sidecar.split_once('=').unwrap().1)
+                );
+                assert_eq!(value("AOE_HOOK_BASE"), Some("/root/.pi/aoe-session"));
+                assert_eq!(value("AOE_PI_WAITING_TOOLS"), Some("ask_user"));
+                assert_eq!(value("AOE_PI_EXTENSION_PID"), Some(""));
+            }
+            set_pi_integration(&inst, if policy == "none" { "afk" } else { "none" });
 
-        let parts = inst
-            .build_launch_command(Some(&execution), &mut inst.conversation_state())
-            .expect("a sandboxed launch line");
-        let cmd = parts.command.expect("a command");
-        assert!(cmd.contains("--env-file"), "{cmd}");
-        assert!(!cmd.contains("aoe-session-id.js"), "{cmd}");
+            let parts = inst
+                .build_launch_command(Some(&execution), &mut inst.conversation_state())
+                .expect("a sandboxed launch line");
+            let cmd = parts.command.expect("a command");
+            assert!(cmd.contains("--env-file"), "{cmd}");
+            assert!(!cmd.contains("aoe-session-id.js"), "{cmd}");
+            assert_eq!(inst.pi_extension_launched, policy != "none");
+            assert!(
+                !cmd.contains("--aoe-afk-binding"),
+                "sandbox cannot acquire host AFK integration"
+            );
+            assert!(!crate::session::get_app_dir()
+                .unwrap()
+                .join("agent-extensions/aoe-afk-runtime.mjs")
+                .exists());
+        }
     }
 
     #[test]
@@ -1908,7 +2092,7 @@ mod tests {
         wrapper.tool = "company-pi".to_string();
         wrapper.detect_as = "pi".to_string();
         wrapper.command = "echo not-pi".to_string();
-        assert!(wrapper.identity_extension_launch().is_none());
+        assert!(wrapper.identity_extension_launch().unwrap().is_none());
         let agent = wrapper.resolved_agent();
         let command = wrapper
             .build_host_command(agent, None, &mut wrapper.conversation_state())

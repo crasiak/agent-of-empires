@@ -1782,6 +1782,7 @@ work-opencode = "opencode"
             docker_env: None,
             pane_env: Vec::new(),
             identity_extension: None,
+            pi_integration: crate::session::config::PiIntegration::None,
             usage_tracking: false,
         };
         let execution = super::execution::NativeExecution {

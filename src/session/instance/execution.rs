@@ -628,6 +628,7 @@ pub(super) struct NativeLaunchInputs {
     pub(super) docker_env: Option<crate::session::environment::DockerExecEnv>,
     pub(super) pane_env: Vec<crate::tmux::PaneEnvMutation>,
     pub(super) identity_extension: Option<(String, String)>,
+    pub(super) pi_integration: crate::session::config::PiIntegration,
     /// The profile's `session.usage_tracking`, resolved here so
     /// `status_hook_env_prefix` doesn't need its own config load.
     pub(super) usage_tracking: bool,
@@ -1448,7 +1449,7 @@ impl Instance {
     ) -> Result<NativeLaunchInputs> {
         let launch_id = uuid::Uuid::new_v4().to_string();
         let profile = self.effective_profile();
-        let identity_extension = self.identity_extension_launch();
+        let identity_extension = self.identity_extension_launch_from(config)?;
         if let Some(sandbox) = self.sandbox_info.as_ref().filter(|sandbox| sandbox.enabled) {
             let docker_env = self.sandbox_launch_environment(
                 Some(agent),
@@ -1482,6 +1483,7 @@ impl Instance {
                 docker_env: Some(docker_env),
                 pane_env: Vec::new(),
                 identity_extension,
+                pi_integration: config.session.pi_integration,
                 profile,
                 usage_tracking: config.session.usage_tracking,
             })
@@ -1514,6 +1516,7 @@ impl Instance {
                 docker_env: None,
                 pane_env,
                 identity_extension,
+                pi_integration: config.session.pi_integration,
                 profile,
                 usage_tracking: config.session.usage_tracking,
             })
@@ -3104,6 +3107,60 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial]
+    fn sandbox_native_inputs_reconcile_the_captured_pi_policy() {
+        use crate::session::instance::test_helpers::{
+            admit_sandbox_fixture, install_container_transport, set_pi_integration, test_sandbox,
+            tool_instance,
+        };
+        for policy in ["none", "identity", "afk"] {
+            let (_guard, _base, _tmp) = crate::hooks::test_support::BaseGuard::ready();
+            let home = tempfile::tempdir().unwrap();
+            let _home = crate::session::test_support::isolate_home(home.path());
+            let project = home.path().join("project");
+            std::fs::create_dir(&project).unwrap();
+            let mut inst = tool_instance("pi", project.to_str().unwrap());
+            inst.sandbox_info = Some(test_sandbox("aoe-pi-policy-snapshot", Some("/workspace")));
+            set_pi_integration(&inst, policy);
+            admit_sandbox_fixture(&inst);
+            let container_config = inst.build_container_config().unwrap();
+            let root = container_config
+                .volumes
+                .iter()
+                .find(|v| v.container_path == "/root/.pi")
+                .unwrap();
+            let extension = PathBuf::from(&root.host_path).join("agent/extensions/aoe-session-id.js");
+            let _transport = install_container_transport(
+                home.path(),
+                "aoe-pi-policy-snapshot",
+                &container_config.volumes,
+            );
+            let captured = crate::session::config::repo_config::resolve_config_with_repo(
+                &inst.effective_profile(),
+                &project,
+            )
+            .unwrap();
+            set_pi_integration(&inst, if policy == "none" { "afk" } else { "none" });
+            inst.build_container_config().unwrap();
+            assert_eq!(extension.exists(), policy == "none");
+            let inputs = inst
+                .native_launch_inputs(crate::agents::get_agent("pi").unwrap(), &captured)
+                .unwrap();
+            assert_eq!(inputs.pi_integration, captured.session.pi_integration);
+            assert_eq!(inputs.identity_extension.is_some(), policy != "none");
+            let environment = inputs.docker_env.unwrap();
+            assert_eq!(
+                environment
+                    .env
+                    .iter()
+                    .any(|(key, _)| key == "AOE_SESSION_ID_FILE"),
+                policy != "none"
+            );
+            assert_eq!(extension.exists(), policy != "none");
+        }
+    }
+
+    #[test]
     fn ledger_pi_commands_have_a_native_execution_identity() {
         let config = crate::session::config::SessionConfig::default();
         for command in [
@@ -3230,6 +3287,31 @@ mod tests {
             crate::session::instance::test_helpers::tool_instance("pi", cwd.to_str().unwrap());
         instance.command = format!("{} run pi --profile personal --", quote(&selected_ledger));
         instance.extra_args = "--no-extensions --no-mcp --no-skills --no-prompt-templates --no-themes --tools read,write,edit,bash".into();
+        for policy in ["none", "identity", "afk"] {
+            let mut probe = instance.clone();
+            super::super::test_helpers::set_pi_integration(&probe, policy);
+            let command = probe
+                .prepare_launch_command(probe.conversation_state())
+                .unwrap()
+                .command
+                .unwrap();
+            assert_eq!(
+                command.matches("--aoe-afk-binding").count(),
+                usize::from(policy == "afk"),
+                "{command}"
+            );
+            assert_eq!(
+                command.contains("pi-aoe-session-id.js"),
+                policy != "none",
+                "{command}"
+            );
+            assert_eq!(command.matches("--expect-launch").count(), 1, "{command}");
+            assert!(command.contains(&"b".repeat(64)), "{command}");
+            assert!(probe
+                .build_launch_command(None, &mut probe.conversation_state())
+                .is_err());
+        }
+        super::super::test_helpers::set_pi_integration(&instance, "afk");
         let native = instance.resolve_native_execution(None).unwrap();
         assert!(native.pi_pinnable);
         assert_eq!(native.program, selected_ledger);
@@ -3416,6 +3498,7 @@ mod tests {
         instance.scratch = true;
         instance.command = "ledger run pi --profile aoe-document-work --".into();
         instance.extra_args = document::restrictive_args();
+        super::super::test_helpers::set_pi_integration(&instance, "identity");
         let storage = crate::session::Storage::new_unwatched("test").unwrap();
         storage
             .update(|rows, _| {
@@ -3671,6 +3754,7 @@ mod tests {
             docker_env: None,
             pane_env: Vec::new(),
             identity_extension: None,
+            pi_integration: crate::session::config::PiIntegration::None,
             usage_tracking: false,
         };
         let store = inputs.physical_location(&native.join("opencode.db"));
@@ -3771,6 +3855,7 @@ mod tests {
             docker_env: None,
             pane_env: Vec::new(),
             identity_extension: None,
+            pi_integration: crate::session::config::PiIntegration::None,
         };
         assert!(inputs
             .read_native_file(&root.join("absent.toml"))
@@ -4272,6 +4357,7 @@ mod tests {
             docker_env: None,
             pane_env: Vec::new(),
             identity_extension: None,
+            pi_integration: crate::session::config::PiIntegration::None,
             usage_tracking: false,
         };
         let database = crate::session::instance::test_helpers::create_hermes_database(root.path());
@@ -4411,6 +4497,7 @@ mod tests {
             docker_env: None,
             pane_env: Vec::new(),
             identity_extension: None,
+            pi_integration: crate::session::config::PiIntegration::None,
             usage_tracking: false,
         };
         let database = alias.join("new/opencode.db");

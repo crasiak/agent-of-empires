@@ -73,6 +73,7 @@ Every field is optional. Missing colors fall back to the Empire baseline, except
 [session]
 default_tool = "claude"
 yolo_mode_default = false
+pi_integration = "none"
 agent_status_hooks = true
 smart_rename = true
 name_agent_session = false
@@ -356,10 +357,19 @@ A wrapper around a supported agent needs no `agent_acp_cmd` at all: map it with 
 
 To pass those overrides to a host structured session anyway, use the session's `extra_env` or [`environment`](#host-environment). A Docker-sandboxed session reads only `sandbox.environment` and pins its own config dir at a container path, so set the container-side value there, or give the wrapper a real `agent_acp_cmd`. An explicit `agent_acp_cmd` wins if you set both.
 
+## Pi integration
+
+`session.pi_integration` is global/profile-only: `none` (default) loads no AoE
+Pi extensions; `identity` enables identity, status and configured usage reporting;
+`afk` additionally loads the host AFK integration. Sandbox launches support
+identity reporting but not host AFK integration. Unknown values are rejected.
+Loading AFK integration grants no authority: presence and work still require
+separate confirmation. The selection is frozen for each prepared native launch.
+
 ## AFK presence control
 
-Direct Pi terminal sessions support [expiring control-only AFK](afk.md). It is
-runtime session state, not a configuration default or permission mode, and does
+Host Pi terminal sessions with `session.pi_integration = "afk"` support
+[expiring control-only AFK](afk.md). Authority is runtime session state, not a configuration default or permission mode, and does
 not authorize autonomous actions.
 
 ## Agent command overrides

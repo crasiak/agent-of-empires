@@ -484,6 +484,24 @@ impl Instance {
         &self,
         fold: container_config::CredentialFold,
     ) -> Result<crate::containers::ContainerConfig> {
+        self.build_container_config_with_snapshot(fold, None)
+    }
+
+    pub(super) fn build_container_config_from(
+        &self,
+        config: &crate::session::config::Config,
+    ) -> Result<crate::containers::ContainerConfig> {
+        self.build_container_config_with_snapshot(
+            container_config::CredentialFold::Freshest,
+            Some(config),
+        )
+    }
+
+    fn build_container_config_with_snapshot(
+        &self,
+        fold: container_config::CredentialFold,
+        config: Option<&crate::session::config::Config>,
+    ) -> Result<crate::containers::ContainerConfig> {
         self.ensure_container_hook_mount_source();
         let sandbox = self
             .sandbox_info
@@ -493,11 +511,16 @@ impl Instance {
         // sandbox installs status hooks into that agent's config, matching the
         // host path. Gated by the same setting; only applies to agents that
         // declare selected_agent_hooks.
-        let merge_selected = crate::session::config::profile_config::resolve_config_or_warn(
-            &self.effective_profile(),
-        )
-        .session
-        .merge_hooks_into_selected_agent;
+        let merge_selected = config.map_or_else(
+            || {
+                crate::session::config::profile_config::resolve_config_or_warn(
+                    &self.effective_profile(),
+                )
+                .session
+                .merge_hooks_into_selected_agent
+            },
+            |config| config.session.merge_hooks_into_selected_agent,
+        );
         let selected_agent = if merge_selected {
             // Mirror the host path's agent resolution (a custom wrapper detected
             // as kiro carries kiro's sidecar via detect_as), and the sandbox's
@@ -520,7 +543,8 @@ impl Instance {
                 Some(self.get_tool_command()),
             )
             .with_selected_agent(selected_agent.as_deref())
-            .with_credential_fold(fold),
+            .with_credential_fold(fold)
+            .with_launch_config(config),
             container_config::SandboxYolo {
                 enabled: self.is_yolo_mode(),
             },

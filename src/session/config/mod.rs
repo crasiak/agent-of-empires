@@ -1025,6 +1025,16 @@ impl ScratchSmartRenameMode {
     }
 }
 
+/// AoE extensions loaded into Pi. AFK loading does not grant AFK authority.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PiIntegration {
+    #[default]
+    None,
+    Identity,
+    Afk,
+}
+
 /// Session-related configuration defaults
 #[derive(Debug, Clone, Serialize, Deserialize, SettingsSection)]
 // `repo_default = "deny"`: most of this section is personal preference, but
@@ -1038,6 +1048,17 @@ impl ScratchSmartRenameMode {
 // someone marks it `repo = "allow"` (#3154).
 #[setting_section(name = "session", category = "Session", repo_default = "deny")]
 pub struct SessionConfig {
+    /// Load no AoE extensions, identity/status reporting only, or identity plus AFK.
+    /// AFK authority still requires separate confirmation.
+    #[serde(default)]
+    #[setting(
+        label = "Pi integration",
+        widget = "select",
+        options = "none:None,identity:Identity,afk:AFK",
+        repo = "deny"
+    )]
+    pub pi_integration: PiIntegration,
+
     /// Default coding tool for new sessions. If not set or the tool is
     /// unavailable, falls back to the first available tool. Repo-denied: the
     /// launch path exact-matches the user's `custom_agents` before built-ins,
@@ -1088,10 +1109,9 @@ pub struct SessionConfig {
     pub hide_empty_groups: bool,
 
     /// Record agent context resets, prompts, and turns per session in a local
-    /// usage log (`usage.db` in the app directory). Claude and Pi always
-    /// record when this is on; Codex records only when agent status hooks
-    /// are also on, since Codex has no identity hooks to tether the usage
-    /// hooks to. Off adds nothing. Nothing leaves this machine.
+    /// usage log (`usage.db` in the app directory). Pi requires identity or AFK
+    /// integration; Codex requires agent status hooks. Off adds nothing.
+    /// Nothing leaves this machine.
     #[serde(default = "default_true")]
     #[setting(label = "Record session usage", widget = "toggle")]
     pub usage_tracking: bool,
@@ -2066,6 +2086,7 @@ pub enum RowTagMode {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
+            pi_integration: PiIntegration::default(),
             default_tool: None,
             yolo_mode_default: false,
             pre_trust_agent_folders: false,
@@ -4037,6 +4058,11 @@ mod model_value_quoting_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_integration_rejects_unknown_policy() {
+        assert!(toml::from_str::<Config>("[session]\npi_integration = 'automatic'\n").is_err());
+    }
 
     #[test]
     fn notice_policy_hides_by_display_severity_and_age() {

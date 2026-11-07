@@ -1,6 +1,8 @@
 # AFK control, Session work and one-cycle delegation for Pi
 
-AFK is off by default. **Control-only presence does not authorize autonomous
+First opt in to loading the runtime with
+[`session.pi_integration = "afk"`](configuration.md#pi-integration).
+AFK authority remains off by default. **Control-only presence does not authorize autonomous
 work.** Native Session work periods and restricted one-file delegation are
 separate opt-ins. Presence and one-file delegation never start an idle turn;
 a confirmed native work period can continue the task already assigned to that

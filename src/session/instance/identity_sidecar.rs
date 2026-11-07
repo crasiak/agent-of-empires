@@ -97,12 +97,48 @@ impl Instance {
     }
 
     /// Extension flag and sidecar environment for an identity-publishing backend.
-    pub(super) fn identity_extension_launch(&self) -> Option<(String, String)> {
+    pub(super) fn identity_extension_launch(&self) -> Result<Option<(String, String)>> {
+        if !self.is_pi() {
+            return Ok(None);
+        }
+        let config = if self.is_sandboxed() {
+            crate::session::config::repo_config::resolve_config_with_repo(
+                &self.effective_profile(),
+                Path::new(&self.project_path),
+            )?
+        } else {
+            crate::session::config::profile_config::resolve_config_or_warn(
+                &self.effective_profile(),
+            )
+        };
+        self.identity_extension_launch_from(&config)
+    }
+
+    pub(super) fn identity_extension_launch_from(
+        &self,
+        config: &crate::session::config::Config,
+    ) -> Result<Option<(String, String)>> {
+        let sandbox_config = (self.is_sandboxed() && self.is_pi())
+            .then(|| self.build_container_config_from(config))
+            .transpose()?;
+        Ok(self.identity_extension_launch_prepared(config, sandbox_config.as_ref()))
+    }
+
+    fn identity_extension_launch_prepared(
+        &self,
+        config: &crate::session::config::Config,
+        sandbox_config: Option<&crate::containers::ContainerConfig>,
+    ) -> Option<(String, String)> {
+        if config.session.pi_integration == crate::session::config::PiIntegration::None {
+            return None;
+        }
         let backend = self.resolved_capture_backend()?;
         backend.identity_publisher()?;
         if !self.is_sandboxed() {
             if backend != SessionCaptureBackend::Pi
-                || launch_command::environment_defines_path(&self.resolved_host_environment())
+                || launch_command::environment_defines_path(
+                    &self.resolved_host_environment_from(config.environment.clone()),
+                )
                 || (crate::session::tailored::document::account(self).is_none()
                     && crate::session::ledger_pi::profile(&self.tool, self.get_tool_command())
                         .is_none()
@@ -115,7 +151,6 @@ impl Instance {
                 .ok()?
                 .join("session_id");
             let profile = self.effective_profile();
-            let config = crate::session::config::profile_config::resolve_config_or_warn(&profile);
             let usage_bin = config
                 .session
                 .usage_tracking
@@ -127,26 +162,27 @@ impl Instance {
                     &sidecar,
                     &self.id,
                     usage_bin.as_deref().map(|bin| (bin, profile.as_str())),
-                    &crate::agents::pi_waiting_tools(&config),
+                    &crate::agents::pi_waiting_tools(config),
                 ),
             ));
         }
-        let bind_dir = self.sandbox_capture_store_dir()?;
-        let config = self.build_container_config().ok()?;
+        let container_config = sandbox_config?;
+        let mount = container_config
+            .volumes
+            .iter()
+            .find(|mount| mount.container_path == "/root/.pi" && !mount.read_only)?;
+        let bind_dir = Path::new(&mount.host_path);
         let (container_root, flag, sidecar_root) = match backend {
-            SessionCaptureBackend::Pi => {
-                container_config::install_pi_sandbox_extension_at(&bind_dir).ok()?;
-                (
-                    "/root/.pi",
-                    String::new(),
-                    container_config::PI_SIDECAR_DIR_IN_CONTAINER.to_string(),
-                )
-            }
+            SessionCaptureBackend::Pi => (
+                "/root/.pi",
+                String::new(),
+                container_config::PI_SIDECAR_DIR_IN_CONTAINER.to_string(),
+            ),
 
             _ => return None,
         };
-        if !config.uses_default_container_home()
-            || !config.path_is_mounted(&bind_dir, Path::new(container_root), true)
+        if !container_config.uses_default_container_home()
+            || !container_config.path_is_mounted(bind_dir, Path::new(container_root), true)
         {
             return None;
         }
@@ -156,14 +192,12 @@ impl Instance {
             .as_ref()
             .is_some_and(|sandbox| sandbox.container_id.is_some())
             || container.exists().ok() == Some(true);
-        if container_known && container.mount_fingerprint_matches(&config).ok()? != Some(true) {
+        if container_known
+            && container.mount_fingerprint_matches(container_config).ok()? != Some(true)
+        {
             return None;
         }
-        let waiting_tools = crate::agents::pi_waiting_tools(
-            &crate::session::config::profile_config::resolve_config_or_warn(
-                &self.effective_profile(),
-            ),
-        );
+        let waiting_tools = crate::agents::pi_waiting_tools(config);
         // The extension writes status beside the sidecar only when named this exact base.
         Some((
             flag,
@@ -816,9 +850,11 @@ pi = "~/.pi-personal"
         .unwrap();
 
         let mut declared = sandboxed_pi("piownconfig01");
+        set_pi_integration(&declared, "identity");
         admit_sandbox_fixture(&declared);
         let (_, env_prefix) = declared
             .identity_extension_launch()
+            .unwrap()
             .expect("declared sandbox config supports the pane extension");
         assert!(env_prefix.contains("AOE_SESSION_ID_FILE=/root/.pi/aoe-session/"));
         declared.mark_pi_extension_launched_for_test();
@@ -1242,9 +1278,11 @@ pi = "~/.pi-personal"
         .unwrap();
         let mut inst = tool_instance("pi", "/tmp/pi-hook-base");
         inst.sandbox_info = Some(test_sandbox("aoe-pi-hook-base", None));
+        set_pi_integration(&inst, "identity");
         admit_sandbox_fixture(&inst);
         let (_, env) = inst
             .identity_extension_launch()
+            .unwrap()
             .expect("the default sandbox admits the publisher");
         let entries = shell_words::split(&env).unwrap();
         for entry in [
@@ -1263,7 +1301,7 @@ pi = "~/.pi-personal"
         let mut other_home = inst.clone();
         other_home.sandbox_info.as_mut().unwrap().extra_env = Some(vec!["HOME=/home/agent".into()]);
         assert!(
-            other_home.identity_extension_launch().is_none(),
+            other_home.identity_extension_launch().is_err(),
             "a non-default container home has no mount to name"
         );
     }
