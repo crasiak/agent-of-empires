@@ -3339,6 +3339,8 @@ mod tests {
                 .run(project.path())
                 .unwrap()
         };
+        let config_path = crate::session::get_app_dir().unwrap().join("config.toml");
+        fs::write(&config_path, "[session]\npi_integration = 'none'\n").unwrap();
         let initial = build();
         let root = PathBuf::from(
             &initial
@@ -3350,7 +3352,6 @@ mod tests {
         );
         let extension = root.join("agent/extensions/aoe-session-id.js");
         assert!(!extension.exists());
-        let config_path = crate::session::get_app_dir().unwrap().join("config.toml");
         for policy in ["identity", "afk"] {
             fs::write(
                 &config_path,
