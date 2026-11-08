@@ -46,7 +46,8 @@ identity and AFK assets embedded by that build. The inventory records native
 binary and asset hashes plus the source revision when available. It is not a
 Ledger admission, import resolver or permission to load an extension. Existing
 launch, ownership, hash and full import-closure checks still apply. Ordinary Pi
-needs none of these assets; see [Pi integration](guides/session-resume.md).
+uses identity-only integration by default; AFK is opt-in. Explicit `none` loads
+no AoE extensions. See [Pi integration](guides/session-resume.md).
 
 The optional `homeManagerModules.default` module puts the native package and
 explicitly selected profile configurations in one Home Manager generation:
@@ -58,7 +59,7 @@ explicitly selected profile configurations in one Home Manager generation:
     enable = true;
     # Select the actual app directory, not a guessed alternate namespace.
     appDirectory = ".config/agent-of-empires"; # Linux; inspect macOS's existing layout
-    profiles.work.session.pi_integration = "none";
+    profiles.work.session.pi_integration = "identity";
   };
 }
 ```

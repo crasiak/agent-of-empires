@@ -45,6 +45,18 @@ if [ -n "$parent" ]; then
   file="$store/fork_$child.jsonl"
   printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$child" "$PWD" > "$file"
   tail -n +2 "$parent" >> "$file"
+elif [ -n "$child" ]; then
+  file=
+  for candidate in "$store"/*_"$child".jsonl; do
+    if [ -f "$candidate" ]; then
+      file="$candidate"
+      break
+    fi
+  done
+  if [ -z "$file" ]; then
+    file="$store/fresh_$child.jsonl"
+    printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$child" "$PWD" > "$file"
+  fi
 else
   file="$session"
   [ -f "$file" ] || exit 1
@@ -136,6 +148,7 @@ fn pi_fork_keeps_distinct_child_ids_and_restarts_without_reforking() {
         &mut h,
         "--fork <path|id>\n--session-id <id>\n--extension <path>\n--session <path|id>",
     );
+    h.append_config("[session]\npi_integration = \"identity\"\n");
     let parent_bytes = std::fs::read(&transcript).unwrap();
     let parent_row = session_by_title(&h.read_sessions(), "PiParent").clone();
     let project = h.project_path();

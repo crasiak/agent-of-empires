@@ -1029,8 +1029,8 @@ impl ScratchSmartRenameMode {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PiIntegration {
-    #[default]
     None,
+    #[default]
     Identity,
     Afk,
 }
@@ -1048,8 +1048,8 @@ pub enum PiIntegration {
 // someone marks it `repo = "allow"` (#3154).
 #[setting_section(name = "session", category = "Session", repo_default = "deny")]
 pub struct SessionConfig {
-    /// Load no AoE extensions, identity/status reporting only, or identity plus AFK.
-    /// AFK authority still requires separate confirmation.
+    /// Identity/status reporting by default; none disables AoE extensions, afk adds AFK.
+    /// AFK is opt-in and authority still requires separate confirmation.
     #[serde(default)]
     #[setting(
         label = "Pi integration",
@@ -4058,6 +4058,23 @@ mod model_value_quoting_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_integration_defaults_to_identity_but_none_and_afk_remain_explicit() {
+        for input in ["", "[session]\n"] {
+            let config: Config = toml::from_str(input).unwrap();
+            assert_eq!(config.session.pi_integration, PiIntegration::Identity);
+        }
+        assert_eq!(
+            SessionConfig::default().pi_integration,
+            PiIntegration::Identity
+        );
+        for (policy, expected) in [("none", PiIntegration::None), ("afk", PiIntegration::Afk)] {
+            let config: Config =
+                toml::from_str(&format!("[session]\npi_integration = '{policy}'\n")).unwrap();
+            assert_eq!(config.session.pi_integration, expected);
+        }
+    }
 
     #[test]
     fn pi_integration_rejects_unknown_policy() {

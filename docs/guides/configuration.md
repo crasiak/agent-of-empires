@@ -73,7 +73,7 @@ Every field is optional. Missing colors fall back to the Empire baseline, except
 [session]
 default_tool = "claude"
 yolo_mode_default = false
-pi_integration = "none"
+pi_integration = "identity"
 agent_status_hooks = true
 smart_rename = true
 name_agent_session = false
@@ -359,10 +359,11 @@ To pass those overrides to a host structured session anyway, use the session's `
 
 ## Pi integration
 
-`session.pi_integration` is global/profile-only: `none` (default) loads no AoE
-Pi extensions; `identity` enables identity, status and configured usage reporting;
-`afk` additionally loads the host AFK integration. Sandbox launches support
-identity reporting but not host AFK integration. Unknown values are rejected.
+`session.pi_integration` is global/profile-only: `identity` (default) enables
+identity, status and configured usage reporting; explicit `none` loads no AoE
+Pi extensions; opt-in `afk` additionally loads the host AFK integration. Sandbox
+launches support identity reporting but not host AFK integration. Unknown values
+are rejected.
 Loading AFK integration grants no authority: presence and work still require
 separate confirmation. The selection is frozen for each prepared native launch.
 

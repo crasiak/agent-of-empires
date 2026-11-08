@@ -30,7 +30,6 @@
             perl
             cmake
             installShellFiles
-            python3
           ];
 
           buildInputs = with pkgs; [
@@ -88,6 +87,7 @@
 
           aoe = craneLib.buildPackage (commonArgs // {
             inherit cargoArtifacts;
+            nativeBuildInputs = nativeBuildInputs ++ [ pkgs.python3 ];
             cargoExtraArgs = "--package agent-of-empires";
             doCheck = false;
             postPhases = [ "exportIntegrationPhase" ];
@@ -148,6 +148,7 @@
 
           aoeWithWeb = craneLib.buildPackage (commonArgsWithWeb // {
             cargoArtifacts = cargoArtifactsWithWeb;
+            nativeBuildInputs = nativeBuildInputs ++ [ pkgs.python3 ];
             doCheck = false;
             # Point build.rs at the pre-built frontend; it will copy dist/ into
             # place and skip running npm entirely (see build.rs AOE_WEB_DIST handling).

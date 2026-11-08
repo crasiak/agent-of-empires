@@ -14,7 +14,7 @@ To send new work without changing the Agent conversation, see
 | Claude Code | Yes | Yes | Pane-scoped native hook |
 | Codex | Yes | Yes | Pane-scoped native hook (host), isolated managed store (sandbox). On a macOS host the capture is unbound: no launch binding and no final flush at teardown; see [Codex](#supported-managed-contexts). |
 | Cursor Agent | Yes | Yes | `beforeSubmitPrompt` hook `conversation_id` |
-| Pi | Opt-in | Opt-in | Pane-scoped AoE extension with [identity or AFK integration](configuration.md#pi-integration) |
+| Pi | Yes | Yes | Pane-scoped AoE extension with [default identity or opt-in AFK integration](configuration.md#pi-integration) |
 | OMP | Yes | Yes | Pane-scoped routed terminal store |
 | OpenCode | Opt-in | No | AoE-preassigned native id |
 | Hermes | Yes | Yes | `pre_llm_call` hook of the CLI or TUI foreground agent (host; subagents and background tasks are never adopted), isolated managed store (sandbox) |

@@ -1741,7 +1741,7 @@ mod tests {
             let project = home.path().join("project");
             std::fs::create_dir(&project).unwrap();
             let mut inst = tool_instance("pi", project.to_str().unwrap());
-            if policy != "none" {
+            if policy != "identity" {
                 set_pi_integration(&inst, policy);
             }
             let native = inst.resolve_native_execution(None).unwrap();
@@ -1998,7 +1998,7 @@ mod tests {
                 "PI_CODING_AGENT_SESSION_DIR=/root/.pi/agent/sessions".to_string()
             ]);
             inst.sandbox_info = Some(sandbox);
-            if policy != "none" {
+            if policy != "identity" {
                 set_pi_integration(&inst, policy);
             }
             admit_sandbox_fixture(&inst);
