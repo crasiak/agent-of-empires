@@ -279,6 +279,41 @@ fn seed_store(h: &TuiTestHarness) -> String {
     database.display().to_string()
 }
 
+fn has_database_route(stores: &serde_json::Value, database: &str) -> bool {
+    stores.as_array().is_some_and(|stores| {
+        stores
+            .iter()
+            .any(|store| store.as_str() == Some(database))
+    })
+}
+
+#[test]
+#[parallel]
+fn opencode_store_route_matches_database_identity() {
+    let root = tempfile::tempdir().expect("create route fixture");
+    for directory in ["data", "other"] {
+        let data = root.path().join(directory);
+        fs::create_dir(&data).unwrap();
+        fs::write(data.join("opencode.db"), "").unwrap();
+    }
+    let data = root.path().join("data");
+    let alias = root.path().join("data-alias");
+    std::os::unix::fs::symlink(&data, &alias).expect("alias database directory");
+    let database = fs::canonicalize(data.join("opencode.db")).unwrap();
+    let other = fs::canonicalize(root.path().join("other/opencode.db")).unwrap();
+    let alias = alias.join("opencode.db");
+    assert_ne!(alias, database, "fixture must retain an alias spelling");
+    let stores = serde_json::json!([database]);
+    for (expected, matches) in [(&other, false), (&database, true), (&alias, true)] {
+        assert_eq!(
+            has_database_route(&stores, expected.to_str().unwrap()),
+            matches,
+            "expected database {}, stores {stores}",
+            expected.display()
+        );
+    }
+}
+
 /// The store mints the child, the launch opens that child, and the flag 2.x
 /// refuses never reaches the command line.
 #[test]
@@ -288,7 +323,11 @@ fn opencode_store_fork_opens_the_child_the_store_minted() {
     require_python3!();
 
     let mut h = TuiTestHarness::new("opencode_store_fork");
-    let database = seed_store(&h);
+    let seeded_database = seed_store(&h);
+    let alias = h.home_path().join("opencode-data-alias");
+    std::os::unix::fs::symlink(Path::new(&seeded_database).parent().unwrap(), &alias)
+        .expect("alias database directory");
+    let database = alias.join("opencode.db").display().to_string();
     h.set_env("OPENCODE_DB", &database);
     let log_path = install_fake_opencode(&mut h, true);
     let launch_log = h.home_path().join("fake-opencode-launch.log");
@@ -370,12 +409,8 @@ fn opencode_store_fork_opens_the_child_the_store_minted() {
         "{child}"
     );
     assert!(
-        child["active_execution"]["binding"]["stores"]
-            .as_array()
-            .is_some_and(|stores| stores
-                .iter()
-                .any(|store| store.as_str() == Some(database.as_str()))),
-        "the fork lost its live database route: {child}"
+        has_database_route(&child["active_execution"]["binding"]["stores"], &database),
+        "the fork lost its live database route for {database}: {child}"
     );
 }
 
