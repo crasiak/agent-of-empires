@@ -280,11 +280,11 @@ fn seed_store(h: &TuiTestHarness) -> String {
 }
 
 fn has_database_route(stores: &serde_json::Value, database: &str) -> bool {
-    stores.as_array().is_some_and(|stores| {
-        stores
-            .iter()
-            .any(|store| store.as_str() == Some(database))
-    })
+    let database = fs::canonicalize(database).expect("canonicalize expected database");
+    let database = database.to_str().expect("database path is UTF-8");
+    stores
+        .as_array()
+        .is_some_and(|stores| stores.iter().any(|store| store.as_str() == Some(database)))
 }
 
 #[test]
