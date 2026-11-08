@@ -269,8 +269,10 @@ jobs:
     needs: macos-gate
     if: ${{ !cancelled() && (needs.macos-gate.result != 'success' || needs.macos-gate.outputs.run == 'true') }}
     runs-on: macos-latest
-    # Bound a hung test without consuming GitHub's six-hour job limit.
-    timeout-minutes: 45
+    # Bound a hung test without consuming GitHub's six-hour job limit. A
+    # near-cold build (for example after a toolchain bump) compiles for about
+    # 45 minutes before tests start, so leave room for the suite as well.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
