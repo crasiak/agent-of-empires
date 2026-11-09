@@ -1,6 +1,7 @@
 //! `AcpState`: the structured view session state, folded from `Event`s by a single writer.
 
 use crate::daemon::PromptAttachmentRef;
+use crate::session::Status;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -125,7 +126,7 @@ pub struct ThinkingSignal {
     pub started_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RateLimitInfo {
     pub status: String,
     /// When the quota window clears, if the agent reported it.
@@ -361,6 +362,61 @@ impl BackgroundAgentStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundTaskLaunch {
+    pub task_id: String,
+    pub tool_call_id: Option<String>,
+    pub workflow: Option<WorkflowLaunch>,
+    /// What the log already recorded for the workflow's agents, so a resumed
+    /// journal read neither repeats nor misses an event.
+    pub workflow_agents: WorkflowAgents,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowAgents {
+    pub launched: std::collections::HashSet<String>,
+    pub completed: std::collections::HashSet<String>,
+}
+
+/// A Claude `Workflow` run, from its launch result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowLaunch {
+    pub run_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Host directory holding the run's journal and agent transcripts.
+    /// Stripped before any client-facing frame, like
+    /// `BackgroundAgentLaunched::output_file`.
+    #[serde(default)]
+    pub transcript_dir: String,
+}
+
+/// A workflow run of the session, kept like `background_agents` so a client
+/// whose replay window misses its launch or finish still ties the task to its
+/// tool call and end time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowRunRecord {
+    pub task_id: String,
+    pub tool_call_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Closed by its task's finish, or by a later start reusing the task id.
+    #[serde(default)]
+    pub finished: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+/// The workflow run and phase a background sub-agent belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowRef {
+    pub run_id: String,
+    pub name: String,
+    pub phase: String,
+}
+
 /// One tool call a background sub-agent made, parsed from its transcript.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackgroundAgentTool {
@@ -382,6 +438,8 @@ pub struct BackgroundAgentRecord {
     pub description: String,
     pub prompt: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<WorkflowRef>,
     pub status: BackgroundAgentStatus,
     pub started_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -401,6 +459,17 @@ pub struct BackgroundAgentRecord {
     /// Non-fatal note, e.g. an unrecognized transcript format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+}
+
+/// What the main turn is doing for the sidebar. Kept apart from `turn_active`,
+/// which dispatch reads and which must not follow display-only signals.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SidebarPhase {
+    #[default]
+    Idle,
+    Active,
+    Waiting,
+    Error,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -448,6 +517,11 @@ pub struct AcpState {
     pub session_notices: Vec<SessionNotice>,
     #[serde(default)]
     pub background_agents: Vec<BackgroundAgentRecord>,
+    /// Ids of running background tasks that are not sub-agents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_tasks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_runs: Vec<WorkflowRunRecord>,
 
     /// Whether the main turn is in flight. Dispatch (`acp::dispatch::decide`)
     /// and the queue drain gate on this directly, so it tracks only the main
@@ -455,6 +529,9 @@ pub struct AcpState {
     /// `has_active_background_agent()`.
     #[serde(default)]
     pub turn_active: bool,
+    /// Sidebar projection input; rebuilt from the log, so never serialized.
+    #[serde(skip)]
+    pub sidebar_phase: SidebarPhase,
     /// A mid-turn prompt is injected into the running turn rather than queued.
     #[serde(default)]
     pub steering: bool,
@@ -646,6 +723,8 @@ pub enum Event {
         /// before any client-facing frame (`protocol::strip_transcript_path`).
         #[serde(default)]
         output_file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow: Option<WorkflowRef>,
         started_at: DateTime<Utc>,
     },
     /// Throttled snapshot of a running background sub-agent.
@@ -673,12 +752,39 @@ pub enum Event {
         warning: Option<String>,
         ended_at: DateTime<Utc>,
     },
+    /// A background task that is not a sub-agent (Bash `run_in_background`, or
+    /// a `Workflow` run) started, from the tool result's `toolResponse`. Its
+    /// end is read from the session transcript (`acp::task_transcript`).
+    BackgroundTaskStarted {
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        description: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow: Option<WorkflowLaunch>,
+    },
+    /// A background task reached a terminal state.
+    BackgroundTaskFinished {
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ended_at: Option<DateTime<Utc>>,
+    },
     /// The adapter runtime failed a prompt before emitting any transcript.
     PromptRuntimeError {
         message: String,
     },
     AgentMessageChunk {
         text: String,
+        /// The ACP message this chunk belongs to; a change starts a new message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
+    /// Summarized model thinking. Never fed back as context.
+    AgentThoughtChunk {
+        text: String,
+        /// The ACP message this chunk belongs to; a change starts a new thought.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
     },
     /// aoe sent `session/cancel` and armed the escalation watchdog.
     CancelRequested {
@@ -799,20 +905,48 @@ impl AcpState {
         }
     }
 
-    /// Whether any background sub-agent is still in flight. Keyed on
-    /// `ended_at`, not `status`: a terminal `BackgroundAgentCompleted` can
-    /// carry `status: Stalled` (the tailer's abort timeout gives up without a
-    /// clean `end_turn`), and that record is done like any other (#4001).
+    /// Whether any background sub-agent or task is still in flight. Agents
+    /// are keyed on `ended_at`, not `status`: a terminal
+    /// `BackgroundAgentCompleted` can carry `status: Stalled` (the tailer's
+    /// abort timeout gives up without a clean `end_turn`), and that record is
+    /// done like any other (#4001).
     pub fn has_active_background_agent(&self) -> bool {
-        self.background_agents.iter().any(|a| a.ended_at.is_none())
+        !self.background_tasks.is_empty()
+            || self.background_agents.iter().any(|a| a.ended_at.is_none())
     }
 
-    /// Apply a single event; returns the new `last_seq`.
-    pub fn apply_event(&mut self, event: Event) -> Result<u64, StateError> {
+    /// Task ids can be reused, so only the run still open on `task_id` closes.
+    fn close_workflow_run(&mut self, task_id: &str, ended_at: Option<DateTime<Utc>>) {
+        if let Some(run) = self
+            .workflow_runs
+            .iter_mut()
+            .find(|run| run.task_id == task_id && !run.finished)
+        {
+            run.finished = true;
+            run.ended_at = ended_at;
+        }
+    }
+
+    /// The sidebar status this state implies. A live background agent keeps
+    /// the row `Running` between main turns.
+    pub fn sidebar_status(&self) -> Status {
+        match self.sidebar_phase {
+            SidebarPhase::Error => Status::Error,
+            SidebarPhase::Waiting => Status::Waiting,
+            SidebarPhase::Active => Status::Running,
+            SidebarPhase::Idle if self.has_active_background_agent() => Status::Running,
+            SidebarPhase::Idle => Status::Idle,
+        }
+    }
+
+    pub fn apply_event(&mut self, seq: u64, event: Event) -> Result<u64, StateError> {
         match event {
             Event::PlanUpdated { plan } => self.current_plan = Some(plan),
             Event::TodoListUpdated { todos } => self.todos = todos,
-            Event::ToolCallStarted { tool_call } => self.start_tool_call(tool_call),
+            Event::ToolCallStarted { tool_call } => {
+                self.sidebar_phase = SidebarPhase::Active;
+                self.start_tool_call(tool_call)
+            }
             Event::ToolCallCompleted { tool_call_id, .. } => {
                 if self
                     .in_flight_tool
@@ -852,7 +986,10 @@ impl AcpState {
                     }
                 }
             }
-            Event::ApprovalRequested { approval } => self.pending_approvals.push(approval),
+            Event::ApprovalRequested { approval } => {
+                self.sidebar_phase = SidebarPhase::Waiting;
+                self.pending_approvals.push(approval)
+            }
             Event::ApprovalResolved { nonce, .. } => {
                 let pos = self
                     .pending_approvals
@@ -862,6 +999,7 @@ impl AcpState {
                 if self.pending_approvals.remove(pos).resolved.is_some() {
                     return Err(StateError::ApprovalAlreadyResolved(nonce));
                 }
+                self.sidebar_phase = SidebarPhase::Active;
             }
             Event::ElicitationRequested { elicitation } => {
                 // The asking tool call is now waiting on the user, not running.
@@ -871,10 +1009,12 @@ impl AcpState {
                 {
                     self.in_flight_tool = None;
                 }
+                self.sidebar_phase = SidebarPhase::Waiting;
                 self.pending_elicitations.push(elicitation)
             }
             Event::ElicitationResolved { nonce, .. } => {
                 self.pending_elicitations.retain(|e| e.nonce != nonce);
+                self.sidebar_phase = SidebarPhase::Active;
             }
             Event::DiffEmitted { diff } => {
                 self.recent_diffs.push(diff);
@@ -884,11 +1024,12 @@ impl AcpState {
                     .saturating_sub(Self::MAX_RECENT_DIFFS);
                 self.recent_diffs.drain(..excess);
             }
-            Event::ThinkingStarted => {
+            Event::ThinkingStarted | Event::AgentThoughtChunk { .. } => {
                 self.thinking = Some(ThinkingSignal {
                     started_at: Utc::now(),
                 });
                 self.turn_active = true;
+                self.sidebar_phase = SidebarPhase::Active;
             }
             Event::ThinkingEnded => self.thinking = None,
             Event::RateLimit { info } => self.rate_limit = Some(info),
@@ -899,7 +1040,7 @@ impl AcpState {
                 key,
             } => {
                 let notice = SessionNotice {
-                    id: notice_id(key.as_deref(), self.last_seq.saturating_add(1)),
+                    id: notice_id(key.as_deref(), seq),
                     severity,
                     title,
                     description,
@@ -952,19 +1093,29 @@ impl AcpState {
                     reason,
                 });
             }
-            Event::PromptRuntimeError { .. } | Event::AgentStartupError { .. } => {
+            Event::PromptRuntimeError { .. } => {
                 self.turn_active = false;
                 self.cancelling = false;
             }
+            Event::AgentStartupError { .. } => {
+                self.turn_active = false;
+                self.cancelling = false;
+                self.sidebar_phase = SidebarPhase::Error;
+            }
             Event::CancelRequested { .. } => self.cancelling = true,
             Event::Stopped { reason } => self.end_turn(&reason),
-            Event::IncompatibleAgent { detail } => self.startup_error = Some(detail),
+            Event::IncompatibleAgent { detail } => {
+                self.startup_error = Some(detail);
+                self.sidebar_phase = SidebarPhase::Error;
+            }
             Event::UserPromptSent { .. } | Event::UserDiffCommentsPrompt { .. } => self.open_turn(),
             Event::PromptCapabilities { steering, .. } => self.steering = steering,
             Event::AcpSessionAssigned { .. } => {
                 self.startup_error = None;
                 self.rate_limit = None;
+                self.heal_sidebar_phase();
             }
+            Event::RateLimitAutoResumed { .. } => self.heal_sidebar_phase(),
             Event::SessionContextReset { .. } => self.usage = None,
             // Clears the conversation; adapter-scoped commands, modes and
             // selectors are never re-announced, so they stay.
@@ -993,6 +1144,7 @@ impl AcpState {
                 prompt,
                 model,
                 output_file: _,
+                workflow,
                 started_at,
             } => self.launch_background_agent(BackgroundAgentRecord {
                 agent_id,
@@ -1000,6 +1152,7 @@ impl AcpState {
                 description,
                 prompt,
                 model,
+                workflow,
                 status: BackgroundAgentStatus::Running,
                 started_at,
                 ended_at: None,
@@ -1053,19 +1206,44 @@ impl AcpState {
                     }
                 }
             }
+            Event::BackgroundTaskStarted {
+                task_id,
+                tool_call_id,
+                workflow,
+                ..
+            } => {
+                // A reused task id replaces whatever run held it.
+                self.close_workflow_run(&task_id, None);
+                if let (Some(workflow), Some(tool_call_id)) = (workflow, tool_call_id) {
+                    self.workflow_runs.push(WorkflowRunRecord {
+                        task_id: task_id.clone(),
+                        tool_call_id,
+                        name: workflow.name,
+                        summary: workflow.summary,
+                        finished: false,
+                        ended_at: None,
+                    });
+                }
+                if !self.background_tasks.contains(&task_id) {
+                    self.background_tasks.push(task_id);
+                }
+            }
+            Event::BackgroundTaskFinished { task_id, ended_at } => {
+                self.close_workflow_run(&task_id, ended_at);
+                self.background_tasks.retain(|id| *id != task_id);
+            }
             // Titles live on `Instance`; wakeups and monitors are read from the log.
+            Event::AgentMessageChunk { .. } => self.sidebar_phase = SidebarPhase::Active,
             Event::SessionTitleSuggested { .. }
             | Event::ToolCallContent { .. }
-            | Event::RateLimitAutoResumed { .. }
             | Event::ModeSwitchFailed { .. }
             | Event::RawAgentUpdate { .. }
-            | Event::AgentMessageChunk { .. }
             | Event::ConversationSummary { .. }
             | Event::ConversationCompactionSummary { .. }
             | Event::WakeupScheduled { .. }
             | Event::MonitorArmed { .. } => {}
         }
-        self.last_seq = self.last_seq.saturating_add(1);
+        self.last_seq = seq;
         self.updated_at = Utc::now();
         Ok(self.last_seq)
     }
@@ -1093,6 +1271,7 @@ impl AcpState {
     fn open_turn(&mut self) {
         let steered = self.turn_active && self.steering;
         self.turn_active = true;
+        self.sidebar_phase = SidebarPhase::Active;
         if !steered {
             self.cancelling = false;
         }
@@ -1102,9 +1281,17 @@ impl AcpState {
         self.session_notices.clear();
     }
 
+    /// A fresh worker attached: a startup error no longer holds the row.
+    fn heal_sidebar_phase(&mut self) {
+        if self.sidebar_phase == SidebarPhase::Error {
+            self.sidebar_phase = SidebarPhase::Idle;
+        }
+    }
+
     /// The turn is over however it ended, so every in-turn phase clears.
     fn end_turn(&mut self, reason: &str) {
         self.turn_active = false;
+        self.sidebar_phase = SidebarPhase::Idle;
         self.cancelling = false;
         self.compacting = false;
         self.compaction_tool_id = None;
@@ -1178,7 +1365,10 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn chunk(text: &str) -> Event {
-        Event::AgentMessageChunk { text: text.into() }
+        Event::AgentMessageChunk {
+            text: text.into(),
+            message_id: None,
+        }
     }
 
     pub(crate) fn stopped(reason: &str) -> Event {
@@ -1204,9 +1394,215 @@ mod tests {
     fn applied(events: impl IntoIterator<Item = Event>) -> AcpState {
         let mut s = fresh_state();
         for event in events {
-            s.apply_event(event).unwrap();
+            s.apply_event(s.last_seq.saturating_add(1), event).unwrap();
         }
         s
+    }
+
+    /// The sidebar projection over event sequences, including the ones the old
+    /// per-event table got right only by reading outside activity flags.
+    #[test]
+    fn sidebar_status_projects_the_folded_events() {
+        use super::test_support::chunk;
+        use crate::acp::permissions::build_approval;
+        let tool = || ToolCall {
+            id: "t".into(),
+            name: "shell".into(),
+            kind: "execute".into(),
+            args_preview: "{}".into(),
+            started_at: Utc::now(),
+            parent_tool_call_id: None,
+            memory_recall: None,
+            diffs: Vec::new(),
+        };
+        let approval = build_approval(tool(), Vec::new());
+        let nonce = approval.nonce.clone();
+        let elicitation = Elicitation {
+            nonce: Nonce("e-1".into()),
+            message: "Pick".into(),
+            title: None,
+            description: None,
+            tool_call_id: None,
+            questions: Vec::new(),
+            requested_at: Utc::now(),
+            resolved: None,
+        };
+        let launched = || Event::BackgroundAgentLaunched {
+            agent_id: "bg-1".into(),
+            tool_call_id: "tc-1".into(),
+            description: "map backend".into(),
+            prompt: "do it".into(),
+            model: "claude-opus-4-8".into(),
+            output_file: "/tmp/bg-1.output".into(),
+            started_at: Utc::now(),
+            workflow: None,
+        };
+        let completed = |status| Event::BackgroundAgentCompleted {
+            agent_id: "bg-1".into(),
+            status,
+            tools: Vec::new(),
+            result: None,
+            warning: None,
+            ended_at: Utc::now(),
+        };
+        let startup_error = || Event::AgentStartupError {
+            message: "boom".into(),
+        };
+        let assigned = || Event::AcpSessionAssigned {
+            acp_session_id: "a-1".into(),
+        };
+        let cases: Vec<(&str, Vec<Event>, Status)> = vec![
+            ("nothing yet", vec![], Status::Idle),
+            ("open turn", vec![prompt("go")], Status::Running),
+            (
+                "turn ended",
+                vec![prompt("go"), stopped("end_turn")],
+                Status::Idle,
+            ),
+            // A turn resumed agent-side (fired wakeup, background output) streams
+            // these without a UserPromptSent.
+            ("chunk without a prompt", vec![chunk("x")], Status::Running),
+            (
+                "thinking without a prompt",
+                vec![Event::ThinkingStarted],
+                Status::Running,
+            ),
+            (
+                "tool call without a prompt",
+                vec![Event::ToolCallStarted { tool_call: tool() }],
+                Status::Running,
+            ),
+            (
+                "pending approval",
+                vec![
+                    prompt("go"),
+                    Event::ApprovalRequested {
+                        approval: approval.clone(),
+                    },
+                ],
+                Status::Waiting,
+            ),
+            (
+                "approval answered",
+                vec![
+                    prompt("go"),
+                    Event::ApprovalRequested { approval },
+                    Event::ApprovalResolved {
+                        nonce,
+                        decision: ApprovalDecision::Allow,
+                    },
+                ],
+                Status::Running,
+            ),
+            (
+                "pending elicitation",
+                vec![
+                    prompt("go"),
+                    Event::ElicitationRequested {
+                        elicitation: elicitation.clone(),
+                    },
+                ],
+                Status::Waiting,
+            ),
+            (
+                "elicitation answered",
+                vec![
+                    prompt("go"),
+                    Event::ElicitationRequested { elicitation },
+                    Event::ElicitationResolved {
+                        nonce: Nonce("e-1".into()),
+                        outcome: ElicitationOutcome::Cancelled,
+                        answers: Vec::new(),
+                    },
+                ],
+                Status::Running,
+            ),
+            // The stop ends the turn even though the request was never answered.
+            (
+                "stopped while blocked",
+                vec![
+                    prompt("go"),
+                    Event::ApprovalRequested {
+                        approval: build_approval(tool(), Vec::new()),
+                    },
+                    stopped("cancelled"),
+                ],
+                Status::Idle,
+            ),
+            (
+                "background agent outlives the turn",
+                vec![prompt("go"), launched(), stopped("end_turn")],
+                Status::Running,
+            ),
+            // #4001: a detach closes the record like any terminal status.
+            (
+                "detached agent then stopped",
+                vec![
+                    prompt("go"),
+                    launched(),
+                    completed(BackgroundAgentStatus::Detached),
+                    stopped("user_stopped"),
+                ],
+                Status::Idle,
+            ),
+            (
+                "agent completes mid-turn",
+                vec![
+                    prompt("go"),
+                    launched(),
+                    completed(BackgroundAgentStatus::Completed),
+                ],
+                Status::Running,
+            ),
+            (
+                "background task outlives the turn",
+                vec![
+                    prompt("go"),
+                    Event::BackgroundTaskStarted {
+                        task_id: "task-1".into(),
+                        tool_call_id: None,
+                        description: "sleep".into(),
+                        workflow: None,
+                    },
+                    stopped("end_turn"),
+                ],
+                Status::Running,
+            ),
+            (
+                "startup error",
+                vec![prompt("go"), startup_error()],
+                Status::Error,
+            ),
+            (
+                "startup error then a new prompt",
+                vec![startup_error(), prompt("retry")],
+                Status::Running,
+            ),
+            (
+                "worker reattached",
+                vec![startup_error(), assigned()],
+                Status::Idle,
+            ),
+            (
+                "assignment mid-turn",
+                vec![prompt("go"), assigned()],
+                Status::Running,
+            ),
+            (
+                "incompatible agent",
+                vec![Event::IncompatibleAgent {
+                    detail: StartupErrorDetail::MissingAgentInfo {
+                        expected_package: "pkg".into(),
+                        install_command: "install".into(),
+                        auto_install: false,
+                    },
+                }],
+                Status::Error,
+            ),
+        ];
+        for (name, events, want) in cases {
+            assert_eq!(applied(events).sidebar_status(), want, "{name}");
+        }
     }
 
     fn notice(title: &str) -> Event {
@@ -1443,10 +1839,13 @@ mod tests {
     fn turn_flags_and_rate_limit_park_follow_their_edges() {
         let mut s = fresh_state();
         assert!(!s.turn_active);
-        s.apply_event(prompt("hi")).unwrap();
-        s.apply_event(Event::ThinkingStarted).unwrap();
+        s.apply_event(s.last_seq.saturating_add(1), prompt("hi"))
+            .unwrap();
+        s.apply_event(s.last_seq.saturating_add(1), Event::ThinkingStarted)
+            .unwrap();
         assert!(s.turn_active && s.thinking.is_some());
-        s.apply_event(stopped("end_turn")).unwrap();
+        s.apply_event(s.last_seq.saturating_add(1), stopped("end_turn"))
+            .unwrap();
         assert!(!s.turn_active && s.thinking.is_none());
 
         for terminal in [
@@ -1542,10 +1941,13 @@ mod tests {
         let mut s = fresh_state();
         let before = s.updated_at;
         let seq = s
-            .apply_event(Event::ModeSwitchFailed {
-                mode_id: "bypassPermissions".into(),
-                reason: "Mode bypassPermissions is not available.".into(),
-            })
+            .apply_event(
+                s.last_seq.saturating_add(1),
+                Event::ModeSwitchFailed {
+                    mode_id: "bypassPermissions".into(),
+                    reason: "Mode bypassPermissions is not available.".into(),
+                },
+            )
             .unwrap();
         assert_eq!(seq, 1);
         assert_eq!(
@@ -1554,10 +1956,13 @@ mod tests {
             "a failed switch changes nothing"
         );
         assert!(s.updated_at >= before);
-        let result = s.apply_event(Event::ApprovalResolved {
-            nonce: Nonce::new(),
-            decision: ApprovalDecision::Allow,
-        });
+        let result = s.apply_event(
+            s.last_seq.saturating_add(1),
+            Event::ApprovalResolved {
+                nonce: Nonce::new(),
+                decision: ApprovalDecision::Allow,
+            },
+        );
         assert!(matches!(result, Err(StateError::UnknownApprovalNonce(_))));
 
         // A rate-limit park ends on a live prompt, session, or organic stop.
@@ -1637,8 +2042,11 @@ mod tests {
 
         let mut richer = tool_call("tc-1");
         richer.name = "Write src/foo.rs".into();
-        s.apply_event(Event::ToolCallStarted { tool_call: richer })
-            .unwrap();
+        s.apply_event(
+            s.last_seq.saturating_add(1),
+            Event::ToolCallStarted { tool_call: richer },
+        )
+        .unwrap();
         let tool = s.in_flight_tool.as_ref().unwrap();
         assert_eq!(tool.name, "Write src/foo.rs", "richer fields still apply");
         assert_eq!(
@@ -1695,6 +2103,7 @@ mod tests {
                 model: "claude-opus-4-8".into(),
                 output_file: "/tmp/a1.output".into(),
                 started_at: Utc::now(),
+                workflow: None,
             },
             progress(
                 3,
@@ -1714,16 +2123,20 @@ mod tests {
         assert_eq!(agent.tools[0].name, "Read");
         assert_eq!(agent.last_tool.as_deref(), Some("Read"));
 
-        s.apply_event(Event::BackgroundAgentCompleted {
-            agent_id: "a1".into(),
-            status: BackgroundAgentStatus::Completed,
-            tools: vec![],
-            result: Some("done".into()),
-            warning: None,
-            ended_at: Utc::now(),
-        })
+        s.apply_event(
+            s.last_seq.saturating_add(1),
+            Event::BackgroundAgentCompleted {
+                agent_id: "a1".into(),
+                status: BackgroundAgentStatus::Completed,
+                tools: vec![],
+                result: Some("done".into()),
+                warning: None,
+                ended_at: Utc::now(),
+            },
+        )
         .unwrap();
-        s.apply_event(progress(9, vec![])).unwrap();
+        s.apply_event(s.last_seq.saturating_add(1), progress(9, vec![]))
+            .unwrap();
         let agent = &s.background_agents[0];
         assert_eq!(
             agent.status,
@@ -1762,6 +2175,7 @@ mod tests {
             model: "claude-opus-4-8".into(),
             output_file: "/tmp/a1.output".into(),
             started_at: Utc::now(),
+            workflow: None,
         }
     }
 
@@ -1803,14 +2217,110 @@ mod tests {
             let mut s = applied([launched()]);
             assert!(s.has_active_background_agent(), "{status:?}");
 
-            s.apply_event(bg_completed(status)).unwrap();
-            s.apply_event(bg_progress(BackgroundAgentStatus::Running, 9))
+            s.apply_event(s.last_seq.saturating_add(1), bg_completed(status))
                 .unwrap();
+            s.apply_event(
+                s.last_seq.saturating_add(1),
+                bg_progress(BackgroundAgentStatus::Running, 9),
+            )
+            .unwrap();
             let agent = &s.background_agents[0];
             assert_eq!(agent.status, status, "{status:?} must not reopen");
             assert!(agent.ended_at.is_some(), "{status:?}");
             assert!(!s.has_active_background_agent(), "{status:?}");
         }
+    }
+
+    /// A backgrounded command keeps the session busy after the turn that
+    /// started it ends, until its own finish event.
+    #[test]
+    fn a_background_task_holds_the_busy_signal_until_it_finishes() {
+        let started = |id: &str| Event::BackgroundTaskStarted {
+            task_id: id.into(),
+            tool_call_id: None,
+            description: "sleep".into(),
+            workflow: None,
+        };
+        let finished = |id: &str| Event::BackgroundTaskFinished {
+            task_id: id.into(),
+            ended_at: None,
+        };
+        let mut s = applied([prompt("go"), started("t-1"), started("t-2"), stopped("end")]);
+        assert!(!s.turn_active);
+        assert!(s.has_active_background_agent());
+
+        s.apply_event(s.last_seq.saturating_add(1), finished("t-1"))
+            .unwrap();
+        assert!(s.has_active_background_agent(), "t-2 still runs");
+        s.apply_event(s.last_seq.saturating_add(1), finished("t-2"))
+            .unwrap();
+        assert!(!s.has_active_background_agent());
+    }
+
+    #[test]
+    fn workflow_runs_keep_their_end_after_their_task() {
+        let workflow = |id: &str, call: &str| Event::BackgroundTaskStarted {
+            task_id: id.into(),
+            tool_call_id: Some(call.into()),
+            description: "drafts".into(),
+            workflow: Some(WorkflowLaunch {
+                run_id: "wf_1".into(),
+                name: "drafts".into(),
+                summary: None,
+                transcript_dir: "/home/u/.claude/wf".into(),
+            }),
+        };
+        let runs = |s: &AcpState| {
+            s.workflow_runs
+                .iter()
+                .map(|run| {
+                    (
+                        run.tool_call_id.clone(),
+                        run.finished,
+                        run.ended_at.map(|at| at.to_rfc3339()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let ended_at: Option<DateTime<Utc>> = "2026-10-30T10:01:00Z".parse().ok();
+        let mut s = applied([workflow("wfx", "toolu_a"), workflow("wfy", "toolu_b")]);
+        assert_eq!(
+            runs(&s),
+            [
+                ("toolu_a".into(), false, None),
+                ("toolu_b".into(), false, None)
+            ]
+        );
+        for event in [
+            Event::BackgroundTaskStarted {
+                task_id: "wfx".into(),
+                tool_call_id: Some("toolu_bash".into()),
+                description: "sleep".into(),
+                workflow: None,
+            },
+            Event::BackgroundTaskFinished {
+                task_id: "wfy".into(),
+                ended_at,
+            },
+            // The command reusing `wfx` ends; the replaced run keeps no time.
+            Event::BackgroundTaskFinished {
+                task_id: "wfx".into(),
+                ended_at,
+            },
+        ] {
+            s.apply_event(s.last_seq.saturating_add(1), event).unwrap();
+        }
+        assert_eq!(
+            runs(&s),
+            [
+                ("toolu_a".into(), true, None),
+                (
+                    "toolu_b".into(),
+                    true,
+                    Some("2026-10-30T10:01:00+00:00".into())
+                ),
+            ]
+        );
     }
 
     /// #4001: `turn_active` gates prompt dispatch and the queue drain, not
@@ -1821,8 +2331,11 @@ mod tests {
         let mut s = applied([prompt("go"), launched()]);
         assert!(s.turn_active && s.has_active_background_agent());
 
-        s.apply_event(bg_completed(BackgroundAgentStatus::Completed))
-            .unwrap();
+        s.apply_event(
+            s.last_seq.saturating_add(1),
+            bg_completed(BackgroundAgentStatus::Completed),
+        )
+        .unwrap();
         assert!(
             s.turn_active,
             "the main turn's own Stopped never fired, so it is still live"
@@ -1839,8 +2352,11 @@ mod tests {
             "the display signal stays busy"
         );
 
-        s.apply_event(bg_completed(BackgroundAgentStatus::Completed))
-            .unwrap();
+        s.apply_event(
+            s.last_seq.saturating_add(1),
+            bg_completed(BackgroundAgentStatus::Completed),
+        )
+        .unwrap();
         assert!(!s.turn_active && !s.has_active_background_agent());
     }
 
@@ -1953,20 +2469,25 @@ mod tests {
         );
 
         let mut s = applied(adapter_events());
-        s.apply_event(Event::SessionCleared).unwrap();
+        s.apply_event(s.last_seq.saturating_add(1), Event::SessionCleared)
+            .unwrap();
         assert_eq!(s.config_options.len(), 2);
         assert!(s.available_commands[0].accepts_input);
         assert_eq!(s.available_modes.len(), 1);
         assert_eq!(s.current_mode_id.as_deref(), Some("plan"));
         assert!(s.usage.is_none() && s.current_plan.is_none());
 
-        s.apply_event(Event::ConfigOptionSwitchFailed {
-            config_id: "effort".into(),
-            value: "high".into(),
-            reason: "unsupported".into(),
-        })
+        s.apply_event(
+            s.last_seq.saturating_add(1),
+            Event::ConfigOptionSwitchFailed {
+                config_id: "effort".into(),
+                value: "high".into(),
+                reason: "unsupported".into(),
+            },
+        )
         .unwrap();
-        s.apply_event(switch_agent()).unwrap();
+        s.apply_event(s.last_seq.saturating_add(1), switch_agent())
+            .unwrap();
         assert!(s.config_options.is_empty() && s.config_option_switch_failed.is_none());
         assert!(s.available_commands.is_empty() && s.available_modes.is_empty());
         assert_eq!(s.current_mode_id, None);

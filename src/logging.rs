@@ -42,7 +42,10 @@ pub fn resolve_sink(cfg: &LoggingConfig, app_dir: &Path, ctx: ProcessContext) ->
 
     let force_file = matches!(
         ctx,
-        ProcessContext::Tui | ProcessContext::ServeDaemonChild | ProcessContext::Runner
+        ProcessContext::Tui
+            | ProcessContext::ServeDaemonChild
+            | ProcessContext::Runner
+            | ProcessContext::OneShotCli
     );
     let want_stdout = matches!(cfg.output, SinkKind::Stdout);
 
@@ -108,11 +111,19 @@ pub const DEFAULT_TARGET_ROOTS: &[&str] = &[
     "tmux",
     "http",
     "serve",
+    "server",
     "runtime",
     "hooks",
     "sound",
     "telemetry",
     "smart_rename",
+    "events",
+    "conversation_summary",
+    "shutdown",
+    "file_watch",
+    "push",
+    "task",
+    "daemon",
 ];
 
 pub const KNOWN_SUB_TARGETS: &[&str] = &[
@@ -124,14 +135,11 @@ pub const KNOWN_SUB_TARGETS: &[&str] = &[
     "acp.runner",
     "plugin.host",
     "terminal.ws",
-    "terminal.ws.bytes",
     "auth.token",
     "auth.middleware",
     "auth.rate_limit",
     "auth.passphrase",
     "auth.passkey",
-    "auth.device",
-    "auth.ip",
     "process.signal",
     "process.tree",
     "process.reap",
@@ -140,14 +148,57 @@ pub const KNOWN_SUB_TARGETS: &[&str] = &[
     "update.fetch",
     "update.cache",
     "update.parse",
-    "containers.docker",
     "containers.image",
     "containers.runtime",
     "git.command",
+    "git.worktree",
     "web.client",
     "log.runtime",
-    "runtime.uds",
+    "migrations.v036",
+    "migrations.v037",
+    "migrations.v038",
+    "migrations.v039",
+    "migrations.v040",
+    "migrations.v041",
+    "migrations.v043",
+    "migrations.v044",
+    "migrations.v045",
+    "migrations.v046",
+    "migrations.v047",
+    "migrations.v048",
+    "migrations.v052",
+    "migrations.v053",
+    "server.file_watch",
+    "server.lifecycle",
+    "server.idle_reap",
+    "server.runtime",
+    "server.session_service",
+    "server.session_store",
+    "server.sleep_inhibit",
+    "server.maintenance",
+    "server.status",
+    "server.sessions",
     "runtime.ws",
+    "file_watch.service",
+    "file_watch.subscriber",
+    "push.wake_fired",
+    "task.panic",
+    "session.status_change",
+    "session.create",
+    "session.delete",
+    "session.trash",
+    "session.restart",
+    "session.start",
+    "session.restore",
+    "session.rename",
+    "session.sync",
+    "serve.lifecycle",
+    "serve.shutdown",
+    "daemon.client",
+    "acp.queue",
+    "plugin.install",
+    "http.api.telemetry",
+    "http.api.system",
 ];
 
 /// Only the filter hot-swaps; sink and rotation settings apply on restart.
@@ -300,13 +351,14 @@ impl LogConfig {
         Some(s)
     }
 
+    /// The `warn` catch-all keeps dependency crates to warn/error at any level.
     pub fn filter_for_level(level: LogLevel) -> String {
         let lvl = level.as_str();
-        DEFAULT_TARGET_ROOTS
-            .iter()
-            .map(|t| format!("{t}={lvl}"))
-            .collect::<Vec<_>>()
-            .join(",")
+        let mut s = String::from("warn");
+        for t in DEFAULT_TARGET_ROOTS {
+            s.push_str(&format!(",{t}={lvl}"));
+        }
+        s
     }
 }
 
@@ -410,10 +462,11 @@ impl std::error::Error for LogFilterError {}
 pub type TeeLayer = crate::acp::session_tee::SessionTeeLayer;
 
 pub fn init_subscriber(target: SubscriberTarget, filter: String) -> InitResult {
-    init_subscriber_with_options(target, filter, false, None)
+    init_subscriber_with_options(target, filter, false, None, true)
 }
 
-/// Default Full output without the span chain prefix.
+/// Default Full output without the span chain prefix. The enclosing
+/// `acp_session` label is added unless the event declares its own `session`.
 pub(crate) struct NoSpanFormat;
 
 impl<S, N> tracing_subscriber::fmt::FormatEvent<S, N> for NoSpanFormat
@@ -435,16 +488,49 @@ where
             meta.level(),
             meta.target(),
         )?;
+        if meta.fields().field("session").is_none() {
+            if let Some(session) = acp_session_label(ctx) {
+                write!(writer, "session={session} ")?;
+            }
+        }
         ctx.field_format().format_fields(writer.by_ref(), event)?;
         writeln!(writer)
     }
 }
 
+/// The `session` field of the enclosing `acp_session` span, which the span
+/// chain would otherwise carry.
+fn acp_session_label<S, N>(ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>) -> Option<String>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    N: for<'a> tracing_subscriber::fmt::FormatFields<'a> + 'static,
+{
+    let span = ctx
+        .event_scope()?
+        .find(|span| span.name() == "acp_session")?;
+    let extensions = span.extensions();
+    let fields = extensions
+        .get::<tracing_subscriber::fmt::FormattedFields<N>>()?
+        .fields
+        .as_str();
+    let start = if fields.starts_with("session=") {
+        0
+    } else {
+        fields.find(" session=")? + 1
+    };
+    let value = fields[start + "session=".len()..].split(' ').next()?;
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// `start_marker` writes the filter-immune `[AOE_START_MARKER]` line that
+/// delimits daemon and TUI runs; one-shot CLI commands skip it so the last
+/// marker in the shared file stays the daemon's.
 pub fn init_subscriber_with_options(
     target: SubscriberTarget,
     filter: String,
     show_spans: bool,
     session_tee: Option<TeeLayer>,
+    start_marker: bool,
 ) -> InitResult {
     let parsed = match EnvFilter::builder().with_regex(false).parse(&filter) {
         Ok(f) => f,
@@ -466,8 +552,9 @@ pub fn init_subscriber_with_options(
         SubscriberTarget::File(path, policy) => match SizeRotatingWriter::new(path.clone(), policy)
         {
             Ok(mut writer) => {
-                // Filter-immune boundary between process runs.
-                write_raw_startup_marker(&mut writer);
+                if start_marker {
+                    write_raw_startup_marker(&mut writer);
+                }
                 let mw = std::sync::Mutex::new(writer);
                 if show_spans {
                     let fmt_layer = tracing_subscriber::fmt::layer()
@@ -495,7 +582,9 @@ pub fn init_subscriber_with_options(
             Err(e) => Err(format!("open log file {}: {e}", path.display())),
         },
         SubscriberTarget::Stdout => {
-            write_raw_startup_marker(&mut std::io::stdout());
+            if start_marker {
+                write_raw_startup_marker(&mut std::io::stdout());
+            }
             if show_spans {
                 let fmt_layer = tracing_subscriber::fmt::layer().with_ansi(false);
                 Registry::default()
@@ -857,6 +946,29 @@ pub async fn watch_runtime_filter(
     }
 }
 
+/// Crate targets a filter may name besides aoe's own roots.
+const EXTERNAL_TARGET_ROOTS: &[&str] = &["agent_client_protocol"];
+
+/// Directive roots outside aoe's targets, such as one renamed since the filter
+/// was saved, whose directives then match no aoe log (#4991).
+fn unknown_target_roots(directive: &str) -> Vec<&str> {
+    directive
+        .split(',')
+        .filter_map(|d| {
+            let d = d.trim();
+            // A bare target means `target=trace`; a bare level names no target.
+            if d.is_empty() || LogLevel::parse(d).is_some() {
+                return None;
+            }
+            let root = d.split(['.', ':', '[', '=']).next()?.trim();
+            (!root.is_empty()
+                && !DEFAULT_TARGET_ROOTS.contains(&root)
+                && !EXTERNAL_TARGET_ROOTS.contains(&root))
+            .then_some(root)
+        })
+        .collect()
+}
+
 fn apply_filter_file(path: &std::path::Path) {
     let directive = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -866,6 +978,14 @@ fn apply_filter_file(path: &std::path::Path) {
     if directive.is_empty() {
         return;
     }
+    let unknown = unknown_target_roots(directive);
+    if !unknown.is_empty() {
+        tracing::warn!(
+            target: "log.runtime",
+            roots = ?unknown,
+            "runtime filter names log targets outside aoe; a renamed aoe target there matches nothing"
+        );
+    }
     match set_filter(directive) {
         // Logging here would write into the watched dir and re-trigger the watcher.
         Ok(swap) if swap.changed => tracing::info!(
@@ -873,14 +993,14 @@ fn apply_filter_file(path: &std::path::Path) {
             previous = %swap.previous,
             current = %swap.current,
             source = "file-watch",
-            "runner filter swapped"
+            "filter swapped"
         ),
         Ok(_) => {}
         Err(e) => tracing::warn!(
             target: "log.runtime",
             error = %e,
             directive = %directive,
-            "runner filter swap failed"
+            "filter swap failed"
         ),
     }
     #[cfg(debug_assertions)]
@@ -894,7 +1014,28 @@ fn apply_filter_file(path: &std::path::Path) {
 mod tests {
     use super::*;
 
+    use std::collections::BTreeSet;
+
     use crate::session::test_support::EnvGuard;
+
+    #[test]
+    fn unknown_target_roots_cases() {
+        let cases = [
+            (
+                "agent_of_empires=trace,cockpit=trace,cockpit.event_store=debug",
+                vec!["cockpit", "cockpit"],
+            ),
+            (
+                "acp=trace,acp[turn]=debug,agent_client_protocol::jsonrpc::transport_actor=trace",
+                vec![],
+            ),
+            ("agent_of_empires::tui=debug,hyper=debug", vec!["hyper"]),
+            ("info,cockpit", vec!["cockpit"]),
+        ];
+        for (directive, want) in cases {
+            assert_eq!(unknown_target_roots(directive), want, "{directive}");
+        }
+    }
 
     #[test]
     fn log_level_parse_accepts_known() {
@@ -956,6 +1097,57 @@ mod tests {
         });
     }
 
+    /// The `transport_actor=trace` directive only works while the SDK emits
+    /// from that exact module path.
+    #[tokio::test]
+    async fn sdk_transport_trace_target_matches_the_filter_directive() {
+        use agent_client_protocol::v1::schema::CancelNotification;
+        use agent_client_protocol::{ByteStreams, Client};
+        use std::sync::{Arc, Mutex};
+        use tokio::io::AsyncReadExt;
+        use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        struct Targets(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Targets {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(event.metadata().target().into());
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(Targets(seen.clone())),
+        );
+        let (ours, mut peer) = tokio::io::duplex(4096);
+        let (read, write) = tokio::io::split(ours);
+        Client
+            .v1()
+            .connect_with(
+                ByteStreams::new(write.compat_write(), read.compat()),
+                async |cx| {
+                    cx.send_notification(CancelNotification::new("s"))?;
+                    let mut sent = [0u8; 1];
+                    peer.read_exact(&mut sent).await.unwrap();
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|t| t == "agent_client_protocol::jsonrpc::transport_actor"));
+    }
+
     #[test]
     fn filter_string_applies_trace_overlays() {
         let cfg = |level, acp_trace, terminal_trace| LogConfig {
@@ -973,6 +1165,123 @@ mod tests {
             .filter_string()
             .unwrap();
         assert!(terminal.ends_with(",terminal=trace"));
+    }
+
+    #[test]
+    fn default_filter_keeps_dependencies_at_warn_and_lets_overrides_win() {
+        let directive = format!(
+            "{},http.request=info",
+            LogConfig::filter_for_level(LogLevel::Trace)
+        );
+        let filter = EnvFilter::builder()
+            .with_regex(false)
+            .parse(&directive)
+            .unwrap();
+        // Consts keep these fixtures out of the source scan below.
+        const DEPENDENCY: &str = "hyper_util";
+        const OWN: &str = "session.create";
+        const OVERRIDDEN: &str = "http.request";
+        tracing::subscriber::with_default(Registry::default().with(filter), || {
+            assert!(tracing::enabled!(target: DEPENDENCY, tracing::Level::WARN));
+            assert!(!tracing::enabled!(target: DEPENDENCY, tracing::Level::INFO));
+            assert!(tracing::enabled!(target: OWN, tracing::Level::TRACE));
+            assert!(!tracing::enabled!(target: OVERRIDDEN, tracing::Level::DEBUG));
+        });
+    }
+
+    /// Every `target:` used in `src/` as `(file, target)`, excluding test-only targets.
+    fn source_targets() -> Vec<(PathBuf, String)> {
+        fn walk(dir: &Path, pattern: &regex::Regex, out: &mut Vec<(PathBuf, String)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, pattern, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let src = std::fs::read_to_string(&path).unwrap();
+                    for captures in pattern.captures_iter(&src) {
+                        let target = captures.get(1).or(captures.get(2)).unwrap().as_str();
+                        if !target.starts_with("aoe_test_") {
+                            out.push((path.clone(), target.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        // The trailing comma excludes struct fields such as `target: "codex".to_string()`.
+        let pattern = regex::Regex::new(
+            r#"target: "([A-Za-z_][A-Za-z0-9_.]*)"\s*,|target = "([A-Za-z_][A-Za-z0-9_.]*)""#,
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        walk(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &pattern,
+            &mut out,
+        );
+        out
+    }
+
+    #[test]
+    fn every_source_target_root_is_filtered_and_known_sub_targets_exist() {
+        let targets = source_targets();
+        assert!(!targets.is_empty(), "the source scan found no targets");
+        let unlisted: Vec<String> = targets
+            .iter()
+            .filter(|(_, target)| {
+                let root = target.split('.').next().unwrap();
+                !DEFAULT_TARGET_ROOTS.contains(&root) && !EXTERNAL_TARGET_ROOTS.contains(&root)
+            })
+            .map(|(file, target)| format!("{}: {target}", file.display()))
+            .collect();
+        assert!(
+            unlisted.is_empty(),
+            "targets whose root is missing from DEFAULT_TARGET_ROOTS (their events are dropped at every level):\n{}",
+            unlisted.join("\n")
+        );
+        let used: BTreeSet<&str> = targets.iter().map(|(_, t)| t.as_str()).collect();
+        let unused: Vec<&str> = KNOWN_SUB_TARGETS
+            .iter()
+            .copied()
+            .filter(|t| !used.contains(t))
+            .collect();
+        assert!(
+            unused.is_empty(),
+            "KNOWN_SUB_TARGETS entries no longer used in src/: {unused:?}"
+        );
+    }
+
+    #[test]
+    fn known_sub_targets_stay_synced_with_ts_mirror() {
+        let mirror_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("web/src/components/settings/customWidgets.tsx");
+        let Ok(mirror) = std::fs::read_to_string(&mirror_path) else {
+            // Nix-filtered sources omit web/.
+            eprintln!(
+                "skipping TS logging target mirror check: {} is absent",
+                mirror_path.display()
+            );
+            return;
+        };
+        let start = mirror
+            .find("const KNOWN_TARGETS")
+            .expect("customWidgets.tsx declares `const KNOWN_TARGETS`");
+        let body = &mirror[start..];
+        let body = &body[..body
+            .find("];")
+            .expect("KNOWN_TARGETS array closes with `];`")];
+        let mirrored: BTreeSet<&str> = body
+            .split("value: \"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap())
+            .collect();
+        let known: BTreeSet<&str> = KNOWN_SUB_TARGETS.iter().copied().collect();
+        let missing_in_ts: Vec<_> = known.difference(&mirrored).collect();
+        let missing_in_rust: Vec<_> = mirrored.difference(&known).collect();
+        assert!(
+            missing_in_ts.is_empty() && missing_in_rust.is_empty(),
+            "KNOWN_TARGETS in customWidgets.tsx is out of sync with KNOWN_SUB_TARGETS: \
+             missing in TS {missing_in_ts:?}, missing in Rust {missing_in_rust:?}"
+        );
     }
 
     #[test]
@@ -1110,6 +1419,7 @@ mod tests {
             "aoe=notalevel".into(),
             false,
             None,
+            true,
         );
         assert!(init.controller.is_none());
         assert_eq!(active_sink(), None);
@@ -1132,6 +1442,56 @@ mod tests {
                 "coercion surfaces a warning"
             );
         }
+    }
+
+    struct TestBufWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for TestBufWriter {
+        fn write(&mut self, src: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(src);
+            Ok(src.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn no_span_format_prefixes_the_acp_session_label() {
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer_buf = buf.clone();
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(move || TestBufWriter(writer_buf.clone()))
+            .with_ansi(false)
+            .event_format(NoSpanFormat);
+        tracing::subscriber::with_default(Registry::default().with(layer), || {
+            tracing::info!(target: "acp.protocol", "outside");
+            let span = tracing::info_span!("acp_session", session = %"abc123", turn = 7);
+            span.in_scope(|| {
+                tracing::info!(target: "acp.protocol", "inside");
+                tracing::info_span!("inner")
+                    .in_scope(|| tracing::warn!(target: "acp.protocol", "nested"));
+                tracing::info!(target: "acp.protocol", session = "x", "own");
+            });
+        });
+        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4, "{out}");
+        assert!(lines[0].ends_with(" INFO acp.protocol: outside"), "{out}");
+        assert!(
+            lines[1].ends_with(" INFO acp.protocol: session=abc123 inside"),
+            "{out}"
+        );
+        assert!(
+            lines[2].ends_with(" WARN acp.protocol: session=abc123 nested"),
+            "{out}"
+        );
+        assert!(
+            lines[3].ends_with(" INFO acp.protocol: own session=\"x\""),
+            "{out}"
+        );
+        assert_eq!(lines[3].matches("session=").count(), 1, "{out}");
     }
 
     #[test]

@@ -1,25 +1,37 @@
-import { memo, useRef, useState } from "react";
+import { memo, useCallback, useId, useMemo, useRef, useState } from "react";
 import { Pin } from "lucide-react";
 import type { Workspace } from "../../lib/types";
-import { renameSession } from "../../lib/api";
-import { isSessionActive } from "../../lib/session";
+import { renameSession, type RuntimeCursor, type SessionMutation } from "../../lib/api";
+import { isFreshIdle, isSessionActive } from "../../lib/session";
 import { useIdleDecayWindowMs } from "../../lib/idleDecay";
 import { sessionRowChromeClass } from "../../lib/sessionRowChrome";
 import { useSessionColorsEnabled } from "../../lib/sessionColors";
 import { useSidebarCompact } from "../../lib/sidebarCompact";
-import type { OptimisticTriage } from "../../lib/sidebarOptimistic";
+import { EMPTY_OPTIMISTIC, type OptimisticTriage } from "../../lib/sidebarOptimistic";
+import { sessionWorkspace } from "../../lib/sessionWorkspace";
 import { reportError, reportInfo } from "../../lib/toastBus";
+import { MARK_MEANING, meaningText } from "../../lib/sidebarMarks";
+import { statusMeaning } from "../../lib/statusLegend";
 import { StatusGlyph } from "../StatusGlyph";
+import { Tooltip } from "../Tooltip";
 import { useContextMenu } from "../useContextMenu";
-import { RowSubRows, RowTrailingBadges } from "./RowBadges";
+import { GroupExpandToggle, RowSubRows, RowTrailingBadges } from "./RowBadges";
+import { NAV_ITEM, onSidebarArrowKey } from "./keyboardNav";
 import { SessionActionsMenu, type SessionActionHandlers, type SessionMenuState } from "./SessionActions";
 import { sessionColorStyle } from "./rowModel";
 import { useSessionRowModel } from "./useSessionRowModel";
-import type { RowActivate, RowBulkApi } from "./types";
+import type { ClickModifiers, RowActivate, RowBulkApi, RowContextScope } from "./types";
 import { useLongPress } from "./useLongPress";
+
+// A sibling row always navigates and never consults the group's selection.
+const NAVIGATE_ONLY: ClickModifiers = { metaKey: false, ctrlKey: false, shiftKey: false };
+const SINGLE_SCOPE: RowContextScope = { kind: "single" };
 
 export interface SessionRowProps extends SessionActionHandlers {
   workspace: Workspace;
+  observedById: Record<string, RuntimeCursor>;
+  runtimeEpoch: string | null;
+  onSessionMutation: (mutation: SessionMutation) => void;
   isActive: boolean;
   isSelected: boolean;
   /** The open row while keyboard focus is in its main panel. */
@@ -29,6 +41,10 @@ export interface SessionRowProps extends SessionActionHandlers {
   indented?: boolean;
   optimistic: OptimisticTriage;
   bulkApi: RowBulkApi;
+  /** Only passed to rows that can expand, so a navigation does not re-render every other row. */
+  activeSessionId?: string | null;
+  /** Looks up an expanded sibling's own optimistic triage; only passed to rows that can expand. */
+  optimisticFor?: (workspaceId: string) => OptimisticTriage;
 }
 
 export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
@@ -36,14 +52,24 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
   const idleDecayWindowMs = useIdleDecayWindowMs();
   const sessionColorsEnabled = useSessionColorsEnabled();
   const compact = useSidebarCompact();
-  const { model, setNotify, setColor } = useSessionRowModel(workspace, props.optimistic, isActive);
+  const { model, setNotify, setColor } = useSessionRowModel(workspace, props.optimistic, isActive, props);
   const { label, sessionId, isDeleting, navigationSession } = model;
   const sessionHighlightStyle = sessionColorsEnabled ? sessionColorStyle(model.sessionColor) : undefined;
+  const [expanded, setExpanded] = useState(false);
+  const siblingBulkApi = useMemo<RowBulkApi>(() => ({ ...bulkApi, prepareScope: () => SINGLE_SCOPE }), [bulkApi]);
+  const activateSibling = useCallback<RowActivate>(
+    (_siblingId, _e, siblingSessionId) => onActivate(workspace.id, NAVIGATE_ONLY, siblingSessionId),
+    [onActivate, workspace.id],
+  );
 
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(label);
   const renameRef = useRef<HTMLInputElement>(null);
   const rowRef = useRef<HTMLAnchorElement>(null);
+  // The glyph's tooltip: on hovering the glyph, or on keyboard focus of the row, which stays the
+  // focus target and is described by it.
+  const [glyphTip, setGlyphTip] = useState<"hover" | "focus" | null>(null);
+  const glyphTipId = useId();
 
   const openedAtRef = useRef(0);
   const { menu, menuRef, openMenu, closeMenu } = useContextMenu<SessionMenuState>(openedAtRef);
@@ -60,6 +86,7 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
     if (!trimmed || trimmed === model.sessionTitle || !sessionId) return;
     const result = await renameSession(sessionId, trimmed);
     if (result.ok) {
+      props.onSessionMutation(result);
       // The title persisted; a tmux rekey warning is informational.
       result.warnings?.forEach((warning) => reportInfo(warning));
     } else {
@@ -103,6 +130,12 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
       : isActive
         ? "text-text-primary"
         : "text-text-secondary";
+  const glyphMeaning = model.showUnreadGlyph
+    ? MARK_MEANING.unread
+    : statusMeaning(model.status, {
+        dormant: model.dormant,
+        fresh: isFreshIdle({ status: model.status, idle_entered_at: model.idleEnteredAt }, idleDecayWindowMs),
+      });
   const navigationSessionId = navigationSession?.id ?? null;
   const sessionPath = navigationSessionId ? `/session/${encodeURIComponent(navigationSessionId)}` : "/";
 
@@ -117,32 +150,15 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
         data-active-session-row={isActive || undefined}
         data-testid="sidebar-session-row"
         data-highlight-color={sessionColorsEnabled && model.sessionColorDot ? model.sessionColor : undefined}
-        title={model.needsAttention ? `${label} · ${model.attentionHint}` : label}
         style={sessionHighlightStyle}
+        aria-describedby={glyphTip ? glyphTipId : undefined}
         draggable={false}
-        onKeyDown={(e) => {
-          if (
-            (e.key !== "ArrowDown" && e.key !== "ArrowUp") ||
-            e.altKey ||
-            e.ctrlKey ||
-            e.metaKey ||
-            e.shiftKey ||
-            e.target !== e.currentTarget
-          ) {
-            return;
-          }
-          const sidebar = e.currentTarget.closest<HTMLElement>('[role="navigation"][aria-label="Sessions sidebar"]');
-          if (!sidebar) return;
-          const rows = Array.from(
-            sidebar.querySelectorAll<HTMLAnchorElement>(
-              '[data-testid="sidebar-session-row"]:not([aria-disabled="true"])',
-            ),
-          ).filter((row) => row.getClientRects().length > 0);
-          const index = rows.indexOf(e.currentTarget);
-          if (index === -1) return;
-          e.preventDefault();
-          rows[index + (e.key === "ArrowDown" ? 1 : -1)]?.focus();
+        {...{ [NAV_ITEM]: "" }}
+        onKeyDown={onSidebarArrowKey}
+        onFocus={(e) => {
+          if (e.target === e.currentTarget && e.currentTarget.matches(":focus-visible")) setGlyphTip("focus");
         }}
+        onBlur={() => setGlyphTip(null)}
         onClick={(e) => {
           // Middle-click and Alt+click keep the browser's href behavior.
           if (e.button !== 0 || e.altKey) return;
@@ -163,26 +179,50 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
       >
         {isSelected && <span className="sr-only">Selected</span>}
         <div className="flex items-center gap-2">
-          <span
-            className={`text-sm shrink-0 leading-none font-mono ${model.showUnreadGlyph ? "text-status-unread font-semibold" : model.textClass} ${
-              attention ? "motion-safe:animate-pulse font-semibold" : ""
-            }`}
-            data-attention={attention ? "true" : undefined}
-            aria-label={attention ? `${model.status} · ${model.attentionHint}` : undefined}
+          <Tooltip
+            text={meaningText(glyphMeaning)}
+            detail={
+              // The attention hint lost its `title`; the tooltip is where a mouse user reads it. Waiting
+              // and Error already say it in the glyph's meaning, so only other attention adds a line.
+              [
+                // `needsAttention`, not `attention`: an unread glyph can stand in for the attention one,
+                // and the reason still has to show.
+                model.needsAttention && model.status !== "Waiting" && model.status !== "Error"
+                  ? model.attentionHint.charAt(0).toUpperCase() + model.attentionHint.slice(1)
+                  : null,
+                glyphTip === "focus" ? "Press Enter to open" : null,
+              ]
+                .filter(Boolean)
+                .join(" \u00b7 ") || undefined
+            }
+            id={glyphTipId}
+            open={glyphTip !== null}
           >
-            {model.showUnreadGlyph ? (
-              <span title="Unread" aria-label="Unread" data-testid="sidebar-unread-dot">
-                ●
-              </span>
-            ) : (
-              <StatusGlyph
-                status={model.status}
-                createdAt={model.createdAt}
-                idleEnteredAt={model.idleEnteredAt}
-                dormant={model.dormant}
-              />
-            )}
-          </span>
+            <span
+              className={`text-sm shrink-0 leading-none font-mono ${model.showUnreadGlyph ? "text-status-unread font-semibold" : model.textClass} ${
+                attention ? "motion-safe:animate-pulse font-semibold" : ""
+              }`}
+              data-attention={attention ? "true" : undefined}
+              data-testid="sidebar-status-glyph"
+              aria-label={attention ? `${model.status} · ${model.attentionHint}` : undefined}
+              // Only a mouse hover opens it; a tap fires emulated mouse events and must not.
+              onPointerEnter={(e) => e.pointerType === "mouse" && setGlyphTip((tip) => tip ?? "hover")}
+              onPointerLeave={() => setGlyphTip((tip) => (tip === "hover" ? null : tip))}
+            >
+              {model.showUnreadGlyph ? (
+                <span aria-label="Unread" data-testid="sidebar-unread-dot">
+                  ●
+                </span>
+              ) : (
+                <StatusGlyph
+                  status={model.status}
+                  createdAt={model.createdAt}
+                  idleEnteredAt={model.idleEnteredAt}
+                  dormant={model.dormant}
+                />
+              )}
+            </span>
+          </Tooltip>
           <div className="min-w-0 flex-1">
             <span
               className={`flex items-center gap-1.5 text-[13px] md:text-[14px] ${labelTone} ${model.effectivePinned ? "font-semibold" : ""} ${model.effectiveArchived || model.effectiveSnoozed ? "italic opacity-70" : ""}`}
@@ -197,19 +237,34 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
                 />
               )}
               {!compact && model.effectivePinned && (
-                <span title="Pinned" aria-label="Pinned" className="shrink-0 inline-flex text-brand-400">
-                  <Pin className="h-3 w-3 -rotate-45" />
-                </span>
+                <Tooltip text={meaningText(MARK_MEANING.pinned)}>
+                  <span
+                    aria-label="Pinned"
+                    data-testid="sidebar-pinned-mark"
+                    className="shrink-0 inline-flex text-brand-400"
+                  >
+                    <Pin className="h-3 w-3 -rotate-45" />
+                  </span>
+                </Tooltip>
               )}
               {model.isFavorited && (
-                <span title="Favorited" aria-label="Favorited" className="shrink-0 text-favorite">
-                  ✦
-                </span>
+                <Tooltip text={meaningText(MARK_MEANING.favorite)}>
+                  <span aria-label="Favorited" data-testid="sidebar-favorite-mark" className="shrink-0 text-favorite">
+                    ✦
+                  </span>
+                </Tooltip>
               )}
               <span className="truncate" title={label}>
                 {label}
               </span>
               {!compact && <RowTrailingBadges workspace={workspace} model={model} />}
+              {!compact && (
+                <GroupExpandToggle
+                  count={workspace.sessions.length}
+                  expanded={expanded}
+                  onToggle={() => setExpanded((e) => !e)}
+                />
+              )}
             </span>
             {!compact && <RowSubRows first={model.firstSession} />}
           </div>
@@ -229,6 +284,28 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
         onRename={startRename}
         bulkApi={bulkApi}
       />
+      {expanded && !compact && workspace.sessions.length > 1 && (
+        // The guide line is what reads as "these rows belong to the header above"; indentation
+        // alone is too subtle a shift to carry that on its own.
+        <div className="ml-4 border-l border-surface-700/50" data-testid="sidebar-expanded-sessions">
+          {workspace.sessions.map((session) => {
+            const sibling = sessionWorkspace(workspace, session);
+            return (
+              <SessionRow
+                key={session.id}
+                {...props}
+                workspace={sibling}
+                indented
+                isActive={session.id === (props.activeSessionId ?? null)}
+                isSelected={false}
+                onActivate={activateSibling}
+                bulkApi={siblingBulkApi}
+                optimistic={props.optimisticFor?.(sibling.id) ?? EMPTY_OPTIMISTIC}
+              />
+            );
+          })}
+        </div>
+      )}
     </>
   );
 });

@@ -37,6 +37,22 @@ const SCHEMA = [
     },
     { profile_overridable: false },
   ),
+  ...[
+    ["split_terminal_height_percent", "Split Terminal Height (%)", 1, 99],
+    ["split_terminal_min_width", "Split Terminal Minimum Width", 0, 1000],
+    ["split_terminal_min_height", "Split Terminal Minimum Height", 0, 1000],
+  ].map(([name, label, min, max]) =>
+    field(
+      "session",
+      name as string,
+      label as string,
+      { kind: "number", min: min as number, max: max as number },
+      {
+        tui_only: true,
+        profile_overridable: false,
+      },
+    ),
+  ),
   field("tmux", "status_bar", "Status Bar", { kind: "select", options: TMUX_MODES }),
   field("tmux", "mouse", "Mouse Support", { kind: "select", options: TMUX_MODES }),
   field(
@@ -55,6 +71,17 @@ const SCHEMA = [
     { profile_overridable: false, advanced: true, description: "Ceiling on concurrent session-id poller threads." },
   ),
   field("sound", "enabled", "Enabled", { kind: "toggle" }, { description: "Play sounds on agent state transitions." }),
+  field("sound", "server_volume", "Server volume", { kind: "custom", id: "sound-volume" }),
+  field("sound", "browser_volume", "Browser volume", { kind: "custom", id: "sound-volume" }),
+  field("sound", "browser_scope", "Browser scope", {
+    kind: "select",
+    options: [
+      { value: "all", label: "All sessions" },
+      { value: "other_sessions", label: "Other sessions" },
+      { value: "hidden_tab", label: "Hidden tab only" },
+    ],
+  }),
+  field("sound", "browser_idle_enabled", "Browser: Idle", { kind: "toggle" }, { advanced: true }),
 ];
 
 vi.mock("../../../lib/api", () => ({
@@ -63,7 +90,7 @@ vi.mock("../../../lib/api", () => ({
   fetchSettings: vi.fn(() => Promise.resolve({ tmux: {}, logging: {}, session: {}, sound: {} })),
   getSettingsSchema: vi.fn(() => Promise.resolve(SCHEMA)),
   updateSettings: vi.fn(() => Promise.resolve("committed" as const)),
-  updateTheme: vi.fn(() => Promise.resolve(true)),
+  updateTheme: vi.fn(() => Promise.resolve("committed")),
   fetchThemes: vi.fn(() => Promise.resolve([])),
   setDefaultProfile: vi.fn(() => Promise.resolve(true)),
   createProfile: vi.fn(() => Promise.resolve(true)),
@@ -165,6 +192,28 @@ describe("schema-driven settings field PATCH payloads", () => {
     }
   });
 
+  it("edits paired terminal sizing in the Terminal UI group with sparse numeric patches", async () => {
+    const { container } = renderTab("session");
+    await screen.findByText("Snooze Duration (minutes)");
+    const fold = screen.getByRole("button", { name: /Terminal UI/ });
+    expect(screen.queryByText("Split Terminal Height (%)")).toBeNull();
+    fireEvent.click(fold);
+    for (const [name, label, min, max, value] of [
+      ["split_terminal_height_percent", "Split Terminal Height (%)", "1", "99", "30"],
+      ["split_terminal_min_width", "Split Terminal Minimum Width", "0", "1000", "110"],
+      ["split_terminal_min_height", "Split Terminal Minimum Height", "0", "1000", "35"],
+    ]) {
+      const input = numberInputByLabel(container, label);
+      expect(input.min).toBe(min);
+      expect(input.max).toBe(max);
+      expect(input.closest("div")?.parentElement?.textContent).toContain("Applies to all profiles");
+      commit(input, value);
+      await waitFor(() =>
+        expect(api.updateSettings).toHaveBeenCalledWith({ session: { [name]: Number(value) } }, "main"),
+      );
+    }
+  });
+
   it("session poller-thread ceiling is an advanced, global-only number that emits { session: { session_id_poller_max_threads } }", async () => {
     const LABEL = "Session-id poller threads (restart req.)";
     const { container } = renderTab("session");
@@ -205,5 +254,42 @@ describe("schema-driven settings field PATCH payloads", () => {
     await waitFor(() =>
       expect(vi.mocked(api.updateSettings)).toHaveBeenCalledWith({ sound: { enabled: true } }, "main"),
     );
+  });
+
+  it("sound controls emit typed PATCH leaves for scope, an advanced event switch and both volumes", async () => {
+    vi.mocked(api.fetchSettings).mockResolvedValue({
+      tmux: {},
+      logging: {},
+      session: {},
+      sound: { browser_idle_enabled: true },
+    } as never);
+    const { container } = renderTab("sound");
+    await screen.findByText("Browser scope");
+
+    fireEvent.change(selectByLabel(container, "Browser scope"), { target: { value: "hidden_tab" } });
+    await waitFor(() =>
+      expect(api.updateSettings).toHaveBeenLastCalledWith({ sound: { browser_scope: "hidden_tab" } }, "main"),
+    );
+
+    const fold = Array.from(container.querySelectorAll("button[aria-expanded]")).find((b) =>
+      b.textContent?.includes("Advanced"),
+    ) as HTMLButtonElement;
+    fireEvent.click(fold);
+    await screen.findByText("Browser: Idle");
+    clickToggle(container, "Browser: Idle");
+    await waitFor(() =>
+      expect(api.updateSettings).toHaveBeenLastCalledWith({ sound: { browser_idle_enabled: false } }, "main"),
+    );
+
+    for (const [label, key, value] of [
+      ["Browser volume", "browser_volume", 0.5],
+      ["Server volume", "server_volume", 1.2],
+    ] as const) {
+      const match = Array.from(container.querySelectorAll("label")).find((l) => l.textContent === label);
+      const range = match?.parentElement?.parentElement?.querySelector('input[type="range"]') as HTMLInputElement;
+      expect(range).toBeTruthy();
+      fireEvent.change(range, { target: { value: String(value) } });
+      await waitFor(() => expect(api.updateSettings).toHaveBeenLastCalledWith({ sound: { [key]: value } }, "main"));
+    }
   });
 });

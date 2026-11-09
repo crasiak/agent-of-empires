@@ -32,7 +32,8 @@ beforeEach(() => {
       if (url === "/api/groups") return load();
       if (init?.method === "PATCH") {
         patches.push({ url, body: JSON.parse(init.body as string) });
-        return patchResult ? patchResult() : jsonResponse({ id: "s1" }, patchStatus);
+        const id = decodeURIComponent(url.split("/")[3]!);
+        return patchResult ? patchResult() : jsonResponse(makeSession({ id, title: id }), patchStatus);
       }
       return jsonResponse({});
     }),

@@ -1,13 +1,13 @@
 //! Test fixtures shared by more than one submodule's tests.
 
-use agent_client_protocol::schema::v1::SessionUpdate;
+use agent_client_protocol::v1::schema::SessionUpdate;
 
 use crate::acp::agent_registry::AgentSpec;
 
 use super::spawn::SpawnConfig;
 
 pub(super) fn text_chunk(text: &str, id: Option<&str>) -> SessionUpdate {
-    use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
+    use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, TextContent};
     let mut chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
     if let Some(id) = id {
         chunk = chunk.message_id(id);
@@ -40,6 +40,7 @@ pub(super) fn compaction_chunk(id: &str, text: &str) -> SessionUpdate {
 /// Build a minimal host (non-sandboxed) `SpawnConfig` for env tests.
 pub(super) fn env_test_spawn_config(cwd: std::path::PathBuf) -> SpawnConfig {
     SpawnConfig {
+        launch_lease: None,
         provider_routing: Vec::new(),
         wrapper_substitution: None,
         agent_key: "claude".into(),
@@ -88,6 +89,7 @@ pub(super) fn reset_fake_spawn_config(
     cwd: &std::path::Path,
 ) -> SpawnConfig {
     SpawnConfig {
+        launch_lease: None,
         provider_routing: Vec::new(),
         wrapper_substitution: None,
         agent_key: "codex".into(),

@@ -19,6 +19,7 @@ export function sessionResponse({ id, title, project_path, ...rest }: SessionInp
     tool: "claude",
     status: "Idle",
     yolo_mode: false,
+    lifecycle_generation: 0,
     created_at: new Date().toISOString(),
     last_accessed_at: null,
     idle_entered_at: null,
@@ -39,8 +40,11 @@ export async function mockSessionsList(
   sessions: () => SessionInput[],
   ordering: () => string[] = () => [],
 ) {
-  await page.route("**/api/sessions", (r) => {
+  await page.route(/\/api\/sessions(\?.*)?$/, (r) => {
     if (r.request().method() !== "GET") return r.fulfill({ status: 400 });
-    return r.fulfill({ json: { sessions: sessions().map(sessionResponse), workspace_ordering: ordering() } });
+    return r.fulfill({
+      headers: { "aoe-runtime-epoch": "mock-runtime", "aoe-runtime-revision": "1" },
+      json: { sessions: sessions().map(sessionResponse), workspace_ordering: ordering() },
+    });
   });
 }

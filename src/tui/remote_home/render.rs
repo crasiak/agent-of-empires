@@ -23,12 +23,14 @@ const SELECTED_ROW_CONTRAST_RATIO: f32 = 3.0;
 /// plugin cannot push the project path off the row. Matches the title column's
 /// budget.
 const ROW_COLUMN_MAX_WIDTH: usize = 24;
-
-/// Gap between two plugins' cells inside the same column.
-const ROW_COLUMN_GAP: &str = "  ";
+const TITLE_WIDTH: usize = 24;
+const STATUS_WIDTH: usize = 10;
+const CONTEXT_WIDTH: usize = 11;
+const ROW_PREFIX_WIDTH: usize = 2 + 1 + TITLE_WIDTH + 2 + STATUS_WIDTH + 2 + CONTEXT_WIDTH + 2;
+const PATH_GAP_WIDTH: usize = 2;
 
 /// One plugin's `row-column` text plus the tone to paint it in.
-type RowColumnCell = (String, Option<Tone>);
+type RowColumnCell = (String, Option<Tone>, usize);
 
 /// A session's cells and the display width they occupy together.
 type MeasuredCells = (Vec<RowColumnCell>, usize);
@@ -44,22 +46,32 @@ type MeasuredCells = (Vec<RowColumnCell>, usize);
 /// Budgets in terminal cells, not chars: plugin text is arbitrary, and a wide
 /// glyph (an emoji status marker, CJK) paints two cells while counting as one
 /// char, which would under-measure the column and shift the path after all.
+#[cfg(test)]
 fn row_column_cells(state: &RemoteHomeState, session_id: &str) -> MeasuredCells {
-    let mut budget = ROW_COLUMN_MAX_WIDTH;
+    row_column_cells_with_budget(state, session_id, ROW_COLUMN_MAX_WIDTH)
+}
+
+fn row_column_cells_with_budget(
+    state: &RemoteHomeState,
+    session_id: &str,
+    mut budget: usize,
+) -> MeasuredCells {
     let mut width = 0;
     let mut cells = Vec::new();
-    for (text, tone) in plugin_ui::row_column_cells(&state.plugin_ui, session_id) {
+    for (_, text, tone, presentation) in
+        plugin_ui::session_row_statuses(&state.plugin_ui, session_id)
+    {
         let gap = if cells.is_empty() {
             0
         } else {
-            UnicodeWidthStr::width(ROW_COLUMN_GAP)
+            presentation.separator_width()
         };
         // Needs room for the gap plus at least one cell of text, else the
         // remaining plugins are dropped rather than rendered as a bare gap.
         if budget <= gap {
             break;
         }
-        let text = truncate_to_width(&text, budget - gap);
+        let text = truncate_to_width(text, budget - gap);
         // Clamp rather than trust the helper: if it ever hands back more cells
         // than it was given, `budget -= gap + len` would underflow (panic in a
         // debug build) or wrap the budget wide open, voiding the cap this loop
@@ -67,7 +79,7 @@ fn row_column_cells(state: &RemoteHomeState, session_id: &str) -> MeasuredCells 
         let len = UnicodeWidthStr::width(text.as_str()).min(budget - gap);
         width += gap + len;
         budget -= gap + len;
-        cells.push((text, tone));
+        cells.push((text, tone, gap));
     }
     (cells, width)
 }
@@ -128,7 +140,7 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHomeSt
             Constraint::Length(2),
         ])
         .split(area);
-    render_header(frame, chunks[0], theme, state);
+    render_header(frame, chunks[0], theme);
     render_list(frame, chunks[1], theme, state);
     render_footer(frame, chunks[2], theme, state);
     if let Some(dialog) = &state.filter_dialog {
@@ -136,20 +148,13 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHomeSt
     }
 }
 
-fn render_header(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHomeState) {
-    let spans = vec![
-        Span::styled(
-            " Remote sessions · ",
-            Style::default()
-                .fg(theme.title)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            state.endpoint.base_url.clone(),
-            Style::default().fg(theme.text),
-        ),
-        Span::raw(" "),
-    ];
+fn render_header(frame: &mut Frame, area: Rect, theme: &Theme) {
+    let spans = vec![Span::styled(
+        " Remote sessions ",
+        Style::default()
+            .fg(theme.title)
+            .add_modifier(Modifier::BOLD),
+    )];
     let block = Block::default().borders(Borders::BOTTOM);
     let para = Paragraph::new(Line::from(spans)).block(block);
     frame.render_widget(para, area);
@@ -158,8 +163,8 @@ fn render_header(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHom
 fn render_list(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHomeState) {
     if let Some(err) = &state.last_error {
         let para = Paragraph::new(format!(
-            "Could not reach daemon at {}:\n\n{}\n\nPress r to retry, q to quit.",
-            state.endpoint.base_url, err
+            "Could not reach daemon:\n\n{}\n\nPress r to retry, q to quit.",
+            err
         ))
         .style(Style::default().fg(theme.error));
         frame.render_widget(para, area);
@@ -182,10 +187,13 @@ fn render_list(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHomeS
         return;
     }
     // Measure every row's plugin cells first so they all pad to one width.
+    let lane_budget = usize::from(area.width)
+        .saturating_sub(ROW_PREFIX_WIDTH + PATH_GAP_WIDTH + 1)
+        .min(ROW_COLUMN_MAX_WIDTH);
     let plugin_cells: Vec<MeasuredCells> = state
         .sessions
         .iter()
-        .map(|s| row_column_cells(state, &s.id))
+        .map(|s| row_column_cells_with_budget(state, &s.id, lane_budget))
         .collect();
     let plugin_width = plugin_cells.iter().map(|(_, w)| *w).max().unwrap_or(0);
     let items: Vec<ListItem> = state
@@ -206,39 +214,32 @@ fn render_list(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHomeS
             };
             let mut spans = vec![
                 Span::styled(
-                    format!(" {}  ", fixed_width(&s.title, 24)),
+                    format!(" {}  ", fixed_width(&s.title, TITLE_WIDTH)),
                     readable(title_style),
                 ),
                 Span::styled(
-                    format!("{}  ", fixed_width(&s.status, 10)),
+                    format!("{}  ", fixed_width(&s.status, STATUS_WIDTH)),
                     readable(status_style),
                 ),
                 Span::styled(
                     format!(
                         "{}  ",
-                        fixed_width(context_resume_summary(s.context_resume), 11)
+                        fixed_width(context_resume_summary(s.context_resume), CONTEXT_WIDTH)
                     ),
                     readable(status_style),
                 ),
             ];
             if plugin_width > 0 {
                 let (cells, width) = &plugin_cells[idx];
-                for (i, (text, tone)) in cells.iter().enumerate() {
-                    if i > 0 {
-                        spans.push(Span::raw(ROW_COLUMN_GAP));
-                    }
+                spans.push(Span::raw(" ".repeat(plugin_width - width)));
+                for (text, tone, gap) in cells {
+                    spans.push(Span::raw(" ".repeat(*gap)));
                     spans.push(Span::styled(
                         text.clone(),
                         readable(plugin_ui::tone_style(*tone, theme)),
                     ));
                 }
-                // Pad to the shared width, then the inter-column gap, so the
-                // path starts at the same screen column on every row.
-                spans.push(Span::raw(format!(
-                    "{:width$}{ROW_COLUMN_GAP}",
-                    "",
-                    width = plugin_width - width
-                )));
+                spans.push(Span::raw("  "));
             }
             let appearance = state.appearances.get(&s.repo_id);
             let project_style = if is_selected {
@@ -333,7 +334,7 @@ fn render_footer(frame: &mut Frame, area: Rect, theme: &Theme, state: &RemoteHom
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::acp::client::discovery::{DaemonEndpoint, Source};
+    use crate::daemon::{DaemonEndpoint, Source};
     use crate::tui::remote_home::RemoteSession;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -374,6 +375,11 @@ mod tests {
                "session_id": session_id, "payload": {"text": text}})
     }
 
+    fn row_badge(session_id: &str, payload: serde_json::Value) -> serde_json::Value {
+        json!({"plugin_id": "gh", "slot": "row-badge", "id": "b",
+               "session_id": session_id, "payload": payload})
+    }
+
     /// Screen column where `needle` starts on the first row carrying it. Indexes
     /// the per-cell strings from `rows`, one character per painted cell, so it is
     /// a real column: a byte offset would be skewed by the multi-byte `▸ `
@@ -396,8 +402,12 @@ mod tests {
     /// selector) and the trailing cell of a wide glyph holds an empty symbol, so
     /// both are folded to a single representative character.
     fn rows(state: &RemoteHomeState) -> Vec<String> {
+        rows_with_width(state, 100)
+    }
+
+    fn rows_with_width(state: &RemoteHomeState, width: u16) -> Vec<String> {
         let theme = crate::tui::styles::load_theme_with_mode("empire", false);
-        let mut terminal = Terminal::new(TestBackend::new(100, 10)).expect("terminal");
+        let mut terminal = Terminal::new(TestBackend::new(width, 10)).expect("terminal");
         terminal
             .draw(|f| render(f, f.area(), &theme, state))
             .expect("draw");
@@ -433,6 +443,63 @@ mod tests {
     }
 
     #[test]
+    fn plugin_column_right_aligns_statuses() {
+        let state = state_with(
+            &["s1", "s2"],
+            json!([row_column("s1", "long status"), row_column("s2", "short")]),
+        );
+        let painted = rows(&state);
+        assert_eq!(
+            column_of(&painted, "long status") + "long status".len(),
+            column_of(&painted, "short") + "short".len()
+        );
+    }
+
+    #[test]
+    fn narrow_rows_keep_short_status_visible() {
+        let state = state_with(
+            &["s1", "s2"],
+            json!([
+                row_column("s1", "a very long status label"),
+                row_column("s2", "X")
+            ]),
+        );
+        let painted = rows_with_width(&state, 60);
+        assert!(
+            painted.iter().any(|line| line.contains("X  /")),
+            "{painted:?}"
+        );
+        assert_eq!(
+            painted.iter().filter(|line| line.ends_with('/')).count(),
+            2,
+            "{painted:?}"
+        );
+    }
+
+    #[test]
+    fn row_badges_use_presentation_gaps_and_keep_path_gap() {
+        let state = state_with(
+            &["s1"],
+            json!([row_badge(
+                "s1",
+                json!({"items": [
+                    {"text": "A", "presentation": "glyph"},
+                    {"text": "B", "presentation": "glyph"},
+                    {"text": "Open", "icon": "git"},
+                    {"tooltip": "fallback", "presentation": "glyph"}
+                ]})
+            )]),
+        );
+        let painted = rows(&state);
+        assert!(
+            painted
+                .iter()
+                .any(|line| line.contains("A B  Open  fallback  /tmp/s1")),
+            "{painted:?}"
+        );
+    }
+
+    #[test]
     fn plugin_cells_are_capped_to_the_budget() {
         let long = "x".repeat(ROW_COLUMN_MAX_WIDTH + 20);
         let state = state_with(&["s1"], json!([row_column("s1", &long)]));
@@ -453,6 +520,64 @@ mod tests {
         let (cells, width) = row_column_cells(&state, "s1");
         assert_eq!(cells.len(), 1);
         assert_eq!(width, ROW_COLUMN_MAX_WIDTH);
+    }
+
+    #[test]
+    fn row_badges_render_items_and_tooltip_fallback() {
+        let state = state_with(
+            &["s1"],
+            json!([
+                row_badge(
+                    "s1",
+                    json!({"items": [
+                        {"text": "CI", "tone": "danger"},
+                        {"tooltip": "ico"}
+                    ]}),
+                ),
+                row_badge("s1", json!({"tooltip": "wip"})),
+            ]),
+        );
+        let (cells, width) = row_column_cells(&state, "s1");
+        assert!(width <= ROW_COLUMN_MAX_WIDTH, "{width} cells");
+        let texts: Vec<&str> = cells.iter().map(|(t, _, _)| t.as_str()).collect();
+        // Itemized badge: each item's text (tooltip when text is absent).
+        assert_eq!(&texts[..2], &["CI", "ico"], "{texts:?}");
+        // Badge without an items list: the top-level tooltip is the fallback.
+        assert_eq!(texts[2], "wip", "{texts:?}");
+        let painted = rows(&state);
+        assert!(painted.iter().any(|l| l.contains("CI")), "{painted:?}");
+    }
+
+    #[test]
+    fn row_badges_are_budgeted_and_keep_path_aligned() {
+        // A long itemized badge is truncated to the budget, not overflowing it.
+        let long_badge = state_with(
+            &["s1"],
+            json!([row_badge(
+                "s1",
+                json!({"items": [
+                    {"text": "x".repeat(ROW_COLUMN_MAX_WIDTH + 20), "tone": "danger"}
+                ]})
+            )]),
+        );
+        let (cells, width) = row_column_cells(&long_badge, "s1");
+        assert_eq!(width, ROW_COLUMN_MAX_WIDTH);
+        assert!(cells[0].0.ends_with('…'), "{:?}", cells[0].0);
+
+        // A badge on one row must not shift the path column vs a row without one.
+        let both = state_with(
+            &["s1", "s2"],
+            json!([row_badge("s1", json!({"items": [{"text": "CI failed"}]}))]),
+        );
+        let painted = rows(&both);
+        assert!(
+            painted.iter().any(|l| l.contains("CI failed")),
+            "{painted:?}"
+        );
+        assert_eq!(
+            column_of(&painted, "/tmp/s1"),
+            column_of(&painted, "/tmp/s2")
+        );
     }
 
     #[test]
@@ -495,9 +620,8 @@ mod tests {
             assert!(width <= ROW_COLUMN_MAX_WIDTH, "{id}: {width} cells");
             let painted: usize = cells
                 .iter()
-                .map(|(t, _)| UnicodeWidthStr::width(t.as_str()))
-                .sum::<usize>()
-                + ROW_COLUMN_GAP.len() * cells.len().saturating_sub(1);
+                .map(|(t, _, gap)| UnicodeWidthStr::width(t.as_str()) + gap)
+                .sum::<usize>();
             assert_eq!(painted, width, "{id}: measured width must match painted");
         }
         // The cap holds, so the path still renders and stays aligned.

@@ -35,6 +35,7 @@ async function mountThreeKeepingTwo() {
   const activate = (id: string, limit: number) =>
     rerender(
       <TerminalSessionStack
+        readOnly={false}
         activeSessionId={id}
         sessions={sessions}
         persistent={true}
@@ -42,7 +43,13 @@ async function mountThreeKeepingTwo() {
       />,
     );
   const { rerender } = render(
-    <TerminalSessionStack activeSessionId="s1" sessions={sessions} persistent={true} maxPersistentTerminals={2} />,
+    <TerminalSessionStack
+      readOnly={false}
+      activeSessionId="s1"
+      sessions={sessions}
+      persistent={true}
+      maxPersistentTerminals={2}
+    />,
   );
   await waitFor(() => {
     expect(screen.getByTestId("terminal-s1")).toBeDefined();
@@ -68,12 +75,14 @@ describe("TerminalSessionStack", () => {
 
   it("renders only the active session when persistence is disabled", () => {
     const sessions = [makeSession("s1"), makeSession("s2")];
-    const { rerender } = render(<TerminalSessionStack activeSessionId="s1" sessions={sessions} persistent={false} />);
+    const { rerender } = render(
+      <TerminalSessionStack readOnly={false} activeSessionId="s1" sessions={sessions} persistent={false} />,
+    );
 
     expect(screen.getByTestId("terminal-s1").dataset.active).toBe("true");
     expect(screen.queryByTestId("terminal-s2")).toBeNull();
 
-    rerender(<TerminalSessionStack activeSessionId="s2" sessions={sessions} persistent={false} />);
+    rerender(<TerminalSessionStack readOnly={false} activeSessionId="s2" sessions={sessions} persistent={false} />);
 
     expect(screen.queryByTestId("terminal-s1")).toBeNull();
     expect(screen.getByTestId("terminal-s2").dataset.active).toBe("true");

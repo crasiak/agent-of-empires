@@ -22,6 +22,19 @@ impl Drop for TmuxCleanup<'_> {
     }
 }
 
+struct DaemonCleanup<'a>(&'a std::path::Path);
+
+impl Drop for DaemonCleanup<'_> {
+    fn drop(&mut self) {
+        let _ = Command::new(env!("CARGO_BIN_EXE_aoe"))
+            .args(["serve", "--stop"])
+            .env("HOME", self.0)
+            .env("XDG_CONFIG_HOME", self.0.join(".config"))
+            .env_remove("AOE_DAEMON_URL")
+            .output();
+    }
+}
+
 /// Set an env var for the test body and restore its prior value on drop.
 struct EnvRestore(&'static str, Option<std::ffi::OsString>);
 
@@ -117,6 +130,19 @@ fn start_with_size_opts_returns_skipped_when_pane_preexists() {
     // `new-session` so a prior `#[serial]` test's stale snapshot can't
     // make `exists()` miss our session.
     tmux::refresh_session_cache();
+    let pane_pid = || {
+        let output = Command::new("tmux")
+            .arg("-S")
+            .arg(tmux_socket())
+            .args(["display-message", "-t", &session_name, "-p", "#{pane_pid}"])
+            .output()
+            .expect("read preexisting pane identity");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let before = pane_pid();
+    assert!(!before.trim().is_empty());
+    let persisted_before = serde_json::to_value(&inst).expect("serialize preexisting launch state");
 
     let outcome = inst
         .start_with_size_opts(None, false)
@@ -126,6 +152,16 @@ fn start_with_size_opts_returns_skipped_when_pane_preexists() {
         outcome,
         LaunchSidOutcome::Skipped,
         "preexisting pane must short-circuit before apply_session_flags"
+    );
+    assert_eq!(
+        pane_pid(),
+        before,
+        "Skipped must not respawn the preexisting live pane"
+    );
+    assert_eq!(
+        serde_json::to_value(&inst).expect("serialize skipped launch state"),
+        persisted_before,
+        "Skipped must not mutate persisted launch state or reserve a generation"
     );
 }
 
@@ -306,6 +342,7 @@ fn fork_child_publication_confirms_preallocated_identity() {
         return;
     }
     let temp = IsolatedHome::new();
+    let _daemon = DaemonCleanup(temp.path());
     acknowledge_agent_hooks();
     let project = temp.path().join("project");
     let bin = temp.path().join("bin");
@@ -348,6 +385,8 @@ sleep 60
             .env("SHELL", "/bin/bash")
             .env("TMPDIR", temp.path())
             .env("AOE_TMUX_SOCKET", tmux_socket())
+            .env_remove("AOE_DAEMON_URL")
+            .env_remove("AOE_NO_AUTOSTART")
             .output()
             .unwrap();
         assert!(
@@ -365,6 +404,9 @@ sleep 60
         "-t",
         "parent",
     ]);
+    // Local identity fixtures must finish before the Daemon loads their rows.
+    cli(&["serve", "--stop"]);
+    std::fs::create_dir_all(temp.path().join(".claude")).unwrap();
     cli(&["session", "set-session-id", "parent", VALID_CLAUDE_UUID]);
     cli(&["add", "--fork-from", "parent", "-t", "child"]);
     let storage = Storage::open_unwatched("default").unwrap();
@@ -377,6 +419,7 @@ sleep 60
     let session_name = tmux::Session::generate_name(&child.id, &child.title);
     let _cleanup = TmuxCleanup(&session_name);
     let child_sid = child.agent_session_id.clone();
+    cli(&["serve", "--stop"]);
     cli(&["session", "start", "child"]);
     std::fs::write(&publish, "").unwrap();
     assert!(

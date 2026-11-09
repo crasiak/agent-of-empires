@@ -12,10 +12,8 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use super::attached_status_hooks::AttachedStatusHookWatcher;
 use super::focus_requests::{self, FocusResult};
-use super::home::{HomeView, TerminalMode};
-use super::status_poller::StatusUpdate;
+use super::home::{bindings, HomeView, TerminalMode};
 use super::styles::Theme;
 use crate::containers::image_update::ImageUpdate;
 use crate::session::config::AppStateConfig;
@@ -57,13 +55,11 @@ fn clear_reported_session_creates(reported: u32, outcome: crate::telemetry::Send
     });
 }
 
+/// Count one TUI session create for the opt-in telemetry trend counter.
+/// Bounded accumulator, read-and-decremented by the snapshot paths; a no-op
+/// for opted-out installs. Called when a daemon-confirmed creation lands.
 pub(super) fn record_session_create() {
     TUI_SESSION_CREATES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[cfg(test)]
-pub(crate) fn session_create_count_for_test() -> u32 {
-    reported_session_creates()
 }
 
 struct UpdateStatus {
@@ -118,7 +114,9 @@ pub struct App {
     /// Snoozed via Ctrl+x until a newer release ships.
     dismissed_update_version: Option<String>,
     image_update: Option<ImageUpdate>,
-    image_update_rx: Option<tokio::sync::oneshot::Receiver<anyhow::Result<Option<ImageUpdate>>>>,
+    image_update_rx: Option<
+        tokio::sync::oneshot::Receiver<anyhow::Result<crate::containers::image_update::ImageCheck>>,
+    >,
     image_pull_rx: Option<tokio::sync::oneshot::Receiver<anyhow::Result<()>>>,
     /// Snoozed via Ctrl+x while the registry still resolves to this digest.
     dismissed_image_digest: Option<String>,
@@ -135,13 +133,24 @@ pub struct App {
     // Actions that need the async loop, picked up after `execute_action`.
     pending_structured_view_open: Option<String>,
     pending_view_switch: Option<String>,
-    pending_daemon_start_open: Option<String>,
+
     pending_smart_rename: Option<String>,
     /// External focus requests (Switchboard Jump); absent inside tmux.
     focus_control: Option<std::sync::Arc<focus_requests::Control>>,
     focus_rx: Option<tokio::sync::mpsc::UnboundedReceiver<focus_requests::Incoming>>,
-    /// Outcome line of an in-flight "Auto-name now", which waits for the agent's one-shot.
-    smart_rename_rx: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
+    dashboard_stop_requested: bool,
+    dashboard_stop: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
+    dashboard_launch: Option<
+        tokio::sync::oneshot::Receiver<
+            Result<
+                (
+                    crate::daemon::RuntimeConnection,
+                    crate::daemon::DaemonClient,
+                ),
+                String,
+            >,
+        >,
+    >,
     /// Debounce for structured preview-on-select, so fast navigation doesn't
     /// connect a WebSocket per keystroke.
     preview_mount_pending: Option<(String, std::time::Instant)>,
@@ -167,6 +176,10 @@ impl Drop for ToolDetection {
             }
         }
     }
+}
+
+fn theme_apply_needed(current: (&str, bool), next: (&str, bool)) -> bool {
+    current != next
 }
 
 /// Ignores SIGINT/SIGQUIT while alive. With raw mode off for a child process,
@@ -234,7 +247,14 @@ fn apply_mouse_capture_transition<W: std::io::Write>(
     Ok(())
 }
 
+fn skip_predraw_cursor_hide(live_send_active: bool, has_overlay: bool) -> bool {
+    live_send_active && !has_overlay
+}
+
 impl App {
+    fn set_status(&mut self, text: impl Into<String>) {
+        self.update_status = Some(UpdateStatus::transient(text.into()));
+    }
     /// Printable ASCII or Enter with no modifier other than Shift. Enter is
     /// included so newlines inside a Mosh-stripped paste stay in the burst.
     fn is_burst_candidate(key: &KeyEvent) -> bool {
@@ -299,7 +319,7 @@ impl App {
         file_watch: std::sync::Arc<crate::file_watch::FileWatchService>,
     ) -> Result<Self> {
         let active_profile = if profile.is_empty() {
-            None
+            None // all-profiles mode
         } else {
             Some(profile.to_string())
         };
@@ -348,13 +368,14 @@ impl App {
             host_title: super::host_title::HostTitleTracker::default(),
             mosh_active,
             pending_structured_view_open: None,
-            pending_daemon_start_open: None,
             preview_mount_pending: None,
             pending_view_switch: None,
             pending_smart_rename: None,
             focus_control: None,
             focus_rx: None,
-            smart_rename_rx: None,
+            dashboard_launch: None,
+            dashboard_stop_requested: false,
+            dashboard_stop: None,
             pending_install_version: None,
             last_installed_version_in_session: None,
         };
@@ -488,7 +509,10 @@ impl App {
             .as_ref()
             .is_some_and(|v| v.is_active());
         let skip_hide = embedded_active
-            || (self.home.live_send.is_some() && !self.home.has_non_live_send_overlay());
+            || skip_predraw_cursor_hide(
+                self.home.live_send.is_some(),
+                self.home.has_non_live_send_overlay(),
+            );
         // Queue, never execute: flushing the opener alone would put the widget
         // build inside the bracket and freeze the display for that time.
         crossterm::queue!(
@@ -509,6 +533,8 @@ impl App {
         draw_result?;
         end_result?;
         self.sync_host_title(terminal)?;
+        #[cfg(feature = "e2e-tests")]
+        e2e_report_runtime(self.home.runtime_settled());
         Ok(())
     }
 
@@ -582,26 +608,6 @@ impl App {
         Ok(result)
     }
 
-    fn with_attached_status_hooks<F, R>(
-        &mut self,
-        terminal: &mut Terminal<TuiBackend>,
-        f: F,
-    ) -> Result<(R, Vec<StatusUpdate>)>
-    where
-        F: FnOnce() -> R,
-    {
-        let watcher = AttachedStatusHookWatcher::start(self.home.attached_status_hook_sessions());
-        let result = self.with_raw_mode_disabled(terminal, f);
-        let mut attached_status_updates = Vec::new();
-
-        if let Some(watcher) = watcher {
-            attached_status_updates = watcher.stop();
-        }
-        self.home.reset_status_refresh();
-
-        result.map(|result| (result, attached_status_updates))
-    }
-
     pub fn show_startup_warning(&mut self, message: &str) {
         // Warnings preempt onboarding dialogs.
         self.home.intro_dialog = None;
@@ -617,7 +623,10 @@ impl App {
         // Theme and color mode are global; reapplying an unchanged theme would
         // force a flickering full clear on every config save.
         let palette_mode = crate::session::config::resolve_theme_palette_mode();
-        if (self.theme_name.as_str(), self.theme_palette_mode) == (name, palette_mode) {
+        if !theme_apply_needed(
+            (&self.theme_name, self.theme_palette_mode),
+            (name, palette_mode),
+        ) {
             return;
         }
         self.theme = crate::tui::styles::load_theme_with_mode(name, palette_mode);
@@ -627,6 +636,7 @@ impl App {
     }
 
     pub async fn run(&mut self, terminal: &mut Terminal<TuiBackend>) -> Result<()> {
+        self.home.connect_runtime();
         // Display snapshots are refreshed off the paint thread. Don't warm the
         // cache here: startup must paint before any tmux deadline.
         crate::tmux::spawn_snapshot_poller();
@@ -635,12 +645,15 @@ impl App {
         // This clear satisfies any pending redraw; honoring it on the first tick
         // would blank the first frame until the next paint.
         self.needs_redraw = false;
+        self.sync_mouse_capture(terminal)?;
         self.draw(terminal)?;
         #[cfg(feature = "e2e-tests")]
         e2e_render_ack(true)?;
 
         self.spawn_tool_detection(false);
-        crate::plugin::auto_update::spawn_if_enabled(&Config::load_or_warn(), None);
+        tokio::spawn(async {
+            crate::plugin::auto_update::run_if_enabled(&Config::load_or_warn(), None).await;
+        });
 
         // `None` when checks are off, so enabling them later checks immediately.
         let settings = get_update_settings();
@@ -685,22 +698,16 @@ impl App {
         // Skip ticker refreshes right after another refresh to avoid tearing.
         let mut last_refresh_at: Option<std::time::Instant> = None;
         const REFRESH_COOLDOWN: Duration = Duration::from_millis(15);
-        let mut last_status_refresh = std::time::Instant::now();
         let mut last_metrics_sample = std::time::Instant::now();
         let mut last_usage_refresh = std::time::Instant::now();
         let mut last_ledger_refresh: Option<std::time::Instant> = None;
-        let mut last_session_feed_refresh = std::time::Instant::now();
         let mut last_disk_refresh = std::time::Instant::now();
         let mut full_heartbeat_deferred = false;
         let mut last_spinner_redraw = std::time::Instant::now();
         let mut last_heartbeat = std::time::Instant::now();
         let mut last_presence_refresh = std::time::Instant::now();
         let mut last_serve_probe = std::time::Instant::now();
-        let mut last_session_idle_reap = std::time::Instant::now();
         let mut last_update_eval = std::time::Instant::now();
-        const STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
-        // Structured rows cost the daemon SQLite lookups per request.
-        const SESSION_FEED_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
         const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
         const METRICS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
         const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -710,10 +717,7 @@ impl App {
         const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
         const PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
         const SERVE_PROBE_INTERVAL: Duration = Duration::from_secs(2);
-        // Auto-stop for idle plain tmux sessions; the storage lock prevents
-        // double stops when serve runs its own reaper.
-        const SESSION_IDLE_REAP_INTERVAL: Duration = Duration::from_secs(60);
-        // Wider than the heartbeat so a couple of missed beats don't drop an instance.
+        // Wider than the heartbeat so missed beats do not drop an instance.
         const PRESENCE_FRESH_WINDOW: Duration = Duration::from_secs(30);
 
         crate::session::write_tui_heartbeat();
@@ -746,6 +750,33 @@ impl App {
 
             tokio::select! {
                 event = self.event_stream.as_mut().expect("event_stream missing").next() => {
+                    self.home.apply_session_feed();
+                    self.home.enforce_trash_read_only();
+                    if self.home.selected_is_trashed() {
+                        self.close_embedded_structured();
+                    }
+                    if self.home.sidebar_source != crate::tui::session_feed::SidebarSource::Daemon
+                        && self.home.serve_view.is_none() {
+                        match event {
+                            Some(Ok(Event::Key(key)))
+                                if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                                #[cfg(feature = "e2e-tests")]
+                                if key.code == KeyCode::F(12) && std::env::var_os("AOE_E2E_INPUT_BARRIER").is_some() {
+                                    self.draw(terminal)?;
+                                    e2e_render_ack(false)?;
+                                    continue;
+                                }
+                                if self.handle_runtime_gate_key(key) {
+                                    break;
+                                }
+                            }
+                            Some(Ok(Event::Resize(_, _))) => {}
+                            None => break,
+                            _ => continue,
+                        }
+                        self.draw(terminal)?;
+                        continue;
+                    }
                     match event {
                         Some(Ok(Event::Key(key))) => {
                             // Terminals reporting releases would double-fire every handler.
@@ -875,6 +906,7 @@ impl App {
                                         }
                                     }
                                 }
+
                                 if !self.needs_redraw {
                                     self.draw(terminal)?;
                                 }
@@ -1017,7 +1049,19 @@ impl App {
                                 if let Some(url) =
                                     self.home.preview_link_at(mouse.column, mouse.row)
                                 {
-                                    self.home.open_link(&url);
+                                    // Say what happened either way, and never claim
+                                    // an open that did not happen: when no browser
+                                    // the user could see is reachable, the
+                                    // clipboard still reaches their machine.
+                                    let status =
+                                        match crate::tui::open_url::open_url(&url) {
+                                            Ok(()) => format!("opened {url}"),
+                                            Err(e) => {
+                                                crate::tui::clipboard::copy_to_clipboard(&url);
+                                                format!("{e}; copied {url}")
+                                            }
+                                        };
+                                    self.home.flash_status(status);
                                     let _ = self.home.clear_preview_selection();
                                     // Otherwise clicking the link again counts as a double-click.
                                     self.home.forget_preview_click();
@@ -1069,12 +1113,8 @@ impl App {
                                     }
                                     self.draw(terminal)?;
                                     None
-                                } else if self
-                                    .home
-                                    .handle_sidebar_collapse_click(mouse.column, mouse.row)
-                                    || self
-                                        .home
-                                        .handle_diagnostics_click(mouse.column, mouse.row)
+                                } else if self.home.handle_sidebar_collapse_click(mouse.column, mouse.row)
+                                    || self.home.handle_diagnostics_click(mouse.column, mouse.row)
                                     || self.home.handle_tips_badge_click(mouse.column, mouse.row)
                                 {
                                     let _ = self.home.clear_preview_selection();
@@ -1102,6 +1142,7 @@ impl App {
                                     }
                                     self.draw(terminal)?;
                                     action
+
                                 } else if self.home.clear_preview_selection() {
                                     self.draw(terminal)?;
                                     None
@@ -1169,11 +1210,8 @@ impl App {
                                 if let Some(session_id) = self.pending_view_switch.take() {
                                     self.perform_view_switch(&session_id, terminal).await;
                                 }
-                                if let Some(session_id) = self.pending_daemon_start_open.take() {
-                                    self.start_daemon_then_open(&session_id, terminal).await;
-                                }
                                 if let Some(session_id) = self.pending_smart_rename.take() {
-                                    self.perform_smart_rename(&session_id).await;
+                                    self.perform_smart_rename(&session_id);
                                 }
                             }
                             continue;
@@ -1204,6 +1242,7 @@ impl App {
                             // mouse reports cannot enter the new composer.
                             self.sync_mouse_capture(terminal)?;
                             self.draw(terminal)?;
+
                             continue;
                         }
                         Some(Ok(Event::Resize(_, _))) => {
@@ -1299,38 +1338,36 @@ impl App {
                 control.set_profile(&self.focus_profile());
             }
             let mut refresh_needed = false;
-            // Deterministic signals that bypass the live-send cool-down.
-            let mut full = false;
+            let mut needs_full_refresh = false;
 
-            full |= self.home.expire_status_flash();
-            // Diffed redraw, not `needs_redraw`: a clear per tick strobes.
-            full |= self.home.tick_preview_autoscroll();
-            refresh_needed |= self.home.tick_unread_dwell(std::time::Instant::now());
+            needs_full_refresh |= self.home.expire_status_flash();
 
-            // Banner changes shift the layout, so they need a full clear.
-            full |= self.poll_tool_detection();
-            let banner_changed = self.poll_update_check()
+            // Drag scrolling uses diffed repaint, not a full terminal clear.
+            needs_full_refresh |= self.home.tick_preview_autoscroll();
+            if self.home.tick_unread_dwell(std::time::Instant::now()) {
+                refresh_needed = true;
+            }
+            needs_full_refresh |= self.poll_tool_detection();
+            // Every banner poll must run.
+            if self.poll_update_check()
                 | self.poll_update_status()
                 | self.poll_image_update_check()
                 | self.poll_image_pull_status()
-                | self.poll_smart_rename();
-            if banner_changed {
+            {
                 self.needs_redraw = true;
-                full = true;
+                needs_full_refresh = true;
             }
 
-            if last_status_refresh.elapsed() >= STATUS_REFRESH_INTERVAL {
-                self.home.request_status_refresh();
-                self.home.repair_session_id_pollers();
-                last_status_refresh = std::time::Instant::now();
-            }
-            full |= self.home.apply_status_updates();
+            self.home.request_plugin_ui_refresh();
 
             if last_metrics_sample.elapsed() >= METRICS_SAMPLE_INTERVAL {
                 self.home.request_metrics_refresh();
                 last_metrics_sample = std::time::Instant::now();
             }
-            refresh_needed |= self.home.apply_metrics_updates();
+
+            if self.home.apply_metrics_updates() {
+                refresh_needed = true;
+            }
 
             if last_usage_refresh.elapsed() >= USAGE_REFRESH_INTERVAL {
                 self.home.request_usage_refresh();
@@ -1346,59 +1383,75 @@ impl App {
             refresh_needed |= self.home.tick_work_arc();
             refresh_needed |= self.home.tick_session_search(std::time::Instant::now());
 
-            if last_session_feed_refresh.elapsed() >= SESSION_FEED_REFRESH_INTERVAL {
-                self.home.request_session_feed_refresh();
-                last_session_feed_refresh = std::time::Instant::now();
-            }
-            full |= self.home.apply_session_feed();
-            full |= self.home.apply_structured_approval_results();
-            full |= self.home.apply_deletion_results();
-            full |= self.home.apply_stop_results();
-            full |= self.home.apply_trash_results();
-            full |= self.home.apply_drop_results();
-            full |= self.home.apply_reconcile_results();
-
-            if last_session_idle_reap.elapsed() >= SESSION_IDLE_REAP_INTERVAL {
-                last_session_idle_reap = std::time::Instant::now();
-                full |= self.reap_idle_sessions();
+            if self.home.apply_plugin_ui_updates() {
+                needs_full_refresh = true;
             }
 
-            full |= self.home.apply_session_id_updates();
-            full |= self.home.apply_recovery_updates();
-            full |= self.home.apply_restart_results();
-            for session_id in self.home.take_restarted_attaches() {
-                self.attach_live_session(&session_id, terminal)?;
-                full = true;
+            needs_full_refresh |= self.home.apply_session_feed();
+            needs_full_refresh |= self.poll_dashboard_launch();
+            needs_full_refresh |= self.poll_dashboard_stop();
+            let had_native_error = self.home.info_dialog.is_some();
+            if let Some(ready) = self.home.take_native_attachment() {
+                use crate::tui::home::panes::PaneIntent;
+                match ready.intent {
+                    PaneIntent::Preview => self.needs_redraw = true,
+                    PaneIntent::Attach => self.attach_native_target(ready, terminal)?,
+                    PaneIntent::LiveSend(target) => {
+                        // The toast that covered the revive settles with the
+                        // receipt, exactly as the blocking path used to.
+                        self.update_status = None;
+                        match self.home.enter_live_send_with(
+                            &ready.id,
+                            &ready.tmux_name,
+                            target,
+                            ready.lease,
+                        ) {
+                            Ok(()) => self.draw(terminal)?,
+                            Err(()) => self.draw(terminal)?,
+                        }
+                    }
+                    PaneIntent::Send { message, target } => {
+                        self.update_status = None;
+                        self.home.finish_send(
+                            &ready.id,
+                            &ready.tmux_name,
+                            target,
+                            &message,
+                            &ready.lease,
+                        );
+                    }
+                }
+                needs_full_refresh = true;
             }
-            full |= self.home.apply_attach_project_results();
+            needs_full_refresh |= !had_native_error && self.home.info_dialog.is_some();
+            needs_full_refresh |= self.home.apply_structured_approval_results();
 
-            let store_move = self.home.poll_store_move();
-            full |= store_move.changed;
-            if let Some(action) = store_move.resume {
-                self.execute_action(action, terminal)?;
-                full = true;
-            }
+            needs_full_refresh |= self.home.apply_restart_results();
 
-            if let Some(session_id) = self.home.apply_creation_results() {
+            needs_full_refresh |= self.home.poll_store_move();
+
+            let created_attach = self
+                .home
+                .apply_creation_results()
+                .or_else(|| self.home.take_created_attach());
+            if let Some(session_id) = created_attach {
                 self.dispatch_new_session_attach(&session_id, terminal)?;
                 if let Some(sid) = self.pending_structured_view_open.take() {
                     self.open_structured_view(&sid).await?;
                 }
-                full = true;
+                needs_full_refresh = true;
             }
 
-            full |= self.home.tick_dialog();
-            full |= self.home.tick_settings_status();
-            full |= self.home.tick_opener();
-
-            // The link policy is not input policy, so it reloads even during live-send.
+            needs_full_refresh |= self.home.tick_dialog();
+            needs_full_refresh |= self.home.tick_settings_status();
+            needs_full_refresh |= self.home.tick_opener();
             if self
                 .home
                 .config_watch
                 .link_policy_dirty
                 .swap(false, std::sync::atomic::Ordering::Acquire)
             {
-                full |= self.home.refresh_link_policy();
+                needs_full_refresh |= self.home.refresh_link_policy();
             }
 
             // Full/config reloads stay deferred during live-send to preserve input
@@ -1410,7 +1463,7 @@ impl App {
                 if let Some(theme_name) = self.home.take_pending_watcher_theme() {
                     self.set_theme(&theme_name);
                 }
-                full = true;
+                needs_full_refresh = true;
             }
 
             let heartbeat_due = last_disk_refresh.elapsed() >= DISK_REFRESH_INTERVAL;
@@ -1439,7 +1492,7 @@ impl App {
                         }
                     }
                     last_disk_refresh = std::time::Instant::now();
-                    full = true;
+                    needs_full_refresh = true;
                 }
                 DiskRefreshDecision::StorageOnly => {
                     let reload_result = self.home.reload_storage_only();
@@ -1447,16 +1500,15 @@ impl App {
                     if heartbeat_due {
                         last_disk_refresh = std::time::Instant::now();
                     }
-                    full = true;
+                    needs_full_refresh = true;
                 }
                 DiskRefreshDecision::None => {}
             }
 
-            full |= self.home.try_present_reload_failure_dialog();
-            full |= self.home.try_clear_recovered_reload_dialog();
-            // Another surface took the size-owner lock: leave live mode.
-            full |= self.home.poll_live_send_takeover();
-            full |= self.home.try_present_shortcut_bar_tip();
+            needs_full_refresh |= self.home.try_present_reload_failure_dialog();
+            needs_full_refresh |= self.home.try_clear_recovered_reload_dialog();
+            needs_full_refresh |= self.home.poll_live_send_takeover();
+            needs_full_refresh |= self.home.try_present_shortcut_bar_tip();
 
             if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
                 crate::session::write_tui_heartbeat();
@@ -1503,26 +1555,33 @@ impl App {
                 && self.home.live_send.is_none()
             {
                 last_spinner_redraw = std::time::Instant::now();
-                full = true;
+                needs_full_refresh = true;
             }
 
-            full |= self.reconcile_structured_preview().await;
+            needs_full_refresh |= self.reconcile_structured_preview().await;
 
             // Same cadence keeps the embedded composer caret blinking.
             if let Some(view) = self.home.structured_preview.as_mut() {
                 let toast_changed = view.tick();
                 if toast_changed || last_spinner_redraw.elapsed() >= SPINNER_REDRAW_INTERVAL {
                     last_spinner_redraw = std::time::Instant::now();
-                    full = true;
+                    needs_full_refresh = true;
                 }
             }
 
             // Live-send refreshes on every tick; preview wakes carry changed content.
-            let live = self.home.live_send.is_some();
-            refresh_needed |= full || live || woke_via_post_key || woke_via_preview;
+            refresh_needed |= needs_full_refresh
+                || self.home.live_send.is_some()
+                || woke_via_post_key
+                || woke_via_preview;
 
-            let in_cooldown = last_refresh_at.is_some_and(|t| t.elapsed() < REFRESH_COOLDOWN);
-            if live && in_cooldown && !full && !woke_via_post_key && !woke_via_preview {
+            if refresh_needed
+                && self.home.live_send.is_some()
+                && !woke_via_post_key
+                && !woke_via_preview
+                && !needs_full_refresh
+                && last_refresh_at.is_some_and(|t| t.elapsed() < REFRESH_COOLDOWN)
+            {
                 refresh_needed = false;
             }
 
@@ -1537,14 +1596,8 @@ impl App {
         }
 
         self.tool_detection = None;
-        self.home.apply_session_id_updates();
-        // Persist the final restart snapshot instead of a stale `Starting` row.
         self.home.apply_restart_results();
-        self.home.cleanup_pending_creation();
-
-        if let Err(e) = self.home.save() {
-            tracing::error!(target: "tui.input", "Failed to save on quit: {}", e);
-        }
+        self.home.cleanup_pending_creation().await;
 
         // Bounded and deduped so a dead endpoint or an unchanged launch-then-quit costs nothing.
         if let Some(snapshot) = self.build_telemetry_snapshot() {
@@ -1719,21 +1772,25 @@ impl App {
     /// The image banner has the lowest priority and stays hidden while its own
     /// pull runs, so `u` can't re-arm into a no-op.
     fn image_banner_active(&self) -> bool {
-        self.image_update.is_some()
-            && self.update_info.is_none()
-            && self.update_status.is_none()
-            && self.image_pull_rx.is_none()
+        should_show_image_banner(
+            self.image_update.is_some(),
+            self.update_info.is_some(),
+            self.update_status.is_some(),
+            self.image_pull_rx.is_some(),
+        )
     }
 
     fn spawn_image_update_check(&mut self) {
         if self.image_update_rx.is_some() {
             return;
         }
-        let image = Config::load_or_warn().sandbox.default_image.clone();
+        let sandbox = Config::load_or_warn().sandbox;
+        let image = sandbox.default_image;
+        let runtime = crate::containers::ContainerRuntime::from(sandbox.container_runtime);
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.image_update_rx = Some(rx);
         tokio::spawn(async move {
-            let result = crate::containers::image_update::check_for_image_update(&image).await;
+            let result = crate::containers::image_update::check_image(runtime, &image).await;
             let _ = tx.send(result);
         });
     }
@@ -1743,14 +1800,15 @@ impl App {
             return false;
         };
         match rx.try_recv() {
-            Ok(Ok(Some(update))) => {
+            Ok(Ok(crate::containers::image_update::ImageCheck::Available(update))) => {
                 if self.dismissed_image_digest.as_deref() == Some(update.remote_digest.as_str()) {
                     return false;
                 }
                 self.image_update = Some(update);
                 true
             }
-            Ok(Ok(None)) => false,
+            // The TUI banner only offers an update; it has no row for "can't tell".
+            Ok(Ok(_)) => false,
             Ok(Err(e)) => {
                 tracing::debug!(target: "containers.image_update", error = %e, "image update check failed");
                 false
@@ -1939,10 +1997,6 @@ impl App {
         }
         Ok(())
     }
-
-    fn set_status(&mut self, text: impl Into<String>) {
-        self.update_status = Some(UpdateStatus::transient(text.into()));
-    }
 }
 
 fn persist_dismissed_update_version(version: Option<String>) {
@@ -2067,6 +2121,15 @@ fn plan_disk_refresh(
     }
 }
 
+fn should_show_image_banner(
+    has_image_update: bool,
+    has_app_update: bool,
+    has_status: bool,
+    pull_in_flight: bool,
+) -> bool {
+    has_image_update && !has_app_update && !has_status && !pull_in_flight
+}
+
 /// Log and record reload errors; the loop keeps the previous in-memory state.
 fn handle_tick_reload_storage(
     result: anyhow::Result<()>,
@@ -2134,6 +2197,23 @@ fn quit_intent(
     QuitIntent::Quit
 }
 
+/// Writes `ready` or `busy` to `AOE_E2E_RUNTIME_STATE` when it changes, so e2e tests can wait
+/// for an applied receipt without a footer label.
+#[cfg(feature = "e2e-tests")]
+fn e2e_report_runtime(settled: bool) {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static LAST: AtomicU8 = AtomicU8::new(u8::MAX);
+    let Some(path) = std::env::var_os("AOE_E2E_RUNTIME_STATE") else {
+        return;
+    };
+    // Recorded only once written, so a failed write is retried on the next draw.
+    if LAST.load(Ordering::SeqCst) != u8::from(settled)
+        && std::fs::write(path, if settled { "ready" } else { "busy" }).is_ok()
+    {
+        LAST.store(u8::from(settled), Ordering::SeqCst);
+    }
+}
+
 #[cfg(feature = "e2e-tests")]
 pub(crate) fn e2e_render_ack(initial: bool) -> Result<()> {
     let Some(path) = std::env::var_os("AOE_E2E_INPUT_BARRIER") else {
@@ -2165,7 +2245,13 @@ impl App {
             return Ok(());
         }
         if self.home.routes_tailored_key(&key) {
-            self.home.handle_key(key, self.update_info.as_ref());
+            let _ = self.home.handle_key(key, self.update_info.as_ref());
+            return Ok(());
+        }
+        let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
+        if !ctrl_c && self.home.retained_reader_focused() && !self.home.has_non_live_send_overlay()
+        {
+            let _ = self.home.handle_key(key, self.update_info.as_ref());
             return Ok(());
         }
         // An ACTIVE embedded view owns the keyboard; a mere preview does not.
@@ -2210,7 +2296,16 @@ impl App {
                 self.should_quit = true;
                 return Ok(());
             }
-            (KeyCode::Char('q'), modifiers) if !self.home.has_dialog() => {
+            // `quit_intent` owns the modifier rules (Ctrl+q is swallowed for live-send), so
+            // the Quit chord is probed bare.
+            (code, modifiers)
+                if !self.home.has_dialog()
+                    && bindings::is_bound(
+                        bindings::ActionId::Quit,
+                        self.home.strict_hotkeys,
+                        &KeyEvent::new(code, KeyModifiers::NONE),
+                    ) =>
+            {
                 match quit_intent(
                     modifiers,
                     self.home.is_creation_pending(),
@@ -2230,11 +2325,14 @@ impl App {
                 return Ok(());
             }
             // No `needs_redraw`: its full clear flashes the screen.
-            (KeyCode::Char('x'), KeyModifiers::CONTROL)
-                if (self.update_info.is_some()
-                    || self.update_status.is_some()
-                    || self.image_update.is_some())
-                    && !self.home.has_dialog() =>
+            _ if bindings::is_bound(
+                bindings::ActionId::DismissUpdateBanner,
+                self.home.strict_hotkeys,
+                &key,
+            ) && (self.update_info.is_some()
+                || self.update_status.is_some()
+                || self.image_update.is_some())
+                && !self.home.has_dialog() =>
             {
                 if self.image_banner_active() {
                     if let Some(update) = self.image_update.as_ref() {
@@ -2274,93 +2372,36 @@ impl App {
         if let Some(session_id) = self.pending_view_switch.take() {
             self.perform_view_switch(&session_id, terminal).await;
         }
-        if let Some(session_id) = self.pending_daemon_start_open.take() {
-            self.start_daemon_then_open(&session_id, terminal).await;
-        }
+
         if let Some(session_id) = self.pending_structured_view_open.take() {
             self.open_structured_view(&session_id).await?;
         }
+
         if let Some(session_id) = self.pending_smart_rename.take() {
-            self.perform_smart_rename(&session_id).await;
+            self.perform_smart_rename(&session_id);
         }
 
         Ok(())
     }
 
-    /// On-demand "Auto-name now"; the new title arrives through the file watcher.
-    async fn perform_smart_rename(&mut self, session_id: &str) {
-        use crate::acp::client::{require_daemon, HttpClient, ManagerError};
-
-        // A second request would replace the receiver and lose the first one's result.
-        if self.smart_rename_rx.is_some() {
-            self.set_status("auto-name already in progress");
-            return;
-        }
+    fn perform_smart_rename(&mut self, session_id: &str) {
         let title = self
             .home
             .get_instance(session_id)
-            .map(|i| i.title.clone())
+            .map(|row| row.title.clone())
             .unwrap_or_default();
-
-        let endpoint = match require_daemon().await {
-            Ok(e) => e,
-            Err(ManagerError::NoDaemonRunning(_)) => {
-                self.set_status(
-                    "Auto-name needs a running daemon; open the structured view first.",
-                );
-                return;
-            }
-            Err(e) => {
-                self.set_status(format!("daemon unreachable: {e}"));
-                return;
-            }
-        };
-        let http = match HttpClient::new(endpoint) {
-            Ok(h) => h,
-            Err(e) => {
-                self.set_status(format!("auto-name failed: {e}"));
-                return;
-            }
-        };
-        self.set_status(format!("auto-naming \"{title}\"…"));
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.smart_rename_rx = Some(rx);
-        let session_id = session_id.to_string();
-        tokio::spawn(async move {
-            let outcome = http
-                .smart_rename(&session_id)
-                .await
-                .map_err(|e| smart_rename_failure(&e));
-            let _ = tx.send(outcome);
-        });
-    }
-
-    /// Surfaces a failed "Auto-name now"; success shows as the new title.
-    fn poll_smart_rename(&mut self) -> bool {
-        let Some(mut rx) = self.smart_rename_rx.take() else {
-            return false;
-        };
-        match rx.try_recv() {
-            Ok(Ok(())) => false,
-            Ok(Err(failure)) => {
-                self.set_status(failure);
-                true
-            }
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                self.smart_rename_rx = Some(rx);
-                false
-            }
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                self.set_status("auto-name ended unexpectedly");
-                true
-            }
+        match self.home.session_feed.submit_request(
+            session_id.to_owned(),
+            crate::tui::session_feed::SessionRequest::SmartRename,
+        ) {
+            Ok(()) => self.set_status(format!("auto-naming \"{title}\"…")),
+            Err(error) => self.set_status(format!("auto-name failed: {error}")),
         }
     }
 
-    /// POST the view switch, starting a local daemon first if needed: the user
-    /// just confirmed a dialog saying the agent restarts under `aoe serve`.
+    /// Switch views against the located runtime without changing daemon exposure.
     async fn perform_view_switch(&mut self, session_id: &str, terminal: &mut Terminal<TuiBackend>) {
-        use crate::acp::client::{require_daemon, HttpClient, ManagerError};
+        use crate::acp::client::{locate_daemon, HttpClient};
 
         let Some(inst) = self.home.get_instance(session_id) else {
             return;
@@ -2368,23 +2409,19 @@ impl App {
         let to_structured = !inst.is_structured();
         let title = inst.title.clone();
 
-        let endpoint = match require_daemon().await {
-            Ok(e) => e,
-            Err(ManagerError::NoDaemonRunning(_)) => {
-                self.set_status("Starting local daemon for the view switch…");
-                let _ = self.draw(terminal);
-                match crate::tui::dialogs::start_local_daemon_and_wait().await {
-                    Ok(e) => e,
-                    Err(e) => {
-                        // The log-tail hint is multi-line; a status is one row.
-                        let first = e.lines().next().unwrap_or("unknown error");
-                        self.set_status(format!("view switch failed: {first}"));
-                        return;
-                    }
-                }
-            }
+        self.set_status("Connecting to the daemon…");
+        let _ = self.draw(terminal);
+        let endpoint = match locate_daemon().await {
+            Ok(endpoint) => endpoint,
             Err(e) => {
-                self.set_status(format!("daemon unreachable: {e}"));
+                // The failure hint is multi-line; a status is one row.
+                let first = e
+                    .to_string()
+                    .lines()
+                    .next()
+                    .unwrap_or("unknown error")
+                    .to_string();
+                self.set_status(format!("view switch failed: {first}"));
                 return;
             }
         };
@@ -2407,10 +2444,9 @@ impl App {
         });
     }
 
-    /// Enter the structured view, mounting it first if needed, or offer to
-    /// start a daemon when none runs.
+    /// Enter the structured view against the located runtime.
     async fn open_structured_view(&mut self, session_id: &str) -> Result<()> {
-        use crate::acp::client::{require_daemon, ManagerError};
+        use crate::acp::client::locate_daemon;
 
         // Archived rows render a placeholder; an active view would capture keys invisibly.
         if self
@@ -2434,18 +2470,21 @@ impl App {
                 .await;
             return Ok(());
         }
-        match require_daemon().await {
+        match locate_daemon().await {
             Ok(endpoint) => {
                 self.connect_embedded_structured(endpoint, session_id).await;
                 self.activate_embedded();
                 self.drain_pending_paste_for_structured_view(session_id)
                     .await;
             }
-            Err(ManagerError::NoDaemonRunning(_)) => {
-                self.home.prompt_start_daemon_for_structured(session_id);
-            }
             Err(e) => {
-                self.set_status(format!("structured view: {e}"));
+                let first = e
+                    .to_string()
+                    .lines()
+                    .next()
+                    .unwrap_or("unknown error")
+                    .to_string();
+                self.set_status(format!("structured view: {first}"));
             }
         }
         Ok(())
@@ -2481,7 +2520,7 @@ impl App {
     /// Mount in preview state; the caller activates it when entering.
     async fn connect_embedded_structured(
         &mut self,
-        endpoint: crate::acp::client::DaemonEndpoint,
+        endpoint: crate::daemon::DaemonEndpoint,
         session_id: &str,
     ) {
         use crate::tui::structured_view::embedded::EmbeddedView;
@@ -2502,39 +2541,72 @@ impl App {
         self.home.structured_preview = None;
     }
 
-    async fn start_daemon_then_open(
-        &mut self,
-        session_id: &str,
-        terminal: &mut Terminal<TuiBackend>,
-    ) {
-        self.update_status = Some(UpdateStatus::transient("Starting local daemon…".into()));
-        let _ = self.draw(terminal);
-        match crate::tui::dialogs::start_local_daemon_and_wait().await {
-            Ok(endpoint) => {
-                self.update_status = None;
-                self.connect_embedded_structured(endpoint, session_id).await;
-                self.activate_embedded();
-                self.drain_pending_paste_for_structured_view(session_id)
-                    .await;
-            }
-            Err(e) => {
-                let first = e.lines().next().unwrap_or("unknown error");
-                self.set_status(format!("daemon start failed: {first}"));
-            }
-        }
+    fn clear_preview_mount_pending(&mut self) {
+        self.preview_mount_pending = None;
+        self.home.structured_preview_pending = false;
     }
 
     /// Keep a streaming preview mounted for the selected structured session,
     /// debounced and only while a daemon is already reachable. Returns true if
     /// the mount set changed.
     async fn reconcile_structured_preview(&mut self) -> bool {
+        self.home.enforce_trash_read_only();
+        let retained = self
+            .home
+            .selected_session
+            .as_deref()
+            .and_then(|id| self.home.get_instance(id))
+            .filter(|inst| inst.is_trashed());
+        if let Some(inst) = retained {
+            let matches = self
+                .home
+                .retained_preview
+                .as_ref()
+                .is_some_and(|view| view.matches(inst));
+            if !matches {
+                let view = crate::tui::structured_view::embedded::RetainedView::new(
+                    crate::acp::client::discover().ok(),
+                    inst,
+                );
+                if self.home.retained_preview.is_some() && !self.home.retained_reader_focused() {
+                    self.home.retained_scroll_offset = 0;
+                    self.home.retained_focus = None;
+                }
+                self.home.retained_preview = Some(view);
+                self.home.clear_preview_selection();
+            }
+            self.clear_preview_mount_pending();
+            self.close_embedded_structured();
+            let changed = self
+                .home
+                .retained_preview
+                .as_mut()
+                .is_some_and(|view| view.tick());
+            if changed {
+                self.home.clear_preview_selection();
+            }
+            return changed || !matches;
+        }
+        let removed_retained = self.home.retained_preview.take().is_some();
+        if removed_retained {
+            self.home.retained_focus = None;
+            self.home.retained_scroll_offset = 0;
+        }
+        if self.home.sidebar_source != crate::tui::session_feed::SidebarSource::Daemon {
+            self.clear_preview_mount_pending();
+            return self.home.structured_preview.take().is_some();
+        }
+        if removed_retained {
+            self.home.clear_preview_selection();
+            self.home.structured_preview = None;
+        }
         // An active view stays unless a peer deleted, flipped, or archived its
         // session, or the selection moved: it would capture keys invisibly.
         if let Some(view) = self
             .home
             .structured_preview
             .as_ref()
-            .filter(|v| v.is_active())
+            .filter(|view| view.is_active())
         {
             let still_valid =
                 self.home.selected_structured_session().as_deref() == Some(view.session_id());
@@ -2549,8 +2621,8 @@ impl App {
             .home
             .structured_preview
             .as_ref()
-            .map(|v| v.session_id().to_string());
-        if desired.as_deref() == mounted.as_deref() {
+            .map(|v| v.session_id());
+        if desired.as_deref() == mounted {
             self.clear_preview_mount_pending();
             return false;
         }
@@ -2587,110 +2659,220 @@ impl App {
         true
     }
 
-    fn clear_preview_mount_pending(&mut self) {
-        self.preview_mount_pending = None;
-        self.home.structured_preview_pending = false;
+    fn start_dashboard_launch(&mut self) {
+        let Some(request) = self.home.pending_dashboard_launch.take() else {
+            return;
+        };
+        if self.dashboard_stop_requested || self.dashboard_stop.is_some() {
+            if let Some(serve) = &mut self.home.serve_view {
+                serve.begin_stop();
+            }
+            return;
+        }
+        if self.dashboard_launch.is_some() {
+            return;
+        }
+        let profile = self
+            .home
+            .active_profile
+            .clone()
+            .or_else(|| {
+                self.home
+                    .session_feed
+                    .applied_snapshot()
+                    .map(|snapshot| snapshot.contents.default_profile.clone())
+            })
+            .unwrap_or_default();
+        let epoch = self.home.session_feed.applied_epoch().map(str::to_owned);
+        self.home.session_feed.suspend_for_dashboard();
+        self.home
+            .set_sidebar_source(crate::tui::session_feed::SidebarSource::Connecting, None);
+        self.home.dashboard_launch = Some(crate::tui::dialogs::DashboardLaunch::Running {
+            target: request.target(),
+            started_at: std::time::Instant::now(),
+        });
+        let (result, receiver) = tokio::sync::oneshot::channel();
+        self.dashboard_launch = Some(receiver);
+        tokio::spawn(async move {
+            let _ = result.send(request.run(profile, epoch).await);
+        });
     }
 
-    /// Auto-stop plain tmux sessions idle past `session.auto_stop_idle_secs`.
-    /// Claims happen under the storage lock so a co-running `aoe serve` can't
-    /// double-stop. Returns true if any session was reaped.
-    fn reap_idle_sessions(&mut self) -> bool {
-        // Skip the pass on a tmux query failure rather than reap an attached session.
-        let Ok(attached) = crate::tmux::attached_session_names() else {
+    fn poll_dashboard_launch(&mut self) -> bool {
+        let Some(receiver) = &mut self.dashboard_launch else {
             return false;
         };
-        let now = chrono::Utc::now();
-        let instances: Vec<crate::session::Instance> = self.home.instances().cloned().collect();
-        let candidates = crate::session::idle_reap::idle_reap_candidates(
-            &instances,
-            now,
-            &attached,
-            |profile| {
-                crate::session::config::profile_config::resolve_config_or_warn(profile)
-                    .session
-                    .auto_stop_idle_secs
-            },
-        );
-        let mut reaped = false;
-        for cand in candidates {
-            match crate::session::idle_reap::claim_idle_stop(
-                &cand.profile,
-                self.home.file_watch.clone(),
-                &cand.session_id,
-                now,
-                cand.threshold_secs,
-            ) {
-                Ok(Some(instance)) => {
-                    // The claim persisted `Stopped`; kill off the UI thread.
-                    self.home
-                        .set_instance_status(&cand.session_id, crate::session::Status::Stopped);
-                    self.home
-                        .stop_poller
-                        .request_stop(crate::tui::stop_poller::StopRequest {
-                            session_id: cand.session_id.clone(),
-                            instance,
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return false,
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Err("Dashboard startup was interrupted; no reconnect or mutation was replayed. Use aoe serve --status, then reconnect explicitly.".to_owned()),
+        };
+        self.dashboard_launch = None;
+        let launch = self.home.dashboard_launch.take();
+        match result {
+            Ok(prepared) if self.dashboard_stop_requested => {
+                drop(prepared);
+            }
+            Ok(prepared) => {
+                if let Some(serve) = &mut self.home.serve_view {
+                    serve.finish_launch(Ok(()));
+                }
+                self.home.session_feed.connect_prepared(
+                    self.home.active_profile.clone().unwrap_or_default(),
+                    Some(prepared),
+                );
+            }
+            Err(_) if self.dashboard_stop_requested => {}
+            Err(message) => {
+                if let Some(serve) = &mut self.home.serve_view {
+                    serve.finish_launch(Err(message.clone()));
+                } else if let Some(crate::tui::dialogs::DashboardLaunch::Running {
+                    target, ..
+                }) = launch
+                {
+                    // Hidden with Esc: the offline takeover's "Didn't start" row reports it. The log
+                    // tail is read now, so a view opened later shows this failure's lines.
+                    self.home.dashboard_launch =
+                        Some(crate::tui::dialogs::DashboardLaunch::Failed {
+                            target,
+                            message: message.clone(),
+                            log_tail: crate::acp::client::autostart::initial_log_tail(),
                         });
-                    tracing::info!(
-                        target: "tui.idle_reap",
-                        session = %cand.session_id,
-                        profile = %cand.profile,
-                        threshold_secs = cand.threshold_secs,
-                        "auto-stopped idle tmux session",
-                    );
-                    reaped = true;
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        target: "tui.idle_reap",
-                        session = %cand.session_id,
-                        error = %e,
-                        "idle auto-stop claim failed",
-                    );
-                }
+                self.home.set_sidebar_source(
+                    crate::tui::session_feed::SidebarSource::Disconnected,
+                    Some(&message),
+                );
             }
         }
-        if reaped {
-            if let Err(e) = self.home.save() {
-                tracing::error!(target: "tui.idle_reap", "failed to save after idle reap: {e}");
-            }
-        }
-        reaped
+        self.start_dashboard_stop_if_ready();
+        true
     }
 
+    /// Keys while the runtime isn't the Daemon and no Web dashboard view is open: the offline
+    /// takeover or the "Connecting" screen. Returns true to quit.
+    fn handle_runtime_gate_key(&mut self, key: KeyEvent) -> bool {
+        use crate::tui::session_feed::SidebarSource;
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('q'), KeyModifiers::NONE)
+            | (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+            (KeyCode::Char('r'), KeyModifiers::NONE)
+                if self.home.sidebar_source == SidebarSource::Disconnected =>
+            {
+                self.home.connect_runtime();
+            }
+            // A dashboard start hidden with Esc keeps the runtime off the Daemon, so this screen is
+            // the only way back to it: still starting, or why it didn't.
+            (KeyCode::Enter, KeyModifiers::NONE) if self.home.dashboard_launch.is_some() => {
+                self.home.open_serve();
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn request_dashboard_stop(&mut self) {
+        if self.dashboard_stop_requested || self.dashboard_stop.is_some() {
+            return;
+        }
+        self.dashboard_stop_requested = true;
+        if let Some(serve) = &mut self.home.serve_view {
+            serve.begin_stop();
+        }
+        self.home.session_feed.suspend_for_dashboard();
+        self.home
+            .set_sidebar_source(crate::tui::session_feed::SidebarSource::Connecting, None);
+        self.start_dashboard_stop_if_ready();
+    }
+
+    fn start_dashboard_stop_if_ready(&mut self) {
+        if !self.dashboard_stop_requested
+            || self.dashboard_launch.is_some()
+            || self.dashboard_stop.is_some()
+        {
+            return;
+        }
+        let (result, receiver) = tokio::sync::oneshot::channel();
+        self.dashboard_stop = Some(receiver);
+        tokio::spawn(async move {
+            let stopped = crate::cli::serve::stop_daemon().await.map_err(|error| {
+                tracing::warn!(target: "tui.home", %error, "dashboard stop failed");
+                "Stop did not complete. Inspect `aoe serve --status` before reconnecting or retrying.".to_owned()
+            });
+            let _ = result.send(stopped);
+        });
+    }
+
+    fn poll_dashboard_stop(&mut self) -> bool {
+        let Some(receiver) = &mut self.dashboard_stop else {
+            return false;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return false,
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Err(
+                "Stop was interrupted; inspect `aoe serve --status` before another action."
+                    .to_owned(),
+            ),
+        };
+        self.dashboard_stop = None;
+        self.dashboard_stop_requested = false;
+        if let Some(serve) = &mut self.home.serve_view {
+            serve.finish_stop(result.clone());
+        }
+        let message = result.err().unwrap_or_else(|| {
+            "Daemon stopped by this TUI. Reconnect explicitly to start a local runtime.".to_owned()
+        });
+        self.home.set_sidebar_source(
+            crate::tui::session_feed::SidebarSource::Disconnected,
+            Some(&message),
+        );
+        true
+    }
     fn execute_action(
         &mut self,
         action: Action,
         terminal: &mut Terminal<TuiBackend>,
     ) -> Result<()> {
+        let target = match &action {
+            Action::AttachSession(id)
+            | Action::AttachTerminal(id, _)
+            | Action::SendMessage(id, _)
+            | Action::EnterLiveSend(id)
+            | Action::AttachToolSession(id, _)
+            | Action::RunBackgroundToolSession(id, _)
+            | Action::OpenStructuredView(id)
+            | Action::SwitchSessionView(id)
+            | Action::SmartRenameNow(id)
+            | Action::StopSession(id) => Some(id),
+            _ => None,
+        };
+        if target.is_some_and(|id| self.home.get_instance(id).is_some_and(|i| i.is_trashed())) {
+            return Ok(());
+        }
         match action {
+            Action::StartDashboard => self.start_dashboard_launch(),
+            Action::StopDashboard => self.request_dashboard_stop(),
             Action::Quit => self.should_quit = true,
             Action::RecheckAgents => self.spawn_tool_detection(true),
             Action::AttachSession(id) => {
                 self.attach_session(&id, terminal)?;
             }
-            Action::AttachAfterCreate(id) => {
-                self.dispatch_new_session_attach(&id, terminal)?;
-            }
             Action::AttachTerminal(id, mode) => {
-                self.attach_terminal(&id, mode, terminal)?;
+                self.attach_terminal(&id, mode);
             }
             Action::EditFile(path) => {
                 self.edit_file(&path, terminal)?;
             }
             Action::StopSession(id) => {
-                if let Some(inst) = self.home.get_instance(&id) {
-                    // Background stop: `docker stop` can block for the grace
-                    // period. Stopped now so the poller doesn't flag Error.
-                    let request = crate::tui::stop_poller::StopRequest {
-                        session_id: id.clone(),
-                        instance: inst.clone(),
-                    };
-                    self.home
-                        .set_instance_status(&id, crate::session::Status::Stopped);
-                    self.home.save()?;
-                    self.home.stop_poller.request_stop(request);
+                if self.home.get_instance(&id).is_none() {
+                    return Ok(());
+                }
+                if let Err(error) = self.home.submit_daemon_stop_via_ui(&id) {
+                    self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
+                        "Stop failed",
+                        &error.to_string(),
+                    ));
                 }
             }
             Action::SetTheme(name) => {
@@ -2727,9 +2909,19 @@ impl App {
                     self.set_status("Reviving session...");
                     self.draw(terminal)?;
                 }
-                self.home.execute_send_message(&id, &message);
-                if !warm {
+                let target = self.home.take_send_target();
+                // Boot the pane at the size it will be shown at, so entering
+                // live send does not immediately reflow it.
+                let boot_size = self.home.live_send_boot_size();
+                if let Err(error) = self
+                    .home
+                    .prepare_send_target(&id, target, message, boot_size)
+                {
                     self.update_status = None;
+                    self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
+                        "Send Failed",
+                        &error.to_string(),
+                    ));
                 }
             }
             Action::EnterLiveSend(id) => {
@@ -2741,18 +2933,21 @@ impl App {
                     self.set_status("Reviving session...");
                     self.draw(terminal)?;
                 }
-                let outcome = self.home.prepare_live_send(&id);
-                // Settle the toast first so the redraw computes the final geometry.
-                if !warm {
-                    // The info dialog already carries any failure detail.
+                let target = self.home.take_live_send_target();
+                let boot_size = self.home.live_send_boot_size();
+                if let Err(error) = self.home.prepare_live_send_target(&id, target, boot_size) {
+                    // The receipt carries the geometry the user will see, so the
+                    // entry itself happens there; a refusal here only needs to
+                    // drop the toast and explain.
                     self.update_status = None;
-                }
-                if outcome.is_ok() {
-                    self.draw(terminal)?;
+                    self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
+                        "Live send failed",
+                        &error.to_string(),
+                    ));
                 }
             }
             Action::AttachToolSession(id, tool_name) => {
-                self.attach_tool_session(&id, &tool_name, terminal)?;
+                self.attach_tool_session(&id, &tool_name);
             }
             Action::RunBackgroundToolSession(id, tool_name) => {
                 self.run_background_tool_session(&id, &tool_name);
@@ -2760,14 +2955,12 @@ impl App {
             // These need the async loop, which drains them after this returns.
             Action::OpenStructuredView(id) => self.pending_structured_view_open = Some(id),
             Action::SwitchSessionView(id) => self.pending_view_switch = Some(id),
-            Action::StartDaemonThenOpenStructured(id) => self.pending_daemon_start_open = Some(id),
             Action::SmartRenameNow(id) => self.pending_smart_rename = Some(id),
         }
         Ok(())
     }
 
-    /// Route a new session through the configured attach mode. Structured
-    /// sessions open their structured view instead.
+    /// Apply the configured new-session attach mode to the canonical row.
     fn dispatch_new_session_attach(
         &mut self,
         session_id: &str,
@@ -2820,10 +3013,16 @@ impl App {
             needs_restart,
             "attach_session: restart decision"
         );
-        if needs_restart && self.home.refuse_start_if_shelved(session_id) {
+        // A row about to be started must not be one the user shelved: the
+        // trashed/archived agent stays stopped, so refuse visibly and point at
+        // the restore key instead of letting the runtime reject the start
+        // (#4118). The predicate is this branch's own, so the Stopped case the
+        // thin-client rework added to it is refused the same way.
+        let starts_agent = needs_restart || instance.status == crate::session::Status::Stopped;
+        if starts_agent && self.home.refuse_start_if_shelved(session_id) {
             return Ok(());
         }
-        if needs_restart {
+        if starts_agent {
             // Warn once when the agent can't take the sandbox's custom instruction.
             if custom_instruction_warning_pending(&instance) {
                 self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
@@ -2849,17 +3048,12 @@ impl App {
                 return Ok(());
             }
 
-            if instance.is_sandboxed()
-                && self
-                    .defer_to_store_move(session_id, Action::AttachSession(session_id.to_string()))
-            {
-                return Ok(());
+            let size = crate::terminal::get_size();
+            if instance.status == crate::session::Status::Stopped {
+                self.home.start_then_attach(session_id, size);
+            } else {
+                self.home.restart_then_attach(session_id, size, false);
             }
-
-            let skip_on_launch = self.home.take_on_launch_hooks_ran(session_id);
-            // The attach follows from the tick loop; failures surface as dialogs.
-            self.home
-                .restart_then_attach(session_id, crate::terminal::get_size(), skip_on_launch);
             return Ok(());
         }
 
@@ -2938,8 +3132,7 @@ impl App {
         };
         let mut state = focus_requests::target_state(&instance);
         if state.exists && state.needs_restart && !state.shelved {
-            state.needs_input = custom_instruction_warning_pending(&instance)
-                || (instance.is_sandboxed() && self.home.needs_store_move_before_launch(id));
+            state.needs_input = custom_instruction_warning_pending(&instance);
         }
         focus_requests::decide(Some(state))
     }
@@ -2988,6 +3181,9 @@ impl App {
         session_id: &str,
         terminal: &mut Terminal<TuiBackend>,
     ) -> Result<()> {
+        if !self.home.session_feed.native_interaction_available() {
+            return Ok(());
+        }
         let tmux_session = match self.home.get_instance(session_id) {
             Some(inst) => inst.tmux_session()?,
             None => return Ok(()),
@@ -2997,14 +3193,16 @@ impl App {
         tmux_session.reset_size_to_latest_client();
         self.home.clear_preview_pane_sync(session_id);
         self.enter_focus_attached(session_id);
-        let (attach_result, attached_status_updates) =
-            self.with_attached_status_hooks(terminal, || tmux_session.attach())?;
+        let attach_result = self.with_raw_mode_disabled(terminal, || tmux_session.attach())?;
         let shown = self.leave_focus_attached(session_id);
 
-        self.settle_after_attach(attached_status_updates)?;
-        // Turns that finished during the attach were applied without the
-        // live-send exemption; the user just viewed them, including any
-        // session a focus request switched to.
+        self.needs_redraw = true;
+        crate::tmux::refresh_session_cache();
+        self.home.apply_session_feed();
+        let result = self.home.reload();
+        self.home.reload_failure_state.record_storage(&result);
+        self.home.try_present_reload_failure_dialog();
+        // The user just viewed every session a focus request switched to.
         for (i, id) in shown.iter().enumerate() {
             if i > 0 {
                 // The first session's preview sync was cleared before attach.
@@ -3012,9 +3210,6 @@ impl App {
             }
             self.home.clear_unread_on_view(id);
             self.home.stamp_last_accessed(id);
-        }
-        if let Err(e) = self.home.save() {
-            tracing::error!("Failed to save after attach-return: {}", e);
         }
         self.select_after_attach(shown.last().map_or(session_id, String::as_str));
 
@@ -3025,16 +3220,72 @@ impl App {
         Ok(())
     }
 
-    fn settle_after_attach(&mut self, updates: Vec<StatusUpdate>) -> Result<()> {
+    fn attach_terminal(&mut self, session_id: &str, mode: TerminalMode) {
+        let sandboxed = self
+            .home
+            .get_instance(session_id)
+            .is_some_and(|row| row.is_sandboxed());
+        let target = if mode == TerminalMode::Container && sandboxed {
+            crate::session::AuxiliaryTarget::Container { index: 0 }
+        } else {
+            crate::session::AuxiliaryTarget::Host { index: 0 }
+        };
+        self.prepare_native_attachment(session_id, target);
+    }
+
+    fn attach_tool_session(&mut self, session_id: &str, tool_name: &str) {
+        self.prepare_native_attachment(
+            session_id,
+            crate::session::AuxiliaryTarget::Tool {
+                tool_name: tool_name.into(),
+            },
+        );
+    }
+
+    fn prepare_native_attachment(&mut self, id: &str, target: crate::session::AuxiliaryTarget) {
+        use crate::tui::home::panes::{NativePane, PaneIntent};
+        if let Err(error) = self.home.prepare_native_attachment(
+            id,
+            NativePane::Auxiliary(target),
+            crate::terminal::get_size(),
+            PaneIntent::Attach,
+        ) {
+            self.home.info_dialog = Some(crate::tui::dialogs::InfoDialog::new(
+                "Attachment failed",
+                &error.to_string(),
+            ));
+        }
+    }
+
+    fn attach_native_target(
+        &mut self,
+        ready: crate::tui::home::ReadyNativeAttachment,
+        terminal: &mut Terminal<TuiBackend>,
+    ) -> Result<()> {
+        if !ready.lease.is_valid() {
+            return Ok(());
+        }
+        let target = crate::tmux::Session::from_name(&ready.tmux_name);
+        let lease = ready.lease;
+        self.home.clear_preview_pane_sync(&ready.id);
+        let attach_result = self.with_raw_mode_disabled(
+            terminal,
+            Box::new(move || {
+                anyhow::ensure!(lease.is_valid(), "Native interaction permission revoked");
+                target.reset_size_to_latest_client();
+                target.attach()
+            }),
+        )?;
         self.needs_redraw = true;
-        crate::tmux::refresh_session_cache();
-        self.home.reload()?;
-        self.home.apply_status_updates_without_hooks(updates);
+        self.home.apply_session_feed();
+        self.select_after_attach(&ready.id);
+        if let Err(error) = attach_result {
+            tracing::warn!(target: "tui.input", %error, "Native tmux attach failed");
+            self.set_status(format!("Attach failed: {error}"));
+        }
         Ok(())
     }
 
-    /// In Attention sort, jump to the top-attention row: the session we left
-    /// usually dropped a tier.
     fn select_after_attach(&mut self, session_id: &str) {
         if self.home.sort_order() == crate::session::config::SortOrder::Attention {
             self.home.select_top_attention(Some(session_id));
@@ -3043,172 +3294,11 @@ impl App {
         }
     }
 
-    /// Start a pending sandbox store copy and resume `resume` afterwards,
-    /// returning `true` when the launch was deferred.
-    fn defer_to_store_move(&mut self, session_id: &str, resume: Action) -> bool {
-        if !self.home.needs_store_move_before_launch(session_id) {
-            return false;
-        }
-        if !self.home.begin_store_move(session_id, Some(resume)) {
-            self.set_status("another agent store move is still in progress");
-        }
-        true
-    }
-
-    fn attach_terminal(
-        &mut self,
-        session_id: &str,
-        mode: TerminalMode,
-        terminal: &mut Terminal<TuiBackend>,
-    ) -> Result<()> {
-        let instance = match self.home.get_instance(session_id) {
-            Some(inst) => inst.clone(),
-            None => return Ok(()),
-        };
-
-        let size = crate::terminal::get_size();
-
-        let attach_fn: Box<dyn FnOnce() -> Result<()>> = match mode {
-            TerminalMode::Container if instance.is_sandboxed() => {
-                let container_session = instance.container_terminal_tmux_session()?;
-                if !container_session.exists() || container_session.is_pane_dead() {
-                    if self.defer_to_store_move(
-                        session_id,
-                        Action::AttachTerminal(session_id.to_string(), mode),
-                    ) {
-                        return Ok(());
-                    }
-                    if container_session.exists() {
-                        let _ = container_session.kill();
-                    }
-                    if let Err(e) = self
-                        .home
-                        .start_container_terminal_for_instance_with_size(session_id, size)
-                    {
-                        self.home
-                            .set_instance_error(session_id, Some(e.to_string()));
-                        return Ok(());
-                    }
-                }
-                Box::new(move || container_session.attach())
-            }
-            _ => {
-                let terminal_session = instance.terminal_tmux_session()?;
-                if !terminal_session.exists() || terminal_session.is_pane_dead() {
-                    if terminal_session.exists() {
-                        let _ = terminal_session.kill();
-                    }
-                    if let Err(e) = self
-                        .home
-                        .start_terminal_for_instance_with_size(session_id, size)
-                    {
-                        self.home
-                            .set_instance_error(session_id, Some(e.to_string()));
-                        return Ok(());
-                    }
-                }
-                Box::new(move || terminal_session.attach())
-            }
-        };
-
-        let (attach_result, attached_status_updates) =
-            self.with_attached_status_hooks(terminal, attach_fn)?;
-
-        self.settle_after_attach(attached_status_updates)?;
-        self.select_after_attach(session_id);
-
-        if let Err(e) = attach_result {
-            tracing::warn!(target: "tui.input", "tmux terminal attach returned error: {}", e);
-        }
-
-        Ok(())
-    }
-
-    fn attach_tool_session(
-        &mut self,
-        session_id: &str,
-        tool_name: &str,
-        terminal: &mut Terminal<TuiBackend>,
-    ) -> Result<()> {
-        let instance = match self.home.get_instance(session_id) {
-            Some(inst) => inst.clone(),
-            None => return Ok(()),
-        };
-
-        let tool_config = match self.home.tool_configs.get(tool_name) {
-            Some(tc) => tc.clone(),
-            None => return Ok(()),
-        };
-
-        if tool_config.command.is_empty() {
-            self.home.set_instance_error(
-                session_id,
-                Some(format!("Tool '{}' has no command configured", tool_name)),
-            );
-            return Ok(());
-        }
-
-        let size = crate::terminal::get_size();
-        let tool_session = crate::tmux::ToolSession::new(&instance.id, &instance.title, tool_name);
-
-        if !tool_session.exists() || tool_session.is_pane_dead() {
-            if tool_session.exists() {
-                let _ = tool_session.kill();
-            }
-            if let Err(e) = tool_session.create_with_size(
-                &instance.project_path,
-                &tool_config.command,
-                size,
-                &instance.effective_profile(),
-            ) {
-                self.home
-                    .set_instance_error(session_id, Some(e.to_string()));
-                return Ok(());
-            }
-            // A bad tool command can exit instantly and leave a dead pane.
-            if let Err(e) = tool_session.wait_until_ready() {
-                self.home
-                    .set_instance_error(session_id, Some(e.to_string()));
-                return Ok(());
-            }
-        }
-
-        let branch = instance
-            .worktree_info
-            .as_ref()
-            .map(|w| w.branch.as_str())
-            .or_else(|| instance.workspace_info.as_ref().map(|w| w.branch.as_str()));
-        crate::tmux::status_bar::apply_all_tmux_options(
-            tool_session.session_name(),
-            &format!("{} ({})", instance.title, tool_name),
-            branch,
-            None,
-            &instance.effective_profile(),
-        );
-
-        let attach_fn: Box<dyn FnOnce() -> Result<()>> = Box::new(move || tool_session.attach());
-        let (attach_result, attached_status_updates) =
-            self.with_attached_status_hooks(terminal, attach_fn)?;
-
-        self.settle_after_attach(attached_status_updates)?;
-        self.home.select_session_by_id(session_id);
-
-        if let Err(e) = attach_result {
-            tracing::warn!(
-                "tmux tool session '{}' attach returned error: {}",
-                tool_name,
-                e
-            );
-        }
-
-        Ok(())
-    }
-
     fn run_background_tool_session(&mut self, session_id: &str, tool_name: &str) {
         let Some(project_path) = self
             .home
             .get_instance(session_id)
-            .map(|i| i.project_path.clone())
+            .map(|i| i.project_path.as_str())
         else {
             self.set_status(format!("Tool '{tool_name}' failed: session not found"));
             return;
@@ -3217,12 +3307,12 @@ impl App {
             .home
             .tool_configs
             .get(tool_name)
-            .map(|t| t.command.clone())
+            .map(|t| t.command.as_str())
         else {
             self.set_status(format!("Tool '{tool_name}' is not configured"));
             return;
         };
-        let status = match spawn_background_tool(session_id, tool_name, &project_path, &command) {
+        let status = match spawn_background_tool(session_id, tool_name, project_path, command) {
             Ok(()) => format!("Started background tool: {tool_name}"),
             Err(e) => format!("Failed to start background tool '{tool_name}': {e}"),
         };
@@ -3234,21 +3324,20 @@ impl App {
         path: &std::path::Path,
         terminal: &mut Terminal<TuiBackend>,
     ) -> Result<()> {
-        let editor_available = |name: &str| {
-            std::process::Command::new(name)
-                .arg("--version")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok()
-        };
         let editor = std::env::var("EDITOR")
             .ok()
             .or_else(|| {
                 ["vim", "nano"]
                     .into_iter()
-                    .find(|name| editor_available(name))
-                    .map(str::to_string)
+                    .find(|name| {
+                        std::process::Command::new(name)
+                            .arg("--version")
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status()
+                            .is_ok()
+                    })
+                    .map(str::to_owned)
             })
             .unwrap_or_else(|| "vim".to_string());
 
@@ -3361,6 +3450,8 @@ fn wait_for_background_tool(session_id: &str, tool_name: &str, mut child: std::p
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    StartDashboard,
+    StopDashboard,
     Quit,
     RecheckAgents,
     AttachSession(String),
@@ -3380,8 +3471,6 @@ pub enum Action {
     /// Deferred so the loop can show "Reviving..." before `ensure_pane_ready`.
     SendMessage(String, String),
     EnterLiveSend(String),
-    /// A session from the synchronous create path, routed through the new-session mode.
-    AttachAfterCreate(String),
     /// (session id, tool name indexing `Config.tools`).
     AttachToolSession(String, String),
     /// Run a tool command detached in the session's workdir.
@@ -3389,24 +3478,8 @@ pub enum Action {
     // Stashed for the async loop.
     OpenStructuredView(String),
     SwitchSessionView(String),
-    StartDaemonThenOpenStructured(String),
-    SmartRenameNow(String),
-}
 
-/// Leads with the API `message` so the agent's reason fits the one-row banner.
-fn smart_rename_failure(e: &crate::acp::client::HttpError) -> String {
-    let message = match e {
-        crate::acp::client::HttpError::Server { body, .. } => {
-            serde_json::from_str::<serde_json::Value>(body)
-                .ok()
-                .and_then(|v| v["message"].as_str().map(str::to_owned))
-        }
-        _ => None,
-    };
-    format!(
-        "auto-name failed: {}",
-        message.unwrap_or_else(|| e.to_string())
-    )
+    SmartRenameNow(String),
 }
 
 async fn recv_focus(
@@ -3442,6 +3515,7 @@ mod tests {
     async fn startup_onboarding_preserves_saved_state_during_config_edits() {
         for readable_state in [true, false] {
             let _home = crate::session::test_support::isolate_app_dir();
+            crate::session::get_profile_dir("test").unwrap();
             update_app_state(|state| {
                 state.has_seen_welcome = true;
                 state.has_responded_to_telemetry = true;
@@ -3525,6 +3599,7 @@ mod tests {
         }
         let temp = tempfile::tempdir().unwrap();
         let _home = crate::session::test_support::isolate_app_dir_at(temp.path());
+        crate::session::get_profile_dir("test").unwrap();
         let memo = crate::tmux::AgentAvailabilityGuard::capture();
         let bin = temp.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -3610,6 +3685,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let _home = crate::session::test_support::isolate_app_dir_at(temp.path());
+        crate::session::get_profile_dir("test").unwrap();
         let _memo = crate::tmux::AgentAvailabilityGuard::capture();
         crate::tmux::invalidate_agent_availability();
         let bin = temp.path().join("bin");
@@ -3697,6 +3773,7 @@ mod tests {
     async fn current_version_update_result_refreshes_the_open_changelog() {
         let temp = tempfile::tempdir().unwrap();
         let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        crate::session::get_profile_dir("test").unwrap();
         let mut app = App::new(
             "test",
             AvailableTools::with_tools(&["claude"]),
@@ -3766,6 +3843,7 @@ mod tests {
         ] {
             let temp = tempfile::tempdir().unwrap();
             let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+            crate::session::get_profile_dir("test").unwrap();
             let mut app = App::new(
                 "test",
                 AvailableTools::with_tools(initial_tools),
@@ -3814,29 +3892,7 @@ mod tests {
         }
     }
     use crate::telemetry::SendOutcome;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    #[test]
-    fn smart_rename_failure_leads_with_the_api_message() {
-        use crate::acp::client::HttpError;
-        use reqwest::StatusCode;
-        for (body, want) in [
-            (
-                r#"{"error":"smart_rename_failed","message":"`opencode` failed: token expired"}"#,
-                "auto-name failed: `opencode` failed: token expired",
-            ),
-            (
-                "upstream down",
-                "auto-name failed: daemon returned HTTP 502 Bad Gateway: upstream down",
-            ),
-        ] {
-            let e = HttpError::Server {
-                status: StatusCode::BAD_GATEWAY,
-                body: body.to_string(),
-            };
-            assert_eq!(smart_rename_failure(&e), want);
-        }
-    }
+    use std::sync::atomic::Ordering;
 
     /// Read a signal's disposition; `sigaction` sets while reading, so restore it.
     #[cfg(unix)]
@@ -3855,9 +3911,8 @@ mod tests {
     fn same_disposition(a: nix::sys::signal::SigHandler, b: nix::sys::signal::SigHandler) -> bool {
         use nix::sys::signal::SigHandler;
         match (a, b) {
-            (SigHandler::SigDfl, SigHandler::SigDfl) | (SigHandler::SigIgn, SigHandler::SigIgn) => {
-                true
-            }
+            (SigHandler::SigDfl, SigHandler::SigDfl) => true,
+            (SigHandler::SigIgn, SigHandler::SigIgn) => true,
             (SigHandler::Handler(f1), SigHandler::Handler(f2)) => f1 as usize == f2 as usize,
             _ => false,
         }
@@ -3965,12 +4020,299 @@ mod tests {
         assert!(crate::session::tui_control::live_records().is_empty());
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn retained_reader_ctrl_c_quits_or_confirms_pending_creation() {
+        let _guard = crate::session::test_support::isolate_app_dir();
+        crate::session::get_profile_dir("test").unwrap();
+        let mut inst = crate::session::Instance::new("retained quit", "/tmp");
+        inst.trash();
+        inst.source_profile = "test".into();
+        crate::session::Storage::new_unwatched("test")
+            .unwrap()
+            .update(|rows, _| {
+                *rows = vec![inst.clone()];
+                Ok(())
+            })
+            .unwrap();
+        let mut app = App::new(
+            "test",
+            AvailableTools::with_tools(&["claude"]),
+            true,
+            false,
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .unwrap();
+        app.home.selected_session = Some(inst.id.clone());
+        app.home.retained_focus = Some((inst.id.clone(), inst.lifecycle_generation));
+        assert!(app.home.retained_reader_focused());
+        let backend =
+            crate::tui::hyperlink::HyperlinkBackend::new(std::io::stdout(), Default::default());
+        let mut terminal = Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 100, 40)),
+            },
+        )
+        .unwrap();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        app.handle_key(ctrl_c, &mut terminal).await.unwrap();
+        assert!(app.should_quit);
+        app.should_quit = false;
+        app.home.pending_creation = Some(crate::tui::home::PendingCreation {
+            daemon_id: None,
+            request_key: "other-creation".into(),
+            origin_epoch: "test".into(),
+            cancel_requested: false,
+            cancel_sent: false,
+            outcome_unknown: false,
+            confirmation: None,
+            reload_retry_at: None,
+        });
+        app.handle_key(ctrl_c, &mut terminal).await.unwrap();
+        assert!(!app.should_quit);
+        assert!(app.home.confirm_dialog.is_some());
+        assert!(app.home.is_creation_pending());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn retained_refresh_discards_captured_selection_without_resetting_reader() {
+        use crate::acp::state::Event as AcpEvent;
+        use axum::{routing::get, Router};
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(temp.path());
+        crate::session::get_profile_dir("test").unwrap();
+        let mut inst = crate::session::Instance::new("retained selection", "/tmp");
+        inst.trash();
+        inst.source_profile = "test".into();
+        crate::session::Storage::new_unwatched("test")
+            .unwrap()
+            .update(|rows, groups| {
+                *rows = vec![inst.clone()];
+                *groups = crate::session::GroupTree::new_with_groups(rows, &[]).get_all_groups();
+                Ok(())
+            })
+            .unwrap();
+        let id = inst.id.clone();
+        let state = crate::server::test_support::build_test_app_state(vec![inst.clone()]);
+        state
+            .acp_event_store
+            .record(
+                &id,
+                1,
+                &AcpEvent::AgentMessageChunk {
+                    text: "OLD-RETAINED\n\n".repeat(80),
+                    message_id: None,
+                },
+            )
+            .unwrap();
+        let router = Router::new()
+            .route(
+                "/api/sessions/{id}/acp/replay",
+                get(crate::server::api::acp_replay),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = crate::daemon::DaemonEndpoint::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            None,
+            crate::daemon::Source::Env,
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut app = App::new(
+            "test",
+            AvailableTools::with_tools(&["claude"]),
+            true,
+            false,
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .unwrap();
+        crate::server::test_support::refresh_canonical_metadata_for_test(&state).await;
+        let snapshot = state.runtime.publish(&state).await.unwrap().value.clone();
+        app.home.session_feed.publish_for_test(
+            crate::tui::session_feed::SessionFeedResult::Snapshot(std::sync::Arc::new(snapshot)),
+        );
+        app.home.apply_session_feed();
+        app.home.selected_session = Some(id.clone());
+        app.home.retained_preview = Some(crate::tui::structured_view::embedded::RetainedView::new(
+            Some(endpoint),
+            &inst,
+        ));
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(200, 40)).unwrap();
+        let theme = crate::tui::styles::Theme::default();
+        let mut ticker = tokio::time::interval(Duration::from_millis(10));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                ticker.tick().await;
+                app.reconcile_structured_preview().await;
+                terminal
+                    .draw(|frame| {
+                        app.home
+                            .render(frame, frame.area(), &theme, None, None, None);
+                    })
+                    .unwrap();
+                if app
+                    .home
+                    .retained_preview
+                    .as_ref()
+                    .unwrap()
+                    .rendered_text(app.home.preview_text_view.pane.width)
+                    .is_some_and(|text| text.to_string().contains("OLD-RETAINED"))
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        app.home.retained_focus = Some((id.clone(), inst.lifecycle_generation));
+        app.home.retained_scroll_offset = 7;
+        terminal
+            .draw(|frame| {
+                app.home
+                    .render(frame, frame.area(), &theme, None, None, None);
+            })
+            .unwrap();
+        let pane = app.home.preview_text_view.pane;
+        let (x, y) = (pane.y..pane.bottom())
+            .find_map(|y| {
+                let line: String = (pane.x..pane.right())
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect();
+                line.find("OLD-RETAINED").map(|byte| {
+                    (
+                        pane.x + unicode_width::UnicodeWidthStr::width(&line[..byte]) as u16,
+                        y,
+                    )
+                })
+            })
+            .expect("retained text must be painted before selecting it");
+        assert!(app.home.handle_drag_start(x, y));
+        assert!(app.home.handle_drag_move(x + 8, y));
+        app.home.handle_drag_end();
+        terminal
+            .draw(|frame| {
+                app.home
+                    .render(frame, frame.area(), &theme, None, None, None);
+            })
+            .unwrap();
+        assert!(app
+            .home
+            .preview_copy_text
+            .as_ref()
+            .is_some_and(|text| text.contains("OLD")));
+        terminal
+            .draw(|frame| {
+                app.home
+                    .render(frame, frame.area(), &theme, None, None, None);
+            })
+            .unwrap();
+        assert!(
+            app.home.preview_selection.is_some(),
+            "unchanged repaint keeps selection"
+        );
+        assert!(app.home.preview_copy_text.is_some());
+        for resize in [false, true] {
+            let changed_theme = crate::tui::styles::Theme {
+                text: ratatui::style::Color::Yellow,
+                ..theme.clone()
+            };
+            terminal = Terminal::new(ratatui::backend::TestBackend::new(
+                if resize { 180 } else { 200 },
+                40,
+            ))
+            .unwrap();
+            terminal
+                .draw(|frame| {
+                    app.home.render(
+                        frame,
+                        frame.area(),
+                        if resize { &theme } else { &changed_theme },
+                        None,
+                        None,
+                        None,
+                    );
+                })
+                .unwrap();
+            assert!(app.home.preview_selection.is_none());
+            assert!(!app.home.preview_copy_pending);
+            assert!(app.home.take_preview_copy_text().is_none());
+            assert!(app.home.retained_reader_focused());
+            assert_eq!(app.home.retained_scroll_offset, 7);
+            terminal = Terminal::new(ratatui::backend::TestBackend::new(200, 40)).unwrap();
+            terminal
+                .draw(|frame| {
+                    app.home
+                        .render(frame, frame.area(), &theme, None, None, None);
+                })
+                .unwrap();
+            assert!(app.home.handle_drag_start(x, y));
+            assert!(app.home.handle_drag_move(x + 8, y));
+            app.home.handle_drag_end();
+            terminal
+                .draw(|frame| {
+                    app.home
+                        .render(frame, frame.area(), &theme, None, None, None);
+                })
+                .unwrap();
+            assert!(app
+                .home
+                .preview_copy_text
+                .as_ref()
+                .is_some_and(|text| text.contains("OLD")));
+        }
+        state
+            .acp_event_store
+            .record(
+                &id,
+                2,
+                &AcpEvent::AgentMessageChunk {
+                    text: "NEW-RETAINED".into(),
+                    message_id: Some("next".into()),
+                },
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                ticker.tick().await;
+                app.reconcile_structured_preview().await;
+                terminal
+                    .draw(|frame| {
+                        app.home
+                            .render(frame, frame.area(), &theme, None, None, None);
+                    })
+                    .unwrap();
+                if app
+                    .home
+                    .retained_preview
+                    .as_ref()
+                    .unwrap()
+                    .rendered_text(app.home.preview_text_view.pane.width)
+                    .is_some_and(|text| text.to_string().contains("NEW-RETAINED"))
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(app.home.preview_selection.is_none());
+        assert!(!app.home.preview_copy_pending);
+        assert!(app.home.take_preview_copy_text().is_none());
+        assert!(app.home.retained_reader_focused());
+        assert_eq!(app.home.retained_scroll_offset, 7);
+        server.abort();
+        let _ = server.await;
+    }
+
     /// A failed replacement must not consume the previous view's draft.
     #[tokio::test]
     #[serial_test::serial]
     async fn drain_paste_forwards_to_the_mounted_view_and_keeps_other_targets() {
         let temp = tempfile::TempDir::new().unwrap();
         let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        crate::session::get_profile_dir("test").unwrap();
         let mut app = App::new(
             "test",
             crate::tmux::AvailableTools::with_tools(&["claude"]),
@@ -3979,36 +4321,52 @@ mod tests {
             crate::file_watch::FileWatchService::noop(),
         )
         .expect("app");
-        let pending = &mut app.home.pending_paste_for_structured_view;
-        pending.insert("s-1".into(), "buffered draft".into());
-        pending.insert("s-2".into(), "other target".into());
+        app.home
+            .pending_paste_for_structured_view
+            .insert("s-1".into(), "buffered draft".into());
+        app.home
+            .pending_paste_for_structured_view
+            .insert("s-2".into(), "other target".into());
         app.home.structured_preview =
             Some(crate::tui::structured_view::embedded::EmbeddedView::for_test("s-1"));
 
         // A failed attempt to mount s-2 can leave s-1 mounted.
         app.drain_pending_paste_for_structured_view("s-2").await;
-        let composer = |app: &App| {
+        assert_eq!(
             app.home
                 .structured_preview
                 .as_ref()
                 .unwrap()
-                .composer_text()
-        };
-        assert_eq!(composer(&app), "");
+                .composer_text(),
+            ""
+        );
         assert_eq!(
             app.home
                 .pending_paste_for_structured_view
                 .get("s-1")
                 .map(String::as_str),
-            Some("buffered draft")
+            Some("buffered draft"),
         );
 
         app.drain_pending_paste_for_structured_view("s-1").await;
         app.drain_pending_paste_for_structured_view("s-1").await;
-        assert_eq!(composer(&app), "buffered draft");
-        let pending = &app.home.pending_paste_for_structured_view;
-        assert_eq!(pending.get("s-1"), None);
-        assert_eq!(pending.get("s-2").map(String::as_str), Some("other target"));
+
+        let preview = app.home.structured_preview.as_ref().expect("mounted");
+        assert_eq!(
+            preview.composer_text(),
+            "buffered draft",
+            "the captured buffer must land in the mounted composer"
+        );
+        assert_eq!(
+            app.home.pending_paste_for_structured_view.get("s-1"),
+            None,
+            "a forwarded buffer must be consumed"
+        );
+        assert_eq!(
+            app.home.pending_paste_for_structured_view.get("s-2"),
+            Some(&"other target".to_string()),
+            "another target's unsent draft must survive the drain"
+        );
     }
 
     #[test]
@@ -4017,18 +4375,103 @@ mod tests {
     fn ignore_signals_guard_installs_sig_ign_and_restores_prior_disposition() {
         use nix::sys::signal::{SigHandler, Signal};
 
-        let signals = [Signal::SIGINT, Signal::SIGQUIT];
-        let baseline = signals.map(current_disposition);
+        let baseline_sigint = current_disposition(Signal::SIGINT);
+        let baseline_sigquit = current_disposition(Signal::SIGQUIT);
+
         let guard = IgnoreSignalsGuard::new();
-        for signal in signals {
-            assert!(same_disposition(
-                current_disposition(signal),
-                SigHandler::SigIgn
-            ));
-        }
+        assert!(
+            same_disposition(current_disposition(Signal::SIGINT), SigHandler::SigIgn),
+            "SIGINT should be ignored while the guard is alive"
+        );
+        assert!(
+            same_disposition(current_disposition(Signal::SIGQUIT), SigHandler::SigIgn),
+            "SIGQUIT should be ignored while the guard is alive"
+        );
+
         drop(guard);
-        for (signal, before) in signals.into_iter().zip(baseline) {
-            assert!(same_disposition(current_disposition(signal), before));
+
+        assert!(
+            same_disposition(current_disposition(Signal::SIGINT), baseline_sigint),
+            "SIGINT disposition should be restored after the guard drops"
+        );
+        assert!(
+            same_disposition(current_disposition(Signal::SIGQUIT), baseline_sigquit),
+            "SIGQUIT disposition should be restored after the guard drops"
+        );
+    }
+
+    #[test]
+    fn theme_apply_needed_compares_name_and_palette_mode() {
+        assert!(
+            !theme_apply_needed(("empire", false), ("empire", false)),
+            "identical name + mode is a no-op (no redraw, no clear)"
+        );
+        assert!(
+            theme_apply_needed(("empire", false), ("zinc", false)),
+            "a different name must re-apply"
+        );
+        assert!(
+            theme_apply_needed(("empire", false), ("empire", true)),
+            "a different palette mode must re-apply even with the same name"
+        );
+    }
+
+    #[test]
+    fn skip_predraw_cursor_hide_only_in_live_send_without_overlay() {
+        assert!(
+            skip_predraw_cursor_hide(true, false),
+            "live-send with no overlay must skip the pre-draw Hide (the fix)"
+        );
+        assert!(
+            !skip_predraw_cursor_hide(true, true),
+            "live-send with an overlay open must keep the Hide for IME protection"
+        );
+        assert!(
+            !skip_predraw_cursor_hide(false, false),
+            "outside live-send the Hide must stay unchanged"
+        );
+        assert!(
+            !skip_predraw_cursor_hide(false, true),
+            "outside live-send with an overlay the Hide must stay unchanged"
+        );
+    }
+
+    fn reset_creates(to: u32) {
+        TUI_SESSION_CREATES.store(to, Ordering::Relaxed);
+    }
+
+    #[test]
+    #[serial_test::serial(telemetry_creates)]
+    fn create_counter_clear_preserves_in_flight_create() {
+        reset_creates(0);
+        record_session_create();
+        record_session_create();
+        record_session_create();
+        let reported = reported_session_creates();
+        assert_eq!(reported, 3);
+        record_session_create();
+        clear_reported_session_creates(reported, SendOutcome::Sent);
+        assert_eq!(
+            TUI_SESSION_CREATES.load(Ordering::Relaxed),
+            1,
+            "the create that arrived during the send must be retained"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(telemetry_creates)]
+    fn create_counter_clear_retains_on_unconfirmed_send() {
+        for outcome in [SendOutcome::Failed, SendOutcome::Deduped] {
+            reset_creates(0);
+            record_session_create();
+            record_session_create();
+            let reported = reported_session_creates();
+            clear_reported_session_creates(reported, outcome);
+            assert_eq!(
+                TUI_SESSION_CREATES.load(Ordering::Relaxed),
+                2,
+                "{outcome:?} must retain the count for the next snapshot"
+            );
         }
     }
 
@@ -4056,197 +4499,427 @@ mod tests {
     // The counter is process-global, hence the serial group.
     #[test]
     #[serial_test::serial(telemetry_creates)]
-    fn create_counter_clears_only_what_a_confirmed_send_reported() {
-        let count = || TUI_SESSION_CREATES.load(Ordering::Relaxed);
-
-        TUI_SESSION_CREATES.store(0, Ordering::Relaxed);
-        for _ in 0..3 {
-            record_session_create();
-        }
-        let reported = reported_session_creates();
-        assert_eq!(reported, 3);
-        record_session_create(); // lands while the send is in flight
-        clear_reported_session_creates(reported, SendOutcome::Sent);
-        assert_eq!(count(), 1);
-
-        for outcome in [SendOutcome::Failed, SendOutcome::Deduped] {
-            TUI_SESSION_CREATES.store(2, Ordering::Relaxed);
-            clear_reported_session_creates(2, outcome);
-            assert_eq!(count(), 2, "{outcome:?} must retain the count");
-        }
-
-        TUI_SESSION_CREATES.store(3, Ordering::Relaxed);
+    fn create_counter_clear_is_noop_for_zero_and_saturates() {
+        reset_creates(3);
         clear_reported_session_creates(0, SendOutcome::Sent);
-        assert_eq!(count(), 3);
-        TUI_SESSION_CREATES.store(2, Ordering::Relaxed);
+        assert_eq!(TUI_SESSION_CREATES.load(Ordering::Relaxed), 3);
+
+        reset_creates(2);
         clear_reported_session_creates(5, SendOutcome::Sent);
-        assert_eq!(count(), 0, "saturates instead of wrapping");
+        assert_eq!(TUI_SESSION_CREATES.load(Ordering::Relaxed), 0);
     }
 
     #[test]
-    fn quit_intent_policy() {
-        use QuitIntent::*;
-        let cases = [
-            // Ctrl+Q never quits (#1569).
-            (KeyModifiers::CONTROL, false, false, Ignore),
-            (KeyModifiers::CONTROL, true, true, Ignore),
-            (KeyModifiers::NONE, false, false, Quit),
-            (KeyModifiers::NONE, false, true, Confirm),
-            (KeyModifiers::NONE, true, false, ConfirmDuringCreation),
-            (KeyModifiers::NONE, true, true, ConfirmDuringCreation),
-        ];
-        for (mods, creating, confirm, expected) in cases {
-            assert_eq!(quit_intent(mods, creating, confirm), expected);
+    fn image_banner_shows_only_when_it_owns_the_row() {
+        assert!(should_show_image_banner(true, false, false, false));
+        assert!(!should_show_image_banner(false, false, false, false));
+        assert!(!should_show_image_banner(true, true, false, false));
+        assert!(!should_show_image_banner(true, false, true, false));
+    }
+
+    #[test]
+    fn image_banner_stays_hidden_while_its_own_pull_runs() {
+        assert!(!should_show_image_banner(true, false, false, true));
+        assert!(!should_show_image_banner(true, false, true, true));
+    }
+
+    #[test]
+    fn ctrl_q_never_quits() {
+        for creation_pending in [false, true] {
+            for confirm in [false, true] {
+                assert_eq!(
+                    quit_intent(KeyModifiers::CONTROL, creation_pending, confirm),
+                    QuitIntent::Ignore,
+                );
+            }
         }
     }
 
     #[test]
-    fn disk_refresh_decisions() {
-        use DiskRefreshDecision::*;
-        // (live_idle, heartbeat_due, dirty) -> decision
-        let cases = [
-            (true, true, true, FullHeartbeat),
-            (true, true, false, FullHeartbeat),
-            (true, false, true, StorageOnly),
-            (true, false, false, None),
-            (false, false, false, None),
-            (false, true, false, StorageOnly),
-            (false, false, true, StorageOnly),
-            (false, true, true, StorageOnly),
-        ];
-        for (idle, heartbeat, dirty, expected) in cases {
+    fn plain_q_quits_when_confirm_disabled() {
+        assert_eq!(
+            quit_intent(KeyModifiers::NONE, false, false),
+            QuitIntent::Quit,
+        );
+    }
+
+    #[test]
+    fn plain_q_confirms_when_enabled() {
+        assert_eq!(
+            quit_intent(KeyModifiers::NONE, false, true),
+            QuitIntent::Confirm,
+        );
+    }
+
+    #[test]
+    fn creation_pending_confirms_before_anything_else() {
+        assert_eq!(
+            quit_intent(KeyModifiers::NONE, true, true),
+            QuitIntent::ConfirmDuringCreation,
+        );
+        assert_eq!(
+            quit_intent(KeyModifiers::NONE, true, false),
+            QuitIntent::ConfirmDuringCreation,
+        );
+    }
+
+    #[test]
+    fn heartbeat_wins_when_both_disk_paths_are_ready() {
+        assert_eq!(
+            decide_disk_refresh(true, true, true),
+            DiskRefreshDecision::FullHeartbeat,
+            "when live-idle and both heartbeat and watcher are ready, the full reload wins"
+        );
+        assert_eq!(
+            decide_disk_refresh(true, true, false),
+            DiskRefreshDecision::FullHeartbeat,
+            "heartbeat fires even without a watcher kick"
+        );
+        assert_eq!(
+            decide_disk_refresh(true, false, true),
+            DiskRefreshDecision::StorageOnly,
+            "watcher kick alone fires the storage-only path"
+        );
+        assert_eq!(
+            decide_disk_refresh(true, false, false),
+            DiskRefreshDecision::None,
+            "no inputs ready yields no refresh"
+        );
+    }
+
+    #[test]
+    fn live_send_uses_storage_only_for_watcher_and_heartbeat() {
+        assert_eq!(
+            decide_disk_refresh(false, false, false),
+            DiskRefreshDecision::None,
+            "live-send with no refresh input must remain idle"
+        );
+        assert_eq!(
+            decide_disk_refresh(false, true, false),
+            DiskRefreshDecision::StorageOnly,
+            "live-send must use a storage-only heartbeat fallback"
+        );
+        for &heartbeat in &[false, true] {
             assert_eq!(
-                decide_disk_refresh(idle, heartbeat, dirty),
-                expected,
-                "idle={idle} heartbeat={heartbeat} dirty={dirty}"
+                decide_disk_refresh(false, heartbeat, true),
+                DiskRefreshDecision::StorageOnly,
+                "live-send must allow the storage-only watcher path (heartbeat={heartbeat})"
             );
         }
+    }
 
+    #[test]
+    fn full_heartbeat_deferred_during_live_send_runs_on_exit() {
         let live_plan = plan_disk_refresh(false, true, false, false);
-        assert_eq!(live_plan.decision, StorageOnly);
+        assert_eq!(live_plan.decision, DiskRefreshDecision::StorageOnly);
         assert!(live_plan.full_heartbeat_deferred);
-        let idle_plan = plan_disk_refresh(true, false, false, true);
-        assert_eq!(idle_plan.decision, FullHeartbeat);
+
+        let idle_plan = plan_disk_refresh(true, false, false, live_plan.full_heartbeat_deferred);
+        assert_eq!(idle_plan.decision, DiskRefreshDecision::FullHeartbeat);
         assert!(!idle_plan.full_heartbeat_deferred);
     }
 
     #[test]
-    fn config_refresh_kick_is_gated_by_live_send() {
-        let dirty = AtomicBool::new(true);
-        assert!(!take_config_refresh_kick(false, &dirty));
+    fn caller_consumes_dirty_latch_during_live_send() {
+        let dirty_atomic = std::sync::atomic::AtomicBool::new(true);
+        let dirty = dirty_atomic.swap(false, std::sync::atomic::Ordering::Acquire);
+
+        assert!(dirty, "live-send must consume the watcher kick");
         assert!(
-            dirty.load(Ordering::Acquire),
-            "stays latched for the next idle tick"
+            !dirty_atomic.load(std::sync::atomic::Ordering::Acquire),
+            "a consumed watcher kick must not remain latched"
         );
-        assert!(take_config_refresh_kick(true, &dirty));
-        assert!(!dirty.load(Ordering::Acquire));
+        assert_eq!(
+            decide_disk_refresh(false, true, dirty),
+            DiskRefreshDecision::StorageOnly,
+            "the consumed kick must choose storage-only refresh while the full heartbeat remains deferred"
+        );
     }
 
     #[test]
-    fn poll_update_receiver_states() {
-        let info = |available, latest: &str| UpdateInfo {
-            available,
+    fn config_refresh_kick_is_gated_by_live_send() {
+        let dirty = std::sync::atomic::AtomicBool::new(true);
+        assert!(
+            !take_config_refresh_kick(false, &dirty),
+            "live-send must defer config refreshes"
+        );
+        assert!(
+            dirty.load(std::sync::atomic::Ordering::Acquire),
+            "live-send must leave config_dirty latched for the next eligible tick"
+        );
+    }
+
+    #[test]
+    fn config_refresh_and_disk_refresh_can_coexist_in_one_tick() {
+        let config_dirty = std::sync::atomic::AtomicBool::new(true);
+        let disk_dirty = std::sync::atomic::AtomicBool::new(true);
+
+        let config_kick = take_config_refresh_kick(true, &config_dirty);
+        let dirty = disk_dirty.swap(false, std::sync::atomic::Ordering::Acquire);
+        let disk_decision = decide_disk_refresh(true, true, dirty);
+
+        assert!(config_kick, "config refresh must be scheduled first");
+        assert_eq!(disk_decision, DiskRefreshDecision::FullHeartbeat);
+        assert!(!config_dirty.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!disk_dirty.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_action_enum() {
+        let quit = Action::Quit;
+        let attach = Action::AttachSession("test-id".to_string());
+        let attach_terminal =
+            Action::AttachTerminal("test-id".to_string(), TerminalMode::Container);
+
+        assert_eq!(quit, Action::Quit);
+        assert_eq!(attach, Action::AttachSession("test-id".to_string()));
+        assert_eq!(
+            attach_terminal,
+            Action::AttachTerminal("test-id".to_string(), TerminalMode::Container)
+        );
+    }
+
+    #[test]
+    fn test_action_clone() {
+        let original = Action::AttachSession("session-123".to_string());
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+
+        let terminal_action = Action::AttachTerminal("session-123".to_string(), TerminalMode::Host);
+        let terminal_cloned = terminal_action.clone();
+        assert_eq!(terminal_action, terminal_cloned);
+    }
+
+    #[test]
+    fn test_poll_update_check_returns_true_when_update_available() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let update_info = UpdateInfo {
+            available: true,
             current_version: "0.4.0".to_string(),
-            latest_version: latest.to_string(),
+            latest_version: "0.5.0".to_string(),
+        };
+        tx.send(Ok(update_info)).unwrap();
+
+        let (info, rx_out, received) = poll_update_receiver(Some(rx), None);
+        assert!(received);
+        assert!(info.is_some());
+        assert_eq!(info.as_ref().unwrap().latest_version, "0.5.0");
+        assert!(rx_out.is_none()); // Channel consumed
+    }
+
+    #[test]
+    fn test_poll_update_check_returns_false_when_no_update() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let update_info = UpdateInfo {
+            available: false,
+            current_version: "0.5.0".to_string(),
+            latest_version: "0.5.0".to_string(),
+        };
+        tx.send(Ok(update_info)).unwrap();
+
+        let (info, rx_out, received) = poll_update_receiver(Some(rx), None);
+        assert!(!received);
+        assert!(info.is_none());
+        assert!(rx_out.is_none()); // Channel consumed even though no update
+    }
+
+    #[test]
+    fn test_poll_update_check_returns_false_when_channel_empty() {
+        let (_tx, rx) = tokio::sync::oneshot::channel::<anyhow::Result<UpdateInfo>>();
+
+        let (info, rx_out, received) = poll_update_receiver(Some(rx), None);
+        assert!(!received);
+        assert!(info.is_none());
+        assert!(rx_out.is_some());
+    }
+
+    #[test]
+    fn periodic_recheck_fires_after_interval_elapses() {
+        let interval = Duration::from_secs(24 * 3600);
+        assert!(should_spawn_periodic_update_check(
+            Some(interval + Duration::from_secs(1)),
+            interval,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn periodic_recheck_holds_within_interval() {
+        let interval = Duration::from_secs(24 * 3600);
+        assert!(!should_spawn_periodic_update_check(
+            Some(interval - Duration::from_secs(1)),
+            interval,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn periodic_recheck_skips_when_in_flight() {
+        let interval = Duration::from_secs(24 * 3600);
+        assert!(!should_spawn_periodic_update_check(
+            Some(interval + Duration::from_secs(1)),
+            interval,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn periodic_recheck_skips_when_mode_disabled() {
+        let interval = Duration::from_secs(24 * 3600);
+        assert!(!should_spawn_periodic_update_check(
+            Some(interval + Duration::from_secs(1)),
+            interval,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn periodic_recheck_fires_immediately_when_never_checked_and_mode_enabled() {
+        let interval = Duration::from_secs(24 * 3600);
+        assert!(should_spawn_periodic_update_check(
+            None, interval, false, true,
+        ));
+    }
+
+    #[test]
+    fn periodic_recheck_skips_when_never_checked_but_mode_disabled() {
+        let interval = Duration::from_secs(24 * 3600);
+        assert!(!should_spawn_periodic_update_check(
+            None, interval, false, false,
+        ));
+    }
+
+    #[test]
+    fn periodic_recheck_fires_at_interval_boundary() {
+        let interval = Duration::from_secs(3600);
+        assert!(should_spawn_periodic_update_check(
+            Some(interval),
+            interval,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn test_poll_update_check_preserves_existing_info() {
+        let existing_info = UpdateInfo {
+            available: true,
+            current_version: "0.4.0".to_string(),
+            latest_version: "0.5.0".to_string(),
         };
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tx.send(Ok(info(true, "0.5.0"))).unwrap();
-        let (got, rx_out, received) = poll_update_receiver(Some(rx), None);
-        assert!(received && rx_out.is_none());
-        assert_eq!(got.unwrap().latest_version, "0.5.0");
+        let (info, rx_out, received) = poll_update_receiver(None, Some(existing_info));
+        assert!(!received); // No new update received
+        assert!(info.is_some()); // But existing info is preserved
+        assert_eq!(info.as_ref().unwrap().latest_version, "0.5.0");
+        assert!(rx_out.is_none());
+    }
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        tx.send(Ok(info(false, "0.4.0"))).unwrap();
-        let (got, rx_out, received) = poll_update_receiver(Some(rx), None);
-        assert!(!received && got.is_none() && rx_out.is_none());
-
-        let (_tx, rx) = tokio::sync::oneshot::channel::<anyhow::Result<UpdateInfo>>();
-        let (got, rx_out, received) = poll_update_receiver(Some(rx), None);
-        assert!(
-            !received && got.is_none() && rx_out.is_some(),
-            "empty keeps the receiver"
-        );
-
-        let (got, _, received) = poll_update_receiver(None, Some(info(true, "0.5.0")));
-        assert!(!received);
-        assert_eq!(
-            got.unwrap().latest_version,
-            "0.5.0",
-            "existing info is kept"
-        );
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
     }
 
     #[test]
-    fn periodic_recheck_policy() {
-        let interval = Duration::from_secs(3600);
-        let second = Duration::from_secs(1);
-        // (elapsed, in_flight, enabled) -> spawn
-        let cases = [
-            (Some(interval + second), false, true, true),
-            (Some(interval), false, true, true),
-            (Some(interval - second), false, true, false),
-            (Some(interval + second), true, true, false),
-            (Some(interval + second), false, false, false),
-            (None, false, true, true),
-            (None, false, false, false),
-        ];
-        for (elapsed, in_flight, enabled, expected) in cases {
-            assert_eq!(
-                should_spawn_periodic_update_check(elapsed, interval, in_flight, enabled),
-                expected,
-                "elapsed={elapsed:?} in_flight={in_flight} enabled={enabled}"
-            );
-        }
-    }
-
-    fn keys(text: &str) -> Vec<KeyEvent> {
-        text.chars()
-            .map(|c| match c {
-                '\n' => KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                c => KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-            })
-            .collect()
+    fn burst_candidate_accepts_printable_chars_and_enter() {
+        assert!(App::is_burst_candidate(&key(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE
+        )));
+        assert!(App::is_burst_candidate(&key(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE
+        )));
+        assert!(App::is_burst_candidate(&key(
+            KeyCode::Char('A'),
+            KeyModifiers::SHIFT
+        )));
+        assert!(App::is_burst_candidate(&key(
+            KeyCode::Enter,
+            KeyModifiers::NONE
+        )));
     }
 
     #[test]
-    fn burst_candidates_and_chars() {
-        let key = KeyEvent::new;
-        for k in keys("a ~\n")
-            .into_iter()
-            .chain([key(KeyCode::Char('A'), KeyModifiers::SHIFT)])
-        {
-            assert!(App::is_burst_candidate(&k), "{k:?}");
-            assert!(App::burst_char_for(&k).is_some(), "{k:?}");
-        }
-        assert_eq!(App::burst_char_for(&keys("\n")[0]), Some('\n'));
-        for k in [
-            key(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            key(KeyCode::Char('b'), KeyModifiers::ALT),
-            key(KeyCode::Esc, KeyModifiers::NONE),
-            key(KeyCode::Tab, KeyModifiers::NONE),
-            key(KeyCode::Up, KeyModifiers::NONE),
-            key(KeyCode::Backspace, KeyModifiers::NONE),
-        ] {
-            assert!(!App::is_burst_candidate(&k), "{k:?}");
-        }
+    fn burst_candidate_rejects_modified_chords_and_nav_keys() {
+        assert!(!App::is_burst_candidate(&key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!App::is_burst_candidate(&key(
+            KeyCode::Char('b'),
+            KeyModifiers::ALT
+        )));
+        assert!(!App::is_burst_candidate(&key(
+            KeyCode::Esc,
+            KeyModifiers::NONE
+        )));
+        assert!(!App::is_burst_candidate(&key(
+            KeyCode::Tab,
+            KeyModifiers::NONE
+        )));
+        assert!(!App::is_burst_candidate(&key(
+            KeyCode::Up,
+            KeyModifiers::NONE
+        )));
+        assert!(!App::is_burst_candidate(&key(
+            KeyCode::Backspace,
+            KeyModifiers::NONE
+        )));
     }
 
     #[test]
     fn auto_repeat_burst_rejects_held_navigation_but_not_pasted_text() {
-        let j = |kind| KeyEvent::new_with_kind(KeyCode::Char('j'), KeyModifiers::NONE, kind);
         let cases = [
-            (keys("jjj"), true),
-            (keys("kkk"), true),
             (
                 vec![
-                    j(KeyEventKind::Press),
-                    j(KeyEventKind::Repeat),
-                    j(KeyEventKind::Repeat),
+                    key(KeyCode::Char('j'), KeyModifiers::NONE),
+                    key(KeyCode::Char('j'), KeyModifiers::NONE),
+                    key(KeyCode::Char('j'), KeyModifiers::NONE),
                 ],
                 true,
             ),
-            (keys("paste"), false),
+            (
+                vec![
+                    key(KeyCode::Char('k'), KeyModifiers::NONE),
+                    key(KeyCode::Char('k'), KeyModifiers::NONE),
+                    key(KeyCode::Char('k'), KeyModifiers::NONE),
+                ],
+                true,
+            ),
+            (
+                vec![
+                    KeyEvent::new_with_kind(
+                        KeyCode::Char('j'),
+                        KeyModifiers::NONE,
+                        KeyEventKind::Press,
+                    ),
+                    KeyEvent::new_with_kind(
+                        KeyCode::Char('j'),
+                        KeyModifiers::NONE,
+                        KeyEventKind::Repeat,
+                    ),
+                    KeyEvent::new_with_kind(
+                        KeyCode::Char('j'),
+                        KeyModifiers::NONE,
+                        KeyEventKind::Repeat,
+                    ),
+                ],
+                true,
+            ),
+            (
+                vec![
+                    key(KeyCode::Char('p'), KeyModifiers::NONE),
+                    key(KeyCode::Char('a'), KeyModifiers::NONE),
+                    key(KeyCode::Char('s'), KeyModifiers::NONE),
+                    key(KeyCode::Char('t'), KeyModifiers::NONE),
+                    key(KeyCode::Char('e'), KeyModifiers::NONE),
+                ],
+                false,
+            ),
         ];
         for (keys, expected) in cases {
             assert_eq!(App::is_auto_repeat_burst(&keys), expected, "{keys:?}");
@@ -4254,24 +4927,269 @@ mod tests {
     }
 
     #[test]
-    fn split_trailing_enter_peels_only_the_last_enter() {
-        // (burst, paste text, trailing enter)
-        let cases = [
-            ("hi\n", "hi", true),
-            ("a\nb\n", "a\nb", true),
-            ("hi\nthere", "hi\nthere", false),
-            ("abc", "abc", false),
-            ("\n", "", true),
-            ("hi\n\n", "hi\n", true),
+    fn burst_char_for_matches_is_burst_candidate_domain() {
+        let candidates = [
+            key(KeyCode::Char('a'), KeyModifiers::NONE),
+            key(KeyCode::Char(' '), KeyModifiers::NONE),
+            key(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            key(KeyCode::Char('~'), KeyModifiers::NONE),
+            key(KeyCode::Enter, KeyModifiers::NONE),
         ];
-        for (burst, paste, enter) in cases {
-            let (got, trailing) = App::split_trailing_enter(burst, &keys(burst));
-            assert_eq!(got, paste, "{burst:?}");
-            assert_eq!(
-                trailing.map(|k| k.code),
-                enter.then_some(KeyCode::Enter),
-                "{burst:?}"
+        for k in &candidates {
+            assert!(App::is_burst_candidate(k));
+            assert!(
+                App::burst_char_for(k).is_some(),
+                "burst_char_for must agree with is_burst_candidate for {:?}",
+                k
             );
         }
+        assert_eq!(
+            App::burst_char_for(&key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some('\n'),
+            "Enter must map to \\n so embedded sentence-breaks land in the burst"
+        );
+    }
+
+    #[test]
+    fn split_trailing_enter_peels_terminating_enter() {
+        let burst_keys = vec![
+            key(KeyCode::Char('h'), KeyModifiers::NONE),
+            key(KeyCode::Char('i'), KeyModifiers::NONE),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+        ];
+        let (paste, enter) = App::split_trailing_enter("hi\n", &burst_keys);
+        assert_eq!(paste, "hi");
+        assert!(enter.is_some());
+        assert_eq!(enter.unwrap().code, KeyCode::Enter);
+    }
+
+    #[test]
+    fn split_trailing_enter_preserves_embedded_newlines() {
+        let burst_keys = vec![
+            key(KeyCode::Char('a'), KeyModifiers::NONE),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            key(KeyCode::Char('b'), KeyModifiers::NONE),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+        ];
+        let (paste, enter) = App::split_trailing_enter("a\nb\n", &burst_keys);
+        assert_eq!(paste, "a\nb");
+        assert!(enter.is_some());
+    }
+
+    #[test]
+    fn split_trailing_enter_keeps_mid_burst_enter_when_burst_ends_on_char() {
+        let burst_keys = vec![
+            key(KeyCode::Char('h'), KeyModifiers::NONE),
+            key(KeyCode::Char('i'), KeyModifiers::NONE),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            key(KeyCode::Char('t'), KeyModifiers::NONE),
+            key(KeyCode::Char('h'), KeyModifiers::NONE),
+            key(KeyCode::Char('e'), KeyModifiers::NONE),
+            key(KeyCode::Char('r'), KeyModifiers::NONE),
+            key(KeyCode::Char('e'), KeyModifiers::NONE),
+        ];
+        let (paste, enter) = App::split_trailing_enter("hi\nthere", &burst_keys);
+        assert_eq!(paste, "hi\nthere");
+        assert!(enter.is_none());
+    }
+
+    #[test]
+    fn split_trailing_enter_no_enter_at_all() {
+        let burst_keys = vec![
+            key(KeyCode::Char('a'), KeyModifiers::NONE),
+            key(KeyCode::Char('b'), KeyModifiers::NONE),
+            key(KeyCode::Char('c'), KeyModifiers::NONE),
+        ];
+        let (paste, enter) = App::split_trailing_enter("abc", &burst_keys);
+        assert_eq!(paste, "abc");
+        assert!(enter.is_none());
+    }
+
+    #[test]
+    fn split_trailing_enter_single_enter_yields_empty_paste() {
+        let burst_keys = vec![key(KeyCode::Enter, KeyModifiers::NONE)];
+        let (paste, enter) = App::split_trailing_enter("\n", &burst_keys);
+        assert_eq!(paste, "");
+        assert!(enter.is_some());
+    }
+
+    #[test]
+    fn split_trailing_enter_consecutive_trailing_enters_only_peels_last() {
+        let burst_keys = vec![
+            key(KeyCode::Char('h'), KeyModifiers::NONE),
+            key(KeyCode::Char('i'), KeyModifiers::NONE),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            key(KeyCode::Enter, KeyModifiers::NONE),
+        ];
+        let (paste, enter) = App::split_trailing_enter("hi\n\n", &burst_keys);
+        assert_eq!(paste, "hi\n");
+        assert!(enter.is_some());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_launch_hidden_with_esc_stays_visible_and_its_failure_is_shown_once() {
+        use crate::tui::dialogs::{test_render, DashboardLaunch};
+        let _home = crate::session::test_support::isolate_app_dir();
+        crate::session::get_profile_dir("test").unwrap();
+        let mut app = App::new(
+            "test",
+            AvailableTools::with_tools(&[]),
+            true,
+            false,
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .unwrap();
+        use crate::tui::session_feed::SidebarSource;
+        let enter = KeyEvent::from(KeyCode::Enter);
+        // The whole home screen as the user sees it, including a takeover.
+        let home = |app: &mut App| {
+            test_render::text(&test_render::draw(110, 40, |frame, theme| {
+                app.home
+                    .render(frame, frame.area(), theme, None, None, None)
+            }))
+        };
+        let screen = |app: &App| {
+            let view = app.home.serve_view.as_ref().expect("serve view open");
+            test_render::text(&test_render::draw(110, 40, |frame, theme| {
+                view.render(frame, frame.area(), theme)
+            }))
+        };
+        // 30s or a little more on a loaded run.
+        let elapsed = regex::Regex::new(r"Elapsed: 3\d+s").unwrap();
+        // Whether a view is open when the launch fails.
+        for view_open in [false, true] {
+            let started = std::time::Instant::now() - Duration::from_secs(30);
+            app.home.dashboard_launch = Some(DashboardLaunch::tunnel_for_test(started));
+            let (settle, launch) = tokio::sync::oneshot::channel();
+            app.dashboard_launch = Some(launch);
+            // As start_dashboard_launch leaves it: off the Daemon, behind the runtime gate.
+            app.home.set_sidebar_source(SidebarSource::Connecting, None);
+            assert!(home(&mut app).contains("Enter: back to the Web dashboard start"));
+
+            // Reopened mid-launch through the gate, it counts from the launch and leaves the bound
+            // to the App.
+            assert!(!app.handle_runtime_gate_key(enter));
+            assert!(elapsed.is_match(&screen(&app)), "{}", screen(&app));
+            assert!(app.home.serve_view.as_mut().is_some_and(|v| !v.tick()));
+            if !view_open {
+                app.home.handle_key(KeyEvent::from(KeyCode::Esc), None);
+                assert!(app.home.serve_view.is_none());
+            }
+
+            let log = crate::cli::serve::stdio_redirect_path().unwrap();
+            std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+            std::fs::write(&log, "[AOE_START_MARKER]\nbind failed on port 8081\n").unwrap();
+            let reason = "Dashboard start failed. Check `aoe logs`.";
+            assert!(settle.send(Err(reason.into())).is_ok());
+            assert!(app.poll_dashboard_launch());
+            if !view_open {
+                // Later Daemon activity mustn't stand in for this failure's log lines.
+                std::fs::write(&log, "[AOE_START_MARKER]\nlater daemon activity\n").unwrap();
+                // A dashboard that came up some other way outranks the stored failure.
+                use crate::tui::dialogs::WebState;
+                assert_eq!(app.home.connections_web_state(None), WebState::Failed);
+                app.home.serve_running = true;
+                assert_ne!(app.home.connections_web_state(None), WebState::Failed);
+                app.home.serve_running = false;
+                // The offline takeover says it didn't start, and Enter, through the gate, shows why.
+                assert_eq!(app.home.sidebar_source, SidebarSource::Disconnected);
+                let takeover = home(&mut app);
+                assert!(
+                    takeover.contains("Didn't start \u{00B7} Enter shows why"),
+                    "{takeover}"
+                );
+                assert!(!app.handle_runtime_gate_key(enter));
+            }
+            let shown = screen(&app);
+            assert!(shown.contains("Dashboard start failed."), "{view_open}");
+            assert!(
+                shown.contains("bind failed on port 8081")
+                    && !shown.contains("later daemon activity"),
+                "{view_open}: {shown}"
+            );
+            app.home.handle_key(KeyEvent::from(KeyCode::Esc), None);
+            assert!(app.home.dashboard_launch.is_none(), "shown once");
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn dashboard_stop_waits_for_owned_launch_settlement_without_reconnect() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        crate::session::get_profile_dir("test").unwrap();
+        let mut app = App::new(
+            "test",
+            AvailableTools::with_tools(&[]),
+            true,
+            false,
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .unwrap();
+        app.home.serve_view = Some(crate::tui::dialogs::ServeView::settled());
+        app.home.pending_paste = Some("retained stop draft".into());
+        let transaction = crate::daemon::lifecycle::Transaction::acquire()
+            .await
+            .unwrap();
+        let (settle_launch, owned_launch) = tokio::sync::oneshot::channel();
+        app.dashboard_launch = Some(owned_launch);
+        app.request_dashboard_stop();
+        assert!(app.dashboard_stop_requested);
+        assert!(
+            app.dashboard_stop.is_none(),
+            "Stop cannot acquire lifecycle while owned launch remains unsettled"
+        );
+        assert!(!app.poll_dashboard_launch());
+        assert_eq!(
+            app.home.pending_paste.as_deref(),
+            Some("retained stop draft")
+        );
+        assert!(app
+            .home
+            .handle_key(KeyEvent::from(KeyCode::Esc), None)
+            .is_none());
+        assert!(
+            app.home.serve_view.is_none(),
+            "input remains usable during deferred Stop"
+        );
+        app.home.serve_view = Some(crate::tui::dialogs::ServeView::settled());
+        assert!(matches!(
+            app.home.handle_key(KeyEvent::from(KeyCode::Enter), None),
+            Some(Action::StartDashboard)
+        ));
+        app.start_dashboard_launch();
+        assert!(
+            app.dashboard_launch.is_some(),
+            "only the original owned launch remains"
+        );
+        assert!(app.dashboard_stop.is_none());
+        assert!(
+            app.home.pending_dashboard_launch.is_none(),
+            "a start attempted during Stop is refused, not replayed later"
+        );
+        assert!(app
+            .home
+            .handle_key(KeyEvent::from(KeyCode::Esc), None)
+            .is_none());
+        drop(transaction);
+        assert!(settle_launch
+            .send(Err("controlled failed startup".into()))
+            .is_ok());
+        assert!(app.poll_dashboard_launch());
+        assert!(app.dashboard_stop.is_some());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while app.dashboard_stop.is_some() {
+                app.poll_dashboard_stop();
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("asynchronous stop settles after launch release");
+        assert!(!app.dashboard_stop_requested);
+        assert!(!app.home.session_feed.mutations_available());
+        assert_eq!(
+            app.home.pending_paste.as_deref(),
+            Some("retained stop draft")
+        );
     }
 }

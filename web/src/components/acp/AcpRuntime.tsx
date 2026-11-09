@@ -44,6 +44,8 @@ export interface AcpContext {
   state: AcpState;
   status: Session["status"];
   hasEverOpened: boolean;
+  /** A replay delivered events while the socket was down. */
+  replayedWhileDown: boolean;
   /** The auto-reconnect backoff is armed between a close and the next dial. */
   reconnecting: boolean;
   retryCount: number;
@@ -53,6 +55,8 @@ export interface AcpContext {
   resolveApproval: (nonce: string, decision: ApprovalDecision, optionId?: string) => Promise<void>;
   resolveElicitation: (nonce: string, resolution: ElicitationResolution) => Promise<void>;
   sendPrompt: (text: string, attachments?: PromptAttachmentInput[]) => Promise<void>;
+  /** The composer's Stop, escalating a cancel the Agent ignores. */
+  stopTurn: () => void;
   /** Staged for the next send; owned here so assistant-ui's `onNew` can send them. */
   pendingAttachments: PromptAttachmentInput[];
   setPendingAttachments: React.Dispatch<React.SetStateAction<PromptAttachmentInput[]>>;
@@ -60,6 +64,10 @@ export interface AcpContext {
   lastActivityRef: Session["lastActivityRef"];
   dismissError: () => void;
   dismissPrimer: () => void;
+  /** After this dashboard's restart of a start in progress succeeds. */
+  markRestartStarted: (epoch: number, stoppedSent: boolean) => void;
+  /** After this dashboard's restart fails once it has stopped the Worker. */
+  markRestartFailed: (epoch: number, message: string, stoppedSent: boolean) => void;
   dismissCompactionReminder: () => void;
   removeQueuedPrompt: (id: string) => void;
   editQueuedPrompt: (id: string, text: string) => void;
@@ -226,6 +234,7 @@ export function AcpRuntime({
         state: acp.state,
         status: acp.status,
         hasEverOpened: acp.hasEverOpened,
+        replayedWhileDown: acp.replayedWhileDown,
         reconnecting: acp.reconnecting,
         retryCount: acp.retryCount,
         retryCountdown: acp.retryCountdown,
@@ -234,12 +243,15 @@ export function AcpRuntime({
         resolveApproval: acp.resolveApproval,
         resolveElicitation: acp.resolveElicitation,
         sendPrompt: acp.sendPrompt,
+        stopTurn: () => void onCancel(),
         pendingAttachments,
         setPendingAttachments,
         forceEndTurn: acp.forceEndTurn,
         lastActivityRef: acp.lastActivityRef,
         dismissError: acp.dismissError,
         dismissPrimer: acp.dismissPrimer,
+        markRestartStarted: acp.markRestartStarted,
+        markRestartFailed: acp.markRestartFailed,
         dismissCompactionReminder: acp.dismissCompactionReminder,
         removeQueuedPrompt: acp.removeQueuedPrompt,
         editQueuedPrompt: acp.editQueuedPrompt,

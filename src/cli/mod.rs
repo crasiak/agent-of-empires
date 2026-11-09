@@ -30,6 +30,7 @@ pub mod sandbox;
 pub mod send;
 pub mod serve;
 pub mod session;
+pub mod session_move;
 pub mod settings;
 pub mod skill;
 pub mod sounds;
@@ -44,7 +45,7 @@ pub mod usage;
 pub mod usage_event;
 pub mod worktree;
 
-pub use definition::{command_name, Cli, Commands, CLI_COMMAND_NAMES};
+pub use definition::{command_name, Cli, Commands, DaemonCommands, CLI_COMMAND_NAMES};
 
 pub(crate) fn color_enabled() -> bool {
     use std::io::IsTerminal;
@@ -62,14 +63,90 @@ pub(crate) fn lifecycle_notice_line(indent: &str, notice: &str) -> String {
 use crate::session::Instance;
 use anyhow::{bail, Result};
 
-pub fn resolve_session<'a>(identifier: &str, instances: &'a [Instance]) -> Result<&'a Instance> {
-    if let Some(inst) = instances.iter().find(|i| i.id == identifier) {
+/// A client for the Daemon, auto-started when none runs (ADR 0004).
+pub(crate) async fn daemon_client() -> Result<crate::acp::client::HttpClient> {
+    let endpoint = crate::acp::client::require_daemon().await?;
+    Ok(crate::acp::client::HttpClient::new(endpoint)?)
+}
+
+/// A profile or project write on the epoch-checked Daemon routes. The Daemon,
+/// auto-started when none runs, validates profiles, paths and names against its
+/// own store and answers with its own message.
+pub(crate) async fn runtime_write(
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let endpoint = crate::acp::client::daemon_manager::require_config_daemon().await?;
+    let client = crate::acp::client::HttpClient::new(endpoint)?;
+    // Its client carries the passphrase session, which a bare endpoint's does not.
+    let info = client.daemon_client().await?.runtime_info().await?;
+    anyhow::ensure!(
+        info.protocol_version == crate::daemon::RUNTIME_PROTOCOL_VERSION,
+        "Daemon runtime protocol is incompatible"
+    );
+    Ok(client
+        .mutate_with(method, path, |request| {
+            let request = request.header(crate::daemon::RUNTIME_EPOCH_HEADER, &info.epoch);
+            match &body {
+                Some(body) => request.json(body),
+                None => request,
+            }
+        })
+        .await?)
+}
+
+/// The fields `resolve_session` matches an identifier against.
+pub trait SessionRef {
+    fn id(&self) -> &str;
+    fn title(&self) -> &str;
+    fn project_path(&self) -> &str;
+}
+
+impl<T: SessionRef + ?Sized> SessionRef for &T {
+    fn id(&self) -> &str {
+        T::id(self)
+    }
+    fn title(&self) -> &str {
+        T::title(self)
+    }
+    fn project_path(&self) -> &str {
+        T::project_path(self)
+    }
+}
+
+impl SessionRef for Instance {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn project_path(&self) -> &str {
+        &self.project_path
+    }
+}
+
+impl SessionRef for crate::daemon::SessionResponse {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn title(&self) -> &str {
+        &self.title
+    }
+    fn project_path(&self) -> &str {
+        &self.project_path
+    }
+}
+
+pub fn resolve_session<'a, S: SessionRef>(identifier: &str, instances: &'a [S]) -> Result<&'a S> {
+    if let Some(inst) = instances.iter().find(|i| i.id() == identifier) {
         return Ok(inst);
     }
 
-    let prefix_matches: Vec<&Instance> = instances
+    let prefix_matches: Vec<&S> = instances
         .iter()
-        .filter(|i| i.id.starts_with(identifier))
+        .filter(|i| i.id().starts_with(identifier))
         .collect();
     match prefix_matches.len() {
         0 => {}
@@ -77,7 +154,7 @@ pub fn resolve_session<'a>(identifier: &str, instances: &'a [Instance]) -> Resul
         _ => {
             let mut candidates: Vec<String> = prefix_matches
                 .iter()
-                .map(|i| format!("  {} ({})", i.id, i.title))
+                .map(|i| format!("  {} ({})", i.id(), i.title()))
                 .collect();
             candidates.sort();
             bail!(
@@ -89,60 +166,15 @@ pub fn resolve_session<'a>(identifier: &str, instances: &'a [Instance]) -> Resul
         }
     }
 
-    if let Some(inst) = instances.iter().find(|i| i.title == identifier) {
+    if let Some(inst) = instances.iter().find(|i| i.title() == identifier) {
         return Ok(inst);
     }
 
-    if let Some(inst) = instances.iter().find(|i| i.project_path == identifier) {
+    if let Some(inst) = instances.iter().find(|i| i.project_path() == identifier) {
         return Ok(inst);
     }
 
     bail!("Session not found: {}", identifier)
-}
-
-pub(crate) fn purge_acp_transcript(inst: &Instance) -> Result<()> {
-    let app_dir = crate::session::get_app_dir()
-        .map_err(|e| anyhow::anyhow!("acp transcript purge: resolve app dir: {e}"))?;
-    let db_path = app_dir.join("acp_events.db");
-    if !db_path.exists() {
-        return Ok(());
-    }
-    purge_acp_transcript_rows(&db_path, &inst.id)
-}
-
-fn purge_acp_transcript_rows(db_path: &std::path::Path, session_id: &str) -> Result<()> {
-    let mut conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| anyhow::anyhow!("acp transcript purge: open event store: {e}"))?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|e| anyhow::anyhow!("acp transcript purge: set busy_timeout: {e}"))?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| anyhow::anyhow!("acp transcript purge: begin transaction: {e}"))?;
-    let schema = crate::events::Schema::new("acp")
-        .map_err(|e| anyhow::anyhow!("acp transcript purge: schema: {e}"))?;
-    for table in [schema.events_table(), schema.attachments_table()] {
-        match tx.execute(
-            &format!("DELETE FROM {table} WHERE session_id = ?1"),
-            rusqlite::params![session_id],
-        ) {
-            Ok(_) => {}
-            Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => {}
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "acp transcript purge: delete from {table}: {e}"
-                ))
-            }
-        }
-    }
-    tx.commit()
-        .map_err(|e| anyhow::anyhow!("acp transcript purge: commit: {e}"))?;
-    Ok(())
-}
-
-pub(crate) struct EmptyTrashOutcome {
-    pub removed: usize,
-    pub restored_after_teardown: usize,
-    pub kept_for_retry: usize,
 }
 
 pub fn truncate(s: &str, max: usize) -> String {
@@ -180,6 +212,32 @@ where
 mod tests {
     use super::*;
     use crate::session::claim::purge_restored_row_must_be_kept;
+
+    #[test]
+    fn resolve_session_matches_daemon_rows() {
+        let row = |id: &str, title: &str, path: &str| -> crate::daemon::SessionResponse {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "title": title, "project_path": path
+            }))
+            .unwrap()
+        };
+        let rows = [
+            row("abc1", "one", "/p/one"),
+            row("abc2", "two", "/p/two"),
+            row("xyz9", "three", "/p/three"),
+        ];
+        for (identifier, expected) in [
+            ("abc2", "abc2"),
+            ("xy", "xyz9"),
+            ("one", "abc1"),
+            ("/p/two", "abc2"),
+        ] {
+            assert_eq!(resolve_session(identifier, &rows).unwrap().id, expected);
+        }
+        let ambiguous = resolve_session("abc", &rows).unwrap_err().to_string();
+        assert!(ambiguous.contains("matches 2 sessions"), "{ambiguous}");
+        assert!(resolve_session("nope", &rows).is_err());
+    }
 
     #[test]
     fn truncate_id_clamps_to_char_boundaries() {
@@ -241,56 +299,5 @@ mod tests {
         assert!(!purge_restored_row_must_be_kept(true, true));
         assert!(!purge_restored_row_must_be_kept(false, false));
         assert!(!purge_restored_row_must_be_kept(false, true));
-    }
-
-    #[test]
-    fn purge_acp_transcript_rows_deletes_only_target_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("acp_events.db");
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE acp_events (session_id TEXT, seq INTEGER, event_json TEXT);
-             CREATE TABLE acp_attachments (session_id TEXT, attachment_id TEXT, data BLOB);
-             INSERT INTO acp_events VALUES ('keep', 0, '{}'), ('drop', 0, '{}'), ('drop', 1, '{}');
-             INSERT INTO acp_attachments VALUES ('keep', 'a0', x'00'), ('drop', 'a1', x'01');",
-        )
-        .unwrap();
-        drop(conn);
-
-        purge_acp_transcript_rows(&db_path, "drop").unwrap();
-
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
-        let events: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM acp_events WHERE session_id = 'drop'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let attachments: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM acp_attachments WHERE session_id = 'drop'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let kept_events: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM acp_events WHERE session_id = 'keep'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(events, 0, "target event rows should be deleted");
-        assert_eq!(attachments, 0, "target attachment blobs should be deleted");
-        assert_eq!(kept_events, 1, "other session must be untouched");
-    }
-
-    #[test]
-    fn purge_acp_transcript_rows_tolerates_missing_table() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("acp_events.db");
-        rusqlite::Connection::open(&db_path).unwrap();
-        purge_acp_transcript_rows(&db_path, "whatever").unwrap();
     }
 }

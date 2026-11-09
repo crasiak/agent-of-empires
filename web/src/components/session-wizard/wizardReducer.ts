@@ -1,5 +1,6 @@
-import type { AgentInfo, GroupInfo, ProfileInfo, ProjectOverrides } from "../../lib/types";
+import type { AgentInfo, CreateFailure, GroupInfo, ProfileInfo, ProjectOverrides } from "../../lib/types";
 import { normalizeProjectPathKey } from "../../lib/registeredProjects";
+import { failureFields } from "./createFailureView";
 import { slugifyBranch } from "./sessionNames";
 
 export interface WizardData {
@@ -32,6 +33,7 @@ export interface WizardData {
   sandboxEnabled: boolean;
   sandboxImage: string;
   extraEnv: string[];
+  hookEnv: string[];
   extraRepoPaths: string[];
   /** Per extra repo base branch, keyed by path; outranks `baseBranch`. */
   repoBases: Record<string, string>;
@@ -44,14 +46,16 @@ export interface WizardData {
   scratch: boolean;
   /** Optimistically true until the wizard's probe says otherwise; false forces `useWorktree` off. */
   pathIsGitRepo: boolean;
-  /** Per-session structured view choice, seeded from `acp.default_new_session_view`; deliberately
+  /** Per-session structured view choice, seeded from `acp.structured_view`; deliberately
    *  not persisted or tracked in `profileDirty`. */
   useStructuredView: boolean;
+  /** False when the profile's `acp.structured_view` is `off`: the toggle is hidden and the view stays off. */
+  structuredViewOffered: boolean;
   /** Set by a direct `useStructuredView` edit so mount-time seeding keeps it. */
   structuredViewDirty: boolean;
   agentModel: string;
   agentEffort: string;
-  /** Existing Claude session id to import and resume. */
+  /** Existing native ACP session id to import and resume. */
   importAcpSessionId: string;
   [key: string]: unknown;
 }
@@ -60,10 +64,20 @@ export interface WizardState {
   data: WizardData;
   isSubmitting: boolean;
   error: string | null;
+  /** A create the server refused, shown as the failure box instead of `error`. */
+  failure: CreateFailure | null;
   agents: AgentInfo[];
+  /** Until "ready", which agents always run in Yolo mode is unknown. "missing": the profile is gone. */
+  agentsStatus: "loading" | "ready" | "failed" | "missing";
+  /** Which profile `agents` and `agentsStatus` describe; any other profile is still loading. */
+  agentsFor: string | null;
   groups: GroupInfo[];
+  /** Which profile `groups` was fetched for; any other profile sees no Groups. */
+  groupsFor: string | null;
   profiles: ProfileInfo[];
   dockerAvailable: boolean;
+  /** The configured Container runtime's display name; null when the probe failed. */
+  dockerRuntimeName: string | null;
   /** The Docker probe has answered, even if the answer was a failure. */
   dockerChecked: boolean;
 }
@@ -72,12 +86,14 @@ export type Action =
   | { type: "SET_FIELD"; field: string; value: unknown }
   | { type: "SUBMIT_START" }
   | { type: "SUBMIT_ERROR"; error: string }
+  | { type: "SUBMIT_FAILED"; failure: CreateFailure }
   | { type: "SUBMIT_SUCCESS" }
   | { type: "SUBMIT_CANCEL" }
-  | { type: "SET_AGENTS"; agents: AgentInfo[] }
-  | { type: "SET_GROUPS"; groups: GroupInfo[] }
+  | { type: "SET_AGENTS"; agents: AgentInfo[]; agentsFor: string }
+  | { type: "AGENTS_FAILED"; agentsFor: string; missing: boolean }
+  | { type: "SET_GROUPS"; groups: GroupInfo[]; groupsFor: string }
   | { type: "SET_PROFILES"; profiles: ProfileInfo[] }
-  | { type: "SET_DOCKER"; available: boolean }
+  | { type: "SET_DOCKER"; available: boolean; runtimeName: string | null }
   | {
       type: "APPLY_PROFILE_DEFAULTS";
       yoloMode: boolean;
@@ -88,6 +104,7 @@ export type Action =
       agentModel?: string;
       agentEffort?: string;
       useStructuredView?: boolean;
+      structuredViewOffered?: boolean;
       /** Mount-time seeding sets this so a late settings response cannot clobber user edits. */
       skipIfDirty?: boolean;
     }
@@ -118,6 +135,7 @@ export const initialData: WizardData = {
   sandboxEnabled: false,
   sandboxImage: "",
   extraEnv: [],
+  hookEnv: [],
   extraRepoPaths: [],
   repoBases: {},
   profileDirty: false,
@@ -127,6 +145,7 @@ export const initialData: WizardData = {
   scratch: false,
   pathIsGitRepo: true,
   useStructuredView: true,
+  structuredViewOffered: true,
   structuredViewDirty: false,
   agentModel: "",
   agentEffort: "",
@@ -138,11 +157,13 @@ const PROFILE_FIELDS = ["yoloMode", "sandboxEnabled", "useWorktree", "tool", "ex
 
 function setField(data: WizardData, field: string, value: unknown): WizardData {
   const next = { ...data, [field]: value };
-  if (field === "title" && !data.worktreeBranchDirty) {
+  if (field === "title" && !data.worktreeBranchDirty && !data.importAcpSessionId) {
     next.worktreeBranch = slugifyBranch(String(value));
   }
   // Any branch edit, even clearing it, stops the title mirror.
   if (field === "worktreeBranch") next.worktreeBranchDirty = true;
+  // The seeded model and effort belong to the previous agent; unset, the server uses the new agent's defaults.
+  if (field === "tool" && value !== data.tool) Object.assign(next, { agentModel: "", agentEffort: "" });
   if (field === "scratch" && value === true) {
     Object.assign(next, {
       path: "",
@@ -171,28 +192,71 @@ function setField(data: WizardData, field: string, value: unknown): WizardData {
     // The import picker dispatches `importAcpSessionId` after `path`, so its own pick survives.
     next.importAcpSessionId = "";
   }
+  if (field === "importAcpSessionId" && value) {
+    Object.assign(next, {
+      scratch: false,
+      useWorktree: false,
+      sandboxEnabled: false,
+      attachExisting: false,
+      extraRepoPaths: [],
+      repoBases: {},
+      worktreeBranch: "",
+      baseBranch: "",
+      projectWorktreeOverride: undefined,
+      projectSandboxOverride: undefined,
+      worktreeDirty: false,
+      sandboxDirty: false,
+    });
+  }
   if (field === "path") next.pathIsGitRepo = true;
   if (field === "pathIsGitRepo" && value === false) next.useWorktree = false;
   if (PROFILE_FIELDS.includes(field)) next.profileDirty = true;
   if (field === "useWorktree") next.worktreeDirty = true;
   if (field === "sandboxEnabled") next.sandboxDirty = true;
   if (field === "useStructuredView") next.structuredViewDirty = true;
+  // An import is the one thing that outranks `off`, so the choice it forced ends with it.
+  if (data.importAcpSessionId && !next.importAcpSessionId && !next.structuredViewOffered) {
+    next.useStructuredView = false;
+  }
   return next;
 }
 
-/** An import (structured on disk) and a hand-set view outrank the seeded view. */
-function seededStructuredView(data: WizardData, action: { useStructuredView?: boolean }): boolean {
-  if (data.importAcpSessionId || data.structuredViewDirty) return data.useStructuredView;
+/** An import (structured on disk) outranks everything; `off` outranks a hand-set view. */
+function seededStructuredView(data: WizardData, action: { useStructuredView?: boolean }, offered: boolean): boolean {
+  if (data.importAcpSessionId) return data.useStructuredView;
+  if (!offered) return false;
+  if (data.structuredViewDirty) return data.useStructuredView;
   return action.useStructuredView ?? data.useStructuredView;
 }
 
+const NO_AGENTS: AgentInfo[] = [];
+
+/** The agent list for `profile`: one loaded for another profile reads as still loading. */
+export function agentsView(
+  state: Pick<WizardState, "agents" | "agentsStatus" | "agentsFor">,
+  profile: string,
+): { agents: AgentInfo[]; agentsStatus: WizardState["agentsStatus"] } {
+  return state.agentsFor === profile
+    ? { agents: state.agents, agentsStatus: state.agentsStatus }
+    : { agents: NO_AGENTS, agentsStatus: "loading" };
+}
+
 export function reducer(state: WizardState, action: Action): WizardState {
+  const next = reduce(state, action);
+  const { failure } = next;
+  if (failure && failure === state.failure && failureFields(failure).some((f) => next.data[f] !== state.data[f]))
+    return { ...next, failure: null };
+  return next;
+}
+
+function reduce(state: WizardState, action: Action): WizardState {
   switch (action.type) {
     case "SET_FIELD":
       return { ...state, data: setField(state.data, action.field, action.value), error: null };
     case "RESET_STRUCTURED_VIEW_DIRTY":
       return { ...state, data: { ...state.data, structuredViewDirty: false } };
     case "SEED_PROJECT_OVERRIDES": {
+      if (state.data.importAcpSessionId || state.data.scratch) return state;
       // A manual toggle wins; still record the override for a later profile reset.
       // Same path identity as the registry lookup: `/repo/` and `/repo` are one project.
       if (
@@ -217,29 +281,48 @@ export function reducer(state: WizardState, action: Action): WizardState {
       };
     }
     case "SUBMIT_START":
-      return { ...state, isSubmitting: true, error: null };
+      return { ...state, isSubmitting: true, error: null, failure: null };
     case "SUBMIT_ERROR":
-      return { ...state, isSubmitting: false, error: action.error };
+      return { ...state, isSubmitting: false, error: action.error, failure: null };
+    case "SUBMIT_FAILED":
+      return { ...state, isSubmitting: false, error: null, failure: action.failure };
     case "SUBMIT_SUCCESS":
       return { ...state, isSubmitting: false };
     case "SUBMIT_CANCEL":
-      return { ...state, isSubmitting: false, error: null };
+      return { ...state, isSubmitting: false, error: null, failure: null };
     case "SET_AGENTS":
-      return { ...state, agents: action.agents };
+      return { ...state, agents: action.agents, agentsStatus: "ready", agentsFor: action.agentsFor };
+    case "AGENTS_FAILED":
+      return {
+        ...state,
+        // A retry for the same Profile keeps its list; another Profile's list must not be read for it.
+        agents: action.agentsFor === state.agentsFor ? state.agents : [],
+        agentsStatus: action.missing ? "missing" : "failed",
+        agentsFor: action.agentsFor,
+      };
     case "SET_GROUPS":
-      return { ...state, groups: action.groups };
+      return { ...state, groups: action.groups, groupsFor: action.groupsFor };
     case "SET_PROFILES":
       return { ...state, profiles: action.profiles };
     case "SET_DOCKER":
-      return { ...state, dockerAvailable: action.available, dockerChecked: true };
+      return {
+        ...state,
+        dockerAvailable: action.available,
+        dockerRuntimeName: action.runtimeName,
+        dockerChecked: true,
+      };
     case "APPLY_PROFILE_DEFAULTS": {
       // A remembered or prefilled path can resolve its repo probe before this arrives, so the
       // seeded default must not flip a worktree back on for a scratch session or a non-repo path.
       const resolvedUseWorktree = () =>
-        state.data.scratch || state.data.pathIsGitRepo === false
+        state.data.importAcpSessionId || state.data.scratch || state.data.pathIsGitRepo === false
           ? false
           : (state.data.projectWorktreeOverride ?? action.worktreeEnabled);
-      const useStructuredView = seededStructuredView(state.data, action);
+      const structuredViewOffered = action.structuredViewOffered ?? state.data.structuredViewOffered;
+      const useStructuredView = seededStructuredView(state.data, action, structuredViewOffered);
+      const resolvedSandbox = state.data.importAcpSessionId
+        ? false
+        : (state.data.projectSandboxOverride ?? action.sandboxEnabled);
       if (action.skipIfDirty && state.data.profileDirty) {
         // Still record the real default, or a later project with no override falls back to `false`.
         // The view is not a profile-tracked field, so it seeds past other edits.
@@ -248,12 +331,11 @@ export function reducer(state: WizardState, action: Action): WizardState {
           data: {
             ...state.data,
             useStructuredView,
+            structuredViewOffered,
             profileWorktreeDefault: action.worktreeEnabled,
             profileSandboxDefault: action.sandboxEnabled,
             useWorktree: state.data.worktreeDirty ? state.data.useWorktree : resolvedUseWorktree(),
-            sandboxEnabled: state.data.sandboxDirty
-              ? state.data.sandboxEnabled
-              : (state.data.projectSandboxOverride ?? state.data.sandboxEnabled),
+            sandboxEnabled: state.data.sandboxDirty ? state.data.sandboxEnabled : resolvedSandbox,
           },
         };
       }
@@ -262,7 +344,7 @@ export function reducer(state: WizardState, action: Action): WizardState {
         data: {
           ...state.data,
           yoloMode: action.yoloMode,
-          sandboxEnabled: state.data.projectSandboxOverride ?? action.sandboxEnabled,
+          sandboxEnabled: resolvedSandbox,
           profileSandboxDefault: action.sandboxEnabled,
           useWorktree: resolvedUseWorktree(),
           profileWorktreeDefault: action.worktreeEnabled,
@@ -271,6 +353,7 @@ export function reducer(state: WizardState, action: Action): WizardState {
           agentModel: action.agentModel ?? "",
           agentEffort: action.agentEffort ?? "",
           useStructuredView,
+          structuredViewOffered,
           profileDirty: false,
           worktreeDirty: false,
           sandboxDirty: false,

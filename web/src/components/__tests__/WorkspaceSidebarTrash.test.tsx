@@ -4,9 +4,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { WorkspaceSidebar } from "../WorkspaceSidebar";
+import { TrashMenu } from "../sidebar/TrashMenu";
 import { buildSessionGroups } from "../../lib/sidebarGroups";
 import type { SessionResponse, Workspace } from "../../lib/types";
 import { makeSession, makeWorkspace } from "./fixtures";
+import { SessionActionProvider } from "../sidebar/SessionActionProvider";
 
 type Props = React.ComponentProps<typeof WorkspaceSidebar>;
 const noop = () => {};
@@ -27,6 +29,9 @@ const trashed = (id: string, ...ids: string[]) =>
 /** `groups` holds the workspaces for navigation; the Trash list is passed separately, as App computes it. */
 function renderSidebar(workspaces: Workspace[], over: Partial<Props> = {}) {
   const props: Props = {
+    observedById: {},
+    runtimeEpoch: "boot",
+    onSessionMutation: noop,
     groups: buildSessionGroups(workspaces, {
       idleDecayWindowMs: 60_000,
       sortMode: "lastActivity",
@@ -64,7 +69,16 @@ function renderSidebar(workspaces: Workspace[], over: Partial<Props> = {}) {
     onAxisChange: noop,
     ...over,
   };
-  render(<WorkspaceSidebar {...props} />);
+  render(
+    <SessionActionProvider
+      sessions={workspaces.flatMap((ws) => ws.sessions)}
+      runtimeEpoch={props.runtimeEpoch}
+      observedById={props.observedById}
+      onSessionMutation={props.onSessionMutation}
+    >
+      <WorkspaceSidebar {...props} />
+    </SessionActionProvider>,
+  );
   return props;
 }
 const withTrash = (over: Partial<Props> = {}) => {
@@ -78,6 +92,18 @@ const follows = (a: Node, b: Node) => !!(a.compareDocumentPosition(b) & Node.DOC
 afterEach(cleanup);
 
 describe("WorkspaceSidebar Trash control", () => {
+  it("shows the daemon's trash count before the rows exist and loads them when opened", () => {
+    const onLoadTrash = vi.fn();
+    renderSidebar([], { trashedWorkspaces: [], trashedCount: 4, trashLoaded: false, onLoadTrash });
+    expect(screen.getByTestId("sidebar-trash-count").textContent).toBe("4");
+    expect(onLoadTrash).not.toHaveBeenCalled();
+
+    click("sidebar-trash-toggle");
+    expect(onLoadTrash).toHaveBeenCalledTimes(1);
+    click("sidebar-trash-toggle");
+    expect(onLoadTrash).toHaveBeenCalledTimes(1);
+  });
+
   it("opens from the footer and exposes Open, Restore, and Delete", () => {
     const props = withTrash();
     expect(query("sidebar-trash-menu")).toBeNull();
@@ -193,15 +219,44 @@ describe("WorkspaceSidebar Trash control", () => {
     for (const id of ["restore", "purge", "empty"]) expect(query(`sidebar-trash-${id}`)).toBeNull();
   });
 
-  it.each([
-    [["c1"], "Permanently delete 1 trashed session? This cannot be undone."],
-    [["c1", "c2"], "Permanently delete 2 trashed sessions? This cannot be undone."],
-  ])("Empty Trash confirm counts sessions %j (#3167)", (ids, expected) => {
-    const ws = trashed("multi-ws", ...ids);
-    renderSidebar([ws], { trashedWorkspaces: [ws] });
+  it("keeps the confirmed trash selection and lifecycle when polling replaces the list", () => {
+    const selected = workspace("selected", [
+      {
+        id: "s1",
+        trashed_at: TRASHED,
+        lifecycle_generation: 1,
+        trash_lifecycle_id: "00000000-0000-4000-8000-000000000001",
+      },
+    ]);
+    const onEmptyTrash = vi.fn();
+    const menu = (workspaces: Workspace[]) => (
+      <TrashMenu
+        trashedWorkspaces={workspaces}
+        trashedCount={workspaces.length}
+        loaded
+        onLoad={noop}
+        onOpen={noop}
+        onRestore={noop}
+        onDelete={noop}
+        onEmptyTrash={onEmptyTrash}
+      />
+    );
+    const view = render(menu([selected]));
     click("sidebar-trash-toggle");
     click("sidebar-trash-empty");
-    expect(screen.getByTestId("empty-trash-dialog").textContent).toContain(expected);
+    expect(screen.getByTestId("empty-trash-dialog").textContent).toMatch(/\b1\b/);
+    const retrash = workspace("selected", [
+      {
+        id: "s1",
+        trashed_at: TRASHED,
+        lifecycle_generation: 2,
+        trash_lifecycle_id: "00000000-0000-4000-8000-000000000002",
+      },
+    ]);
+    view.rerender(menu([retrash, trashed("new", "s2", "s3")]));
+    expect(screen.getByTestId("empty-trash-dialog").textContent).toMatch(/\b1\b/);
+    click("empty-trash-confirm");
+    expect(onEmptyTrash).toHaveBeenCalledExactlyOnceWith([selected]);
   });
 
   it("Empty Trash: Cancel is inert, Escape keeps the panel open, one Confirm purges once", () => {

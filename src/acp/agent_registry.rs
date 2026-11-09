@@ -40,7 +40,7 @@ pub struct AgentRegistry {
 }
 
 impl AgentRegistry {
-    /// One entry per tool with a published ACP server, plus aoe's own `aoe-agent`.
+    /// One entry per tool with a published ACP server, plus the built-in agent.
     pub fn with_defaults() -> Self {
         let claude_install = install_hint_for("claude-agent-acp").unwrap_or("(see project docs)");
         let claude_description =
@@ -148,13 +148,48 @@ pub fn inherited_acp_base(tool: &str, agent_detect_as: &HashMap<String, String>)
         .map(|_| base.clone())
 }
 
+/// Whether `agent` always runs in Yolo mode in `view`: a built-in that does, or a custom agent
+/// whose base does. A terminal session runs the `agent_detect_as` base CLI; a structured one
+/// runs the agent's own valid adapter when it has one, else the base's.
+pub fn runs_always_yolo(
+    agent: &str,
+    view: crate::session::View,
+    agent_acp_cmd: &HashMap<String, String>,
+    agent_detect_as: &HashMap<String, String>,
+) -> bool {
+    if crate::agents::get_agent(agent).is_some() {
+        return crate::agents::is_always_yolo(agent);
+    }
+    match view {
+        crate::session::View::Terminal => agent_detect_as
+            .get(agent)
+            .is_some_and(|base| crate::agents::is_always_yolo(base)),
+        crate::session::View::Structured => {
+            let own_adapter = agent_acp_cmd
+                .get(agent)
+                .is_some_and(|cmd| AgentSpec::from_acp_cmd(agent, cmd).is_ok());
+            !own_adapter
+                && inherited_acp_base(agent, agent_detect_as)
+                    .is_some_and(|base| crate::agents::is_always_yolo(&base))
+        }
+    }
+}
+
 /// The name users know a registry agent by, for headlines such as
 /// "Codex couldn't start".
 pub fn display_name_for(agent: &str) -> Option<&'static str> {
     Some(match agent {
-        "claude" | "claude-code" => "Claude",
+        "claude" | "claude-code" => "Claude Code",
         "opencode" => "OpenCode",
-        "gemini" => "Gemini",
+        "gemini" => "Gemini CLI",
+        "cursor" => "Cursor",
+        "copilot" => "Copilot CLI",
+        "droid" => "Factory Droid",
+        "settl" => "Settl",
+        "hermes" => "Hermes",
+        "kiro" => "Kiro CLI",
+        "qwen" => "Qwen Code",
+        "antigravity" => "Antigravity CLI",
         "codex" => "Codex",
         "vibe" => "Mistral Vibe",
         "pi" => "Pi",
@@ -162,6 +197,8 @@ pub fn display_name_for(agent: &str) -> Option<&'static str> {
         "kimi" => "Kimi Code",
         "prime-agent" => "Prime Agent",
         "aoe-agent" => "aoe-agent",
+        #[cfg(feature = "e2e-tests")]
+        "fake-agent" => "Fake Agent",
         _ => return None,
     })
 }
@@ -336,9 +373,12 @@ mod tests {
     }
 
     #[test]
-    fn every_default_agent_has_a_display_name() {
+    fn every_agent_has_a_display_name() {
         for (name, _) in AgentRegistry::with_defaults().list() {
             assert!(display_name_for(name).is_some(), "{name}");
+        }
+        for agent in crate::agents::AGENTS {
+            assert!(display_name_for(agent.name).is_some(), "{}", agent.name);
         }
     }
 

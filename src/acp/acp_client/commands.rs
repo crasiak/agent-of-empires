@@ -1,7 +1,7 @@
 //! The command channel the connection task pumps, and how each connection
 //! attempt reaches its agent.
 
-use agent_client_protocol::schema::v1::ContentBlock;
+use agent_client_protocol::v1::schema::ContentBlock;
 use tokio::sync::oneshot;
 
 use super::delete::DeleteSessionOutcome;
@@ -58,6 +58,8 @@ pub(super) enum ClientCmd {
     /// `Supervisor::attach` once, right after the connection is up, so
     /// tracking resumes instead of the panel showing them as detached.
     ResumeBackgroundTailing(Vec<(String, String)>),
+    /// Re-tail the exact background task launches a previous daemon left open.
+    ResumeTaskTailing(Vec<crate::acp::state::BackgroundTaskLaunch>),
     #[cfg(test)]
     FlushForTest(oneshot::Sender<()>),
     CloseSession(oneshot::Sender<super::close::CloseSessionOutcome>),

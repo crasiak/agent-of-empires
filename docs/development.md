@@ -12,7 +12,32 @@ cargo fmt
 cargo clippy
 ```
 
+Local dashboard end-to-end tests on Linux require `bubblewrap`, `iproute2`, and
+`tmux`. Host security policy must allow `CAP_NET_ADMIN` in bubblewrap's children
+to configure their private network namespace. The
+[web-e2e CI leg](../.github/workflows/tests.yml) requires this coverage with
+`AOE_REQUIRE_LOCAL_NETWORK_TESTS=1`; unavailable confinement fails the job.
+
+The core-rest CI leg requires the scoped cancellation case to run with
+`AOE_REQUIRE_SCOPED_TESTS=1`; any setup path that skips it must fail. Local runs
+may skip the scoped case when no usable user manager exists; unscoped
+cancellation still runs.
+
+Creation-progress events are advisory and publish independently of session
+snapshots. Tests that need a published session must wait for its ID in the
+canonical snapshot. Hold in-flight fixture gates until explicit release, with
+cleanup that waits for release acknowledgment and lets a late hook exit when
+its gate directory disappears. Keep request deadlines longer than the bounded
+scenario and assert the expected API error code, not merely any error. Keep an
+emergency hook watchdog beyond the request budget for abrupt test-process exit.
+
 The binary is `target/{profile}/aoe`. Web commands and test selection live in `web/AGENTS.md`.
+
+Live web fixtures own any Daemon started by `seedFn`, including when seeding
+fails. Teardown stops that Daemon before its runners and removes the isolated
+HOME only after cleanup succeeds. A shutdown failure retains HOME for diagnosis.
+
+When adding a mutating REST route, classify it in the CityHall allow or deny table in `src/server/access.rs`. Audit its handler or declare an exact, justified exemption in `src/server/api/mod.rs`.
 
 Debug builds carry line tables only, and dependencies carry no debug info, to keep `target/` small across worktrees. Panics still name the file and line in this crate, but a debugger has no local values; rebuild with `RUSTFLAGS="-Cdebuginfo=2"` for a full debugging session.
 
@@ -29,6 +54,15 @@ aoe logs
 
 `cargo xtask dev` runs a dashboard-enabled debug backend on 8081 and Vite with HMR on 5173; `--watch` rebuilds and restarts the backend when Rust inputs change, leaving the previous backend running if a rebuild fails.
 
+Use explicit dotted tracing area targets so per-target logging overrides affect
+native and dashboard failures consistently. Every `target:` root used in `src/`
+must be listed in `DEFAULT_TARGET_ROOTS` in `src/logging.rs`; a unit test
+enforces it, and an unlisted root only reaches the file at `warn` and above.
+Dependency crates log at `warn` regardless of `default_level`. Clearing one override in
+Settings > Logging restores inheritance without clearing other targets.
+
+Filter changes saved in Settings > Logging apply to the TUI, running daemon and structured runners in the same app namespace. Sink and rotation changes require restart. No-op and unrelated saves preserve temporary runtime filters.
+
 Debug builds are isolated from installed release state:
 
 | Resource | Release and `dev-release` | Debug |
@@ -42,7 +76,7 @@ Debug also uses an app-directory tmux socket, which `AOE_TMUX_SOCKET` overrides.
 
 ## Build cache across worktrees
 
-Each worktree has its own `target/`. Developers with many worktrees can opt into [kache](https://github.com/kunobi-ninja/kache), which shares dependency artifacts through a local content-addressed store. It is optional and unused by the repository, CI, Nix, and release builds.
+Each worktree has its own `target/`. Developers with many worktrees can opt into [kache](https://github.com/kunobi-ninja/kache), which shares dependency artifacts through a local content-addressed store. It is optional locally; CI uses it through `.github/actions/kache`, and Nix and release builds do not use it.
 
 ```sh
 cargo binstall kache
@@ -52,6 +86,19 @@ cargo build --all-features
 ```
 
 Install kache before exporting `RUSTC_WRAPPER`, to avoid a bootstrap loop, and unset the variable to disable it. The cache and the worktrees must share a filesystem for linking; crates with native linking may still rebuild. `kache monitor` and `kache stats` inspect it, and `scripts/verify-shared-target.sh` verifies shared artifacts.
+
+Maintainers can share artifacts through the `aoe-rust-kache` S3 bucket. Ask a maintainer with AWS access for an access key for your `kache-<github-user>` IAM user, store it as the `aoe-kache` profile with `aws configure --profile aoe-kache`, then add this to `~/.config/kache/config.toml` and check it with `kache doctor`:
+
+```toml
+[cache.remote]
+type = "s3"
+bucket = "aoe-rust-kache"
+region = "us-east-1"
+prefix = "maint"
+profile = "aoe-kache"
+```
+
+Maintainer keys can only read and write `maint/`, so CI never consumes artifacts built on a laptop.
 
 ## Demo recordings
 

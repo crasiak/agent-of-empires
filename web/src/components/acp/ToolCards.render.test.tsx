@@ -14,6 +14,8 @@ vi.mock("../../hooks/useShikiTheme", () => ({
   useShikiTheme: () => ({ theme: "dark-plus", appearance: "dark" }),
 }));
 
+vi.mock("../../lib/clipboard", () => ({ writeClipboard: vi.fn().mockResolvedValue(true) }));
+
 const { skillIndexRef } = vi.hoisted(() => ({
   skillIndexRef: { current: { labelsByKey: new Map<string, Set<string>>() } as SkillIndex },
 }));
@@ -21,7 +23,15 @@ vi.mock("../../hooks/useSkillIndex", () => ({
   useSkillIndex: () => skillIndexRef.current,
 }));
 
-import type { ActivityRow, BackgroundAgent, ToolCall, ToolOutputBlock } from "../../lib/acpTypes";
+import {
+  applyReducedState,
+  emptyAcpState,
+  type ActivityRow,
+  type BackgroundAgent,
+  type ToolCall,
+  type ToolOutputBlock,
+} from "../../lib/acpTypes";
+import { writeClipboard } from "../../lib/clipboard";
 import { highlightSnippet } from "../../lib/snippetHighlighter";
 import { AgentProfileProvider } from "../../lib/agentProfileContext";
 import type { FileRef, FileRefSession } from "../../lib/fileRef";
@@ -338,6 +348,65 @@ describe("ToolCard expanded bodies", () => {
     expect(container.querySelectorAll('[data-testid="string-diff"]').length).toBe(2);
   });
 
+  it("renders a memory edit from its structured diff when the args carry no text", () => {
+    const path = `${MEMORY_DIR}/feedback_x.md`;
+    const { container, text, toggle } = renderCard(
+      makeToolCall({
+        name: "Edit",
+        kind: "edit",
+        args_preview: args({ file_path: path }),
+        diffs: [
+          { path, old_text: "---\nname: x\n---\nold line", new_text: "---\nname: x\n---\nnew line", created_at: "" },
+        ],
+      }),
+    );
+    expect(text()).toContain("updated");
+    expect(text()).toContain("+1");
+    toggle();
+    expect(container.querySelectorAll('[data-testid="string-diff"]').length).toBe(1);
+  });
+
+  it.each([
+    ["picks the diff matching the memory path", "old line", 1],
+    ["treats an emptied previous file as an edit", "", 1],
+  ])("memory edit %s", (_label, oldText, expectedDiffs) => {
+    const path = `${MEMORY_DIR}/feedback_z.md`;
+    const other = `${MEMORY_DIR}/other.md`;
+    const { container, toggle } = renderCard(
+      makeToolCall({
+        name: "Edit",
+        kind: "edit",
+        args_preview: args({ file_path: path }),
+        diffs: [
+          { path: other, old_text: "unrelated before", new_text: "unrelated after", created_at: "" },
+          { path, old_text: oldText, new_text: "new line", created_at: "" },
+        ],
+      }),
+    );
+    toggle();
+    expect(container.querySelectorAll('[data-testid="string-diff"]').length).toBe(expectedDiffs);
+    expect(container.textContent).toContain("new line");
+    expect(container.textContent).not.toContain("unrelated after");
+  });
+
+  it("renders a newly written memory file as content, not a diff", () => {
+    const path = `${MEMORY_DIR}/feedback_y.md`;
+    const { container, text, toggle } = renderCard(
+      makeToolCall({
+        name: "Write",
+        kind: "edit",
+        args_preview: args({ file_path: path }),
+        diffs: [
+          { path, old_text: null, new_text: "---\nname: y\ndescription: a note\n---\nfresh body", created_at: "" },
+        ],
+      }),
+    );
+    toggle();
+    expect(text()).toContain("saved");
+    expect(text()).toContain("fresh body");
+    expect(container.querySelector('[data-testid="string-diff"]')).toBeNull();
+  });
+
   it("renders synthesized memory as markdown with the envelope and line numbers stripped", () => {
     const { getByTestId, toggle } = renderCard(fixtures.memoryRecallSynthesize);
     toggle();
@@ -449,6 +518,16 @@ describe("structured output media", () => {
     expect(text()).toContain(visible);
   });
 
+  it("keeps a failed Read's output under the attempted action, not outside the card", () => {
+    const { container, getByText } = renderCard(
+      fixtures.read,
+      makeError({ output: [{ kind: "text", text: "partial output" }] }),
+    );
+    const details = container.querySelector("details");
+    expect(details).not.toBeNull();
+    expect(getByText("partial output").closest("details")).toBe(details);
+  });
+
   // Agent-controlled uris never reach a sink; unusable blocks degrade to a placeholder.
   it.each<[string, ToolOutputBlock, string, string]>([
     ["image without data", { kind: "image", mime_type: "image/png" }, "img", "image (image/png)"],
@@ -546,11 +625,17 @@ describe("TodoGroupCard", () => {
     expect(container.textContent).toContain("Step Charlie");
     expect(container.textContent).toContain("1 active");
     expect(container.textContent).not.toContain("Step Alpha");
-    fireEvent.click(getByRole("button"));
+    fireEvent.click(getByRole("button", { name: /updated 3 times/ }));
     const text = container.textContent ?? "";
     expect(text.indexOf("Step Alpha")).toBeGreaterThan(-1);
     expect(text.indexOf("Step Alpha")).toBeLessThan(text.indexOf("Step Bravo"));
     expect(text).toContain("1 items");
+  });
+
+  it("copies the previewed list as a markdown checklist", () => {
+    const { getByRole } = renderGroup(items);
+    fireEvent.click(getByRole("button", { name: "Copy todos" }));
+    expect(writeClipboard).toHaveBeenCalledWith("- [ ] Step Charlie (in progress)");
   });
 
   it.each([
@@ -741,6 +826,131 @@ describe("AsyncSubagentCard", () => {
     );
     fireEvent.click(getByRole("button"));
     expect(openPane).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WorkflowToolCard", () => {
+  const script = "export const meta = { name: 'drafts' }\nawait agent('x')";
+  const tool = makeToolCall({ id: "toolu_wf", name: "Workflow", kind: "other", args_preview: args({ script }) });
+  const launched = makeCompletion({ text: "Workflow launched in background. Task ID: wfx" });
+  const member = (agentId: string, phase: string, status: BackgroundAgent["status"]): BackgroundAgent => ({
+    agentId,
+    toolCallId: "toolu_wf",
+    workflow: { run_id: "wf_1", name: "drafts", phase },
+    description: agentId,
+    prompt: "",
+    model: "",
+    status,
+    startedAt: new Date().toISOString(),
+    endedAt: status === "running" ? null : new Date().toISOString(),
+    toolCount: 0,
+    tools: [],
+    lastTool: null,
+    lastText: null,
+    result: null,
+    warning: null,
+  });
+
+  it("follows the run's agents per phase, keeping the script folded", () => {
+    const openPane = vi.fn();
+    const value = {
+      agents: [member("d1", "Draft", "completed"), member("v1", "Verify", "running")],
+      workflowRuns: { toolu_wf: { taskId: "wfx", name: "issue-drafts", summary: "Draft five issues" } },
+      backgroundTasks: ["wfx"],
+      openPane,
+    };
+    const { container, getByText } = render(
+      wrap(
+        <BackgroundAgentsContext.Provider value={value}>
+          <ToolCard tool={tool} result={launched} />
+        </BackgroundAgentsContext.Provider>,
+        { toolKey: "claude" },
+      ),
+    );
+    const text = () => container.textContent ?? "";
+    expect(text()).toContain("issue-drafts");
+    expect(text()).toContain("1 of 2 agents done");
+    // The call returned at launch, but the run goes on.
+    expect(text()).toContain("running");
+    expect(text()).not.toContain("Draft five issues");
+    fireEvent.click(container.querySelector("button")!);
+    expect(text()).toContain("Draft five issues");
+    expect(text()).toContain("Draft1 done");
+    expect(text()).toContain("Verify1 running · 0 done");
+    expect(text()).toContain("await agent");
+    fireEvent.click(getByText("Open Sub agents"));
+    expect(openPane).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["before its first agent", [], ["wfx"], false, true],
+    ["between phases", [member("d1", "Draft", "completed")], ["wfx"], false, true],
+    ["once its task ends", [member("d1", "Draft", "completed")], [], false, false],
+    ["after it finished, while a later task reuses its id", [], ["wfx"], true, false],
+  ] as const)("follows the run's task %s", (_label, agents, backgroundTasks, finished, running) => {
+    const value = {
+      agents: [...agents],
+      workflowRuns: { toolu_wf: { taskId: "wfx", name: "issue-drafts", summary: null, finished } },
+      backgroundTasks: [...backgroundTasks],
+    };
+    const { container } = render(
+      wrap(
+        <BackgroundAgentsContext.Provider value={value}>
+          <ToolCard tool={tool} result={launched} />
+        </BackgroundAgentsContext.Provider>,
+        { toolKey: "claude" },
+      ),
+    );
+    expect(container.textContent).toContain("issue-drafts");
+    expect(container.textContent?.includes("running")).toBe(running);
+  });
+
+  it.each([
+    ["its last agent ended", [{ ...member("d1", "Draft", "completed"), endedAt: "2026-10-30T10:00:10Z" }]],
+    ["it had no agents", []],
+  ] as const)("times a run opened after it finished by its task even when %s", (_label, agents) => {
+    // The replay window holds neither its launch nor its finish; only the
+    // daemon's state and the history rows know the run.
+    const state = applyReducedState(emptyAcpState(), {
+      agent: "claude",
+      model: null,
+      mode: "Default",
+      current_plan: null,
+      in_flight_tool: null,
+      pending_approvals: [],
+      pending_elicitations: [],
+      thinking: null,
+      rate_limit: null,
+      available_commands: [],
+      available_modes: [],
+      current_mode_id: null,
+      turn_active: false,
+      cancelling: false,
+      compacting: false,
+      workflow_runs: [
+        { task_id: "wfx", tool_call_id: "toolu_wf", name: "drafts", finished: true, ended_at: "2026-10-30T10:01:00Z" },
+      ],
+    });
+    const value = { agents: [...agents], workflowRuns: state.workflowRuns, backgroundTasks: state.backgroundTasks };
+    const { container } = render(
+      wrap(
+        <BackgroundAgentsContext.Provider value={value}>
+          <ToolCard
+            tool={{ ...tool, started_at: "2026-10-30T10:00:00Z" }}
+            result={{ ...launched, at: "2026-10-30T10:00:01Z" }}
+          />
+        </BackgroundAgentsContext.Provider>,
+        { toolKey: "claude" },
+      ),
+    );
+    expect(container.textContent).toContain("1m 0s");
+  });
+
+  it("names a run with no agents yet, and is the generic card for other agents", () => {
+    // The "workflow" label, then the fallback run name.
+    expect(renderCard(tool, launched, { toolKey: "claude" }).text()).toContain("workflowWorkflow");
+    cleanup();
+    expect(renderCard(tool, launched, { toolKey: "codex" }).text()).not.toContain("workflowWorkflow");
   });
 });
 

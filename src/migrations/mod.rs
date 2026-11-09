@@ -4,7 +4,9 @@
 #[cfg(test)]
 mod afk_tests;
 mod config_file;
+mod legacy_scope_recovery;
 pub mod progress;
+pub(crate) mod recovery;
 mod runner_lock;
 mod sessions_file;
 mod store_fs;
@@ -65,8 +67,21 @@ mod v052_document_conversations;
 mod v053_skill_workshop;
 mod v054_work_arc_consent;
 mod v055_session_work_arc;
+mod v056_pending_purge_owners;
+mod v057_reconcile_session_creation_count;
+mod v058_reconcile_trash_lifecycle_id;
+mod v059_reconcile_serve_passphrase_policy;
+mod v060_runner_scope_ownership;
+mod v061_reconcile_runtime_lineages;
+mod v062_tool_retirements;
+mod v063_terminal_handoffs;
+mod v064_session_started_at;
+mod v065_sound_volume_split;
+mod v066_structured_view;
+mod v067_runtime_filter_acp_target;
+mod v068_runtime_filter_reset;
 
-/// Fixtures shared by the migrations that rewrite agent hook files.
+/// Fixtures shared by migrations that rewrite agent hook files.
 #[cfg(test)]
 mod hook_fixtures {
     use crate::session::test_support::EnvGuard;
@@ -75,8 +90,6 @@ mod hook_fixtures {
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
-    /// Clear every agent config-dir override, so a migration's path
-    /// resolution sees only the fixtures under `home` and `app_dir`.
     pub(super) fn unset_agent_home_env() -> EnvGuard {
         EnvGuard::unset(&[
             "CODEX_HOME",
@@ -87,7 +100,6 @@ mod hook_fixtures {
         ])
     }
 
-    /// A tempdir holding an empty `home` and app dir.
     pub(super) fn setup_dirs() -> (TempDir, PathBuf, PathBuf) {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
@@ -97,7 +109,6 @@ mod hook_fixtures {
         (tmp, home, app_dir)
     }
 
-    /// Write `value` as pretty JSON, creating the parent directory.
     pub(super) fn write_json(path: &Path, value: &Value) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -107,11 +118,11 @@ mod hook_fixtures {
 }
 
 use crate::session::afk::schema as afk_schema;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 55;
+const CURRENT_VERSION: u32 = 68;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -293,6 +304,43 @@ const MIGRATIONS: &[Migration] = &[
     (53, "skill_workshop", v053_skill_workshop::run),
     (54, "work_arc_consent", v054_work_arc_consent::run),
     (55, "session_work_arc", v055_session_work_arc::run),
+    (56, "pending_purge_owners", v056_pending_purge_owners::run),
+    (
+        57,
+        "reconcile_session_creation_count",
+        v057_reconcile_session_creation_count::run,
+    ),
+    (
+        58,
+        "reconcile_trash_lifecycle_id",
+        v058_reconcile_trash_lifecycle_id::run,
+    ),
+    (
+        59,
+        "reconcile_serve_passphrase_policy",
+        v059_reconcile_serve_passphrase_policy::run,
+    ),
+    (
+        60,
+        "runner_scope_ownership",
+        v060_runner_scope_ownership::run,
+    ),
+    (
+        61,
+        "reconcile_runtime_lineages",
+        v061_reconcile_runtime_lineages::run,
+    ),
+    (62, "tool_retirements", v062_tool_retirements::run),
+    (63, "terminal_handoffs", v063_terminal_handoffs::run),
+    (64, "session_started_at", v064_session_started_at::run),
+    (65, "sound_volume_split", v065_sound_volume_split::run),
+    (66, "structured_view", v066_structured_view::run),
+    (
+        67,
+        "runtime_filter_acp_target",
+        v067_runtime_filter_acp_target::run,
+    ),
+    (68, "runtime_filter_reset", v068_runtime_filter_reset::run),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -308,41 +356,62 @@ pub fn has_pending_migrations() -> bool {
     get_current_version() < CURRENT_VERSION
 }
 
-/// Move this session's sandbox store into the private layout, if it is still
-/// on the shared one. Called from the container path so the copy is paid by
-/// the session that needs it rather than by every pending row on any `aoe`
-/// start.
-///
-/// `reporter` is how a caller with a screen narrates the copy: the TUI
-/// forwards it to its status line from a worker thread. Callers without one
-/// pass [`progress::tracing_reporter`], which leaves a trail in the log.
-///
-/// Unproven native content is never a launch fallback: errors leave the store
-/// pending, and admission refuses it until a stopped-store transition succeeds.
-pub fn migrate_sandbox_store_for_with(
+/// Check compatibility before changing or stopping a managed daemon.
+pub(crate) fn ensure_schema_supported() -> Result<u32> {
+    let current = get_current_version();
+    ensure_supported_version(current, CURRENT_VERSION)?;
+    Ok(current)
+}
+
+/// The detached daemon child must observe its parent's completed migration.
+pub fn assert_schema_current() -> Result<()> {
+    let current = ensure_schema_supported()?;
+    anyhow::ensure!(
+        current == CURRENT_VERSION,
+        "data schema version {current} is behind this build ({CURRENT_VERSION}); \
+         the parent `aoe serve` must migrate before launching the daemon child"
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+pub(crate) enum SandboxMigrationError {
+    #[error("sandbox migration is pending")]
+    Deferred,
+    #[error("sandbox migration failed")]
+    Failed,
+}
+
+impl SandboxMigrationError {
+    pub(crate) fn api_code(self) -> crate::daemon::ApiErrorCode {
+        match self {
+            Self::Deferred => crate::daemon::ApiErrorCode::SandboxMigrationDeferred,
+            Self::Failed => crate::daemon::ApiErrorCode::SandboxMigrationFailed,
+        }
+    }
+}
+
+/// Move this session's shared sandbox store and isolate its native content,
+/// reporting copy progress to the caller. Unproven content remains pending.
+pub(crate) fn migrate_sandbox_store_for_with(
     id: &str,
     reporter: Option<progress::Reporter>,
+    store: &dyn crate::session::SessionStore,
+    runtime: &crate::containers::ContainerRuntime,
 ) -> Result<()> {
     if get_current_version() < 27 {
         return Ok(());
     }
     let _installed = progress::install(reporter);
-    v027_isolate_sandbox_stores::migrate_instance(id)?;
-    v033_isolate_sandbox_content::migrate_instance(id)
+    v027_isolate_sandbox_stores::migrate_instance(id, store, runtime)?;
+    v033_isolate_sandbox_content::migrate_instance(id, runtime)
 }
 
-/// [`migrate_sandbox_store_for_with`] with the container probes injected, for
-/// a test that drives the launch-time move with no container runtime.
-#[cfg(test)]
-pub(crate) fn migrate_sandbox_store_for_test(
-    id: &str,
-    reporter: Option<progress::Reporter>,
-    is_running: &dyn Fn(&str) -> Result<bool>,
-    reap: &dyn Fn(&str) -> Result<bool>,
-) -> Result<()> {
-    let _installed = progress::install(reporter);
-    v027_isolate_sandbox_stores::migrate_instance_with(id, is_running, reap)
-}
+/// A live daemon or concurrent migration blocks the schema write. Callers
+/// downcast to offer a restart.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}; schema migration refused. Run `aoe serve --restart` with the new binary, or stop the daemon through its manager")]
+pub struct DaemonBlocksMigration(pub(crate) &'static str);
 
 pub fn run_migrations() -> Result<()> {
     run_migrations_with(None)
@@ -356,58 +425,115 @@ pub fn run_migrations() -> Result<()> {
 /// [`run_migrations_announced`] for `aoe migrate`. This path only advances the
 /// schema version and reports the migrations it actually runs.
 pub fn run_migrations_with(reporter: Option<progress::Reporter>) -> Result<()> {
-    run_migrations_inner(reporter, false)
+    run_migrations_inner(reporter, false, None, None)
 }
 
 /// [`run_migrations_with`] for an explicit `aoe migrate`: a pending sandbox
 /// store move also narrates what is still pending and why.
 pub fn run_migrations_announced(reporter: Option<progress::Reporter>) -> Result<()> {
-    run_migrations_inner(reporter, true)
+    run_migrations_inner(reporter, true, None, None)
 }
 
-fn run_migrations_inner(reporter: Option<progress::Reporter>, announce: bool) -> Result<()> {
+pub(crate) fn reconcile_serve_launch_under_transaction(
+    transaction: &crate::daemon::lifecycle::Transaction,
+) -> Result<()> {
+    v059_reconcile_serve_passphrase_policy::run_with_transaction(transaction)
+}
+
+pub(crate) fn run_migrations_under_exclusion(
+    reporter: Option<progress::Reporter>,
+    announce: bool,
+    transaction: &crate::daemon::lifecycle::Transaction,
+    serve: &crate::cli::serve::ServeLock,
+) -> Result<()> {
+    run_migrations_inner(reporter, announce, Some(transaction), Some(serve))
+}
+
+fn run_migrations_inner(
+    reporter: Option<progress::Reporter>,
+    announce: bool,
+    transaction: Option<&crate::daemon::lifecycle::Transaction>,
+    serve: Option<&crate::cli::serve::ServeLock>,
+) -> Result<()> {
     let _installed = progress::install(reporter);
     let _announced = progress::install_announced(announce);
     let _runner_lock = runner_lock::acquire(std::time::Duration::from_secs(30))?;
+    let current = ensure_schema_supported()?;
+    // Older daemons know serve.lock but not the lifecycle transaction. Hold
+    // both before the first schema write; standalone callers include the TUI.
+    let owned_transaction;
+    let transaction = if (current < CURRENT_VERSION || announce) && transaction.is_none() {
+        // A concurrent migrator holds this through its migration and the daemon
+        // start it hands off to; match the async acquire bound.
+        owned_transaction = crate::daemon::lifecycle::Transaction::acquire_blocking_for(
+            std::time::Duration::from_secs(60),
+        )?;
+        Some(&owned_transaction)
+    } else {
+        transaction
+    };
+    // Another migrator may have completed while we acquired its transaction.
     let app = crate::session::get_app_dir()?;
     let current = afk_schema::read_cursor(&app)?;
-    debug!("Current schema version: {}", current);
-
     ensure_supported_version(current, CURRENT_VERSION)?;
     afk_schema::ensure_mainline(&app, current)?;
+    let owned_serve;
+    let serve = if (current < CURRENT_VERSION || announce) && serve.is_none() {
+        owned_serve = crate::cli::serve::try_lock_serve()?.ok_or(DaemonBlocksMigration(
+            "A daemon or migration is starting or running",
+        ))?;
+        Some(&owned_serve)
+    } else {
+        serve
+    };
+    if current < CURRENT_VERSION || announce {
+        let transaction = transaction.context("Missing migration lifecycle transaction")?;
+        // Drop this probe before v059 and explicit recovery take nested lifetime
+        // and state exclusions. The held transaction and serve lock exclude starts.
+        let _lifetime = transaction
+            .try_lifetime()?
+            .ok_or(DaemonBlocksMigration("A daemon still owns its lifetime"))?;
+        if crate::cli::serve::daemon_status() != crate::cli::serve::DaemonStatus::Absent {
+            return Err(
+                DaemonBlocksMigration("Existing daemon identity is live or ambiguous").into(),
+            );
+        }
+    }
+    debug!("Current schema version: {}", current);
     if current == CURRENT_VERSION {
         v027_isolate_sandbox_stores::reconcile_pending(announce)?;
-        return v033_isolate_sandbox_content::reconcile_pending(announce);
+        v033_isolate_sandbox_content::reconcile_pending(announce)?;
+    } else {
+        let pending: Vec<&Migration> = MIGRATIONS
+            .iter()
+            .filter(|(version, ..)| *version > current)
+            .collect();
+        for (index, (version, name, run)) in pending.iter().enumerate() {
+            let start = std::time::Instant::now();
+            info!(target: "migrations", version, name, "running migration");
+            progress::report(progress::Event::Started {
+                version: *version,
+                name,
+                position: index + 1,
+                total: pending.len(),
+            });
+            match (*version, transaction) {
+                (59, Some(transaction)) => {
+                    v059_reconcile_serve_passphrase_policy::run_with_exclusion(transaction, serve)?
+                }
+                _ => run()?,
+            }
+            set_version(*version)?;
+            progress::report(progress::Event::Finished {
+                version: *version,
+                elapsed: start.elapsed(),
+            });
+            info!(target: "migrations", version, name, duration_ms = start.elapsed().as_millis() as u64, "migration completed");
+        }
     }
-
-    let pending: Vec<&Migration> = MIGRATIONS
-        .iter()
-        .filter(|(version, ..)| *version > current)
-        .collect();
-    for (index, (version, name, run)) in pending.iter().enumerate() {
-        let start = std::time::Instant::now();
-        info!(target: "migrations", version, name, "running migration");
-        progress::report(progress::Event::Started {
-            version: *version,
-            name,
-            position: index + 1,
-            total: pending.len(),
-        });
-        run()?;
-        set_version(*version)?;
-        progress::report(progress::Event::Finished {
-            version: *version,
-            elapsed: start.elapsed(),
-        });
-        info!(
-            target: "migrations",
-            version,
-            name,
-            duration_ms = start.elapsed().as_millis() as u64,
-            "migration completed"
-        );
+    if announce {
+        run_explicit_recovery(transaction, serve)?;
     }
-
     Ok(())
 }
 
@@ -418,6 +544,38 @@ fn ensure_supported_version(current: u32, supported: u32) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn run_explicit_recovery(
+    transaction: Option<&crate::daemon::lifecycle::Transaction>,
+    serve: Option<&crate::cli::serve::ServeLock>,
+) -> Result<()> {
+    let owned_transaction;
+    let transaction = match transaction {
+        Some(transaction) => transaction,
+        None => {
+            owned_transaction = crate::daemon::lifecycle::Transaction::acquire_blocking_for(
+                std::time::Duration::from_secs(10),
+            )?;
+            &owned_transaction
+        }
+    };
+    let owned_serve;
+    let serve = match serve {
+        Some(serve) => serve,
+        None => {
+            owned_serve = crate::cli::serve::try_lock_serve()?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Daemon or migration owns serve.lock; explicit scope recovery refused"
+                )
+            })?;
+            &owned_serve
+        }
+    };
+    crate::cli::serve::with_inactive_serve_state(transaction, Some(serve), |_| {
+        recovery::reconcile_repaired_components()
+    })?;
+    legacy_scope_recovery::run_under_exclusion(transaction, serve)
 }
 
 /// Get the schema version from the selected app directory.
@@ -640,12 +798,67 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn pending_schema_migration_preserves_marker_under_active_daemon_exclusion() -> Result<()> {
+        for borrowed in [false, true] {
+            let home = tempfile::tempdir()?;
+            let _home = crate::session::test_support::isolate_app_dir_at(home.path());
+            let app = crate::session::get_app_dir()?;
+            std::fs::create_dir_all(&app)?;
+            set_version(CURRENT_VERSION - 1)?;
+            let marker = std::fs::read(app.join(VERSION_FILE))?;
+            let transaction = borrowed
+                .then(|| {
+                    crate::daemon::lifecycle::Transaction::acquire_blocking_for(
+                        std::time::Duration::from_secs(1),
+                    )
+                })
+                .transpose()?;
+            let serve = crate::cli::serve::try_lock_serve()?.unwrap();
+            let _lifetime = transaction
+                .as_ref()
+                .map(crate::daemon::lifecycle::Transaction::lifetime)
+                .transpose()?;
+            let result = match &transaction {
+                Some(transaction) => {
+                    run_migrations_under_exclusion(None, false, transaction, &serve)
+                }
+                None => run_migrations(),
+            };
+            assert!(
+                result.is_err(),
+                "active daemon exclusion must block migration"
+            );
+            assert_eq!(std::fs::read(app.join(VERSION_FILE))?, marker);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_migrations_are_sequential() {
         let mut prev = 0;
         for (version, ..) in MIGRATIONS {
-            assert!(*version > prev, "migration {version} should be > {prev}");
+            assert!(*version > prev, "Migration {version} should be > {prev}");
             prev = *version;
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_held_serve_lock_refuses_migration_with_a_typed_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let app = crate::session::get_app_dir().unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join(VERSION_FILE), "1").unwrap();
+        let _held = crate::cli::serve::try_lock_serve().unwrap().unwrap();
+
+        let error = run_migrations().unwrap_err();
+
+        assert!(error.is::<DaemonBlocksMigration>());
+        assert!(error.to_string().starts_with(
+            "A daemon or migration is starting or running; schema migration refused."
+        ));
     }
 
     #[test]
@@ -734,6 +947,50 @@ mod tests {
             .contains("refusing to downgrade"));
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn the_daemon_child_check_refuses_a_schema_it_would_have_to_migrate() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let app = crate::session::get_app_dir().unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join(VERSION_FILE), (CURRENT_VERSION - 1).to_string()).unwrap();
+
+        let error = assert_schema_current().unwrap_err().to_string();
+
+        assert!(
+            error.contains("behind this build"),
+            "a behind schema must be refused, not silently migrated: {error}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_daemon_child_check_passes_on_a_migrated_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let app = crate::session::get_app_dir().unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join(VERSION_FILE), CURRENT_VERSION.to_string()).unwrap();
+
+        assert!(assert_schema_current().is_ok());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_daemon_child_check_refuses_a_newer_schema_too() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let app = crate::session::get_app_dir().unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join(VERSION_FILE), (CURRENT_VERSION + 1).to_string()).unwrap();
+
+        assert!(assert_schema_current()
+            .unwrap_err()
+            .to_string()
+            .contains("refusing to downgrade"));
+    }
+
     /// Upgrading preserves the sort order, and a second run leaves state untouched.
     #[test]
     #[serial_test::serial]
@@ -784,7 +1041,7 @@ mod tests {
         fs::write(app.join(VERSION_FILE), "31").unwrap();
         fs::write(
             app.join("sessions.json"),
-            r#"[{"agent_session_id":"old","resume_intent":{"kind":"Use","value":"target"},"retroactive_capture_excludes":["old"]}]"#,
+            r#"[{"id":"3131313131313131","agent_session_id":"old","resume_intent":{"kind":"Use","value":"target"},"retroactive_capture_excludes":["old"]}]"#,
         )
         .unwrap();
 
@@ -805,6 +1062,42 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn schema_33_upgrade_initializes_purge_ownership() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let app = crate::session::get_app_dir().unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join(VERSION_FILE), "33").unwrap();
+
+        run_migrations().unwrap();
+
+        assert_eq!(get_current_version(), CURRENT_VERSION);
+        let journal: serde_json::Value = serde_json::from_slice(
+            &fs::read(app.join(crate::session::purge_owners::FILE_NAME)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(journal["version"], 3);
+        assert_eq!(journal["owners"], serde_json::json!([]));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn current_schema_never_recreates_a_lost_purge_journal() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let app = crate::session::get_app_dir().unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join(VERSION_FILE), CURRENT_VERSION.to_string()).unwrap();
+
+        run_migrations().unwrap();
+        let storage =
+            crate::session::Storage::new_for_test_path("default", app.join("sessions.json"));
+        assert!(crate::session::purge_owners::protection(&storage, None).is_err());
+        assert!(!app.join(crate::session::purge_owners::FILE_NAME).exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn oldest_migration_backup_of_an_upgrade_stays_readable_by_the_previous_release() {
         // v1.16.1 typed both of these as plain strings.
         #[derive(serde::Deserialize)]
@@ -821,7 +1114,7 @@ mod tests {
         fs::write(app.join(VERSION_FILE), "28").unwrap();
         fs::write(
             app.join("sessions.json"),
-            r#"[{"retroactive_capture_excludes":["legacy-sid"],"pending_initial_turn":"go"}]"#,
+            r#"[{"id":"2828282828282828","retroactive_capture_excludes":["legacy-sid"],"pending_initial_turn":"go"}]"#,
         )
         .unwrap();
 
@@ -839,5 +1132,159 @@ mod tests {
             .retroactive_capture_excludes
             .contains("legacy-sid"));
         assert_eq!(before[0].pending_initial_turn.as_deref(), Some("go"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn an_explicit_migrate_acts_on_both_sandbox_reconciliations_and_a_startup_only_reports() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::session::test_support::isolate_app_dir_at(temp.path());
+        let _probes = v033_isolate_sandbox_content::install_test_reconcile_probes(
+            |_| Ok(false),
+            |_| Ok(true),
+            |_| Ok(Vec::new()),
+        );
+        let app = crate::session::get_app_dir().unwrap();
+        let home = dirs::home_dir().unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(home.join(".gemini/sandbox/history")).unwrap();
+        fs::write(home.join(".gemini/sandbox/history/id.json"), b"legacy").unwrap();
+        let mut instance =
+            crate::session::Instance::new("One", temp.path().join("project").to_str().unwrap());
+        instance.id = "one".into();
+        instance.tool = "gemini".into();
+        instance.sandbox_store_generation = 1;
+        let mut row = serde_json::to_value(instance).unwrap();
+        row["sandbox_info"] = serde_json::json!({
+            "enabled":true, "image":"fixture", "container_name":"aoe-sandbox-fixture",
+        });
+        fs::write(
+            app.join("sessions.json"),
+            serde_json::to_vec(&[row]).unwrap(),
+        )
+        .unwrap();
+        fs::write(app.join(VERSION_FILE), CURRENT_VERSION.to_string()).unwrap();
+        crate::session::purge_owners::initialize(&app).unwrap();
+
+        // A bare startup: both reconciliations defer, so neither commits.
+        run_migrations_with(None).unwrap();
+        let reported: serde_json::Value =
+            serde_json::from_slice(&fs::read(app.join("sessions.json")).unwrap()).unwrap();
+        assert_ne!(
+            reported[0]["sandbox_store_generation"],
+            current_store_generation(),
+            "a startup must not act on the store move it reported as pending: {reported}"
+        );
+        assert_eq!(
+            reported[0].get("sandbox_content_policy"),
+            None,
+            "a startup must not isolate the content it reported as pending: {reported}"
+        );
+        assert!(
+            home.join(".gemini/sandbox").is_dir(),
+            "the shared store a startup leaves pending must stay in place"
+        );
+
+        // The explicit `aoe migrate`: the same flag, now acting on both.
+        run_migrations_announced(None).unwrap();
+        let acted: serde_json::Value =
+            serde_json::from_slice(&fs::read(app.join("sessions.json")).unwrap()).unwrap();
+        assert_eq!(
+            acted[0]["sandbox_store_generation"],
+            current_store_generation(),
+            "an explicit migrate must move the store it reported as pending: {acted}"
+        );
+        assert_eq!(
+            acted[0]["sandbox_content_policy"],
+            serde_json::json!(crate::migrations::v033_isolate_sandbox_content::CONTENT_POLICY),
+            "an explicit migrate must isolate the content it reported as pending: {acted}"
+        );
+        assert!(
+            !home.join(".gemini/sandbox").exists(),
+            "a committed move retires the shared store it copied from"
+        );
+    }
+
+    /// The generation a v027-committed row carries, as the JSON the registry
+    /// holds it in.
+    fn current_store_generation() -> serde_json::Value {
+        serde_json::json!(u64::from(
+            crate::session::config::container_config::CURRENT_SANDBOX_STORE_GENERATION
+        ))
+    }
+    #[test]
+    #[serial_test::serial]
+    fn ordinary_current_schema_startup_never_runs_scope_authority_recovery() -> Result<()> {
+        let home = tempfile::tempdir()?;
+        let _home = crate::session::test_support::isolate_app_dir_at(home.path());
+        let app = crate::session::get_app_dir()?;
+        crate::session::purge_owners::initialize(&app)?;
+        crate::tmux::tool_retirement::initialize(&app)?;
+        let store = crate::session::Storage::new_unwatched("default")?;
+        let mut row = crate::session::Instance::new("old", "/tmp/repo");
+        row.view = crate::session::View::Terminal;
+        row.terminal_scopes = None;
+        store.update(|rows, _| {
+            rows.push(row.clone());
+            Ok(())
+        })?;
+        let workers = crate::process::worker_registry::workers_dir()?;
+        std::fs::write(workers.join("quarantined.json"), b"{")?;
+        set_version(CURRENT_VERSION)?;
+        let before = std::fs::read(store.sessions_path())?;
+        let transaction = crate::daemon::lifecycle::Transaction::acquire_blocking_for(
+            std::time::Duration::from_secs(1),
+        )?;
+        let serve = crate::cli::serve::try_lock_serve()?.unwrap();
+        run_migrations_under_exclusion(None, false, &transaction, &serve)?;
+        assert_eq!(std::fs::read(store.sessions_path())?, before);
+        assert_eq!(std::fs::read(workers.join("quarantined.json"))?, b"{");
+        assert_eq!(get_current_version(), CURRENT_VERSION);
+        assert!(run_migrations_under_exclusion(None, true, &transaction, &serve).is_err());
+        assert_eq!(std::fs::read(store.sessions_path())?, before);
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn explicit_recovery_runs_after_current_and_just_completed_migrations() -> Result<()> {
+        for version in [CURRENT_VERSION, CURRENT_VERSION - 1] {
+            let home = tempfile::tempdir()?;
+            let _home = crate::session::test_support::isolate_app_dir_at(home.path());
+            let app = crate::session::get_app_dir()?;
+            crate::session::purge_owners::initialize(&app)?;
+            crate::tmux::tool_retirement::initialize(&app)?;
+            let store = crate::session::Storage::new_unwatched("default")?;
+            let mut row = crate::session::Instance::new("old", "/tmp/repo");
+            row.view = crate::session::View::Terminal;
+            row.terminal_scopes = None;
+            store.update(|rows, _| {
+                rows.push(row.clone());
+                Ok(())
+            })?;
+            let mut persisted: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(store.sessions_path())?)?;
+            persisted[0]["terminal_handoff"] = serde_json::Value::Null;
+            std::fs::write(
+                store.sessions_path(),
+                serde_json::to_vec_pretty(&persisted)?,
+            )?;
+            set_version(version)?;
+            let before = std::fs::read(store.sessions_path())?;
+            let journal_path = app.join(crate::session::purge_owners::FILE_NAME);
+            let journal_before = std::fs::read(&journal_path)?;
+            let transaction = crate::daemon::lifecycle::Transaction::acquire_blocking_for(
+                std::time::Duration::from_secs(1),
+            )?;
+            let serve = crate::cli::serve::try_lock_serve()?.unwrap();
+            let unavailable = legacy_scope_recovery::test_support::deny_inventory();
+            assert!(run_migrations_under_exclusion(None, true, &transaction, &serve).is_err());
+            assert_eq!(unavailable.attempts(), 1);
+            assert_eq!(get_current_version(), CURRENT_VERSION);
+            assert_eq!(std::fs::read(store.sessions_path())?, before);
+            assert_eq!(std::fs::read(journal_path)?, journal_before);
+            assert!(crate::session::migration_backups(store.sessions_path())?.is_empty());
+        }
+        Ok(())
     }
 }

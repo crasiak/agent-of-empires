@@ -26,7 +26,7 @@ import { cacheGet, cacheSet, sweepExpiredStorage } from "./acpSession/stateCache
 import { useLatestRef } from "./useLatestRef";
 
 export { reducer, transcriptDeltaAction, type Action } from "./acpSession/reducer";
-export { clearAcpCache, useBackgroundAgents } from "./acpSession/stateCache";
+export { clearAcpCache, useBackgroundAgents, useBackgroundTasks, useWorkflowRuns } from "./acpSession/stateCache";
 
 type PromptSendResult =
   | { kind: "dispatched" }
@@ -417,6 +417,10 @@ export function useAcpSession(
       dismissModeSwitchFailed: () => dispatch({ kind: "dismiss_mode_switch_failed" }),
       dismissSessionNotice: (id: string) => dispatch({ kind: "dismiss_session_notice", id }),
       dismissConfigOptionSwitchFailed: () => dispatch({ kind: "dismiss_config_option_switch_failed" }),
+      markRestartStarted: (epoch: number, stoppedSent: boolean) =>
+        dispatch({ kind: "restart_started", epoch, stoppedSent }),
+      markRestartFailed: (epoch: number, message: string, stoppedSent: boolean) =>
+        dispatch({ kind: "restart_failed", epoch, message, stoppedSent }),
     }),
     [],
   );

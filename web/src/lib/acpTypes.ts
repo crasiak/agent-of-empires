@@ -137,6 +137,8 @@ export interface Approval {
   options?: ApprovalOption[];
   /** The options are answers rather than a permission vocabulary; post back the picked `option_id`. */
   choice?: boolean;
+  /** Full ExitPlanMode markdown; `tool_call.args_preview` may truncate it. */
+  plan?: string;
   requested_at: string;
   resolved?: {
     decision: ApprovalDecision;
@@ -151,6 +153,7 @@ export interface ElicitationOption {
   value: string;
   label: string;
   description?: string | null;
+  preview?: string | null;
 }
 
 /** Mirror of the untagged Rust `AnswerValue`. */
@@ -374,6 +377,7 @@ export type AcpEvent =
         description: string;
         prompt: string;
         model: string;
+        workflow?: WorkflowRef | null;
         started_at: string;
       };
     }
@@ -398,7 +402,8 @@ export type AcpEvent =
         ended_at: string;
       };
     }
-  | { AgentMessageChunk: { text: string } }
+  | { AgentMessageChunk: { text: string; message_id?: string } }
+  | { AgentThoughtChunk: { text: string; message_id?: string } }
   | { CancelRequested: { escalates_at: string } }
   | { Stopped: { reason: string } }
   | { AgentStartupError: { message: string } }
@@ -434,6 +439,15 @@ export type AcpEvent =
   | { SessionContextReset: { reason: string } }
   | { WakeupScheduled: { at: string; reason: string | null } }
   | { MonitorArmed: { description: string | null } }
+  | {
+      BackgroundTaskStarted: {
+        task_id: string;
+        tool_call_id?: string;
+        description: string;
+        workflow?: { run_id: string; name: string; summary?: string | null } | null;
+      };
+    }
+  | { BackgroundTaskFinished: { task_id: string; ended_at?: string | null } }
   | { PromptRejected: { reason: string; text: string } }
   | { AgentSwitched: { from: string; to: string; reason: string } }
   | { ConversationSummary: { text: string; summarized_until_seq: number } };
@@ -512,6 +526,17 @@ export interface ReducedState {
   compacting: boolean;
   /** Absent on a daemon that predates session notices. */
   session_notices?: SessionNotice[];
+  /** Open background task ids; the daemon omits the field when none are open. */
+  background_tasks?: string[];
+  /** The session's workflow runs; omitted when there are none. */
+  workflow_runs?: {
+    task_id: string;
+    tool_call_id: string;
+    name: string;
+    summary?: string | null;
+    finished?: boolean;
+    ended_at?: string | null;
+  }[];
 }
 
 export interface AcpState {
@@ -537,6 +562,17 @@ export interface AcpState {
   optimisticRows: ActivityRow[];
   /** Frames with `seq` at or below this are dropped, so replays are idempotent. */
   lastSeq: number;
+  /** `session/new` or `session/load` answered, so the Agent's session exists. */
+  sessionAssigned: boolean;
+  /** This dashboard restarted a start still in progress; its own stop doesn't read as a stopped Worker. Not persisted. */
+  restartInFlight: boolean;
+  /** Counts restarts ended by assignment, startup error or another stop, so a late acknowledgement is ignored. */
+  restartEpoch: number;
+  /** A restart stopped the sent prompt and it hasn't been sent again. Kept here because the restart's stop
+   *  unmounts the startup line before the restart answers. Not persisted. */
+  restartStoppedSent: boolean;
+  /** Why a restart failed after its stop, which unmounts the startup line; the stopped banner shows it. Not persisted. */
+  restartFailure: string | null;
   /** Lowest loaded seq; older history pages load with `?before=<oldestSeq>`. */
   oldestSeq: number;
   lagged: boolean;
@@ -609,6 +645,10 @@ export interface AcpState {
   agentOrphaned: boolean;
   /** Async sub-agents launched this session, oldest first. */
   backgroundAgents: BackgroundAgent[];
+  /** Ids of running background tasks that are not sub-agents (backgrounded commands, workflow runs). */
+  backgroundTasks: string[];
+  /** Workflow runs by the `Workflow` tool call that launched them. */
+  workflowRuns: Record<string, WorkflowRun>;
   /** Agent-pushed advisories for the current turn, oldest first. */
   sessionNotices: SessionNotice[];
   /** Ids dismissed in this tab. Local, so it never clears another client. */
@@ -633,10 +673,28 @@ export interface BackgroundAgentTool {
   ok?: boolean | null;
 }
 
+/** The workflow run and phase a background sub-agent belongs to. */
+export interface WorkflowRef {
+  run_id: string;
+  name: string;
+  phase: string;
+}
+
+export interface WorkflowRun {
+  /** The run's background task, live until the run ends. */
+  taskId: string;
+  name: string;
+  summary: string | null;
+  /** Set by its task's finish, or by a later start reusing the task id. */
+  finished?: boolean;
+  endedAt?: string | null;
+}
+
 export interface BackgroundAgent {
   agentId: string;
-  /** The parent `Task` call that launched this agent. */
+  /** The parent `Task` (or `Workflow`) call that launched this agent. */
   toolCallId: string;
+  workflow?: WorkflowRef | null;
   description: string;
   prompt: string;
   model: string;
@@ -704,6 +762,8 @@ export interface ActivityRow {
   output?: ToolOutputBlock[];
   elicitationAnswers?: ElicitationAnswer[];
   asyncSubagent?: boolean;
+  /** A `message` row that opens a new agent message, so its text starts a new paragraph. */
+  messageStart?: boolean;
   at: string; // ISO-8601
 }
 
@@ -711,7 +771,7 @@ export interface ActivityRow {
 export interface TranscriptRow {
   id: string;
   group_id: string;
-  kind: Exclude<ActivityRow["kind"], "thinking">;
+  kind: ActivityRow["kind"];
   at: string;
   text: string;
   tool_call_id?: string;
@@ -727,6 +787,7 @@ export interface TranscriptRow {
   };
   elicitation_answers?: ElicitationAnswer[];
   async_subagent?: boolean;
+  message_start?: boolean;
 }
 
 export type TranscriptDelta =
@@ -783,6 +844,7 @@ export function transcriptRowToActivity(row: TranscriptRow, sessionId: string): 
       ? { elicitationAnswers: row.elicitation_answers }
       : {}),
     ...(row.async_subagent ? { asyncSubagent: true } : {}),
+    ...(row.message_start ? { messageStart: true } : {}),
   };
 }
 
@@ -852,6 +914,11 @@ export function emptyAcpState(): AcpState {
     activity: [],
     optimisticRows: [],
     lastSeq: 0,
+    sessionAssigned: false,
+    restartInFlight: false,
+    restartEpoch: 0,
+    restartStoppedSent: false,
+    restartFailure: null,
     oldestSeq: 0,
     lagged: false,
     startupError: null,
@@ -882,6 +949,8 @@ export function emptyAcpState(): AcpState {
     agentUnresponsive: false,
     agentOrphaned: false,
     backgroundAgents: [],
+    backgroundTasks: [],
+    workflowRuns: {},
     modeSwitchFailed: null,
     lastAgentSwitch: null,
     configOptions: [],
@@ -948,6 +1017,12 @@ export function applyEvent(state: AcpState, frame: AcpFrame): AcpState {
       next.usageBaseline = { cost: priorUsage + priorBaseline };
       next.sessionUsage = null;
     }
+    return next;
+  }
+  if ("AgentThoughtChunk" in event) {
+    // Same turn signal as `ThinkingStarted`.
+    next.serverTurnActive = true;
+    next.turnActive = true;
     return next;
   }
   if ("ToolCallStarted" in event) {
@@ -1060,8 +1135,10 @@ export function applyEvent(state: AcpState, frame: AcpFrame): AcpState {
     if (event.Stopped.reason !== "rate_limited" && event.Stopped.reason !== "rate_limit_exhausted_retries") {
       next.rateLimit = null;
     }
+    // A restart stops the old Worker as `user_stopped`; any other stop ends the restart.
+    if (event.Stopped.reason !== "user_stopped") endRestart(next);
     if (event.Stopped.reason === "user_stopped") {
-      next.workerStopped = true;
+      next.workerStopped = !state.restartInFlight;
       next.workerRestarting = false;
       next.agentUnresponsive = false;
       next.agentOrphaned = false;
@@ -1098,6 +1175,7 @@ export function applyEvent(state: AcpState, frame: AcpFrame): AcpState {
   }
   if ("AgentStartupError" in event) {
     next.startupError = event.AgentStartupError.message;
+    endRestart(next);
     next.agentUnresponsive = false;
     closeTurn(next);
     return next;
@@ -1118,6 +1196,7 @@ export function applyEvent(state: AcpState, frame: AcpFrame): AcpState {
     return next;
   }
   if ("UserPromptSent" in event) {
+    next.restartStoppedSent = false;
     // Opening the turn here keeps `turnActive` from flickering between settling the id and the `reduced_state` frame.
     const pid = event.UserPromptSent.prompt_id;
     const wasInflight = pid != null && pid.length > 0 && next.inflightPromptIds.includes(pid);
@@ -1143,6 +1222,8 @@ export function applyEvent(state: AcpState, frame: AcpFrame): AcpState {
     return next;
   }
   if ("AcpSessionAssigned" in event) {
+    next.sessionAssigned = true;
+    endRestart(next);
     next.startupError = null;
     next.lastError = null;
     next.incompatibleAgent = null;
@@ -1230,6 +1311,7 @@ export function applyEvent(state: AcpState, frame: AcpFrame): AcpState {
       description: e.description,
       prompt: e.prompt,
       model: e.model,
+      workflow: e.workflow ?? null,
       status: "running",
       startedAt: e.started_at,
       endedAt: null,
@@ -1285,8 +1367,42 @@ export function applyEvent(state: AcpState, frame: AcpFrame): AcpState {
     );
     return next;
   }
+  if ("BackgroundTaskStarted" in event) {
+    const { task_id: id, tool_call_id: toolCallId, workflow } = event.BackgroundTaskStarted;
+    if (!next.backgroundTasks.includes(id)) next.backgroundTasks = [...next.backgroundTasks, id];
+    next.workflowRuns = closeWorkflowRun(next.workflowRuns, id, null);
+    if (workflow && toolCallId) {
+      next.workflowRuns = {
+        ...next.workflowRuns,
+        [toolCallId]: { taskId: id, name: workflow.name, summary: workflow.summary ?? null },
+      };
+    }
+    return next;
+  }
+  if ("BackgroundTaskFinished" in event) {
+    const { task_id: id, ended_at: endedAt } = event.BackgroundTaskFinished;
+    next.backgroundTasks = next.backgroundTasks.filter((t) => t !== id);
+    next.workflowRuns = closeWorkflowRun(next.workflowRuns, id, endedAt ?? null);
+    return next;
+  }
   // Remaining events carry no client control state.
   return next;
+}
+
+/** Task ids can be reused, so only the run still open on `taskId` is closed. */
+function closeWorkflowRun(
+  runs: Record<string, WorkflowRun>,
+  taskId: string,
+  endedAt: string | null,
+): Record<string, WorkflowRun> {
+  const key = Object.keys(runs).find((k) => runs[k]!.taskId === taskId && !runs[k]!.finished);
+  return key ? { ...runs, [key]: { ...runs[key]!, finished: true, endedAt } } : runs;
+}
+
+function endRestart(next: AcpState): void {
+  next.restartInFlight = false;
+  next.restartEpoch += 1;
+  next.restartFailure = null;
 }
 
 /** Fold a self-contained run of frames from an empty state, e.g. an older history page. */
@@ -1330,8 +1446,34 @@ export function applyReducedState(state: AcpState, reduced: ReducedState, unchan
     // The daemon's list is authoritative: a cold open whose replay window
     // starts after the notice would otherwise miss it, while the TUI shows it.
     sessionNotices: reduced.session_notices ?? [],
+    // Likewise authoritative: a task that started before the replay window
+    // has no start event here, yet the session is still busy.
+    backgroundTasks: reduced.background_tasks ?? [],
+    workflowRuns: restoreWorkflowRuns(state.workflowRuns, reduced.workflow_runs ?? []),
     locallyResolved,
   };
+}
+
+/** The replay window can miss a run's launch or finish. Adopts runs it
+ *  lacks and finishes it missed, never reopening a run it closed. */
+function restoreWorkflowRuns(
+  runs: Record<string, WorkflowRun>,
+  records: NonNullable<ReducedState["workflow_runs"]>,
+): Record<string, WorkflowRun> {
+  let next = runs;
+  for (const record of records) {
+    const local = runs[record.tool_call_id];
+    if (local && (local.finished || !record.finished)) continue;
+    next = next === runs ? { ...runs } : next;
+    next[record.tool_call_id] = {
+      ...local,
+      taskId: record.task_id,
+      name: record.name,
+      summary: local?.summary ?? record.summary ?? null,
+      ...(record.finished && { finished: true, endedAt: record.ended_at ?? null }),
+    };
+  }
+  return next;
 }
 
 /** Merge a duplicate `ToolCallStarted`: a sparse permission start must not clobber a real one. */
@@ -1406,16 +1548,17 @@ export function deriveTurnActive(state: Pick<AcpState, "serverTurnActive" | "inf
   return state.serverTurnActive || state.inflightPromptIds.length > 0;
 }
 
-/** Outstanding background sub-agent (async Task), mirroring
- *  `AcpState::has_active_background_agent`: keyed on `endedAt` rather than
- *  status, since a stalled agent's own terminal completion counts as done. */
-export function hasActiveBackgroundAgent(state: Pick<AcpState, "backgroundAgents">): boolean {
-  return state.backgroundAgents.some((a) => a.endedAt === null);
+/** Outstanding background sub-agent (async Task) or task, mirroring
+ *  `AcpState::has_active_background_agent`: agents are keyed on `endedAt`
+ *  rather than status, since a stalled agent's own terminal completion counts
+ *  as done. */
+export function hasActiveBackgroundAgent(state: Pick<AcpState, "backgroundAgents" | "backgroundTasks">): boolean {
+  return state.backgroundTasks.length > 0 || state.backgroundAgents.some((a) => a.endedAt === null);
 }
 
 /** Display-only busy signal for the runtime spinner. Distinct from `turnActive`,
  *  which tracks only the main turn because send-vs-queue composer gating reads it. */
-export function isVisiblyBusy(state: Pick<AcpState, "turnActive" | "backgroundAgents">): boolean {
+export function isVisiblyBusy(state: Pick<AcpState, "turnActive" | "backgroundAgents" | "backgroundTasks">): boolean {
   return state.turnActive || hasActiveBackgroundAgent(state);
 }
 

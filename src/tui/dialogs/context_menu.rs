@@ -30,6 +30,8 @@ pub enum ContextMenuAction {
     NewFromSelection,
     /// Fork the session into an independent one resuming its conversation.
     Fork,
+    /// Relaunch the session on the agent binary installed since it started.
+    RestartForUpdate,
     /// Flip the persisted view between structured (ACP) and tmux terminal.
     /// Confirmed first, since the swap destroys in-flight history.
     SwitchView,
@@ -251,6 +253,7 @@ pub struct ContextMenuDialog {
     /// Last rendered rect, so click-outside needs no layout math.
     last_area: Rect,
     scroll_offset: usize,
+    session_target: Option<(String, String, u64)>,
 }
 
 /// The menu item at `(col, row)`, or `None` on any border, past the last item,
@@ -396,6 +399,15 @@ impl ContextMenuDialog {
         self
     }
 
+    /// Adds the update restart row, for a session whose agent binary was replaced after launch.
+    pub fn with_restart_for_update(mut self) -> Self {
+        self.items.push((
+            ContextMenuAction::RestartForUpdate,
+            "Restart to apply update",
+        ));
+        self
+    }
+
     /// A trashed row can only come back out or be deleted for good.
     pub fn for_trashed_session(anchor: (u16, u16)) -> Self {
         Self::new(
@@ -405,6 +417,28 @@ impl ContextMenuDialog {
                 (ContextMenuAction::Delete, "Delete"),
             ],
         )
+    }
+
+    pub fn with_session_target(mut self, id: &str, profile: &str, generation: u64) -> Self {
+        self.session_target = Some((id.to_owned(), profile.to_owned(), generation));
+        self
+    }
+
+    pub fn session_target(&self) -> Option<&(String, String, u64)> {
+        self.session_target.as_ref()
+    }
+
+    pub fn is_read_only_session_menu(&self) -> bool {
+        self.items.iter().all(|(action, _)| {
+            matches!(
+                action,
+                ContextMenuAction::Restore
+                    | ContextMenuAction::Delete
+                    | ContextMenuAction::NewSession
+                    | ContextMenuAction::OpenSortPicker
+                    | ContextMenuAction::OpenGroupPicker
+            )
+        })
     }
 
     pub fn for_group(anchor: (u16, u16)) -> Self {
@@ -501,6 +535,7 @@ impl ContextMenuDialog {
             anchor,
             last_area: Rect::default(),
             scroll_offset: 0,
+            session_target: None,
         }
     }
 
@@ -977,6 +1012,16 @@ mod tests {
 
     fn labels(menu: &ContextMenuDialog) -> Vec<&'static str> {
         menu.items_for_test().iter().map(|(_, l)| *l).collect()
+    }
+
+    #[test]
+    fn update_restart_row_is_added_last_and_only_on_request() {
+        assert!(!labels(&session()).contains(&"Restart to apply update"));
+        let menu = session().with_restart_for_update();
+        assert_eq!(
+            menu.items_for_test().last().copied(),
+            Some((A::RestartForUpdate, "Restart to apply update"))
+        );
     }
 
     #[test]

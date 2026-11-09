@@ -10,7 +10,7 @@ function dispatch(target: EventTarget, init: KeyboardEventInit) {
   return event;
 }
 
-function mount() {
+function mount(ready = true) {
   const actions = {
     onNew: vi.fn(),
     onFocusSidebar: vi.fn(),
@@ -26,7 +26,10 @@ function mount() {
     onToggleRightPanel: vi.fn(),
     onToggleTerminalFocus: vi.fn(),
   } satisfies ShortcutActions;
-  return { actions, ...renderHook(() => useKeyboardShortcuts(() => actions)) };
+  return {
+    actions,
+    ...renderHook(({ ready }) => useKeyboardShortcuts(() => actions, ready), { initialProps: { ready } }),
+  };
 }
 
 type ActionName = keyof ShortcutActions;
@@ -59,6 +62,23 @@ describe("useKeyboardShortcuts", () => {
       unmount();
     }
   });
+  it.each([
+    ["an open field that owns Escape keeps it for its list", true, "true", 0],
+    ["the same field closed lets Escape close the surface", true, "false", 1],
+    ["any other open combobox, such as the palette's, doesn't", false, "true", 1],
+  ])("%s", (_label, owns, expanded, calls) => {
+    const { actions, unmount } = mount();
+    const field = document.createElement("input");
+    field.setAttribute("role", "combobox");
+    if (owns) field.setAttribute("data-owns-escape", "");
+    field.setAttribute("aria-expanded", expanded);
+    document.body.append(field);
+    dispatch(field, { key: "Escape" });
+    expect(actions.onEscape).toHaveBeenCalledTimes(calls);
+    field.remove();
+    unmount();
+  });
+
   it.each<[string, KeyboardEventInit, ActionName | null, ActionName | null]>([
     [
       "Ctrl+Alt+B toggles the right panel, not the sidebar",
@@ -181,6 +201,15 @@ describe("useKeyboardShortcuts", () => {
   it("marks the document ready once the listener is attached", () => {
     delete document.documentElement.dataset.shortcutsReady;
     const { unmount } = mount();
+    expect(document.documentElement.dataset.shortcutsReady).toBe("true");
+    unmount();
+  });
+
+  it("waits to mark the document ready until the actions can act", () => {
+    delete document.documentElement.dataset.shortcutsReady;
+    const { rerender, unmount } = mount(false);
+    expect(document.documentElement.dataset.shortcutsReady).toBeUndefined();
+    rerender({ ready: true });
     expect(document.documentElement.dataset.shortcutsReady).toBe("true");
     unmount();
   });

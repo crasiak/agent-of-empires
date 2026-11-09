@@ -10,13 +10,17 @@ Install Node.js 22 or newer (`brew install node`, `apt install nodejs`, `nvm ins
 
 ### An adapter is missing or too old
 
-aoe refuses to start a session whose adapter is below the version floor and reports the exact requirement. Install the official adapter (`npm install -g @agentclientprotocol/claude-agent-acp@latest`), then `claude login` if you have not.
+aoe refuses to start a session whose adapter is below the version floor and reports the exact requirement. Install the official adapter (`npm install -g @agentclientprotocol/claude-agent-acp@latest`), then `claude auth login` if you have not.
 
 `aoe-agent` ships inside the `aoe` binary and installs into the data dir on demand: `aoe acp doctor --fix --adapter aoe-agent`. It needs Node 22.6+. An `aoe` upgrade that changes its bundled sources makes an installed copy stale, and sessions refuse it until `doctor --fix` reinstalls it.
 
-The dashboard surfaces the same thing inline: a compatibility screen with the installed and required versions, the install command to copy, and two controls. **Restart agent** respawns the worker and re-runs the version check, which is all you need after installing the adapter in a shell. **Update & restart** runs the agent's `npm install -g` on the host as the daemon user and then respawns, queueing every other session blocked on that adapter for a respawn too.
+The dashboard shows the same thing inline, as a screen that names the Agent, the installed and required versions, and numbered steps that follow what this dashboard can do:
 
-That second button appears only for npm-installable agents and only when `acp.allow_agent_install` is on. It is **off by default**, because a global install runs the package's lifecycle scripts as the daemon user; it is always blocked in read-only mode and is `local_only`, so the dashboard cannot turn it on. Enable it from the TUI settings (Advanced) or the config file. Inside a sandbox a host install would not reach the containerized agent, so the action is refused: install the agent in the image instead.
+- **An npm adapter, with installs allowed:** **Update & restart** runs the agent's `npm install -g` on the host as the daemon user and respawns, queueing every other session blocked on that adapter for a respawn too. In a sandboxed session the button is **Update in Sandbox & restart** and installs inside the session's container instead. That fixes this session only; refresh the sandbox image so new sessions don't hit it.
+- **Installs not allowed yet:** step 1 is to turn on `acp.allow_agent_install`, and the button stays disabled until it's on. The setting is **off by default**, because a global install runs the package's lifecycle scripts as the daemon user. It is `local_only`, so the dashboard can't turn it on: enable it from the TUI settings (Advanced) or the config file. The screen notices the change when you come back to the tab.
+- **A sandbox container that isn't running:** for an npm adapter, **Start the container** first; the update comes back once it runs. For an adapter you install by hand, step 1 is **Check again**, which starts the container so the command can run inside it.
+- **Not installable from here:** the command to run by hand, with **Copy**, then **Check again**, which respawns the worker and re-runs the version check.
+- **Read-only and CityHall dashboards** show the command only. Restart the agent from the TUI.
 
 ### "Failed to start structured view agent" while the adapter is installed
 
@@ -62,6 +66,7 @@ Some adapters finish a turn, stream the final message and end-of-turn usage, but
 
 - Read `aoe acp logs --session <id>`, or **Open agent log** on the red startup-error banner.
 - Check the connection chrome at the top of the view for reconnect status.
+- A new session whose agent hasn't started after 30 seconds offers **Restart** on its startup line, which replaces the start in progress. A message you sent while it was starting is stopped; send it again once the agent is ready.
 - A repeatedly-failing worker is parked with a red "session parked" banner: retry from the dashboard or run `aoe acp restart <session>`.
 
 The view auto-reconnects with exponential backoff if the WebSocket drops and resumes the transcript where it left off. The banner counts the attempts and offers a manual **Reconnect** once they are exhausted; returning the tab to the foreground reconnects immediately.
@@ -72,11 +77,11 @@ Approvals expire after `approval_timeout_secs` (default 300). The agent receives
 
 ## Rate limits and agent hand-off
 
-When the active backend hits its rate limit, aoe parks the session rather than respawning into the same limit. The banner shows the reset time, or the agent's own wording when it reported no clock, and a **Continue in another agent** CTA. That opens a picker over the ACP registry, preselects `codex` when installed, switches on confirm, and pre-fills the composer with a recap of the prior conversation (including the prompt that triggered the limit). Review and send it yourself; nothing is auto-sent.
+When the active backend hits its rate limit, aoe parks the session rather than respawning into the same limit. A banner above the composer shows the reset time, or the agent's own wording when it reported no clock, and whether auto-resume is on. **Try again** respawns the same agent now, for when you've added usage; once the reset has passed with auto-resume off, it reads **Resume now**. **Switch Agent** appears when another installed agent is allowed to take over. It opens a picker over those agents only, switches on confirm, and pre-fills the composer with a recap of the prior conversation (including the prompt that triggered the limit). Review and send it yourself; nothing is auto-sent.
 
 ### Auto-resume after reset
 
-To stay on the same backend instead, opt in:
+To stay on the same backend instead, opt in. The banner's **Turn on** link opens this setting for the session's profile:
 
 ```toml
 [acp]
@@ -85,7 +90,7 @@ rate_limit_auto_resume = true
 
 Resume fires once the reported reset plus a 15-second cushion passes, and the reset time survives an `aoe serve` restart. With no reported reset, the first retry is an hour after the park and each further attempt waits twice as long (1h, 2h, 4h, 8h, 16h), so a quota exhausted for days is retried on a matching schedule. The park survives a resume that fails to start.
 
-Each resume re-sends the interrupted prompt, so it gives up after five re-sends that all come back rate-limited, spanning 31 hours. The banner then reads "Auto-resume stopped" and the session stays put. Recovering from the park resets the count, as do a completed turn and an agent switch; manual "Resume now" retries never count against it.
+Each resume re-sends the interrupted prompt, so it gives up after five re-sends that all come back rate-limited, spanning 31 hours. The banner then reads "Auto-resume stopped" and the session stays put. Recovering from the park resets the count, as do a completed turn and an agent switch; manual **Try again** and **Resume now** retries never count against it.
 
 ### Switching agents manually
 
@@ -95,6 +100,14 @@ The same hand-off is available any time, which is how you return to the original
 - **CLI**: `aoe acp switch-agent <session> <target>` (`aoe acp agents` lists the target keys; `--model <name>` overrides the model it starts with). A custom agent with an `agent_acp_cmd` is a valid target even though neither surface lists it.
 
 The transcript divider reads `Switched structured view agent from <from> to <to> (manual)`, distinct from the `(rate_limited)` one the recovery flow emits.
+
+### Switching accounts manually
+
+An account is a tool name with its own `[session.agent_config_dir]` entry (see [Swapping the engine on a restart](../guides/session-resume.md#swapping-the-engine-on-a-restart)). `aoe acp switch-account <session> <tool>` restarts the worker as that account and keeps the conversation: the transcript is copied into the new account's store and the worker resumes it. The same swap is `aoe session restart <session> --tool <tool>`.
+
+- A session parked on a rate limit continues with the interrupted prompt as its next turn, once, and the park's auto-resume budget is disarmed like a manual **Try again**. The generic restart wake message is not sent. A session that is not parked gets the usual wake message.
+- `switch-account` refuses and changes nothing where the swap would start a fresh conversation: the tool runs a different agent, the agent has no known transcript layout (only Claude does), the session has no recorded conversation, or a sandboxed session still has its store move pending. `restart --tool` keeps the parking swap in those cases.
+- The first turn on the new account re-reads the whole context uncached, because the prompt cache belongs to the account.
 
 ## `/clear` collapsed earlier turns
 

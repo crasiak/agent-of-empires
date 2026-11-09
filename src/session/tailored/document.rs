@@ -410,17 +410,40 @@ pub fn build(
     profile: &str,
     request: &DocumentRequest,
 ) -> Result<BuildResult> {
+    let selected = check_launch(&params, request)?;
+    build_prepared(params, titles, branches, profile, |dir| {
+        native::qualify(selected, dir)?;
+        prepare(dir, request)
+    })
+}
+
+/// The launch account, if `params` may start a document chat. The daemon checks this
+/// before reserving the row and calls [`prepare_provisioned`] once scratch exists.
+pub(crate) fn check_launch(
+    params: &InstanceParams,
+    request: &DocumentRequest,
+) -> Result<CaptureAccount> {
     request.validate()?;
     ensure!(
         params.scratch && !params.sandbox && params.tool == "pi" && params.fork_seed.is_none(),
         "Document chat requires a fresh host scratch Pi Session"
     );
-    let selected = command_account(&params.tool, &params.command_override)
-        .context("Invalid document launch command")?;
-    build_prepared(params, titles, branches, profile, |dir| {
-        native::qualify(selected, dir)?;
-        prepare(dir, request)
-    })
+    command_account(&params.tool, &params.command_override)
+        .context("Invalid document launch command")
+}
+
+pub(crate) fn prepare_provisioned(
+    instance: &Instance,
+    selected: CaptureAccount,
+    request: &DocumentRequest,
+) -> Result<()> {
+    ensure!(
+        account(instance).is_some() && instance.extra_args == restrictive_args(),
+        "Document launch policy mismatch"
+    );
+    let dir = Path::new(&instance.project_path);
+    native::qualify(selected, dir)?;
+    prepare(dir, request)
 }
 
 fn build_prepared(

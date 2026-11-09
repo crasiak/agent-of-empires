@@ -536,7 +536,12 @@ fn load_instances(profile: &str, profile_explicit: bool) -> Vec<Instance> {
         crate::session::list_profiles().unwrap_or_default()
     };
     for name in &profiles {
-        if let Ok(storage) = Storage::open_unwatched(name) {
+        let opened = if profile_explicit {
+            Storage::open_reference(name)
+        } else {
+            Storage::open_unwatched(name)
+        };
+        if let Ok(storage) = opened {
             if let Ok((mut instances, _)) = storage.load_with_groups() {
                 for inst in &mut instances {
                     inst.source_profile = name.clone();
@@ -1009,6 +1014,11 @@ mod tests {
     fn pane(pid: Option<u32>) -> crate::tmux::PaneMetadata {
         crate::tmux::PaneMetadata {
             launch_report: None,
+            server: None,
+            session_id: "$42".into(),
+            pane_id: "%42".into(),
+            session_kind: None,
+            tool_owner: crate::tmux::ToolPaneOwner::Unmarked,
             pane_dead: false,
             pane_current_command: None,
             pane_start_command_is_protected: false,

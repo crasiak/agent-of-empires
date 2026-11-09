@@ -2,6 +2,7 @@
 //! before start.
 
 use super::*;
+use crate::session::{SessionStore, Storage};
 
 const IDENTITY_PUBLISHER_DEPENDENCY_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(2);
@@ -54,21 +55,6 @@ impl Instance {
         crate::session::config::profile_config::resolve_config_or_warn(&profile).environment
     }
 
-    /// The host environment the agent process will actually see: the static
-    /// profile `environment` list with every `before_session`-minted key
-    /// dropped, then the minted pairs appended. This is the same precedence
-    /// `build_launch_command` applies to the pane, so anything that has to
-    /// agree with the launched agent about a variable's value must read it
-    /// here rather than from `profile_host_environment` alone.
-    ///
-    /// Minted pairs are `#[serde(skip)]` runtime state, so outside a launch
-    /// (a poller repair, a daemon-side read of a stored row) this degrades to
-    /// the profile list. That is the best available answer: the minted values
-    /// are deliberately not persisted because they may be short-lived secrets.
-    pub(crate) fn resolved_host_environment(&self) -> Vec<String> {
-        self.resolved_host_environment_from(self.profile_host_environment())
-    }
-
     pub(super) fn resolved_host_environment_from(
         &self,
         profile_environment: Vec<String>,
@@ -87,33 +73,74 @@ impl Instance {
         environment
     }
 
-    /// Whether this session still reads the shared sandbox store, so its next
-    /// container launch first copies that store; see [`Self::move_sandbox_store`].
+    /// Whether the next container launch must isolate the sandbox's shared store.
     pub fn sandbox_store_move_pending(&self) -> bool {
         self.is_sandboxed()
             && !crate::migrations::v033_isolate_sandbox_content::instance_ready(self)
                 .unwrap_or(false)
     }
 
-    /// Move this session's sandbox store into the private layout, narrating
-    /// the copy to `reporter`. `Ok(false)` means the container is up, so the
-    /// store cannot move yet and nothing was attempted. The row is read back
-    /// from disk by the caller, not here: the TUI's copy lives in its own
-    /// mirror.
-    ///
-    /// A running container is worth skipping outright: its cohort cannot
-    /// move while it is up, so the pass is guaranteed to refuse, and it is
-    /// not free, since planning takes the v027 lock and every registry's
-    /// storage lock, on which `Storage::update` waits.
-    pub fn move_sandbox_store(
+    fn move_sandbox_store_in(
         &self,
-        reporter: Option<crate::migrations::progress::Reporter>,
+        store: &dyn SessionStore,
+        container: &DockerContainer,
     ) -> Result<bool> {
-        if DockerContainer::from_session_id(&self.id).is_running()? {
+        if container.is_running()? {
             return Ok(false);
         }
-        crate::migrations::migrate_sandbox_store_for_with(&self.id, reporter)?;
+        store
+            .migrate_sandbox_store(&self.id, container.runtime())
+            .map_err(|error| {
+                if error.is::<crate::session::NativeStoreUnavailable>()
+                    || error.is::<LifecycleReservationError>()
+                    || error.is::<crate::migrations::SandboxMigrationError>()
+                {
+                    error
+                } else {
+                    error.context(crate::migrations::SandboxMigrationError::Failed)
+                }
+            })?;
         Ok(true)
+    }
+
+    /// The name is the stable handle; a stored ID goes stale when the
+    /// container is recreated outside this session's launch path.
+    fn refresh_container_id(&mut self, container: &containers::DockerContainer) -> Result<()> {
+        if let Some(sandbox) = self.sandbox_info.as_mut() {
+            sandbox.container_id = Some(container.id()?);
+        }
+        Ok(())
+    }
+
+    fn finish_container_reuse(
+        &mut self,
+        container: &containers::DockerContainer,
+        config: &crate::containers::ContainerConfig,
+        command: &str,
+        session_config: &crate::session::config::SessionConfig,
+    ) -> Result<()> {
+        self.identity_publisher_launched = config.identity_publisher_installed
+            && identity_publisher_mount_matches(container, config)?
+            && identity_publisher_dependencies_available(container)
+            && self.hook_session_publisher_allowed_by_argv();
+        self.refresh_container_id(container)?;
+        let id = self
+            .sandbox_info
+            .as_ref()
+            .and_then(|s| s.container_id.clone());
+        if let Some(id) = id {
+            self.sandbox_pin = container.pin(&id, self.sandbox_pin.as_ref(), None);
+        }
+        self.reconcile_container_workdir(container);
+        container_config::ensure_folder_trust_config_for_active_agent(
+            &self.tool,
+            Some(command),
+            session_config,
+            &self.id,
+            &self.container_workdir(),
+            self.is_yolo_mode(),
+        );
+        Ok(())
     }
 
     pub fn get_container_for_instance(&mut self) -> Result<containers::DockerContainer> {
@@ -126,61 +153,70 @@ impl Instance {
         &mut self,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<containers::DockerContainer> {
-        self.ensure_container(cancel, false)
+        let storage = Storage::new(&self.effective_profile(), self.resolve_file_watch())?;
+        self.ensure_container_with_hook_in(&storage, cancel, None, Self::mint_before_start_env)
+            .map(|(container, _)| container)
     }
 
-    /// [`Self::get_container_for_instance`] for a persisted session: the stored row is reread
-    /// under the lifecycle flock, held through the runtime start or create, so a completed archive
-    /// or trash cannot be followed by a container come-up. Hooks run before the flock is taken.
-    pub(super) fn get_container_admitted(&mut self) -> Result<containers::DockerContainer> {
-        self.ensure_container(&tokio_util::sync::CancellationToken::new(), true)
-    }
-
-    fn ensure_container(
+    pub(crate) fn ensure_container_in(
         &mut self,
-        cancel: &tokio_util::sync::CancellationToken,
-        admit: bool,
+        store: &dyn SessionStore,
+        launch_generation: Option<u64>,
     ) -> Result<containers::DockerContainer> {
-        // Taken inside the shared transition flock below; no holder of the lifecycle flock waits
-        // for that flock exclusively, so the order cannot cycle.
-        let admission = |instance: &Self| admit.then(|| instance.lock_for_input()).transpose();
+        self.ensure_container_with_hook_in(
+            store,
+            &tokio_util::sync::CancellationToken::new(),
+            launch_generation,
+            Self::mint_before_start_env,
+        )
+        .map(|(container, _)| container)
+    }
+
+    pub(crate) fn ensure_container_with_hook_in(
+        &mut self,
+        store: &dyn SessionStore,
+        cancel: &tokio_util::sync::CancellationToken,
+        launch_generation: Option<u64>,
+        mut run_hook: impl FnMut(&mut Self, &crate::session::LaunchConfig) -> Result<()>,
+    ) -> Result<(containers::DockerContainer, bool)> {
+        let launch_config = store.launch_configuration(Path::new(&self.project_path))?;
+        let global_config = &launch_config.global;
+        let profile_config = &launch_config.profile;
         let checkpoint = || {
+            store.check_available()?;
             if cancel.is_cancelled() {
                 anyhow::bail!("sandbox start cancelled");
             }
             Ok(())
         };
+        // Owned, because the pull below reads it after `self` is borrowed
+        // mutably again by the reconciliation steps in between.
         let image = self
             .sandbox_info
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Cannot ensure container for non-sandboxed session"))?
             .image
             .clone();
-        let container = DockerContainer::new(&self.id, &image);
-        // Charge the sandbox store move to the session that needs it, at the
-        // one chokepoint every entry point shares: tmux launches, ACP
-        // structured sessions and a bare container terminal all arrive here.
-        // The TUI runs it ahead of time on a worker so this is a no-op there;
-        // see `tui::store_move_poller`. It must stay above the shared flock
-        // below. Failure is not permission to launch on unproven native state.
-        if self.sandbox_store_move_pending() {
-            if !self.move_sandbox_store(Some(crate::migrations::progress::tracing_reporter()))? {
-                anyhow::bail!(
-                    "sandbox {} must be stopped before native history can be isolated",
-                    self.id
-                );
-            }
-            self.reconcile_from_disk();
+        let container = DockerContainer::new(
+            &self.id,
+            &image,
+            global_config.sandbox.container_runtime.into(),
+        );
+        // Migration takes the transition lock exclusively, before the shared guard below.
+        if self.sandbox_store_move_pending() && self.move_sandbox_store_in(store, &container)? {
+            self.reconcile_from_store(store)?;
         }
-        self.warn_legacy_agent_config_mounts();
-
+        let mut launch_locks = launch_generation
+            .map(|generation| self.reacquire_launch_locks_after_hooks(store, generation, Ok(())))
+            .transpose()?;
+        self.warn_legacy_agent_config_mounts(profile_config);
+        let mut transition_lock = self.container_transition_lock()?;
         // A container built for another agent mounts that agent's config.
         // Decide on the disk row and a resolved profile: a stale in-memory copy
-        // can match an old container or mismatch one a peer rebuilt, and a
-        // defaulted config would misread a valid one. A failed reload still
-        // permits reuse, never removal.
+        // or a defaulted config would remove a valid container. A failed reload
+        // still permits reuse, never removal.
         if container.exists()? {
-            let reloaded = self.try_reconcile_from_disk();
+            let reloaded = self.try_reconcile_from_store(store);
             if container.agent_tool_matches(&self.container_agent_identity()?)? == Some(false) {
                 reloaded.context(
                     "cannot confirm the session's tool before removing its sandbox container",
@@ -190,6 +226,7 @@ impl Instance {
                     session = %self.id,
                     "removing sandbox container built for another tool; it will be recreated"
                 );
+                checkpoint()?;
                 container.remove(true)?;
             } else if let Err(error) = reloaded {
                 tracing::warn!(
@@ -202,15 +239,29 @@ impl Instance {
         }
         // After every reload above, which may have replaced the tool.
         let command = self.get_tool_command().to_owned();
-        // Admit the reconciled tool before refreshing or starting its native store.
-        let _transition_lock =
-            crate::migrations::v033_isolate_sandbox_content::admit_fresh_instance(self)?;
+        // Fence native content around runtime effects, not reentrant hooks.
+        let mut content_admission =
+            Some(crate::migrations::v033_isolate_sandbox_content::admit_fresh_instance(self)?);
+        let mut scoped_hook = |instance: &mut Self, config: &crate::session::LaunchConfig| {
+            drop(content_admission.take());
+            drop(transition_lock.take());
+            drop(launch_locks.take());
+            let result = run_hook(instance, config);
+            launch_locks = launch_generation
+                .map(|generation| {
+                    instance.reacquire_launch_locks_after_hooks(store, generation, Ok(()))
+                })
+                .transpose()?;
+            result?;
+            checkpoint()?;
+            content_admission = Some(
+                crate::migrations::v033_isolate_sandbox_content::admit_fresh_instance(instance)?,
+            );
+            transition_lock = instance.container_transition_lock()?;
+            store.check_available()?;
+            Ok(())
+        };
 
-        // Direct is_running()? / exists()? here rather than probe_running():
-        // this function already returns Result, so `?` correctly propagates
-        // a daemon-down transient to the caller as Err, letting them render
-        // an actionable error rather than silently falling through to a
-        // create attempt that would also fail. See #2596.
         if container.is_running()? {
             if self.sandbox_store_generation >= container_config::CURRENT_SANDBOX_STORE_GENERATION
                 && container.sandbox_store_generation_matches()? == Some(false)
@@ -222,9 +273,14 @@ impl Instance {
             }
             // Already up: not a come-up, so don't re-mint. Fill lazily only if a
             // fresh process attached to a running container with no values yet.
-            self.ensure_before_start_env(false)?;
-            // Refresh would fold a rotating private copy into the shared credential.
-            if self.predates_shared_credential(&container, &command)? {
+            self.ensure_before_start_env(false, &launch_config, &mut scoped_hook)?;
+            if self.sandbox_store_generation < container_config::CURRENT_SANDBOX_STORE_GENERATION {
+                self.refresh_container_id(&container)?;
+                self.reconcile_container_workdir(&container);
+                return Ok((container, false));
+            }
+            // Still rotating the copy in its store.
+            if self.predates_shared_credential(&container, &command, &profile_config.session)? {
                 anyhow::bail!(
                     "running sandbox {} predates the shared credential file; stop it, then relaunch to rebuild it",
                     self.id
@@ -234,16 +290,19 @@ impl Instance {
             // own rotation, and is only seeded when it holds none.
             let fold = container_config::CredentialFold::SeedOnly;
             container_config::refresh_agent_configs_for_instance(
-                &self.effective_profile(),
+                profile_config,
                 &self.id,
                 &self.tool,
                 Some(command.as_str()),
                 fold,
-                std::path::Path::new(&self.container_workdir()),
+                (
+                    global_config.skills.auto_propagate,
+                    Path::new(&self.container_workdir()),
+                ),
             );
-            let config = self.build_container_config_with(fold)?;
-            self.finish_container_reuse(&container, &config, &command)?;
-            return Ok(container);
+            let config = self.build_container_config_with(&launch_config, fold)?;
+            self.finish_container_reuse(&container, &config, &command, &profile_config.session)?;
+            return Ok((container, false));
         }
 
         if self.sandbox_store_generation < container_config::CURRENT_SANDBOX_STORE_GENERATION {
@@ -256,37 +315,48 @@ impl Instance {
         let mut recreate = false;
         if container.exists()? {
             if container.sandbox_store_generation_matches()? == Some(false) {
+                checkpoint()?;
                 container.remove(false)?;
             } else {
                 // Restart of a stopped container is a come-up: refresh so a
                 // short-lived token is re-minted.
-                self.ensure_before_start_env(true)?;
+                self.ensure_before_start_env(true, &launch_config, &mut scoped_hook)?;
                 container_config::refresh_agent_configs_for_instance(
-                    &self.effective_profile(),
+                    profile_config,
                     &self.id,
                     &self.tool,
                     Some(command.as_str()),
                     container_config::CredentialFold::Freshest,
-                    std::path::Path::new(&self.container_workdir()),
+                    (
+                        global_config.skills.auto_propagate,
+                        Path::new(&self.container_workdir()),
+                    ),
                 );
-                let config = self.build_container_config()?;
+                let config = self.build_container_config(&launch_config)?;
                 // Built before its agent shared a credential file, so it
                 // mounts only the store, whose copy the come-up no longer
                 // refreshes.
                 recreate = container.shared_credential_mounts_match(&config)? == Some(false);
                 if recreate {
+                    checkpoint()?;
                     container.remove(false)?;
                 } else {
-                    let _admission = admission(self)?;
                     container_config::place_shadowed_credential_mountpoints(&config);
+                    checkpoint()?;
                     container.start()?;
-                    self.finish_container_reuse(&container, &config, &command)?;
-                    return Ok(container);
+                    self.finish_container_reuse(
+                        &container,
+                        &config,
+                        &command,
+                        &profile_config.session,
+                    )?;
+                    return Ok((container, false));
                 }
             }
         }
 
-        // Ensure image is available (always pulls to get latest)
+        // Ensure image is available (always pulls to get latest), aborting the
+        // pull when the start was cancelled.
         checkpoint()?;
         let runtime = containers::get_container_runtime();
         runtime.ensure_image(&image, cancel)?;
@@ -296,10 +366,13 @@ impl Instance {
         // carries the values (leak-safe via the inherit path in run_create).
         // A container just removed for its credential mount was minted above.
         if !recreate {
-            self.ensure_before_start_env(true)?;
+            self.ensure_before_start_env(true, &launch_config, &mut scoped_hook)?;
         }
-        let _admission = admission(self)?;
-        let config = self.build_container_config()?;
+        let mut config = self.build_container_config(&launch_config)?;
+        // The profile `spawn_prepared_launch` gives `scope_prefix_for`, so the
+        // container lands in its session's slice.
+        config.cgroup_parent =
+            crate::process::systemd::slice_for(store.storage().profile(), &self.id);
         // Still the workdir the *previous* container was created with; the pin below
         // is what moves it forward.
         let stranded = container_config::stranded_named_ignore_volumes(
@@ -309,14 +382,16 @@ impl Instance {
                 .as_ref()
                 .and_then(|sandbox| sandbox.container_workdir.as_deref()),
         );
+        checkpoint()?;
         container.remove_stranded_named_ignore_volumes(&self.id, &stranded);
         container_config::place_shadowed_credential_mountpoints(&config);
         checkpoint()?;
-        let container_id = container.create(&config)?;
+        let (container_id, created) = container.create(&config)?;
         self.identity_publisher_launched = config.identity_publisher_installed
             && identity_publisher_dependencies_available(&container)
             && self.hook_session_publisher_allowed_by_argv();
 
+        self.sandbox_pin = container.pin(&container_id, None, Some(&config));
         if let Some(ref mut sandbox) = self.sandbox_info {
             sandbox.container_id = Some(container_id);
             // Pin the workdir to exactly what the container was built with, so
@@ -324,34 +399,24 @@ impl Instance {
             sandbox.container_workdir = Some(config.working_dir.clone());
         }
 
-        Ok(container)
+        Ok((container, created))
     }
 
-    fn finish_container_reuse(
-        &mut self,
-        container: &containers::DockerContainer,
-        config: &crate::containers::ContainerConfig,
-        command: &str,
-    ) -> Result<()> {
-        self.identity_publisher_launched = config.identity_publisher_installed
-            && identity_publisher_mount_matches(container, config)?
-            && identity_publisher_dependencies_available(container)
-            && self.hook_session_publisher_allowed_by_argv();
-        if let Some(sandbox) = self.sandbox_info.as_mut() {
-            if sandbox.container_id.is_none() {
-                sandbox.container_id = Some(container.id()?);
+    /// Store-scoped `try_reconcile_from_disk`: `Ok(false)` when the row is
+    /// gone from disk (nothing to decide against), `Err` on a storage
+    /// failure so a corrupt registry fails the launch instead of removing
+    /// a container the in-memory row misdescribes.
+    fn try_reconcile_from_store(&mut self, store: &dyn SessionStore) -> Result<bool> {
+        match self.reconcile_from_store(store) {
+            Ok(()) => Ok(true),
+            Err(error)
+                if error.downcast_ref::<LifecycleReservationError>()
+                    == Some(&LifecycleReservationError::Superseded) =>
+            {
+                Ok(false)
             }
+            Err(error) => Err(error),
         }
-        self.backfill_container_workdir(container);
-        container_config::ensure_folder_trust_config_for_active_agent(
-            &self.tool,
-            Some(command),
-            &self.source_profile,
-            &self.id,
-            &self.container_workdir(),
-            self.is_yolo_mode(),
-        );
-        Ok(())
     }
 
     fn container_agent_identity(&self) -> Result<String> {
@@ -371,9 +436,10 @@ impl Instance {
         &self,
         container: &DockerContainer,
         command: &str,
+        session_config: &crate::session::config::SessionConfig,
     ) -> Result<bool> {
         if !container_config::agent_shares_credential_file(
-            &self.effective_profile(),
+            session_config,
             &self.tool,
             Some(command),
         ) {
@@ -391,26 +457,20 @@ impl Instance {
         }
     }
 
-    /// Backfill [`SandboxInfo::container_workdir`] from a live container for a
-    /// session created before that field existed (or one whose value was
-    /// cleared). Authoritative: the value is the container's own
-    /// `Config.WorkingDir`, so a later host-side git-linkage break can't make
-    /// [`Self::container_workdir`] drift from the path the container was built
-    /// with (#2414). No-op once the value is set, when the session is not
-    /// sandboxed, or when the runtime can't report it (the live fallback
-    /// stands). Not persisted here; the next start re-backfills if needed.
-    fn backfill_container_workdir(&mut self, container: &containers::DockerContainer) {
-        let needs_backfill = self
-            .sandbox_info
-            .as_ref()
-            .is_some_and(|s| s.container_workdir.is_none());
-        if !needs_backfill {
-            return;
-        }
-        if let Some(workdir) = container.working_dir() {
-            if let Some(sandbox) = self.sandbox_info.as_mut() {
-                sandbox.container_workdir = Some(workdir);
-            }
+    /// Pin [`SandboxInfo::container_workdir`] to a live container's own
+    /// `Config.WorkingDir`, which is what its mounts were built for. Covers a
+    /// session that predates the field and one whose pin names a path the
+    /// container never mounted (#4806), and keeps a later host-side
+    /// git-linkage break from drifting [`Self::container_workdir`] (#2414).
+    /// A runtime that can't report it leaves the pin. Not persisted here;
+    /// the next start reconciles again.
+    fn reconcile_container_workdir(&mut self, container: &containers::DockerContainer) {
+        self.adopt_container_workdir(container.working_dir());
+    }
+
+    pub(super) fn adopt_container_workdir(&mut self, live: Option<String>) {
+        if let (Some(workdir), Some(sandbox)) = (live, self.sandbox_info.as_mut()) {
+            sandbox.container_workdir = Some(workdir);
         }
     }
 
@@ -443,15 +503,9 @@ impl Instance {
         )
     }
 
-    /// Kept out of `build_container_config` so the diagnostic fires once per
-    /// preparation: a launch can build the config more than once.
-    fn warn_legacy_agent_config_mounts(&self) {
+    /// Warn once per preparation, not per rebuild.
+    fn warn_legacy_agent_config_mounts(&self, config: &crate::session::Config) {
         let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        let Ok(config) =
-            crate::session::config::profile_config::resolve_config(&self.effective_profile())
-        else {
             return;
         };
         let Some(directory) = config.session.agent_config_dir_for(&self.tool, &home) else {
@@ -474,58 +528,39 @@ impl Instance {
         }
     }
 
-    pub(super) fn build_container_config(&self) -> Result<crate::containers::ContainerConfig> {
-        self.build_container_config_with(container_config::CredentialFold::Freshest)
+    pub(super) fn build_container_config(
+        &self,
+        config: &crate::session::LaunchConfig,
+    ) -> Result<crate::containers::ContainerConfig> {
+        self.build_container_config_with(config, container_config::CredentialFold::Freshest)
+    }
+
+    #[cfg(test)]
+    pub(super) fn build_container_config_for_test(
+        &self,
+    ) -> Result<crate::containers::ContainerConfig> {
+        let config = crate::session::storage::local_launch_configuration(
+            &self.effective_profile(),
+            Path::new(&self.project_path),
+        );
+        self.build_container_config(&config)
     }
 
     /// [`Self::build_container_config`] with `fold` deciding what the build
     /// may put in the credential file the agent's sandboxes share.
     fn build_container_config_with(
         &self,
+        config: &crate::session::LaunchConfig,
         fold: container_config::CredentialFold,
-    ) -> Result<crate::containers::ContainerConfig> {
-        self.build_container_config_with_snapshot(fold, None)
-    }
-
-    pub(super) fn build_container_config_from(
-        &self,
-        config: &crate::session::config::Config,
-    ) -> Result<crate::containers::ContainerConfig> {
-        self.build_container_config_with_snapshot(
-            container_config::CredentialFold::Freshest,
-            Some(config),
-        )
-    }
-
-    fn build_container_config_with_snapshot(
-        &self,
-        fold: container_config::CredentialFold,
-        config: Option<&crate::session::config::Config>,
     ) -> Result<crate::containers::ContainerConfig> {
         self.ensure_container_hook_mount_source();
+
         let sandbox = self
             .sandbox_info
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("sandbox_info missing for sandboxed session"))?;
-        // Resolve the user-selected agent (e.g. Kiro `--agent NAME`) so the
-        // sandbox installs status hooks into that agent's config, matching the
-        // host path. Gated by the same setting; only applies to agents that
-        // declare selected_agent_hooks.
-        let merge_selected = config.map_or_else(
-            || {
-                crate::session::config::profile_config::resolve_config_or_warn(
-                    &self.effective_profile(),
-                )
-                .session
-                .merge_hooks_into_selected_agent
-            },
-            |config| config.session.merge_hooks_into_selected_agent,
-        );
-        let selected_agent = if merge_selected {
-            // Mirror the host path's agent resolution (a custom wrapper detected
-            // as kiro carries kiro's sidecar via detect_as), and the sandbox's
-            // own `resolve_active_agent`, which also falls back to detect_as.
-            self.resolved_agent()
+        let selected_agent = if config.profile.session.merge_hooks_into_selected_agent {
+            self.resolved_agent_in(&config.profile.session)
                 .and_then(|a| a.sidecar_hooks.as_ref())
                 .and_then(|s| s.selected_agent_hooks.as_ref())
                 .and_then(|sel| {
@@ -543,35 +578,38 @@ impl Instance {
                 Some(self.get_tool_command()),
             )
             .with_selected_agent(selected_agent.as_deref())
-            .with_credential_fold(fold)
-            .with_launch_config(config),
+            .with_credential_fold(fold),
             container_config::SandboxYolo {
                 enabled: self.is_yolo_mode(),
             },
             &self.id,
             self.workspace_info.as_ref(),
-            &self.source_profile,
+            config,
         )
     }
 
-    /// Run `host_hooks.before_start` on the host and stash the resulting
-    /// `KEY=VALUE` pairs on `sandbox_info.before_start_env`, from where
-    /// [`crate::session::environment::collect_environment`] injects them into the
-    /// container environment on every surface (docker run, the tmux `docker
-    /// exec` launch, and the structured-view worker).
-    ///
-    /// `force` re-mints unconditionally (a container come-up); when false the
-    /// hooks run only if no values are stashed yet, so attaching to an
-    /// already-running container backfills without re-minting on every relaunch.
-    /// A hook failure is propagated so the container does not come up without
-    /// the values the agent depends on. Hooks are resolved from profile/global
-    /// config only, never from the repo.
-    pub(super) fn ensure_before_start_env(&mut self, force: bool) -> Result<()> {
+    fn container_transition_lock(&self) -> Result<Option<crate::session::storage::StorageFlock>> {
+        if self.sandbox_store_generation >= container_config::CURRENT_SANDBOX_STORE_GENERATION {
+            return Ok(None);
+        }
+        crate::session::acquire_storage_shared_flock(
+            &crate::session::get_app_dir()?,
+            crate::migrations::v027_isolate_sandbox_stores::LOCK,
+        )
+        .map(Some)
+    }
+
+    /// Mint host-only hooks on come-up, or backfill an existing container once.
+    fn ensure_before_start_env(
+        &mut self,
+        force: bool,
+        config: &crate::session::LaunchConfig,
+        run_hook: &mut impl FnMut(&mut Self, &crate::session::LaunchConfig) -> Result<()>,
+    ) -> Result<()> {
         if self.sandbox_info.is_none() {
             return Ok(());
         }
-        let commands =
-            crate::session::config::repo_config::resolve_before_start_hooks(&self.source_profile);
+        let commands = &config.profile.host_hooks.before_start;
         if commands.is_empty() {
             if let Some(sb) = self.sandbox_info.as_mut() {
                 sb.before_start_env.clear();
@@ -585,26 +623,31 @@ impl Instance {
         if !force && already_minted {
             return Ok(());
         }
+        run_hook(self, config)
+    }
+
+    pub(crate) fn mint_before_start_env(
+        &mut self,
+        config: &crate::session::LaunchConfig,
+    ) -> Result<()> {
+        let commands = &config.profile.host_hooks.before_start;
 
         let hook_env = crate::session::config::repo_config::lifecycle_env_vars(self);
         let project_path = PathBuf::from(&self.project_path);
-        // Feed the session's sandbox env into the hook so it can read a
-        // per-session value (e.g. `$TEST_VAR`) to scope what it mints.
-        // Repo-contributed env is filtered out so an untrusted repo can't
-        // influence the host hook's environment.
+        // Repository-contributed values must not enter the host hook environment.
         let session_env = self
             .sandbox_info
             .as_ref()
             .map(|sb| {
                 crate::session::environment::session_host_env_pairs(
-                    &self.source_profile,
-                    &project_path,
+                    &config.profile.sandbox.environment,
+                    &config.sandbox().environment,
                     sb,
                 )
             })
             .unwrap_or_default();
         let minted = crate::session::config::repo_config::run_before_start_hooks(
-            &commands,
+            commands,
             &project_path,
             &hook_env,
             &session_env,
@@ -615,37 +658,40 @@ impl Instance {
         Ok(())
     }
 
-    /// Mint the `host_hooks.before_session` environment for a host
+    /// The host environment the agent process will actually see: the static
+    /// profile `environment` list with every `before_session`-minted key
+    /// dropped, then the minted pairs appended. This is the same precedence
+    /// `build_launch_command` applies to the pane, so anything that has to
+    /// agree with the launched agent about a variable's value must read it
+    /// here rather than from `profile_host_environment` alone.
+    ///
+    /// Minted pairs are `#[serde(skip)]` runtime state, so outside a launch
+    /// (a poller repair, a daemon-side read of a stored row) this degrades to
+    /// the profile list. That is the best available answer: the minted values
+    /// are deliberately not persisted because they may be short-lived secrets.
+    pub(crate) fn resolved_host_environment(&self) -> Vec<String> {
+        self.resolved_host_environment_from(self.profile_host_environment())
+    }
+
+    ////// Mint the `host_hooks.before_session` environment for a host
     /// (non-sandboxed) session launch.
     ///
-    /// No-ops for a sandboxed session so a launch runs exactly one of the two
-    /// env-minting hooks: `before_start` on container bring-up,
-    /// `before_session` on host spawn. Nothing is cached, unlike
-    /// [`Self::ensure_before_start_env`], which stashes its result on
-    /// `SandboxInfo` so re-attaching a live container does not re-mint, a host
-    /// launch always spawns a fresh agent process, so re-running the hook is
-    /// both correct and the point (short-lived values get refreshed).
-    ///
-    /// Gated on [`Self::is_sandboxed`] rather than `sandbox_info.is_some()` so
-    /// the condition matches how `build_launch_command` picks its branch: an
-    /// instance carrying disabled `SandboxInfo` builds a host command, and so
-    /// must mint here, or `before_session` would silently not run for it.
-    ///
-    /// Resolved from global + profile config only; a repo cannot contribute the
-    /// command. See [`crate::session::config::repo_config::resolve_before_session_hooks`].
-    pub(super) fn mint_host_session_env(&mut self) -> Result<()> {
+    /// Host launches mint fresh values; sandboxed launches use before_start instead.
+    pub(super) fn mint_host_session_env(
+        &mut self,
+        config: &crate::session::config::Config,
+    ) -> Result<()> {
         self.pending_host_env.clear();
         if self.is_sandboxed() {
             return Ok(());
         }
-        let commands =
-            crate::session::config::repo_config::resolve_before_session_hooks(&self.source_profile);
+        let commands = &config.host_hooks.before_session;
         if commands.is_empty() {
             return Ok(());
         }
         let hook_env = crate::session::config::repo_config::lifecycle_env_vars(self);
         self.pending_host_env = crate::session::config::repo_config::run_before_session_hooks(
-            &commands,
+            commands,
             Path::new(&self.project_path),
             &hook_env,
             &[],
@@ -657,6 +703,227 @@ impl Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn before_start_releases_content_admission_and_rechecks_roots() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("controlled hook refusal")]
+        struct HookRefusal;
+
+        #[derive(Clone, Copy, Debug)]
+        enum HookOutcome {
+            Pass,
+            Refuse,
+            ReplaceRoot,
+        }
+
+        let root = tempfile::tempdir()?;
+        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+        let _env = crate::session::test_support::EnvGuard::unset(&["DOCKER_CONTEXT"])
+            .and_set("DOCKER_HOST", "unix:///var/run/docker.sock");
+        crate::session::config::update_app_state(|state| {
+            state.has_acknowledged_agent_hooks = true;
+        })?;
+        crate::session::config::update_config(|config| {
+            config.systemd.enabled = false;
+            config.sandbox.container_runtime = crate::session::ContainerRuntimeName::Docker;
+            config.host_hooks.before_start = vec!["true".into()];
+        })?;
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin)?;
+        let effect = root.path().join("container-started");
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in\n\
+             'image inspect'*) exit 0;;\n\
+             *inspect*) echo 'Error: No such container (container not found)' >&2; exit 1;;\n\
+             run\\ *|create\\ *|start\\ *) touch '{}'; echo 'permission denied' >&2; exit 1;;\n\
+             esac\nexit 0\n",
+            effect.display()
+        );
+        for runtime in ["docker", "podman", "container"] {
+            let path = bin.join(runtime);
+            std::fs::write(&path, &script)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let _path = crate::session::test_support::path_prepended(&bin);
+        let project = root.path().join("project");
+        std::fs::create_dir(&project)?;
+        let app = crate::session::get_app_dir()?;
+        let store = Storage::new_unwatched("default")?;
+        for reserved in [false, true] {
+            for outcome in [
+                HookOutcome::Pass,
+                HookOutcome::Refuse,
+                HookOutcome::ReplaceRoot,
+            ] {
+                if effect.exists() {
+                    std::fs::remove_file(&effect)?;
+                }
+                let mut instance = Instance::new("hook admission", project.to_str().unwrap());
+                instance.tool = "codex".into();
+                instance.command = "codex".into();
+                instance.source_profile = store.profile().into();
+                instance.sandbox_info = Some(super::super::test_helpers::test_sandbox(
+                    "hook-admission",
+                    None,
+                ));
+                super::super::test_helpers::admit_sandbox_fixture(&instance);
+                let generation = if reserved {
+                    Some(instance.try_acquire_lifecycle_reservation(
+                        LifecycleOperation::Launch,
+                        Instance::LIFECYCLE_RESERVATION_TTL,
+                        Utc::now(),
+                    )?)
+                } else {
+                    None
+                };
+                store.update(|rows, _| {
+                    *rows = vec![instance.clone()];
+                    Ok(())
+                })?;
+                let content_root =
+                    crate::migrations::v033_isolate_sandbox_content::instance_roots(&instance)?
+                        .remove(0)
+                        .path;
+                let retained_root = root.path().join(format!("retained-{}", instance.id));
+                let sentinel = content_root.join("unproven.jsonl");
+                let mut entered = false;
+                let mut exclusive_available = false;
+                let error = instance
+                    .ensure_container_with_hook_in(
+                        &store,
+                        &tokio_util::sync::CancellationToken::new(),
+                        generation,
+                        |_, _| {
+                            entered = true;
+                            let exclusive = crate::session::try_acquire_storage_flock(
+                                &app,
+                                crate::migrations::v027_isolate_sandbox_stores::LOCK,
+                            )?;
+                            exclusive_available = exclusive.is_some();
+                            drop(exclusive);
+                            match outcome {
+                                HookOutcome::Pass => Ok(()),
+                                HookOutcome::Refuse => Err(HookRefusal.into()),
+                                HookOutcome::ReplaceRoot => {
+                                    std::fs::rename(&content_root, &retained_root)?;
+                                    std::fs::create_dir(&content_root)?;
+                                    std::fs::write(&sentinel, b"unproven conversation")?;
+                                    Ok(())
+                                }
+                            }
+                        },
+                    )
+                    .err()
+                    .context("fake runtime must refuse bring-up")?;
+                let case = format!("reserved={reserved}, {outcome:?}: {error:#}");
+                assert!(entered, "{case}");
+                assert!(
+                    exclusive_available,
+                    "before_start retained content exclusion: {case}"
+                );
+                match outcome {
+                    HookOutcome::Pass => assert!(effect.exists(), "{case}"),
+                    HookOutcome::Refuse => {
+                        assert!(error.is::<HookRefusal>(), "{case}");
+                        assert!(!effect.exists(), "{case}");
+                    }
+                    HookOutcome::ReplaceRoot => {
+                        assert!(
+                            matches!(
+                                error.downcast_ref::<crate::migrations::SandboxMigrationError>(),
+                                Some(crate::migrations::SandboxMigrationError::Deferred)
+                            ),
+                            "{case}"
+                        );
+                        assert!(!effect.exists(), "{case}");
+                        assert_eq!(std::fs::read(&sentinel)?, b"unproven conversation");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn superseded_launch_never_brings_up_a_container() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir()?;
+        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+        crate::session::config::update_app_state(|state| {
+            state.has_acknowledged_agent_hooks = true;
+        })?;
+        crate::session::config::update_config(|config| config.systemd.enabled = false)?;
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin)?;
+        let effect = root.path().join("container-started");
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in\n\
+             'image inspect'*) exit 0;;\n\
+             *inspect*) echo 'Error: No such container (container not found)' >&2; exit 1;;\n\
+             run\\ *|create\\ *|start\\ *) touch '{}'; echo 'permission denied' >&2; exit 1;;\n\
+             esac\nexit 0\n",
+            effect.display()
+        );
+        for runtime in ["docker", "podman", "container"] {
+            let path = bin.join(runtime);
+            std::fs::write(&path, &script)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let _path = crate::session::test_support::path_prepended(&bin);
+        let project = root.path().join("project");
+        std::fs::create_dir(&project)?;
+        let store = Storage::new_unwatched("default")?;
+        let mut raw = serde_json::to_value(Instance::new("expired", project.to_str().unwrap()))?;
+        raw["tool"] = "codex".into();
+        raw["command"] = "codex".into();
+        raw["source_profile"] = "default".into();
+        raw["sandbox_info"] = serde_json::json!({
+            "enabled": true, "image": "test-image", "container_name": "expired",
+        });
+        let mut stale: Instance = serde_json::from_value(raw)?;
+        stale.source_profile = store.profile().into();
+        let generation = stale.try_acquire_lifecycle_reservation(
+            LifecycleOperation::Launch,
+            Instance::LIFECYCLE_RESERVATION_TTL,
+            Utc::now() - Instance::SANDBOX_PREPARATION_WINDOW - chrono::Duration::seconds(1),
+        )?;
+        store.update(|rows, _| {
+            rows.push(stale.clone());
+            Ok(())
+        })?;
+        store.update(|rows, _| {
+            let row = &mut rows[0];
+            let stop = row.try_acquire_lifecycle_reservation(
+                LifecycleOperation::Stop,
+                Instance::LIFECYCLE_RESERVATION_TTL,
+                Utc::now(),
+            )?;
+            assert!(row.finish_lifecycle_status(LifecycleOperation::Stop, stop, Status::Stopped));
+            Ok(())
+        })?;
+        let error = stale
+            .run_pre_launch_hooks(true, &store, None, Some(generation))
+            .unwrap_err();
+        assert!(
+            error.is::<LifecycleReservationError>(),
+            "{error:#}; container effect: {}",
+            effect.exists()
+        );
+        assert!(
+            !effect.exists(),
+            "an expired launch brought up a container after Stop"
+        );
+        let stopped = store.load()?;
+        assert_eq!(stopped[0].status, Status::Stopped);
+        assert!(stopped[0].lifecycle_generation > generation);
+        Ok(())
+    }
 
     #[test]
     fn hook_mount_source_is_restored_for_agent_without_hooks() {
@@ -709,6 +976,7 @@ mod tests {
             extra_env: None,
             custom_instruction: None,
             before_start_env: Vec::new(),
+            before_start_hook_env: Vec::new(),
             container_workdir: None,
         });
 
@@ -722,6 +990,34 @@ mod tests {
         let pinned = "/workspace/myrepo-worktrees/contexec".to_string();
         inst.sandbox_info.as_mut().unwrap().container_workdir = Some(pinned.clone());
         assert_eq!(inst.container_workdir(), pinned);
+    }
+
+    /// Regression for #4806: a pin naming a path the pre-1.20 container never
+    /// mounted must yield to the container's own working directory.
+    #[test]
+    fn container_workdir_pin_yields_to_live_container() {
+        let mut inst = Instance::new("groceries", "/nowhere/groceries");
+        inst.sandbox_info = Some(SandboxInfo {
+            provider: None,
+            enabled: true,
+            container_id: None,
+            image: "img".to_string(),
+            container_name: "aoe-sandbox-test".to_string(),
+            extra_env: None,
+            custom_instruction: None,
+            before_start_env: Vec::new(),
+            before_start_hook_env: Vec::new(),
+            container_workdir: Some("/workspace/Thymeline-worktrees/groceries".to_string()),
+        });
+
+        inst.adopt_container_workdir(None);
+        assert_eq!(
+            inst.container_workdir(),
+            "/workspace/Thymeline-worktrees/groceries"
+        );
+
+        inst.adopt_container_workdir(Some("/workspace/groceries".to_string()));
+        assert_eq!(inst.container_workdir(), "/workspace/groceries");
     }
 
     #[test]
@@ -803,6 +1099,7 @@ claude-personal = "~/.claude-global"
             extra_env: None,
             custom_instruction: None,
             before_start_env: Vec::new(),
+            before_start_hook_env: Vec::new(),
             container_workdir: None,
         });
         for (case, declared_agent, entries, expected) in cases {
@@ -820,12 +1117,15 @@ claude-personal = "~/.claude-global"
                 .with_ansi(false)
                 .with_writer(Mutex::new(fs::File::create(&log_path).unwrap()))
                 .finish();
+            let config = crate::session::config::profile_config::resolve_config_or_warn(
+                &instance.source_profile,
+            );
             tracing::subscriber::with_default(subscriber, || {
-                instance.warn_legacy_agent_config_mounts();
+                instance.warn_legacy_agent_config_mounts(&config);
                 if case == "descendants" {
                     // Preparing the config again must not duplicate the diagnostic.
                     for _ in 0..2 {
-                        instance.build_container_config().unwrap();
+                        instance.build_container_config_for_test().unwrap();
                     }
                 }
             });
@@ -964,6 +1264,9 @@ claude-personal = "~/.claude-global"
         for ((tool, detect_as), built_for, disk, expected_removals, expected_store) in cases {
             let _ = std::fs::remove_file(&calls_path);
             let _ = std::fs::remove_file(&removed_path);
+            for root in [".claude", ".codex"] {
+                let _ = std::fs::remove_dir_all(temp.path().join(root).join("sandbox-v2"));
+            }
             std::fs::write(&label_path, built_for).unwrap();
             let mut instance = Instance::new("tool label", project.to_str().unwrap());
             instance.tool = tool.to_string();
@@ -978,8 +1281,12 @@ claude-personal = "~/.claude-global"
                 extra_env: None,
                 custom_instruction: None,
                 before_start_env: Vec::new(),
+                before_start_hook_env: Vec::new(),
                 container_workdir: None,
             });
+            instance.sandbox_store_generation =
+                crate::session::config::container_config::CURRENT_SANDBOX_STORE_GENERATION;
+            super::test_helpers::admit_sandbox_fixture(&instance);
             let _ = std::fs::remove_file(storage.sessions_path());
             let _ = std::fs::remove_file(&profile_config);
             storage
@@ -1030,7 +1337,12 @@ claude-personal = "~/.claude-global"
                         .exists()
                 })
                 .collect();
-            assert_eq!(stores, Vec::from_iter(expected_store), "{case}");
+            if let Some(expected) = expected_store {
+                assert!(
+                    stores.contains(&expected),
+                    "{case}: missing {expected}, got {stores:?}"
+                );
+            }
             if let Disk::RowBrokenProfile(..) = disk {
                 assert!(
                     format!("{error:#}").contains("cannot resolve the session's agent"),
@@ -1055,10 +1367,14 @@ claude-personal = "~/.claude-global"
                 extra_env: None,
                 custom_instruction: None,
                 before_start_env: Vec::new(),
+                before_start_hook_env: Vec::new(),
                 container_workdir: None,
             });
             assert_eq!(
-                instance.build_container_config().unwrap().agent_tool,
+                instance
+                    .build_container_config_for_test()
+                    .unwrap()
+                    .agent_tool,
                 instance.container_agent_identity().unwrap(),
                 "{tool}/{detect_as}"
             );
@@ -1157,6 +1473,7 @@ claude-personal = "~/.claude-global"
                 extra_env: None,
                 custom_instruction: None,
                 before_start_env: Vec::new(),
+                before_start_hook_env: Vec::new(),
                 container_workdir: None,
             });
             let id = instance.id.clone();
@@ -1167,7 +1484,8 @@ claude-personal = "~/.claude-global"
                 })
                 .unwrap();
 
-            let launch = std::thread::spawn(move || instance.get_container_admitted().map(|_| ()));
+            let launch =
+                std::thread::spawn(move || instance.start_container_terminal_with_size(None));
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while !ready.exists() && std::time::Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(10));

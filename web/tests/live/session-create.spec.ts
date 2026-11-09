@@ -49,12 +49,12 @@ async function waitForReadOnlyDashboard(page: Page, serve: ServeHandle) {
 }
 
 test.describe("wizard", () => {
-  test("wizard with Use structured view on creates a structured_view session", async ({ page, spawnServe }) => {
-    // #1841: the structured view toggle defaults on for an ACP-capable agent.
+  test("wizard with Structured view selected creates a structured_view session", async ({ page, spawnServe }) => {
+    // #1841: Structured view is selected by default for an ACP-capable agent.
     const serve = await spawnServe({ acp: true });
     const wizard = await openWizard(page, serve);
     await pickScratch(wizard);
-    const acpToggle = wizard.getByRole("switch", { name: "Use structured view" });
+    const acpToggle = wizard.getByRole("radio", { name: "Structured view" });
     await expect(acpToggle).toBeVisible({ timeout: 10_000 });
     await expect(acpToggle).toBeChecked();
     await wizard.getByRole("button", { name: /Launch session/ }).click();
@@ -64,16 +64,16 @@ test.describe("wizard", () => {
     await waitForView(serve.baseUrl, sessions[0]!.id, "structured");
   });
 
-  test("wizard auto-approve starts Codex in full-access mode", async ({ page, spawnServe }) => {
+  test("wizard Yolo mode starts Codex in full-access mode", async ({ page, spawnServe }) => {
     const serve = await spawnServe({ acp: true, extraEnv: { FAKE_ACP_MODE_VIA_CONFIG_OPTION: "codex" } });
     const wizard = await openWizard(page, serve);
     await pickScratch(wizard);
     await wizard.getByTestId("wizard-agent-row").click();
     await wizard.getByRole("button", { name: "codex", exact: true }).click();
     await wizard.getByRole("button", { name: "Done" }).click();
-    const autoApprove = wizard.getByRole("switch", { name: "Auto-approve actions" });
-    await autoApprove.click();
-    await expect(autoApprove).toBeChecked();
+    const yolo = wizard.getByRole("switch", { name: "Yolo mode" });
+    await yolo.click();
+    await expect(yolo).toBeChecked();
     await wizard.getByRole("button", { name: /Launch session/ }).click();
 
     await waitForStructuredView(page);
@@ -88,17 +88,28 @@ test.describe("wizard", () => {
     page,
     spawnServe,
   }) => {
-    const serve = await spawnServe({ seedFn: seedSessionViaAoeAdd({ title: "frontend-work", subdir: "frontend" }) });
+    const serve = await spawnServe({
+      seedFn: seedSessionViaAoeAdd({
+        title: "frontend-work",
+        subdir: "frontend",
+      }),
+    });
     const [seeded] = await listSessions(serve.baseUrl);
     const del = await page.request.delete(`${serve.baseUrl}/api/sessions/${seeded!.id}`, { data: {} });
     expect(del.ok()).toBe(true);
-    await expect.poll(async () => (await listSessions(serve.baseUrl)).length, { timeout: 10_000 }).toBe(0);
+    await expect
+      .poll(async () => (await listSessions(serve.baseUrl)).length, {
+        timeout: 10_000,
+      })
+      .toBe(0);
 
     const recent = await (await page.request.get(`${serve.baseUrl}/api/recent-projects`)).json();
     expect((recent.projects as { display_name: string }[]).map((p) => p.display_name)).toContain("frontend");
 
     const wizard = await openWizard(page, serve);
-    await expect(wizard.getByText("frontend", { exact: true })).toBeVisible({ timeout: 10_000 });
+    await expect(wizard.getByText("frontend", { exact: true })).toBeVisible({
+      timeout: 10_000,
+    });
     await expect(wizard.getByText("0 sessions")).toBeVisible();
   });
 });
@@ -144,6 +155,13 @@ test.describe("scratch sessions", () => {
     );
     await dialog.getByRole("button", { name: /^Delete$/ }).click();
     const deleteRes = await deletePromise;
+    // This is the assertion the launch reservation used to break: a structured
+    // create released that reservation when its registration window closed
+    // (row, worktree, branch, sandbox, scratch dir), so a delete issued while
+    // the agent's ACP handshake is still unanswered is answered at once rather
+    // than refused as Busy(Launch) for the length of that handshake. Nothing
+    // below waits on the reservation, so re-holding it fails here instead of
+    // being absorbed by the polls.
     expect(deleteRes.ok()).toBe(true);
     expect((deleteRes.request().postDataJSON() as { session_ids: string[] }).session_ids).toEqual([created!.id]);
 
@@ -187,7 +205,9 @@ test.describe("scratch sessions", () => {
 test("search surfaces a session by its conversation content", async ({ spawnServe }) => {
   // #2515: the token appears only in the prompt, so a hit proves content search.
   const needle = "xyzzycontentneedle";
-  const { serve, sessionId } = await startAcpSession(spawnServe, { title: "content-search" });
+  const { serve, sessionId } = await startAcpSession(spawnServe, {
+    title: "content-search",
+  });
   const promptRes = await postPrompt(serve.baseUrl, sessionId, `please remember ${needle} for later`);
   expect(promptRes.status).toBeGreaterThanOrEqual(200);
   expect(promptRes.status).toBeLessThan(300);
@@ -230,7 +250,9 @@ test.describe("directory browser", () => {
     await openWizardWithShortcut(page);
     await expect(option(page, "projects")).toBeVisible({ timeout: 10_000 });
     // #3430: hidden folders are filtered server-side until requested.
-    const hiddenToggle = page.getByRole("checkbox", { name: "Show hidden folders" });
+    const hiddenToggle = page.getByRole("checkbox", {
+      name: "Show hidden folders",
+    });
     await expect(option(page, ".hidden-proj")).toHaveCount(0);
     await hiddenToggle.check();
     await expect(option(page, ".hidden-proj")).toBeVisible({ timeout: 10_000 });
@@ -271,7 +293,9 @@ test.describe("worktrees", () => {
 
   test("duplicate worktree branch returns the real collision error, not a generic one", async ({ spawnServe }) => {
     // #1649
-    const serve = await spawnServe({ seedFn: ({ home, env }) => void initWorkingRepo(join(home, "project"), env) });
+    const serve = await spawnServe({
+      seedFn: ({ home, env }) => void initWorkingRepo(join(home, "project"), env),
+    });
     const payload = {
       path: join(serve.home, "project"),
       tool: "claude",

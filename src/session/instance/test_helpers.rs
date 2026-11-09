@@ -157,6 +157,10 @@ if (args[0] === "container" && args[1] === "inspect" && args.at(-1) === fixture.
   if (args.join(" ") === "env -0") {
     process.stdout.write("HOME=/root\0PATH=/usr/local/bin:/usr/bin:/bin\0");
   } else if (args[0] === "/bin/sh" && args[1] === "-c" && args[3] === "aoe-path") {
+    if (args[2].includes("exit 3")) {
+      const host = physical(canonical(args[4]));
+      process.exit(host && fs.existsSync(host) ? 0 : 3);
+    }
     process.stdout.write(canonical(args[4]) + "\n");
   } else if (args[0] === "/bin/sh" && args[1] === "-c" && args[3] === "aoe-native-program") {
     const command = args[5];
@@ -254,6 +258,7 @@ pub(super) fn test_sandbox(name: &str, workdir: Option<&str>) -> SandboxInfo {
         extra_env: None,
         custom_instruction: None,
         before_start_env: Vec::new(),
+        before_start_hook_env: Vec::new(),
         container_workdir: workdir.map(str::to_string),
     }
 }

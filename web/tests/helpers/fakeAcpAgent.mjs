@@ -387,7 +387,7 @@ const INITIALIZE_RESULT = {
   agentInfo: {
     name: "@agentclientprotocol/claude-agent-acp",
     // Must stay at or above CLAUDE_AGENT_ACP_MIN_VERSION in src/acp/agent_compat.rs.
-    version: "0.82.0",
+    version: "0.99.1",
   },
   // Omitted rather than empty: some clients read an empty list as auth required.
 };
@@ -396,7 +396,7 @@ const INITIALIZE_RESULT = {
 // name and a version at its floor. FAKE_ACP_STEERING advertises `_session/steering` at the
 // separate steering floor.
 const STEERING_ENABLED = process.env.FAKE_ACP_STEERING === "1";
-const STEERING_MIN_VERSION = "0.82.0";
+const STEERING_MIN_VERSION = "0.99.1";
 
 // Running prompts decide `injected` versus `promptRequired`, as the real adapter's turnQueue does.
 const activeTurns = new Set();
@@ -496,6 +496,15 @@ async function handleRequest(msg) {
 
     case "session/new":
     case "session/load": {
+      // FAKE_ACP_STALL_NEW names a marker file with a line per stall: the first FAKE_ACP_STALL_NEW_TIMES
+      // (default 1) session/new calls append one and never answer.
+      const stallMarker = process.env.FAKE_ACP_STALL_NEW;
+      const stalls =
+        stallMarker && existsSync(stallMarker) ? readFileSync(stallMarker, "utf8").split("\n").length - 1 : 0;
+      if (method === "session/new" && stallMarker && stalls < Number(process.env.FAKE_ACP_STALL_NEW_TIMES ?? 1)) {
+        appendFileSync(stallMarker, `${process.pid}\n`);
+        return;
+      }
       const sessionId = params?.sessionId ?? makeSessionId();
       // FAKE_ACP_COMMANDS: emit available_commands_update after session/new.
       const commandsJson = process.env.FAKE_ACP_COMMANDS;

@@ -39,6 +39,26 @@ fn stage(env: &mut TestEnv, lines: &[&str], links: Vec<PaneLink>) {
 
 #[test]
 #[serial]
+fn trash_reader_never_opens_links_from_previous_pane() {
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instance_at(0).id.clone();
+    env.view.select_session_by_id(&id);
+    stage(
+        &mut env,
+        &["old link"],
+        vec![link("old link", "https://example.com/old")],
+    );
+    assert_eq!(
+        env.view.preview_link_at(PANE.x, PANE.y),
+        Some("https://example.com/old".into())
+    );
+    env.view
+        .mutate_instance(&id, |inst| inst.trashed_at = Some(chrono::Utc::now()));
+    assert_eq!(env.view.preview_link_at(PANE.x, PANE.y), None);
+}
+
+#[test]
+#[serial]
 fn click_on_a_link_whose_text_hides_the_target_resolves_it() {
     let mut env = create_test_env_empty();
     stage(
@@ -133,65 +153,6 @@ fn link_columns_are_underlined_so_the_text_reads_as_a_link() {
             .contains(ratatui::style::Modifier::UNDERLINED)),
         "a row with no link text is untouched"
     );
-}
-
-/// Links are underlined only where a click resolves them (#4015). A structured session
-/// keeps its transcript mounted in Terminal view, where the capture's links are real; in
-/// Structured view the transcript owns the pane and the capture's links are neither.
-#[test]
-#[serial]
-fn capture_links_follow_whether_the_transcript_was_painted() {
-    use crate::tui::structured_view::embedded::EmbeddedView;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
-    let theme = crate::tui::styles::load_theme("empire");
-    // (view mode, link live)
-    for (mode, live) in [(ViewMode::Structured, false), (ViewMode::Terminal, true)] {
-        let mut env = create_test_env_with_sessions(1);
-        let id = env.view.instance_at(0).id.clone();
-        let inst = env.view.instance_at_mut(0);
-        inst.view = crate::session::View::Structured;
-        inst.status = Status::Idle;
-        env.view.selected_session = Some(id.clone());
-        env.view.structured_preview = Some(EmbeddedView::for_test(&id));
-        env.view.view_mode = mode.clone();
-
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.area();
-                env.view.render(f, area, &theme, None, None, None);
-            })
-            .unwrap();
-        assert_eq!(
-            env.view.structured_transcript_painted, !live,
-            "{mode:?}: transcript painted"
-        );
-
-        // The capture a Terminal frame would have left behind.
-        stage(
-            &mut env,
-            &["see the AoE repo now"],
-            vec![link("the AoE repo", "https://example.com/aoe")],
-        );
-        if matches!(mode, ViewMode::Terminal) {
-            let staged = std::mem::take(&mut env.view.preview_cache);
-            env.view.terminal_preview_cache = staged;
-        }
-        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 60, 10));
-        env.view.paint_preview_links(&mut buf);
-        let underlined = (0..60).any(|col| {
-            buf[(col, PANE.y)]
-                .modifier
-                .contains(ratatui::style::Modifier::UNDERLINED)
-        });
-        assert_eq!(underlined, live, "{mode:?}: underline");
-        assert_eq!(
-            env.view.preview_link_at(PANE.x + 4, PANE.y).is_some(),
-            live,
-            "{mode:?}: click target"
-        );
-    }
 }
 
 #[test]

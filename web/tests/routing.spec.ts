@@ -63,11 +63,14 @@ test.describe("URL routing", () => {
       releaseSessions = resolve;
     });
     let requested = false;
-    await page.route("**/api/sessions", async (route) => {
+    await page.route(/\/api\/sessions(\?.*)?$/, async (route) => {
       if (route.request().method() === "POST") return route.fulfill({ status: 400 });
       requested = true;
       await sessionsPending;
-      await route.fulfill({ json: { sessions: [], workspace_ordering: [] } });
+      await route.fulfill({
+        headers: { "aoe-runtime-epoch": "mock-runtime", "aoe-runtime-revision": "1" },
+        json: { sessions: [], workspace_ordering: [] },
+      });
     });
 
     try {
@@ -85,9 +88,10 @@ test.describe("URL routing", () => {
 
   test("refresh on /session/<id> for a known session keeps the user on that session", async ({ page }) => {
     // The known session must resolve to its terminal on both navigations.
-    await page.route("**/api/sessions", (r) => {
+    await page.route(/\/api\/sessions(\?.*)?$/, (r) => {
       if (r.request().method() === "POST") return r.fulfill({ status: 400 });
       return r.fulfill({
+        headers: { "aoe-runtime-epoch": "mock-runtime", "aoe-runtime-revision": "1" },
         json: {
           sessions: [makeSession("known-session", "/tmp/known")],
           workspace_ordering: [],
@@ -115,9 +119,12 @@ test.describe("URL routing", () => {
 const LAST_SESSION_KEY = "aoe-last-session-id";
 
 async function stubSessions(page: import("@playwright/test").Page, ids: string[]) {
-  await page.route("**/api/sessions", (r) => {
+  await page.route(/\/api\/sessions(\?.*)?$/, (r) => {
     if (r.request().method() === "POST") return r.fulfill({ status: 400 });
-    return r.fulfill({ json: { sessions: ids.map((id) => makeSession(id)), workspace_ordering: [] } });
+    return r.fulfill({
+      headers: { "aoe-runtime-epoch": "mock-runtime", "aoe-runtime-revision": "1" },
+      json: { sessions: ids.map((id) => makeSession(id)), workspace_ordering: [] },
+    });
   });
   await page.route("**/api/sessions/*/ensure", (r) => r.fulfill({ json: { ok: true } }));
   await page.route("**/api/sessions/*/terminal", (r) => r.fulfill({ status: 200, body: "" }));

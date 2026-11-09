@@ -28,6 +28,9 @@ fn skip_capture(
 const LEGACY_RUNNING_HOOK_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(900);
 
 impl Instance {
+    // Local polling measures from finalization; the Daemon uses persisted pane birth.
+    pub(crate) const STARTUP_GRACE_SECS: u64 = 3;
+
     /// Update status using pre-fetched pane metadata to avoid per-instance subprocess spawns.
     pub fn update_status_with_metadata(
         &mut self,
@@ -84,8 +87,8 @@ impl Instance {
         self.live_status_baseline = Some(self.status);
     }
 
-    /// One `info` line per observed status transition, carrying the evidence a wrong-state report
-    /// needs.
+    /// Records the tmux detection evidence behind a transition; the committed transition itself is
+    /// logged at publish time in `server::push`.
     fn log_status_transition(&self, prev: Status) {
         let detection_tool =
             tmux::status_rules::detection_tool(&self.source_profile, &self.tool, &self.detect_as);
@@ -94,7 +97,7 @@ impl Instance {
         let hook_age_ms = observed
             .and_then(|hook| hook.age)
             .map(|age| age.as_millis());
-        tracing::info!(target: "session.status_change",
+        tracing::debug!(target: "session.status_change",
             "{} [{}] {:?} -> {:?} (hook={:?} hook_age_ms={:?} rule={})",
             self.id, detection_tool, prev, self.status, hook, hook_age_ms,
             self.detection.rule.unwrap_or("none")
@@ -173,7 +176,7 @@ impl Instance {
         }
 
         if let Some(start_time) = self.last_start_time {
-            if start_time.elapsed().as_secs() < 3 {
+            if start_time.elapsed().as_secs() < Self::STARTUP_GRACE_SECS {
                 self.status = Status::Starting;
                 return;
             }
@@ -263,6 +266,33 @@ impl Instance {
             self.tool,
             self.has_command_override()
         );
+        let integration_configured = crate::plugin::agent_integration::configured(self);
+        let integration_snapshot = integration_configured
+            .then(|| crate::plugin::agent_integration::snapshot(self))
+            .flatten();
+        if let Some(status) = crate::plugin::agent_integration::session_status_override(
+            integration_configured,
+            is_dead,
+            integration_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.status),
+        ) {
+            self.status = status;
+            self.detection.pending = None;
+            self.detection.rule = Some("agent_integration");
+            if self.status == Status::Error {
+                if is_dead {
+                    self.explain_error_from_pane(&session);
+                } else if self.last_error.is_none() {
+                    self.last_error = Some(summarize_error_from_pane(
+                        &session.capture_pane(20).unwrap_or_default(),
+                    ));
+                }
+            } else {
+                self.last_error = None;
+            }
+            return;
+        }
 
         // Two detection identities: hooks are installed for (and must be interpreted by) the
         // `agent_detect_as` alias when one is set, so hook reconciliation keeps the alias identity.
@@ -1067,6 +1097,11 @@ Esc to cancel \u{b7} Tab to amend \u{b7} ctrl+e to explain\n\
     fn agent_pane_metadata(command: &str, window_activity: Option<i64>) -> tmux::PaneMetadata {
         tmux::PaneMetadata {
             launch_report: None,
+            server: None,
+            session_id: "$42".into(),
+            pane_id: "%42".into(),
+            session_kind: None,
+            tool_owner: crate::tmux::ToolPaneOwner::Unmarked,
             pane_dead: false,
             pane_current_command: Some(command.to_string()),
             pane_start_command_is_protected: false,
@@ -1477,6 +1512,90 @@ Esc to cancel \u{b7} Tab to amend \u{b7} ctrl+e to explain\n\
 
     #[test]
     #[serial_test::serial]
+    fn omp_prompt_history_retains_status_but_not_stale_ownership() {
+        if !tmux_available() {
+            eprintln!("skipping: tmux not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let pane_file = dir.path().join("history.txt");
+        std::fs::write(
+            &pane_file,
+            "\
+╭─ History ──────────────────────╮
+│                                │
+│ >                              │
+│                                │
+│ ❯ previous prompt              │
+│                                │
+│ ↑/↓ navigate · ⏎ select · ⎋ cancel │
+│                                │
+╰────────────────────────────────╯
+HISTORY_READY",
+        )
+        .unwrap();
+        let mut inst = Instance::new("aoe_test_omp_history", "/tmp");
+        inst.tool = "omp".to_owned();
+        inst.source_profile = format!("omp-history-{}", inst.id);
+        let session_name = tmux::Session::generate_name(&inst.id, &inst.title);
+        let _guard = spawn_pane(
+            &session_name,
+            &format!("cat {}; exec sleep 300", shell_quote(&pane_file)),
+        );
+        assert!(wait_for_pane(&session_name, "HISTORY_READY"));
+        let cache = crate::tmux::SessionCacheGuard::capture();
+        let poll = |inst: &mut Instance, metadata: &tmux::PaneMetadata| {
+            cache.force_present(&[session_name.as_str()]);
+            inst.update_status_with_metadata_inner(Some(metadata), Some(&session_name));
+        };
+        let mut metadata = agent_pane_metadata("omp", None);
+        metadata.pane_title = Some(String::new());
+        for status in [
+            Status::Idle,
+            Status::Running,
+            Status::Waiting,
+            Status::Error,
+        ] {
+            inst.status = status;
+            inst.last_error =
+                (status == Status::Error).then(|| "Provider denied request".to_owned());
+            let diagnostic = inst.last_error.clone();
+            for _ in 0..2 {
+                poll(&mut inst, &metadata);
+                assert_eq!(inst.status, status);
+                assert_eq!(inst.last_error, diagnostic);
+            }
+        }
+        inst.status = Status::Running;
+        inst.last_error = None;
+        metadata.pane_current_command = Some("bash".to_owned());
+        poll(&mut inst, &metadata);
+        poll(&mut inst, &metadata);
+        assert_eq!(
+            inst.status,
+            Status::Idle,
+            "history cannot retain Running after ownership loss"
+        );
+        inst.last_error = None;
+        metadata.pane_start_command_is_protected = true;
+        inst.status = Status::Waiting;
+        poll(&mut inst, &metadata);
+        assert_eq!(
+            inst.status,
+            Status::Waiting,
+            "a live protected wrapper owns history"
+        );
+        metadata.pane_dead = true;
+        poll(&mut inst, &metadata);
+        assert_eq!(
+            inst.status,
+            Status::Error,
+            "history cannot hide a dead pane"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn omp_title_only_transitions_and_ownership_loss_do_not_reuse_cached_status() {
         if !tmux_available() {
             eprintln!("skipping: tmux not available");
@@ -1499,7 +1618,7 @@ Esc to cancel \u{b7} Tab to amend \u{b7} ctrl+e to explain\n\
             .status()
             .unwrap()
             .success());
-        let cache = crate::tmux::SessionCacheGuard::capture();
+        let cache = crate::tmux::SessionCacheGuard::capture_restore_only();
         cache.force_present(&[&session_name]);
         inst.update_status_once(None, Some(&session_name));
         assert_eq!(

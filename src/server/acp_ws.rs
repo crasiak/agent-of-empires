@@ -32,6 +32,14 @@ fn heartbeat_frame() -> String {
     r#"{"kind":"heartbeat"}"#.to_string()
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotProjection {
+    #[default]
+    Full,
+    Web,
+}
+
 /// Query parameters for the structured view WS upgrade.
 #[derive(Debug, Default, Deserialize)]
 pub struct AcpWsQuery {
@@ -42,18 +50,32 @@ pub struct AcpWsQuery {
     /// are built from.
     #[serde(default)]
     pub frames: Option<u8>,
+    /// Web derives background-agent details from raw events, not control snapshots.
+    #[serde(default)]
+    pub projection: SnapshotProjection,
 }
 
 /// Public route handler for the structured view WebSocket.
+///
+/// CityHall client mode is refused for any target that is not a structured
+/// session it owns: the socket streams the whole transcript and the live ACP
+/// event frames, so a foreign or crafted id would hand a locked-down client
+/// the same conversation content the gated REST reads refuse.
 pub async fn acp_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(q): Query<AcpWsQuery>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Some(resp) =
+        crate::server::api::sessions::cityhall_block_non_structured(&state, &id).await
+    {
+        return resp;
+    }
     // Logged at DEBUG so we can prove the route was reached even when the upgrade fails.
     let since = q.since.unwrap_or(0);
     let forward_frames = q.frames.unwrap_or(1) != 0;
+    let projection = q.projection;
     debug!(
         target: "acp.ws",
         session = %id,
@@ -65,8 +87,17 @@ pub async fn acp_ws(
     ws.protocols(["aoe-auth"])
         .on_upgrade(move |socket| async move {
             debug!(target: "acp.ws", session = %session_for_handler, "agent ws upgrade complete");
-            handle(socket, session_for_handler, state, since, forward_frames).await
+            handle(
+                socket,
+                session_for_handler,
+                state,
+                since,
+                forward_frames,
+                projection,
+            )
+            .await
         })
+        .into_response()
 }
 
 async fn handle(
@@ -75,6 +106,7 @@ async fn handle(
     state: Arc<AppState>,
     since: u64,
     forward_frames: bool,
+    projection: SnapshotProjection,
 ) {
     // Clone the shutdown token so this handler exits promptly when the daemon receives
     // SIGINT/SIGTERM/SIGHUP, instead of holding axum's graceful drain open until the
@@ -110,6 +142,7 @@ async fn handle(
         &session_id,
         since,
         forward_frames,
+        projection,
         &mut folds,
     )
     .await;
@@ -205,9 +238,9 @@ async fn handle(
                         // the updated snapshot.
                         if frame.seq > last_applied_seq {
                             last_applied_seq = frame.seq;
-                            let _ = reduced.apply_event((*frame.event).clone());
+                            let _ = reduced.apply_event(frame.seq, (*frame.event).clone());
                         }
-                        if !send_reduced_state(&mut socket, &session_id, frame.seq, &reduced, &mut cold).await {
+                        if !send_reduced_state(&mut socket, &session_id, frame.seq, &reduced, projection, &mut cold).await {
                             break;
                         }
                         // Fold the same event into the transcript render model and push
@@ -236,8 +269,7 @@ async fn handle(
                         let _ = socket
                             .send(Message::Text(gap.to_string().into()))
                             .await;
-                        // The skipped events never reached this connection's control fold,
-                        // and nothing else would ever repair it.
+                        // Rebuild both folds before a later Stop reaches missed terminals.
                         let mut rebuilt = AcpState::new(
                             AcpSessionId(session_id.clone()),
                             seed.0.clone(),
@@ -249,13 +281,21 @@ async fn handle(
                             store.replay_from(&session_for_read, 0)
                         })
                         .await
-                        .unwrap_or_default();
-                        let mut highest = 0;
-                        for (seq, event) in entries {
-                            let _ = rebuilt.apply_event(event);
-                            highest = seq;
-                        }
+                        .unwrap_or_else(|error| {
+                            warn!(target: "acp.ws", %error, "replay rebuild task failed");
+                            Vec::new()
+                        });
+                        let mut rebuilt_transcript = TranscriptModel::new();
+                        let mut folds = ConnectionFolds {
+                            reduced: &mut rebuilt,
+                            transcript: &mut rebuilt_transcript,
+                            cold: &mut cold,
+                            last_applied_seq: 0,
+                        };
+                        fold_connect_history(entries, since, &mut folds, false);
+                        let highest = folds.last_applied_seq;
                         reduced = rebuilt;
+                        transcript = rebuilt_transcript;
                         last_applied_seq = highest;
                         // The cold-field cache still describes what this socket
                         // holds, so an unchanged command list stays omitted.
@@ -264,7 +304,18 @@ async fn handle(
                             &session_id,
                             highest,
                             &reduced,
+                            projection,
                             &mut cold,
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                        if !send_transcript_snapshot(
+                            &mut socket,
+                            &session_id,
+                            highest.max(since),
+                            &transcript,
                         )
                         .await
                         {
@@ -298,6 +349,7 @@ async fn drain_replay_into_socket(
     session_id: &str,
     since: u64,
     forward_frames: bool,
+    projection: SnapshotProjection,
     folds: &mut ConnectionFolds<'_>,
 ) -> usize {
     // Offload the rusqlite read to the blocking pool.
@@ -319,17 +371,15 @@ async fn drain_replay_into_socket(
             }
         };
     let mut sent = 0usize;
-    let to_forward = fold_connect_history(entries, since, folds);
+    let to_forward = fold_connect_history(entries, since, folds, forward_frames);
     let snapshot_seq = folds.last_applied_seq.max(since);
     for (seq, event) in to_forward {
-        if !forward_frames {
-            continue;
-        }
         let frame = AcpBroadcastFrame {
             session_id: session_id.to_string(),
             seq,
             event: Arc::new(event),
             worker_generation: None,
+            sidebar_status: None,
         };
         let payload = match serde_json::to_string(&frame) {
             Ok(s) => s,
@@ -344,7 +394,15 @@ async fn drain_replay_into_socket(
         sent += 1;
     }
     // Connect snapshot.
-    let _ = send_reduced_state(socket, session_id, snapshot_seq, folds.reduced, folds.cold).await;
+    let _ = send_reduced_state(
+        socket,
+        session_id,
+        snapshot_seq,
+        folds.reduced,
+        projection,
+        folds.cold,
+    )
+    .await;
     // Transcript connect snapshot.
     let _ = send_transcript_snapshot(socket, session_id, snapshot_seq, folds.transcript).await;
     sent
@@ -381,16 +439,22 @@ fn fold_connect_history(
     entries: Vec<(u64, Event)>,
     since: u64,
     folds: &mut ConnectionFolds<'_>,
+    forward_frames: bool,
 ) -> Vec<(u64, Event)> {
     let mut to_forward = Vec::new();
     for (seq, event) in entries {
-        let _ = folds.reduced.apply_event(event.clone());
         folds.last_applied_seq = seq;
         if seq <= since {
-            continue;
+            folds.transcript.observe_prior(seq, &event);
+        } else {
+            folds.transcript.apply_event(seq, &event);
         }
-        folds.transcript.apply_event(seq, &event);
-        to_forward.push((seq, event));
+        if seq > since && forward_frames {
+            let _ = folds.reduced.apply_event(seq, event.clone());
+            to_forward.push((seq, event));
+        } else {
+            let _ = folds.reduced.apply_event(seq, event);
+        }
     }
     to_forward
 }
@@ -439,15 +503,29 @@ impl ColdFieldCache {
     }
 }
 
+fn project_control_state(
+    reduced: &AcpState,
+    projection: SnapshotProjection,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut state = serde_json::to_value(reduced)?;
+    if projection == SnapshotProjection::Web {
+        if let Some(object) = state.as_object_mut() {
+            object.remove("background_agents");
+        }
+    }
+    Ok(state)
+}
+
 /// Serialize and send the reduced control state as a `kind`-tagged `reduced_state` frame.
 async fn send_reduced_state(
     socket: &mut WebSocket,
     session_id: &str,
     seq: u64,
     reduced: &AcpState,
+    projection: SnapshotProjection,
     cold: &mut ColdFieldCache,
 ) -> bool {
-    let mut state = match serde_json::to_value(reduced) {
+    let mut state = match project_control_state(reduced, projection) {
         Ok(v) => v,
         Err(e) => {
             warn!(target: "acp.ws", "serialise reduced_state: {e}");
@@ -673,6 +751,13 @@ where
     if subs.is_empty() {
         return;
     }
+    tracing::info!(
+        target: "push",
+        session = %session_id,
+        silent,
+        subs = subs.len(),
+        "acp push fired"
+    );
     let client = match super::push_send::build_client() {
         Ok(c) => c,
         Err(e) => {
@@ -695,6 +780,78 @@ where
 mod tests {
     use super::*;
 
+    fn background_launch() -> Event {
+        Event::BackgroundAgentLaunched {
+            agent_id: "background-1".into(),
+            tool_call_id: "launch-1".into(),
+            description: "inspect code".into(),
+            prompt: "complete instructions".into(),
+            model: "test-model".into(),
+            output_file: String::new(),
+            workflow: None,
+            started_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn web_projection_excludes_only_the_duplicate_background_field() {
+        let mut reduced =
+            AcpState::new(AcpSessionId("s-1".into()), AgentName("claude".into()), None);
+        reduced.apply_event(1, background_launch()).unwrap();
+        let full = serde_json::to_value(&reduced).unwrap();
+        assert_eq!(
+            project_control_state(&reduced, SnapshotProjection::Full).unwrap(),
+            full
+        );
+        let mut expected = full.clone();
+        expected
+            .as_object_mut()
+            .unwrap()
+            .remove("background_agents");
+        let mut web = project_control_state(&reduced, SnapshotProjection::Web).unwrap();
+        assert_eq!(web, expected);
+        let mut cold = ColdFieldCache::default();
+        assert!(!cold
+            .strip_unchanged(&mut web)
+            .contains(&"background_agents"));
+        let mut repeated = project_control_state(&reduced, SnapshotProjection::Web).unwrap();
+        assert!(!cold
+            .strip_unchanged(&mut repeated)
+            .contains(&"background_agents"));
+        assert!(repeated.get("background_agents").is_none());
+        assert_eq!(
+            serde_json::to_value(&reduced).unwrap(),
+            full,
+            "projection mutated authority"
+        );
+        let native: AcpState = serde_json::from_value(full).unwrap();
+        assert!(native.has_active_background_agent());
+    }
+
+    #[test]
+    fn snapshot_projection_is_explicit_and_preserves_legacy_query_defaults() {
+        for (query, projection, frames) in [
+            ("", SnapshotProjection::Full, None),
+            ("projection=full", SnapshotProjection::Full, None),
+            ("projection=web", SnapshotProjection::Web, None),
+            (
+                "since=42&frames=0&projection=web",
+                SnapshotProjection::Web,
+                Some(0),
+            ),
+        ] {
+            let uri = format!("http://localhost/s-1?{query}").parse().unwrap();
+            let Query(parsed) = Query::<AcpWsQuery>::try_from_uri(&uri).unwrap();
+            assert_eq!(parsed.projection, projection);
+            assert_eq!(parsed.frames, frames);
+            if query.contains("since=") {
+                assert_eq!(parsed.since, Some(42));
+            }
+        }
+        let invalid = "http://localhost/s-1?projection=unknown".parse().unwrap();
+        assert!(Query::<AcpWsQuery>::try_from_uri(&invalid).is_err());
+    }
+
     /// The connect snapshot is a whole-state frame the clients adopt verbatim, and every
     /// client dials with a non-zero `since` after its first connect (the web seeds
     /// `lastSeq` from the tail before opening the socket; the TUI reconnects from
@@ -716,6 +873,7 @@ mod tests {
             destructive: false,
             options: Vec::new(),
             choice: false,
+            plan: None,
             requested_at: chrono::Utc::now(),
             resolved: None,
         };
@@ -746,6 +904,7 @@ mod tests {
                 4,
                 Event::AgentMessageChunk {
                     text: "hello".into(),
+                    message_id: None,
                 },
             ),
         ];
@@ -761,7 +920,7 @@ mod tests {
             cold: &mut cold,
             last_applied_seq: 0,
         };
-        let forwarded = fold_connect_history(history.clone(), 4, &mut folds);
+        let forwarded = fold_connect_history(history.clone(), 4, &mut folds, true);
 
         assert!(forwarded.is_empty(), "nothing new to forward");
         assert_eq!(folds.last_applied_seq, 4);
@@ -795,11 +954,209 @@ mod tests {
             cold: &mut cold_cache,
             last_applied_seq: 0,
         };
-        let forwarded = fold_connect_history(history, 0, &mut cold_folds);
+        let forwarded = fold_connect_history(history, 0, &mut cold_folds, true);
         assert_eq!(forwarded.len(), 4);
         assert!(!cold_folds.transcript.rows().is_empty());
         assert_eq!(cold_folds.reduced.available_commands.len(), 1);
         assert_eq!(cold_folds.reduced.pending_approvals.len(), 1);
+    }
+
+    #[test]
+    fn retained_notice_keeps_its_dismissal_identity_after_reconnect() {
+        let directory = tempfile::tempdir().unwrap();
+        let id = "notice-retention";
+        let store =
+            crate::acp::event_store::EventStore::open(&directory.path().join("events.db"), 2)
+                .unwrap();
+        store
+            .record(
+                id,
+                1,
+                &Event::AvailableCommandsUpdated {
+                    commands: Vec::new(),
+                },
+            )
+            .unwrap();
+        for seq in 2..=4 {
+            store
+                .record(
+                    id,
+                    seq,
+                    &Event::AgentMessageChunk {
+                        text: "output".into(),
+                        message_id: None,
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .record(
+                id,
+                5,
+                &Event::SessionNotice {
+                    key: None,
+                    severity: "warning".into(),
+                    title: "Model fallback".into(),
+                    description: None,
+                },
+            )
+            .unwrap();
+        let retained = store.replay_from(id, 0);
+        assert_eq!(
+            retained.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+            [1, 4, 5]
+        );
+        let mut reduced = AcpState::new(AcpSessionId(id.into()), AgentName("claude".into()), None);
+        let mut transcript = TranscriptModel::new();
+        let mut cold = ColdFieldCache::default();
+        let mut folds = ConnectionFolds {
+            reduced: &mut reduced,
+            transcript: &mut transcript,
+            cold: &mut cold,
+            last_applied_seq: 0,
+        };
+        fold_connect_history(retained, 5, &mut folds, true);
+        assert_eq!(folds.reduced.session_notices[0].id, "notice-5");
+    }
+
+    /// A reconnect between two agent messages still marks the new one, since
+    /// the skipped history says which message the client already holds.
+    #[test]
+    fn reconnect_fold_marks_a_message_that_follows_the_cursor() {
+        let chunk = |text: &str, id: &str| Event::AgentMessageChunk {
+            text: text.into(),
+            message_id: Some(id.into()),
+        };
+        let history = vec![(1, chunk("for #4656.", "m-a")), (2, chunk("", "m-b"))];
+        let mut reduced =
+            AcpState::new(AcpSessionId("s-1".into()), AgentName("claude".into()), None);
+        let mut transcript = TranscriptModel::new();
+        let mut cold = ColdFieldCache::default();
+        let mut folds = ConnectionFolds {
+            reduced: &mut reduced,
+            transcript: &mut transcript,
+            cold: &mut cold,
+            last_applied_seq: 0,
+        };
+        fold_connect_history(history, 1, &mut folds, true);
+        let rows = folds.transcript.rows();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].message_start);
+    }
+
+    #[test]
+    fn cursor_bootstrap_keeps_prefix_tools_for_stored_and_live_terminals() {
+        use crate::acp::state::test_support::{prompt, stopped};
+        use crate::acp::state::ToolCall;
+        use crate::acp::transcript::{TranscriptDelta, TranscriptRowKind};
+        let at = chrono::Utc::now();
+        let started = |id: &str| Event::ToolCallStarted {
+            tool_call: ToolCall {
+                id: id.into(),
+                name: id.into(),
+                kind: "read".into(),
+                args_preview: String::new(),
+                started_at: at,
+                parent_tool_call_id: None,
+                memory_recall: None,
+                diffs: Vec::new(),
+            },
+        };
+        let prefix = vec![
+            (1, prompt("run")),
+            (2, started("finished")),
+            (
+                3,
+                Event::ToolCallCompleted {
+                    tool_call_id: "finished".into(),
+                    is_error: false,
+                    content: "done".into(),
+                    output: Vec::new(),
+                    completed_at: at,
+                    async_subagent: false,
+                },
+            ),
+            (4, started("open")),
+            (
+                5,
+                Event::ToolCallContent {
+                    tool_call_id: "open".into(),
+                    content: "old".into(),
+                },
+            ),
+            (
+                6,
+                Event::ToolCallContent {
+                    tool_call_id: "open".into(),
+                    content: "prefix output".into(),
+                },
+            ),
+        ];
+        let suffix = [
+            (
+                7,
+                Event::ToolCallContent {
+                    tool_call_id: "open".into(),
+                    content: "latest output".into(),
+                },
+            ),
+            (8, stopped("cancelled")),
+        ];
+        for stored_terminal in [false, true] {
+            let mut reduced =
+                AcpState::new(AcpSessionId("s".into()), AgentName("claude".into()), None);
+            let mut transcript = TranscriptModel::new();
+            let mut cold = ColdFieldCache::default();
+            let mut folds = ConnectionFolds {
+                reduced: &mut reduced,
+                transcript: &mut transcript,
+                cold: &mut cold,
+                last_applied_seq: 0,
+            };
+            let mut history = prefix.clone();
+            if stored_terminal {
+                history.extend(suffix.clone());
+            }
+            let forwarded = fold_connect_history(history, 6, &mut folds, true);
+            assert_eq!(
+                forwarded.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+                if stored_terminal { vec![7, 8] } else { vec![] }
+            );
+            if !stored_terminal {
+                assert!(
+                    folds.transcript.rows().is_empty(),
+                    "connect snapshot omits prefix rows"
+                );
+                let deltas: Vec<_> = suffix
+                    .iter()
+                    .flat_map(|(seq, event)| folds.transcript.apply_event(*seq, event))
+                    .collect();
+                assert!(matches!(deltas.as_slice(), [TranscriptDelta::Append(row)]
+                    if row.kind == TranscriptRowKind::ToolStopped));
+            }
+            let rows = folds.transcript.rows();
+            assert_eq!(rows.len(), 1, "only the post-cursor terminal is rendered");
+            assert_eq!(rows[0].kind, TranscriptRowKind::ToolStopped);
+            assert_eq!(rows[0].tool_call_id.as_deref(), Some("open"));
+            assert_eq!(rows[0].group_id, "tool-open");
+            assert_eq!(rows[0].text, "latest output");
+            let ended_at = rows[0].at;
+            for (seq, event) in &suffix {
+                assert!(
+                    folds.transcript.apply_event(*seq, event).is_empty(),
+                    "overlapping replay"
+                );
+            }
+            assert!(folds
+                .transcript
+                .apply_event(9, &stopped("prompt_complete"))
+                .is_empty());
+            assert_eq!(
+                folds.transcript.rows()[0].at,
+                ended_at,
+                "terminal timestamp stays fixed"
+            );
+        }
     }
 
     /// Prompt dispatch (Tier 3) reads the daemon's own control state through
@@ -914,15 +1271,27 @@ mod tests {
         assert!(!unknown.turn_active);
     }
 
-    /// `AcpState::apply_event` takes no seq and is not idempotent, and the
-    /// drain overlaps the live broadcast by design, so a duplicated event
-    /// would leave a second, unresolvable approval card in the shelf.
+    /// Replay overlaps live broadcast; duplicates would leave unresolvable approvals.
     type TestSocket = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >;
 
     async fn connect_test_socket(
         state: Arc<AppState>,
+    ) -> (TestSocket, tokio::task::JoinHandle<()>) {
+        connect_test_socket_since(state, 0).await
+    }
+
+    async fn connect_test_socket_since(
+        state: Arc<AppState>,
+        since: u64,
+    ) -> (TestSocket, tokio::task::JoinHandle<()>) {
+        connect_test_socket_query(state, &format!("frames=0&since={since}")).await
+    }
+
+    async fn connect_test_socket_query(
+        state: Arc<AppState>,
+        query: &str,
     ) -> (TestSocket, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -932,7 +1301,7 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/s-1?frames=0"))
+        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/s-1?{query}"))
             .await
             .unwrap();
         (socket, server)
@@ -945,7 +1314,7 @@ mod tests {
                 let message = socket.next().await.expect("socket remains open").unwrap();
                 if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
                     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    if value["kind"] == kind {
+                    if value["kind"] == kind || value["event"].get(kind).is_some() {
                         return value;
                     }
                 }
@@ -953,6 +1322,111 @@ mod tests {
         })
         .await
         .expect("expected websocket frame")
+    }
+
+    #[tokio::test]
+    async fn web_projection_survives_reconnect_without_losing_raw_details() {
+        use crate::acp::state::{BackgroundAgentStatus, BackgroundAgentTool};
+
+        let _home = crate::session::test_support::isolate_app_dir();
+        for (projection, omitted) in [
+            ("", false),
+            ("&projection=full", false),
+            ("&projection=web", true),
+        ] {
+            let state = crate::server::test_support::build_test_app_state(Vec::new());
+            state
+                .acp_event_store
+                .record("s-1", 1, &background_launch())
+                .unwrap();
+            let (mut socket, server) =
+                connect_test_socket_query(state.clone(), &format!("since=0{projection}")).await;
+            let launch = receive_kind(&mut socket, "BackgroundAgentLaunched").await;
+            assert_eq!(
+                launch["event"]["BackgroundAgentLaunched"]["prompt"],
+                "complete instructions"
+            );
+            let initial = receive_kind(&mut socket, "reduced_state").await;
+            assert_eq!(initial["state"].get("background_agents").is_none(), omitted);
+            assert!(initial["unchanged"].as_array().unwrap().is_empty());
+            receive_kind(&mut socket, "transcript_snapshot").await;
+
+            let tools = vec![BackgroundAgentTool {
+                name: "Read".into(),
+                title: Some("complete/file/path".into()),
+                ok: Some(true),
+            }];
+            for (seq, kind, event) in [
+                (
+                    2,
+                    "BackgroundAgentProgress",
+                    Event::BackgroundAgentProgress {
+                        agent_id: "background-1".into(),
+                        status: BackgroundAgentStatus::Running,
+                        tool_count: 1,
+                        tools: tools.clone(),
+                        last_tool: Some("Read".into()),
+                        last_text: Some("latest preview".into()),
+                        at: chrono::DateTime::from_timestamp(1, 0).unwrap(),
+                    },
+                ),
+                (
+                    3,
+                    "BackgroundAgentCompleted",
+                    Event::BackgroundAgentCompleted {
+                        agent_id: "background-1".into(),
+                        status: BackgroundAgentStatus::Completed,
+                        tools,
+                        result: Some("complete result".into()),
+                        warning: None,
+                        ended_at: chrono::DateTime::from_timestamp(2, 0).unwrap(),
+                    },
+                ),
+            ] {
+                let expected = serde_json::to_value(&event).unwrap();
+                state.acp_event_store.record("s-1", seq, &event).unwrap();
+                publish(
+                    &state,
+                    AcpBroadcastFrame {
+                        session_id: "s-1".into(),
+                        seq,
+                        event: Arc::new(event),
+                        worker_generation: None,
+                        sidebar_status: None,
+                    },
+                );
+                let raw = receive_kind(&mut socket, kind).await;
+                assert_eq!(raw["event"], expected);
+                let updated = receive_kind(&mut socket, "reduced_state").await;
+                assert_eq!(updated["state"].get("background_agents").is_none(), omitted);
+                assert!(!updated["unchanged"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("background_agents")));
+            }
+
+            drop(socket);
+            let (mut socket, reconnected_server) =
+                connect_test_socket_query(state.clone(), &format!("since=3{projection}")).await;
+            let reconnected = receive_kind(&mut socket, "reduced_state").await;
+            assert_eq!(
+                reconnected["state"].get("background_agents").is_none(),
+                omitted
+            );
+            if !omitted {
+                assert_eq!(
+                    reconnected["state"]["background_agents"][0]["result"],
+                    "complete result"
+                );
+            }
+            assert!(reconnected["unchanged"].as_array().unwrap().is_empty());
+            state.shutdown.cancel();
+            drop(socket);
+            for server in [server, reconnected_server] {
+                server.abort();
+                let _ = server.await;
+            }
+        }
     }
 
     #[tokio::test]
@@ -973,6 +1447,7 @@ mod tests {
             destructive: false,
             options: Vec::new(),
             choice: false,
+            plan: None,
             requested_at: chrono::Utc::now(),
             resolved: None,
         };
@@ -998,6 +1473,7 @@ mod tests {
                 seq: 7,
                 event: Arc::new(event),
                 worker_generation: None,
+                sidebar_status: None,
             },
         );
         let repeated = receive_kind(&mut socket, "reduced_state").await;
@@ -1018,20 +1494,100 @@ mod tests {
     #[tokio::test]
     async fn lagged_broadcast_reports_gap_and_rebuilds_control_state() {
         let _home = crate::session::test_support::isolate_app_dir();
+        for query in ["frames=0", "frames=0&projection=web"] {
+            let state = crate::server::test_support::build_test_app_state(Vec::new());
+            state
+                .acp_event_store
+                .record("s-1", 1, &Event::ThinkingStarted)
+                .unwrap();
+            let (mut socket, server) = connect_test_socket_query(state.clone(), query).await;
+            let initial = receive_kind(&mut socket, "reduced_state").await;
+            assert_eq!(initial["state"]["turn_active"], true);
+            receive_kind(&mut socket, "transcript_snapshot").await;
+            // No await in this burst: the current-thread receiver cannot drain its eight slots.
+            for seq in 2..=17 {
+                let event = if seq == 2 {
+                    Event::Stopped {
+                        reason: "done".into(),
+                    }
+                } else {
+                    Event::ThinkingEnded
+                };
+                state.acp_event_store.record("s-1", seq, &event).unwrap();
+                publish(
+                    &state,
+                    AcpBroadcastFrame {
+                        session_id: "s-1".into(),
+                        seq,
+                        event: Arc::new(event),
+                        worker_generation: None,
+                        sidebar_status: None,
+                    },
+                );
+            }
+            let gap = receive_kind(&mut socket, "lagged").await;
+            assert_eq!(gap["skipped"], 8);
+            let rebuilt = receive_kind(&mut socket, "reduced_state").await;
+            assert_eq!(rebuilt["seq"], 17);
+            assert_eq!(
+                rebuilt["state"]["turn_active"], false,
+                "missed Stop must be recovered from durable history"
+            );
+            if query.contains("projection=web") {
+                assert!(initial["state"].get("background_agents").is_none());
+                assert!(rebuilt["state"].get("background_agents").is_none());
+                assert!(!rebuilt["unchanged"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("background_agents")));
+            }
+            state.shutdown.cancel();
+            drop(socket);
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn lagged_broadcast_repairs_prefix_tool_lifecycle_without_replaying_starts_or_terminals()
+    {
+        use crate::acp::state::ToolCall;
+        use futures_util::StreamExt;
+
+        let _home = crate::session::test_support::isolate_app_dir();
         let state = crate::server::test_support::build_test_app_state(Vec::new());
-        state
-            .acp_event_store
-            .record("s-1", 1, &Event::ThinkingStarted)
-            .unwrap();
-        let (mut socket, server) = connect_test_socket(state.clone()).await;
-        let initial = receive_kind(&mut socket, "reduced_state").await;
-        assert_eq!(initial["state"]["turn_active"], true);
-        receive_kind(&mut socket, "transcript_snapshot").await;
-        // No await in this burst: the current-thread receiver cannot drain its eight slots.
-        for seq in 2..=17 {
-            let event = if seq == 2 {
-                Event::Stopped {
-                    reason: "done".into(),
+        let at = chrono::Utc::now();
+        for (seq, id) in [(1, "missed"), (2, "queued")] {
+            let event = Event::ToolCallStarted {
+                tool_call: ToolCall {
+                    id: id.into(),
+                    name: id.into(),
+                    kind: "read".into(),
+                    args_preview: String::new(),
+                    started_at: at,
+                    parent_tool_call_id: None,
+                    memory_recall: None,
+                    diffs: Vec::new(),
+                },
+            };
+            state.acp_event_store.record("s-1", seq, &event).unwrap();
+        }
+        let (mut socket, server) = connect_test_socket_since(state.clone(), 2).await;
+        receive_kind(&mut socket, "reduced_state").await;
+        let initial = receive_kind(&mut socket, "transcript_snapshot").await;
+        assert!(initial["rows"].as_array().unwrap().is_empty());
+
+        // No await: both completions enter durable history before the receiver handles lag.
+        // The first completion is dropped; the second remains queued for delivery.
+        for seq in 3..=18 {
+            let event = if seq == 3 || seq == 18 {
+                Event::ToolCallCompleted {
+                    tool_call_id: if seq == 3 { "missed" } else { "queued" }.into(),
+                    is_error: false,
+                    content: "finished".into(),
+                    output: Vec::new(),
+                    completed_at: at,
+                    async_subagent: false,
                 }
             } else {
                 Event::ThinkingEnded
@@ -1044,17 +1600,64 @@ mod tests {
                     seq,
                     event: Arc::new(event),
                     worker_generation: None,
+                    sidebar_status: None,
                 },
             );
         }
         let gap = receive_kind(&mut socket, "lagged").await;
         assert_eq!(gap["skipped"], 8);
-        let rebuilt = receive_kind(&mut socket, "reduced_state").await;
-        assert_eq!(rebuilt["seq"], 17);
+        let rebuilt = receive_kind(&mut socket, "transcript_snapshot").await;
+        assert_eq!(rebuilt["seq"], 18);
+        let rows = rebuilt["rows"].as_array().unwrap();
         assert_eq!(
-            rebuilt["state"]["turn_active"], false,
-            "missed Stop must be recovered from durable history"
+            rows.len(),
+            2,
+            "historical starts must stay behind the cursor"
         );
+        for (row, id) in rows.iter().zip(["missed", "queued"]) {
+            assert_eq!(row["tool_call_id"], id);
+            assert_eq!(row["kind"], "tool_complete");
+            assert_eq!(row["text"], "finished");
+        }
+
+        for (seq, event) in [
+            (
+                19,
+                Event::Stopped {
+                    reason: "cancelled".into(),
+                },
+            ),
+            (20, Event::ThinkingEnded),
+        ] {
+            state.acp_event_store.record("s-1", seq, &event).unwrap();
+            publish(
+                &state,
+                AcpBroadcastFrame {
+                    session_id: "s-1".into(),
+                    seq,
+                    event: Arc::new(event),
+                    worker_generation: None,
+                    sidebar_status: None,
+                },
+            );
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let message = socket.next().await.expect("socket remains open").unwrap();
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_ne!(
+                        frame["kind"], "transcript_delta",
+                        "queued completion must not duplicate; Stop must not stop completed tools"
+                    );
+                    if frame["kind"] == "reduced_state" && frame["seq"] == 20 {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("stop and queued broadcasts drain");
         state.shutdown.cancel();
         drop(socket);
         server.abort();

@@ -67,6 +67,7 @@ mod tests {
         hold_reset_config: bool,
         /// Emitted right after the first `session/new`.
         initial_update: Option<serde_json::Value>,
+        claude_home: Option<PathBuf>,
     }
 
     impl FakeAgent {
@@ -136,9 +137,18 @@ done
         }
 
         async fn spawn(self, dir: &Path, name: &str, effort: Option<&str>) -> (AcpClient, PathBuf) {
+            let claude_home = self.claude_home.clone();
             let (script, capture) = self.write(dir);
             let mut config = reset_fake_spawn_config(&script, dir);
             config.default_effort = effort.map(Into::into);
+            if let Some(store) = claude_home {
+                config.agent_key = "claude".into();
+                config.tool = "claude".into();
+                config.claude_store_pin = Some(crate::session::capture::ClaudeStorePin {
+                    store,
+                    exported_default_store: Some(false),
+                });
+            }
             let client = AcpClient::spawn(config, AcpSessionId(name.into()))
                 .await
                 .expect("spawn scripted fake agent");
@@ -291,6 +301,9 @@ sid=''
 update() {
   printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$1" "$2"
 }
+user() {
+  printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$1" "$2"
+}
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -En 's/.*"id":("[^"]*"|[0-9]+).*/\1/p')
   case $line in
@@ -305,13 +318,16 @@ while IFS= read -r line; do
       sid=child
       update parent PARENT
       update "$sid" early-fork
+      user "$sid" user-history
       printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"%s"}}\n' "$id" "$sid" ;;
     *'"method":"session/load"'*)
       sid=stored
       update foreign FOREIGN
       update "$sid" history
+      user "$sid" user-history
       printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id" ;;
     *'"method":"session/prompt"'*)
+      user "$sid" user-live
       update "$sid" live
       printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id" ;;
   esac
@@ -385,11 +401,18 @@ done
 
     #[tokio::test]
     async fn native_identity_preserves_pre_response_new_fork_and_load_updates() {
-        for (operation, imported, expected) in [
-            ("new", false, vec!["early-1", "live"]),
-            ("fork", false, vec!["early-fork", "live"]),
-            ("load", true, vec!["history", "live"]),
-            ("load", false, vec!["live"]),
+        // Only replayed user messages of an import or fork are recorded (#5224).
+        for (operation, imported, expected, expected_user) in [
+            ("new", false, vec!["early-1", "live"], vec![]),
+            ("fork", false, vec!["early-fork", "live"], vec![]),
+            (
+                "fork",
+                true,
+                vec!["early-fork", "live"],
+                vec!["user-history"],
+            ),
+            ("load", true, vec!["history", "live"], vec!["user-history"]),
+            ("load", false, vec!["live"], vec![]),
         ] {
             let temp = tempfile::tempdir().unwrap();
             let script = write_early_identity_agent(temp.path());
@@ -411,6 +434,17 @@ done
                 identity_texts(&events),
                 expected,
                 "operation={operation} imported={imported}"
+            );
+            let user: Vec<&str> = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::UserPromptSent { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                user, expected_user,
+                "user chunks: operation={operation} imported={imported}"
             );
         }
     }
@@ -672,15 +706,20 @@ done
             )
             .await
             .unwrap();
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            // Bound inactivity, not the total time to drain the backlog.
             let mut texts = Vec::new();
             let mut assigned = false;
             let mut failed = false;
             loop {
-                let event = tokio::time::timeout_at(deadline, client.next_event())
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let event = match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    client.next_event(),
+                )
+                .await
+                {
+                    Ok(event) => event.unwrap(),
+                    Err(_) => panic!("no event within 10s of the previous one"),
+                };
                 match event {
                     Event::AgentMessageChunk { text, .. } => texts.push(text),
                     Event::AcpSessionAssigned { .. } => assigned = true,
@@ -916,6 +955,7 @@ done
                 });
                 events.push(Event::AgentMessageChunk {
                     text: "prior assistant turn".into(),
+                    message_id: None,
                 });
             }
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1036,8 +1076,7 @@ done
         let _ = client.shutdown().await;
     }
 
-    /// Work that outlives its prompt (an open tool, or a tracked async
-    /// sub-agent) would attach old-session events to the fresh conversation.
+    /// Reset must not reattribute pending tools or background work to a new conversation.
     #[tokio::test]
     #[serial_test::serial]
     async fn reset_between_prompts_with_open_work_is_refused() {
@@ -1068,7 +1107,15 @@ done
                 },
             }},
         });
-        let started: [(serde_json::Value, fn(&Event) -> bool); 2] = [
+        let background_task = serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "between-prompt-task-tool",
+            "_meta": { "claudeCode": {
+                "toolName": "Bash",
+                "toolResponse": { "backgroundTaskId": "between-prompt-task" },
+            }},
+        });
+        let started: [(serde_json::Value, fn(&Event) -> bool); 3] = [
             (
                 open_tool,
                 |e| matches!(e, Event::ToolCallStarted { tool_call } if tool_call.id == "between-prompt-tool"),
@@ -1077,12 +1124,26 @@ done
                 background_agent,
                 |e| matches!(e, Event::BackgroundAgentLaunched { agent_id, .. } if agent_id == "between-prompt-agent"),
             ),
+            (
+                background_task,
+                |e| matches!(e, Event::BackgroundTaskStarted { task_id, .. } if task_id == "between-prompt-task"),
+            ),
         ];
         for (index, (initial_update, is_started)) in started.into_iter().enumerate() {
             let dir = tmp.path().join(index.to_string());
             std::fs::create_dir(&dir).unwrap();
+            let claude_home = if index == 2 {
+                let store = dir.join("custom-claude");
+                let project = store.join("projects/-enc");
+                std::fs::create_dir_all(&project).unwrap();
+                std::fs::write(project.join("sid-1.jsonl"), "").unwrap();
+                Some(store)
+            } else {
+                None
+            };
             let agent = FakeAgent {
                 initial_update: Some(initial_update),
+                claude_home,
                 ..FakeAgent::default()
             };
             let (mut client, capture) = agent.spawn(&dir, "reset-open-work", None).await;

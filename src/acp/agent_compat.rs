@@ -1,13 +1,13 @@
 //! Per-adapter compatibility policy for ACP agents.
 
-use agent_client_protocol::schema::v1::InitializeResponse;
 use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::v1::schema::InitializeResponse;
 
 use super::state::StartupErrorDetail;
 
 /// Single source of truth for the `claude-agent-acp` minimum-version floor.
-pub const CLAUDE_AGENT_ACP_MIN_VERSION: &str = "0.82.0";
-pub const CLAUDE_AGENT_ACP_STEERING_MIN_VERSION: &str = "0.82.0";
+pub const CLAUDE_AGENT_ACP_MIN_VERSION: &str = "0.99.1";
+pub const CLAUDE_AGENT_ACP_STEERING_MIN_VERSION: &str = "0.99.1";
 /// Single source of truth for the `opencode` minimum-version floor.
 pub const OPENCODE_MIN_VERSION: &str = "1.16.0";
 
@@ -47,11 +47,17 @@ impl ExpectedAgent {
             .split_whitespace()
             .find_map(|token| {
                 let basename = token.rsplit(['/', '\\']).next().unwrap_or(token);
-                let stem = basename
-                    .strip_suffix(".exe")
-                    .or_else(|| basename.strip_suffix(".cmd"))
-                    .or_else(|| basename.strip_suffix(".bat"))
-                    .unwrap_or(basename);
+                // Windows extensions fold case; the name itself stays exact.
+                let stem = match basename.rsplit_once('.') {
+                    Some((stem, ext))
+                        if ["exe", "cmd", "bat"]
+                            .iter()
+                            .any(|e| ext.eq_ignore_ascii_case(e)) =>
+                    {
+                        stem
+                    }
+                    _ => basename,
+                };
                 match stem {
                     "claude-agent-acp" => Some(Self::ClaudeAgentAcp),
                     "codex-acp" => Some(Self::CodexAcp),
@@ -63,6 +69,15 @@ impl ExpectedAgent {
                 }
             })
             .unwrap_or(Self::Other)
+    }
+
+    /// Env defaults AoE gives this adapter.
+    pub fn default_env(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            // Opus 5 and Sonnet 5 otherwise default to `omitted`.
+            Self::ClaudeAgentAcp => &[("CLAUDE_CODE_THINKING_DISPLAY", "summarized")],
+            _ => &[],
+        }
     }
 }
 
@@ -344,7 +359,7 @@ pub fn version_gates() -> impl Iterator<Item = VersionGate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::Implementation;
+    use agent_client_protocol::v1::schema::Implementation;
 
     fn init(info: Option<(&str, &str)>) -> InitializeResponse {
         let init = InitializeResponse::new(ProtocolVersion::V1);
@@ -474,8 +489,8 @@ mod tests {
             ),
             (ClaudeAgentAcp, Some(true), "999.0.0", true),
             // Advertised but pre-opt-in: the case the floor exists for.
-            (ClaudeAgentAcp, Some(true), "0.81.9", false),
-            (ClaudeAgentAcp, Some(true), "0.82.0-alpha.1", false),
+            (ClaudeAgentAcp, Some(true), "0.99.0", false),
+            (ClaudeAgentAcp, Some(true), "0.99.1-alpha.1", false),
             (ClaudeAgentAcp, Some(false), "999.0.0", false),
             (ClaudeAgentAcp, None, "999.0.0", false),
             (ClaudeAgentAcp, Some(true), "nightly", false),
@@ -591,6 +606,7 @@ mod tests {
             "/usr/local/bin/claude-agent-acp",
             "C:\\Users\\u\\AppData\\Roaming\\npm\\claude-agent-acp.cmd",
             "claude-agent-acp.exe",
+            "claude-agent-acp.EXE",
             "D:\\bin\\claude-agent-acp.bat",
             "claude-agent-acp --some-flag",
             "  /usr/local/bin/claude-agent-acp  ",
@@ -605,6 +621,10 @@ mod tests {
         }
         assert_eq!(
             ExpectedAgent::from_command("unknown-bin"),
+            ExpectedAgent::Other
+        );
+        assert_eq!(
+            ExpectedAgent::from_command("CLAUDE-AGENT-ACP"),
             ExpectedAgent::Other
         );
     }

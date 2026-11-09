@@ -1,14 +1,16 @@
 //! Skills management REST API.
 
-use axum::extract::Path;
+use std::sync::Arc;
+
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::api_error;
 use super::mutation_guard::ElevatedMutationGuard;
+use super::{api_error, AppState};
 use crate::session::skills_model::{self, SkillError, SkillProvenance};
 
 fn skill_error(error: SkillError) -> Response {
@@ -51,7 +53,10 @@ fn source_provenance(source: &str) -> Result<SkillProvenance, String> {
 }
 
 /// `GET /api/skills`: discover skills across every supported host root.
-pub async fn list_skills() -> Response {
+pub async fn list_skills(State(state): State<Arc<AppState>>) -> Response {
+    if let Some(resp) = super::cityhall_block(&state) {
+        return resp;
+    }
     match tokio::task::spawn_blocking(skills_model::discover_all).await {
         Ok(Ok(skills)) => Json(json!({
             "skills": skills.into_iter().map(|skill| {
@@ -79,7 +84,13 @@ pub async fn list_skills() -> Response {
 }
 
 /// `GET /api/skills/{source}/{directory}`: read one source-qualified skill.
-pub async fn read_skill(Path((source, directory)): Path<(String, String)>) -> Response {
+pub async fn read_skill(
+    State(state): State<Arc<AppState>>,
+    Path((source, directory)): Path<(String, String)>,
+) -> Response {
+    if let Some(resp) = super::cityhall_block(&state) {
+        return resp;
+    }
     let provenance = match source_provenance(&source) {
         Ok(value) => value,
         Err(message) => return api_error(StatusCode::BAD_REQUEST, "invalid_skill_source", message),
@@ -117,7 +128,7 @@ pub async fn create_skill(
         skills_model::create_skill(&app_dir, &directory, body.description.as_deref())
     })
     .await;
-    mutation_response(result, Some(response_directory))
+    mutation_response(result, "skill created", &response_directory, true)
 }
 
 #[derive(Deserialize)]
@@ -131,6 +142,7 @@ pub async fn edit_skill(
     Path(directory): Path<String>,
     Json(body): Json<EditSkillBody>,
 ) -> Response {
+    let edited = directory.clone();
     let result = tokio::task::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or_else(|| {
             SkillError::Io(anyhow::anyhow!("could not resolve home dir for skills"))
@@ -139,7 +151,7 @@ pub async fn edit_skill(
         skills_model::edit_skill(&home, &app_dir, &directory, &body.content)
     })
     .await;
-    mutation_response(result, None)
+    mutation_response(result, "skill updated", &edited, false)
 }
 
 /// `DELETE /api/skills/{directory}`: delete an AoE-managed skill.
@@ -147,6 +159,7 @@ pub async fn delete_skill(
     _guard: ElevatedMutationGuard,
     Path(directory): Path<String>,
 ) -> Response {
+    let removed = directory.clone();
     let result = tokio::task::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or_else(|| {
             SkillError::Io(anyhow::anyhow!("could not resolve home dir for skills"))
@@ -155,7 +168,7 @@ pub async fn delete_skill(
         skills_model::delete_skill(&home, &app_dir, &directory)
     })
     .await;
-    mutation_response(result, None)
+    mutation_response(result, "skill removed", &removed, false)
 }
 
 #[derive(Default, Deserialize)]
@@ -174,6 +187,7 @@ pub async fn adopt_skill(
         Ok(value) => value,
         Err(message) => return api_error(StatusCode::BAD_REQUEST, "invalid_skill_source", message),
     };
+    let (adopted, requested) = (provenance.clone(), directory.clone());
     let result = tokio::task::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or_else(|| {
             SkillError::Io(anyhow::anyhow!("could not resolve home dir for skills"))
@@ -189,12 +203,18 @@ pub async fn adopt_skill(
     })
     .await;
     match result {
-        Ok(Ok(directory)) => (
-            StatusCode::CREATED,
-            Json(json!({ "ok": true, "directory": directory })),
-        )
-            .into_response(),
-        Ok(Err(error)) => skill_error(error),
+        Ok(Ok(directory)) => {
+            tracing::info!(target: "session.skills", %directory, source = ?adopted, "skill adopted");
+            (
+                StatusCode::CREATED,
+                Json(json!({ "ok": true, "directory": directory })),
+            )
+                .into_response()
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(target: "session.skills", %source, directory = %requested, ?error, "skill adopt failed");
+            skill_error(error)
+        }
         Err(error) => task_error(error),
     }
 }
@@ -207,16 +227,19 @@ pub struct SyncSkillsBody {
     roots: Vec<String>,
     /// Skills the caller has explicitly asked AoE to take over, overwriting a
     /// skill AoE does not manage or a propagated copy edited in place. Empty
-    /// (the default, and what every automatic sync uses) overwrites nothing.
+    /// means overwrite nothing, which is the default and what every automatic
+    /// sync uses.
     #[serde(default)]
     replace: Vec<String>,
-    /// When non-empty, reconcile only these skills, so sharing a single skill
-    /// is a single-skill operation rather than a filtered full sync.
+    /// When non-empty, reconcile only these skills. This is what makes sharing
+    /// a single skill a single-skill operation rather than a full sync whose
+    /// report is filtered afterwards.
     #[serde(default)]
     directories: Vec<String>,
 }
 
 /// `POST /api/skills/sync`: reconcile the managed store into agent skills dirs.
+///
 /// Returns one outcome per skill per root rather than failing on the first
 /// conflict: a destination AoE does not own is a normal result the user needs to
 /// see, not an error that should abandon the remaining roots.
@@ -233,6 +256,7 @@ pub async fn sync_skills(
             );
         }
     }
+    let (roots, directories) = (body.roots.clone(), body.directories.clone());
     let result = tokio::task::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or_else(|| {
             SkillError::Io(anyhow::anyhow!("could not resolve home dir for skills"))
@@ -254,19 +278,35 @@ pub async fn sync_skills(
     })
     .await;
     match result {
-        Ok(Ok(outcomes)) => Json(json!({ "ok": true, "outcomes": outcomes })).into_response(),
-        Ok(Err(error)) => skill_error(error),
+        Ok(Ok(outcomes)) => {
+            tracing::info!(target: "session.skills", ?roots, ?directories, outcomes = outcomes.len(), "skills synced");
+            Json(json!({ "ok": true, "outcomes": outcomes })).into_response()
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(target: "session.skills", ?roots, ?directories, ?error, "skill sync failed");
+            skill_error(error)
+        }
         Err(error) => task_error(error),
     }
 }
 
+/// `echo_directory` keeps the create response's `directory` field; other mutations answer `null`.
 fn mutation_response(
     result: Result<Result<(), SkillError>, tokio::task::JoinError>,
-    directory: Option<String>,
+    message: &'static str,
+    directory: &str,
+    echo_directory: bool,
 ) -> Response {
     match result {
-        Ok(Ok(())) => Json(json!({ "ok": true, "directory": directory })).into_response(),
-        Ok(Err(error)) => skill_error(error),
+        Ok(Ok(())) => {
+            tracing::info!(target: "session.skills", %directory, source = "aoe-managed", "{message}");
+            let directory = echo_directory.then_some(directory);
+            Json(json!({ "ok": true, "directory": directory })).into_response()
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(target: "session.skills", %directory, ?error, "{message} failed");
+            skill_error(error)
+        }
         Err(error) => task_error(error),
     }
 }

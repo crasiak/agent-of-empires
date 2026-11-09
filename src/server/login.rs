@@ -1,11 +1,12 @@
 //! Passphrase-based login as a second authentication factor.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::extract::{FromRequest, State};
+use axum::extract::{ConnectInfo, FromRequest, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -15,7 +16,6 @@ use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use super::auth::resolve_client_ip;
 use super::secure_store::{check_path_security, write_private};
 use super::AppState;
 use crate::util::{now_ms, system_time_to_ms};
@@ -817,11 +817,18 @@ pub(super) async fn issue_session(
 /// POST /api/login
 pub async fn login_handler(
     State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    peer: super::peer::ConnectionPeer,
     headers: axum::http::HeaderMap,
     login_body: Result<Json<LoginRequest>, axum::extract::rejection::JsonRejection>,
 ) -> axum::response::Response {
-    let client_ip = resolve_client_ip(addr, &headers);
+    let super::peer::ConnectionPeer::Tcp(addr) = peer else {
+        return (
+            StatusCode::CONFLICT,
+            "Local owner authentication does not use browser login",
+        )
+            .into_response();
+    };
+    let client_ip = state.ingress(addr, &headers).client_ip;
 
     if !state.login_manager.is_enabled() {
         return (
@@ -835,7 +842,11 @@ pub async fn login_handler(
     }
 
     // Rate limit check
-    if let Some(remaining) = state.rate_limiter.check_locked(client_ip).await {
+    if let Some(remaining) = state
+        .rate_limiter
+        .check_locked(client_ip, super::rate_limit::AuthBudget::Passphrase)
+        .await
+    {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             [("Retry-After", remaining.to_string())],
@@ -884,11 +895,17 @@ pub async fn login_handler(
     );
 
     if state.login_manager.verify_passphrase(&login_req.passphrase) {
-        state.rate_limiter.record_success(client_ip).await;
+        state
+            .rate_limiter
+            .record_success(client_ip, super::rate_limit::AuthBudget::Passphrase)
+            .await;
         tracing::info!(target: "auth.passphrase", ip = %client_ip, "passphrase login successful");
         issue_session(&state, &binding_bytes, client_ip, &headers).await
     } else {
-        let locked = state.rate_limiter.record_failure(client_ip).await;
+        let locked = state
+            .rate_limiter
+            .record_failure(client_ip, super::rate_limit::AuthBudget::Passphrase)
+            .await;
         tracing::warn!(
             target: "auth.passphrase",
             ip = %client_ip,
@@ -916,10 +933,17 @@ pub struct ElevateRequest {
 /// POST /api/login/elevate
 pub async fn elevate_handler(
     State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    peer: super::peer::ConnectionPeer,
     request: axum::extract::Request,
 ) -> axum::response::Response {
-    let client_ip = resolve_client_ip(addr, request.headers());
+    let super::peer::ConnectionPeer::Tcp(addr) = peer else {
+        return (
+            StatusCode::CONFLICT,
+            "Local owner authentication does not use browser elevation",
+        )
+            .into_response();
+    };
+    let client_ip = state.ingress(addr, request.headers()).client_ip;
 
     if !state.login_manager.is_enabled() {
         return (
@@ -960,7 +984,11 @@ pub async fn elevate_handler(
             .into_response();
     }
 
-    if let Some(remaining) = state.rate_limiter.check_locked(client_ip).await {
+    if let Some(remaining) = state
+        .rate_limiter
+        .check_locked(client_ip, super::rate_limit::AuthBudget::Passphrase)
+        .await
+    {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             [("Retry-After", remaining.to_string())],
@@ -991,7 +1019,10 @@ pub async fn elevate_handler(
         .login_manager
         .verify_passphrase(&elevate_req.passphrase)
     {
-        let ip_locked = state.rate_limiter.record_failure(client_ip).await;
+        let ip_locked = state
+            .rate_limiter
+            .record_failure(client_ip, super::rate_limit::AuthBudget::Passphrase)
+            .await;
         let session_locked = state
             .login_manager
             .record_elevation_failure(&session_id)
@@ -1014,7 +1045,10 @@ pub async fn elevate_handler(
             .into_response();
     }
 
-    state.rate_limiter.record_success(client_ip).await;
+    state
+        .rate_limiter
+        .record_success(client_ip, super::rate_limit::AuthBudget::Passphrase)
+        .await;
     let elevated = state.login_manager.elevate_session(&session_id).await;
     if !elevated {
         return (
@@ -1046,9 +1080,28 @@ pub async fn logout_handler(
     State(state): State<Arc<AppState>>,
     request: axum::extract::Request,
 ) -> axum::response::Response {
-    // Extract session cookie
     if let Some(session_id) = extract_login_session(&request) {
         state.login_manager.invalidate_session(&session_id).await;
+        // Read off the request, not an extractor: a missing peer stamp must
+        // not fail the logout before the session is invalidated.
+        let addr = match request
+            .extensions()
+            .get::<ConnectInfo<super::peer::ConnectionPeer>>()
+        {
+            Some(ConnectInfo(super::peer::ConnectionPeer::Tcp(addr))) => Some(*addr),
+            Some(_) => None,
+            None => request
+                .extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(addr)| *addr),
+        };
+        match addr {
+            Some(addr) => {
+                let ip = state.ingress(addr, request.headers()).client_ip;
+                tracing::info!(target: "auth.passphrase", %ip, "device logged out");
+            }
+            None => tracing::info!(target: "auth.passphrase", "device logged out"),
+        }
     }
 
     let clear_cookie = clear_login_cookie(state.behind_tunnel);
@@ -1133,6 +1186,16 @@ pub async fn login_status_handler(
     axum::extract::Query(query): axum::extract::Query<LoginStatusQuery>,
     request: axum::extract::Request,
 ) -> Json<serde_json::Value> {
+    if request
+        .extensions()
+        .get::<super::principal::Principal>()
+        .is_some_and(super::principal::Principal::is_local_peer)
+    {
+        return Json(serde_json::json!({
+            "required": false, "authenticated": true, "elevated": true,
+            "elevated_until_secs": null, "principal": "local_owner"
+        }));
+    }
     let required = state.login_manager.is_enabled();
 
     if !required {
@@ -1246,7 +1309,11 @@ async fn trigger_new_login_push(state: &AppState, user_agent: &str) {
                 continue;
             }
         };
-        let _ = client
+        let host = reqwest::Url::parse(&sub.endpoint)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_default();
+        match client
             .post(&sub.endpoint)
             .header("Authorization", &auth_header)
             .header("Content-Encoding", "aes128gcm")
@@ -1254,7 +1321,16 @@ async fn trigger_new_login_push(state: &AppState, user_agent: &str) {
             .header("TTL", "60")
             .body(cipher)
             .send()
-            .await;
+            .await
+        {
+            Ok(response) if !response.status().is_success() => {
+                tracing::warn!(target: "auth.passphrase", %host, status = %response.status(), "login push failed");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(target: "auth.passphrase", %host, error = %error.without_url(), "login push failed");
+            }
+        }
     }
 }
 

@@ -186,7 +186,7 @@ export function TailoredSessionsOverlay({
         {open && session && (
           <>
             <div className="flex min-h-0 flex-1 flex-col p-2">
-              <TerminalView session={session} />
+              <TerminalView session={session} readOnly={readOnly} />
             </div>
             <p className="px-4 py-2 text-xs text-text-secondary">
               F2 returns to history. Closing leaves the Session running. Escape goes to the agent.

@@ -8,8 +8,8 @@ use crate::tui::dialogs::DialogResult;
 use crate::tui::highlight::{HighlightFilterDialog, HighlightFilterOutcome, HighlightFilters};
 use std::io::Stdout;
 
-use crate::acp::client::discovery::DaemonEndpoint;
 use crate::acp::client::HttpClient;
+use crate::daemon::DaemonEndpoint;
 use crate::daemon::{ContextResumeAvailability, SessionResponse};
 use crate::plugin::ui_state::UiSnapshot;
 use crate::session::config::{resolve_theme_name, resolve_theme_palette_mode};
@@ -430,7 +430,7 @@ fn apply_snapshot(state: &mut RemoteHomeState, snapshot: RemoteSnapshot) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::acp::client::discovery::Source;
+    use crate::daemon::Source;
 
     fn session(id: &str) -> RemoteSession {
         RemoteSession {

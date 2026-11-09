@@ -1,16 +1,21 @@
 import { memo, useRef } from "react";
 import type { ProjectInfo, RepoGroup } from "../lib/types";
 import { REPO_COLOR_OPTIONS, repoColorStyle, repoSwatchStyle, type RepoAppearanceUpdate } from "../lib/repoAppearance";
+import { MARK_MEANING, meaningText } from "../lib/sidebarMarks";
 import { useSidebarCompact } from "../lib/sidebarCompact";
 import { ContextMenu, MenuHeading, MenuItem, MenuSeparator } from "./ContextMenu";
 import { FoldChevron, PlusIcon } from "./icons";
+import { Tooltip } from "./Tooltip";
 import { useContextMenu } from "./useContextMenu";
 import { useLongPress } from "./sidebar/useLongPress";
 import { usePersistedFlag } from "./usePersistedFlag";
 
 interface ProjectsSectionProps {
-  // No-session registered projects, one entry per path.
+  // Registered projects to list, one entry per path (`unpinnedSavedProjects`).
   projects: RepoGroup[];
+  // Whether the sidebar axis draws repository headers. Without them the section lists every Project, not
+  // only those without a session (#5065), and its label says so.
+  drawsRepoHeaders?: boolean;
   // Lowercased, trimmed filter query; empty means no filter.
   query: string;
   readOnly?: boolean;
@@ -24,6 +29,7 @@ interface ProjectsSectionProps {
 
 export function ProjectsSection({
   projects,
+  drawsRepoHeaders = true,
   query,
   readOnly,
   offline,
@@ -43,6 +49,7 @@ export function ProjectsSection({
   // With CRUD available the header stays so Add is reachable with zero projects.
   const canAdd = !readOnly && !offline;
   if (visible.length === 0 && !canAdd) return null;
+  const label = drawsRepoHeaders ? "Projects, no sessions" : "Projects";
 
   return (
     <div data-testid="sidebar-projects-section">
@@ -52,13 +59,16 @@ export function ProjectsSection({
           data-testid="sidebar-projects-toggle"
           aria-expanded={expanded}
           className={`flex-1 min-w-0 flex items-center gap-2 py-1.5 text-[11px] font-mono uppercase text-text-muted hover:text-text-secondary hover:bg-surface-800/40 cursor-pointer transition-colors ${
-            compact ? "px-2" : "px-3 tracking-widest"
+            compact ? "px-2" : "px-3 tracking-wider"
           }`}
         >
           <FoldChevron className={`shrink-0 transition-transform duration-75 ${expanded ? "" : "-rotate-90"}`} />
-          {/* The count and the wide tracking do not fit the rail, and a clipped
-              "(0)" is exactly what looks broken; truncate the label. See #2288. */}
-          <span className="truncate">Projects{compact ? "" : ` (${visible.length})`}</span>
+          {/* A clipped count is exactly what looks broken, so the label truncates and the count never
+              does; the rail has room for neither (#2288). */}
+          <span className="truncate" title={label}>
+            {compact ? "Projects" : label}
+          </span>
+          {!compact && <span className="shrink-0">({visible.length})</span>}
         </button>
         {canAdd && !compact && (
           <button
@@ -87,7 +97,7 @@ export function ProjectsSection({
         ))}
       {expanded && visible.length === 0 && !compact && (
         <p className="px-3 py-2 text-[12px] text-text-dim">
-          {query ? "No matching projects." : "No saved projects. Add one to keep a repo handy without a session."}
+          {query ? "No matching projects." : "No registered Projects. Add one to keep a repo handy without a session."}
         </p>
       )}
     </div>
@@ -114,6 +124,7 @@ const ProjectRow = memo(function ProjectRow({
   const openedAtRef = useRef(0);
   const { menu, menuRef, openMenu, closeMenu } = useContextMenu<{ x: number; y: number }>(openedAtRef);
   const baseBranch = project.registeredProjects[0]?.default_base_branch;
+  const pinned = project.registeredProjects.some((p) => p.pinned);
   const canModify = !readOnly && !offline;
   const longPress = useLongPress(canModify, (x, y) => {
     openedAtRef.current = Date.now();
@@ -152,9 +163,12 @@ const ProjectRow = memo(function ProjectRow({
         className="group flex items-center gap-2 px-3 py-1.5 text-text-secondary hover:bg-surface-800/50 transition-colors focus:outline-none focus:ring-2 focus:ring-brand-600 select-none [-webkit-touch-callout:none]"
         style={repoColorStyle(project.color)}
       >
-        <span className="shrink-0 text-[10px] leading-none text-text-dim" title="Saved project" aria-hidden>
-          ◆
-        </span>
+        {/* Listed here when the axis draws no pinned header (#5065), so the row carries the pin itself. */}
+        <Tooltip text={meaningText(pinned ? MARK_MEANING.pinnedProject : MARK_MEANING.project)}>
+          <span className="shrink-0 text-[10px] leading-none text-text-dim" aria-hidden>
+            {pinned ? "◆" : "◇"}
+          </span>
+        </Tooltip>
         <button
           onClick={() => canModify && onCreateSession(project.repoPath)}
           disabled={!canModify}

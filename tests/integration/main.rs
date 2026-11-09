@@ -16,14 +16,14 @@
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod afk_observation_clock;
-#[cfg(all(target_os = "linux", debug_assertions))]
+#[cfg(all(unix, debug_assertions))]
+mod cli_read_daemon;
+#[cfg(all(unix, debug_assertions))]
 mod cli_read_parity;
 #[cfg(debug_assertions)]
 mod cli_read_record;
 #[cfg(debug_assertions)]
 mod cli_read_server;
-#[cfg(all(target_os = "linux", debug_assertions))]
-mod cli_read_uds;
 mod common;
 #[cfg(unix)]
 mod frozen_environment;
@@ -47,7 +47,6 @@ mod terminal_smart_rename;
 mod tmux_reachability;
 #[cfg(debug_assertions)]
 mod tmux_send_keys;
-mod tui_attach_detach;
 mod update_command;
 mod worktree_integration;
 
@@ -96,6 +95,8 @@ mod serve_dynamic_profile_rewire;
 #[cfg(debug_assertions)]
 mod serve_filewatch_propagation;
 mod serve_mcp_crud;
+#[cfg(debug_assertions)]
+mod serve_response_compression;
 #[cfg(debug_assertions)]
 mod serve_settings_layers;
 #[cfg(debug_assertions)]

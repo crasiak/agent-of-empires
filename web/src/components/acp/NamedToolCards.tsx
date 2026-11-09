@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components */
 // Cards for tools recognised by name or payload rather than ACP kind: MCP,
-// memory, skills, and Claude's scheduling and harness tools.
+// memory, skills, workflows, and Claude's scheduling and harness tools.
 
 import { useMemo } from "react";
 import DOMPurify from "dompurify";
@@ -16,16 +16,28 @@ import {
   Search,
   Sparkles,
   Square,
+  Workflow,
 } from "lucide-react";
 
 import { useSkillIndex } from "../../hooks/useSkillIndex";
 import { parseJsonObject, pickStr } from "../../lib/acpArgs";
 import type { ToolCall } from "../../lib/acpTypes";
 import type { AgentProfile } from "../../lib/agentProfiles";
+import { diffPair } from "../../lib/diffPair";
 import { humanizeServer, humanizeVerb } from "../../lib/mcpClassify";
 import { cleanRecalledMemory, parseMemoryFrontmatter, type MemoryHit } from "../../lib/memoryClassify";
 import { badgeLabel, badgeTone, resolveSkillSource } from "../../lib/skillProvenance";
+import { StringDiff } from "../diff/StringDiff";
 import { ProvenanceBadge } from "../ProvenanceBadge";
+import {
+  isActiveAgent,
+  useBackgroundAgentsFor,
+  useBackgroundTaskIds,
+  useOpenBackgroundAgentsPane,
+  useWorkflowRun,
+  workflowPhases,
+  workflowRunning,
+} from "./backgroundAgentsContext";
 import { GenericToolCard } from "./CoreToolCards";
 import {
   CardChrome,
@@ -148,6 +160,82 @@ export function SkillToolCard({ tool, result, skillName }: ToolCardProps & { ski
   );
 }
 
+export function classifyWorkflow(tool: ToolCall, profile: AgentProfile): boolean {
+  if (tool.kind !== "other") return false;
+  const title = (pickStr(parseJsonObject(tool.args_preview), "_aoe_title") ?? tool.name ?? "").trim();
+  return profile.specialTitles.workflowNames.includes(title);
+}
+
+function lastEnd(agents: { endedAt: string | null }[]): string | undefined {
+  return agents.reduce<string | undefined>(
+    (last, a) => (a.endedAt && (!last || a.endedAt > last) ? a.endedAt : last),
+    undefined,
+  );
+}
+
+/** Claude's `Workflow` returns at once while the run goes on, so the card
+ *  follows the run's background task and agents, not the call. */
+export function WorkflowToolCard({ tool, result }: ToolCardProps) {
+  const callStatus = statusFor(result);
+  const run = useWorkflowRun(tool.id);
+  const agents = useBackgroundAgentsFor(tool.id);
+  const openPane = useOpenBackgroundAgentsPane();
+  const args = useToolArgs(tool);
+  const script = pickStr(args, "script");
+  const live = workflowRunning(run, useBackgroundTaskIds(), agents);
+  const running = agents.filter(isActiveAgent).length;
+  const status = callStatus === "ok" && live ? "running" : callStatus;
+  const [open, setOpen] = useToolCardExpansion(status);
+  return (
+    <CardChrome
+      status={status}
+      startedAt={tool.started_at}
+      endedAt={live ? undefined : (run?.endedAt ?? lastEnd(agents) ?? result?.at)}
+      icon={<Workflow className={ICON} />}
+      label="workflow"
+      primary={run?.name ?? agents[0]?.workflow?.name ?? "Workflow"}
+      meta={
+        agents.length > 0 && (
+          <span className={TABULAR_META}>
+            {agents.length - running} of {agents.length} agents done
+          </span>
+        )
+      }
+      expanded={open}
+      onToggle={() => setOpen((v) => !v)}
+      body={
+        <ToolErrorBody status={callStatus} errorText={result?.text}>
+          {run?.summary && (
+            <p className="border-t border-surface-800 px-3 py-2 text-xs text-text-secondary">{run.summary}</p>
+          )}
+          {agents.length > 0 && (
+            <div className="border-t border-surface-800 px-3 py-2 text-xs">
+              {workflowPhases(agents).map(({ phase, agents: phaseAgents }) => {
+                const active = phaseAgents.filter(isActiveAgent).length;
+                return (
+                  <div key={phase} className="flex items-center gap-2 text-text-secondary">
+                    <span className="min-w-0 flex-1 truncate">{phase || "Agents"}</span>
+                    <span className="tabular-nums text-text-dim">
+                      {active > 0 && `${active} running · `}
+                      {phaseAgents.length - active} done
+                    </span>
+                  </div>
+                );
+              })}
+              {openPane && (
+                <button type="button" onClick={openPane} className="mt-1.5 text-accent-500 hover:underline">
+                  Open Sub agents
+                </button>
+              )}
+            </div>
+          )}
+          {script && <RawBlock label="input" text={script} />}
+        </ToolErrorBody>
+      }
+    />
+  );
+}
+
 const FRONTMATTER_FIELDS = ["name", "type", "description"] as const;
 
 /** Claude memory files touched through plain Read/Edit/Write. */
@@ -155,15 +243,24 @@ export function MemoryCard({ tool, result, hit }: ToolCardProps & { hit: MemoryH
   const status = statusFor(result);
   const [open, setOpen] = useToolCardExpansion(status);
   const args = useToolArgs(tool);
+  // claude-agent-acp sends the written text only as a structured diff, not in the args.
+  const diff = hit.verb === "recalled" ? undefined : tool.diffs?.find((d) => d.path === hit.path);
+  const oldText = diff?.old_text ?? "";
+  const newText = diff?.new_text ?? "";
+  const showDiff = diff?.old_text != null;
   const content = useMemo<string>(
     () =>
       hit.verb === "recalled"
         ? (result?.text ?? "")
-        : (pickStr(args, "new_string", "newString", "new_str", "content") ?? ""),
-    [hit.verb, args, result?.text],
+        : (pickStr(args, "new_string", "newString", "new_str", "content") ?? newText),
+    [hit.verb, args, result?.text, newText],
   );
   const parsed = useMemo(() => (content ? parseMemoryFrontmatter(content) : null), [content]);
-  const hasBody = Boolean(content);
+  const hasBody = showDiff || Boolean(content);
+  const { adds, dels } = useMemo(
+    () => (showDiff ? diffPair(oldText, newText) : { adds: 0, dels: 0 }),
+    [showDiff, oldText, newText],
+  );
 
   return (
     <CardChrome
@@ -178,12 +275,24 @@ export function MemoryCard({ tool, result, hit }: ToolCardProps & { hit: MemoryH
           <span className="ml-2 text-text-dim">· {hit.basename}</span>
         </>
       }
-      meta={parsed?.type && <span className="hidden md:inline text-[11px] text-text-dim">{parsed.type}</span>}
+      meta={
+        showDiff && status !== "err" ? (
+          <span className="hidden md:inline text-[11px]">
+            <span className="text-emerald-400">+{adds}</span> <span className="text-rose-400">−{dels}</span>
+          </span>
+        ) : (
+          parsed?.type && <span className="hidden md:inline text-[11px] text-text-dim">{parsed.type}</span>
+        )
+      }
       expanded={open}
       onToggle={status === "err" || hasBody ? () => setOpen((v) => !v) : undefined}
       body={
         <ToolErrorBody status={status} errorText={result?.text}>
-          {hasBody && parsed && status !== "err" ? (
+          {showDiff && status !== "err" ? (
+            <div className="border-t border-surface-800 bg-surface-950">
+              <StringDiff oldText={oldText} newText={newText} filePath={hit.path} />
+            </div>
+          ) : hasBody && parsed && status !== "err" ? (
             <div className="border-t border-surface-800 bg-surface-950">
               {(parsed.name || parsed.description || parsed.type) && (
                 <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 px-3 py-2 text-[11px]">
