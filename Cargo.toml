@@ -136,7 +136,7 @@ tempfile = "3.14"
 which = "8.0"
 
 # SQLite
-rusqlite = "0.40"
+rusqlite = "0.41"
 
 # Daemon HTTP/WS server. Core: the daemon is the product, the dashboard is one
 # surface on it (see the `web` feature).
@@ -192,7 +192,7 @@ webpki-roots = "1.0.10"
 # beneath a Dir so a component swapped after the containment check cannot
 # escape the intended root.
 cap-std = "4.0.2"
-rmcp = { version = "3.5.1", features = ["transport-streamable-http-server"] }
+rmcp = { version = "3.9.0", features = ["transport-streamable-http-server"] }
 schemars = { version = "1", features = ["chrono04"] }
 
 # Unix-only: O_NOFOLLOW for capability-safe filesystem operations.
