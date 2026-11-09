@@ -213,6 +213,7 @@ jobs:
       - run: python3 .github/scripts/select-internal-pr.py --self-test
       - run: python3 .github/scripts/check-dependabot-pr.py --self-test
       - run: python3 .github/scripts/classify-cachix-failure.py --self-test
+      - run: python3 scripts/test-export-pi-integration.py -v
 
   nix:
     name: Nix Eval
@@ -324,14 +325,12 @@ jobs:
               BASE="$EVENT_BEFORE"
             fi
           fi
-          # Only the flake recipe: `flake.nix` carries the source filter, the
-          # buildInputs and the package definitions, and `flake.lock` pins
-          # nixpkgs and crane. A change to either can break the build in a way
-          # evaluation cannot see, and neither is touched by an ordinary PR.
+          # Include native packaging helpers and module contracts as well as
+          # the flake recipe: evaluation alone cannot qualify shipped bytes.
           # A git failure here would leave the pipeline non-zero and skip the
           # build, so keep the diff simple enough that it cannot fail.
           if git diff --name-only "$BASE"...HEAD \
-            | grep -E '^(flake\.nix|flake\.lock)$' \
+            | grep -E '^(flake\.nix$|flake\.lock$|nix/|scripts/(export-pi-integration|test-export-pi-integration)\.py$)' \
             >/dev/null; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
@@ -344,6 +343,10 @@ jobs:
       - name: Build default package
         if: steps.changes.outputs.relevant == 'true'
         run: nix build --no-link --print-out-paths -L .#packages.x86_64-linux.default
+
+      - name: Verify final inventory and configuration ownership
+        if: steps.changes.outputs.relevant == 'true'
+        run: nix build --no-link -L .#checks.x86_64-linux.aoe-integration-final .#checks.x86_64-linux.aoe-home-manager .#checks.x86_64-linux.aoe-integration-inventory
 
   nix-build-web:
     name: Nix Build Web

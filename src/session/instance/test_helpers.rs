@@ -53,6 +53,16 @@ pub(crate) fn declare_execution_aliases(
     std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
 }
 
+pub(super) fn set_pi_integration(inst: &Instance, policy: &str) {
+    let mut config = crate::session::config::profile_config::ProfileConfig::default();
+    config.overrides.insert(
+        "session".into(),
+        serde_json::json!({ "pi_integration": policy }),
+    );
+    crate::session::config::profile_config::save_profile_config(&inst.effective_profile(), &config)
+        .unwrap();
+}
+
 /// A path's identity for assertions: a symlinked temp or home root spells the
 /// same directory two ways, so expectations compare the resolved identity.
 pub(crate) fn path_identity(path: &std::path::Path) -> std::path::PathBuf {

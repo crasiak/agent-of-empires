@@ -256,6 +256,7 @@ mod tests {
             ("sandbox", "selinux_relabel", RepoPolicy::Deny),
             ("worktree", "path_template", RepoPolicy::Deny),
             ("session", "default_tool", RepoPolicy::Deny),
+            ("session", "pi_integration", RepoPolicy::Deny),
             ("session", "agent_detect_as", RepoPolicy::Allow),
             // Inherited from the section's repo_default.
             ("session", "yolo_mode_default", RepoPolicy::Deny),

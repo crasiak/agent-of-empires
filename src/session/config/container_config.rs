@@ -1658,6 +1658,56 @@ pub(crate) fn install_pi_sandbox_extension_at(root: &Path) -> Result<()> {
     install_session_extension_at(root, &rel)
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct SandboxPiIntegrationPolicyError(String);
+
+fn reconcile_pi_sandbox_extension(root: &Path, policy: super::PiIntegration) -> Result<()> {
+    let result = (|| -> Result<()> {
+        let mut directory = crate::session::AnchoredDir::open(root)?;
+        for component in ["agent", "extensions"] {
+            if directory.entry_stat(Path::new(component))?.is_none() {
+                return if policy == super::PiIntegration::None {
+                    Ok(())
+                } else {
+                    install_pi_sandbox_extension_at(root)
+                };
+            }
+            directory = directory.child(Path::new(component))?;
+        }
+        let leaf = Path::new("aoe-session-id.js");
+        let Some(stat) = directory.entry_stat(leaf)? else {
+            return if policy == super::PiIntegration::None {
+                Ok(())
+            } else {
+                install_pi_sandbox_extension_at(root)
+            };
+        };
+        anyhow::ensure!(
+            stat.st_mode & libc::S_IFMT == libc::S_IFREG
+                && stat.st_nlink == 1
+                && stat.st_uid == unsafe { libc::geteuid() },
+            "identity extension is not an owned regular single-link file"
+        );
+        anyhow::ensure!(
+            directory.read_regular(leaf, 1 << 20)?.as_deref()
+                == Some(crate::session::instance::SESSION_IDENTITY_EXTENSION.as_bytes()),
+            "identity extension has unrecognized content"
+        );
+        if policy == super::PiIntegration::None {
+            directory.remove_file(leaf)?;
+            directory.sync()?;
+        }
+        Ok(())
+    })();
+    result.with_context(|| {
+        SandboxPiIntegrationPolicyError(format!(
+            "Cannot apply session.pi_integration to {}/agent/extensions/aoe-session-id.js; inspect and relocate conflicting content or links before retrying",
+            root.display()
+        ))
+    })
+}
+
 /// Which branch [`compute_volume_paths_with_resolve`] resolved the mounts through.
 ///
 /// Reported rather than re-derived, so a caller acting on the difference between the
@@ -2239,6 +2289,7 @@ pub(crate) struct ContainerAgentSelection<'a> {
     selected_agent: Option<&'a str>,
     /// How the launch treats the credential file the agent's sandboxes share.
     credential_fold: CredentialFold,
+    launch_config: Option<&'a super::Config>,
 }
 
 impl<'a> ContainerAgentSelection<'a> {
@@ -2248,7 +2299,13 @@ impl<'a> ContainerAgentSelection<'a> {
             command,
             selected_agent: None,
             credential_fold: CredentialFold::Freshest,
+            launch_config: None,
         }
+    }
+
+    pub(crate) fn with_launch_config(mut self, config: Option<&'a super::Config>) -> Self {
+        self.launch_config = config;
+        self
     }
 
     /// Set how the launch treats the shared credential file (see
@@ -2511,7 +2568,14 @@ pub(crate) fn build_container_config(
 
     let project_path = Path::new(project_path_str);
     let resolved_profile = super::effective_profile(profile);
-    let profile_config = super::profile_config::resolve_config_or_warn(&resolved_profile);
+    let fallback_config;
+    let profile_config = match agent_selection.launch_config {
+        Some(config) => config,
+        None => {
+            fallback_config = super::profile_config::resolve_config_or_warn(&resolved_profile);
+            &fallback_config
+        }
+    };
     let profile_session_config = &profile_config.session;
     let active_agent = resolve_active_agent(
         agent_selection.tool,
@@ -2549,7 +2613,9 @@ pub(crate) fn build_container_config(
 
     let mut volumes = project_volumes;
 
-    let sandbox_config = {
+    let sandbox_config = if let Some(config) = agent_selection.launch_config {
+        config.sandbox.clone()
+    } else {
         match super::repo_config::resolve_config_with_repo(&resolved_profile, project_path) {
             Ok(c) => {
                 tracing::debug!(target: "session.profile",
@@ -2580,10 +2646,10 @@ pub(crate) fn build_container_config(
     }
     validate_managed_container_environment(&environment, active_agent, CONTAINER_HOME)?;
     if !environment.iter().any(|entry| entry.key() == "CODEX_HOME") {
-        if let Some(codex_home) = managed_codex_home(
+        if let Some(codex_home) = managed_codex_home_from_config(
             agent_selection.tool,
             agent_selection.command,
-            profile,
+            profile_session_config,
             instance_id,
         )? {
             environment.push(EnvEntry::Literal {
@@ -2687,7 +2753,7 @@ pub(crate) fn build_container_config(
         instance_id,
         agent_selection.tool,
         &content_roots,
-        &profile_config,
+        profile_config,
         Path::new(&workspace_path),
     )?;
     for mount in AGENT_CONFIG_MOUNTS
@@ -2716,6 +2782,9 @@ pub(crate) fn build_container_config(
             ),
         }
         .with_context(|| format!("preparing isolated {} configuration", mount.host_rel))?;
+        if mount.tool_name == "pi" {
+            reconcile_pi_sandbox_extension(&sandbox_dir, profile_session_config.pi_integration)?;
+        }
         active_sandbox_config = Some((mount, sandbox_dir.clone()));
 
         tracing::debug!(target: "session.profile",
@@ -2806,7 +2875,7 @@ pub(crate) fn build_container_config(
             if let Some(sidecar) = &agent.sidecar_hooks {
                 let mut events = match crate::agents::resolved_sidecar_hook_events(
                     agent,
-                    &profile_config,
+                    profile_config,
                 ) {
                     Ok(events) => events,
                     Err(e) => {
@@ -2874,7 +2943,7 @@ pub(crate) fn build_container_config(
                     tracing::warn!(target: "session.profile", "No sandbox config mount for {} hooks", agent.name);
                 }
             } else if let Some(hook_cfg) = &agent.hook_config {
-                let mut events = match crate::agents::resolved_hook_events(agent, &profile_config) {
+                let mut events = match crate::agents::resolved_hook_events(agent, profile_config) {
                     Ok(events) => events,
                     Err(e) => {
                         tracing::warn!(target: "session.profile", "Failed to resolve hooks in sandbox config: {}", e);
@@ -3257,6 +3326,72 @@ mod tests {
                 self.profile,
             )
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn sandbox_pi_policy_reconciles_only_the_owned_extension() {
+        let _home = IsolatedHome::new();
+        let project = TempDir::new().unwrap();
+        let build = || {
+            Build::new("pi")
+                .instance("pipolicy001")
+                .run(project.path())
+                .unwrap()
+        };
+        let config_path = crate::session::get_app_dir().unwrap().join("config.toml");
+        fs::write(&config_path, "[session]\npi_integration = 'none'\n").unwrap();
+        let initial = build();
+        let root = PathBuf::from(
+            &initial
+                .volumes
+                .iter()
+                .find(|v| v.container_path == "/root/.pi")
+                .unwrap()
+                .host_path,
+        );
+        let extension = root.join("agent/extensions/aoe-session-id.js");
+        assert!(!extension.exists());
+        for policy in ["identity", "afk"] {
+            fs::write(
+                &config_path,
+                format!("[session]\npi_integration = '{policy}'\n"),
+            )
+            .unwrap();
+            build();
+            assert_eq!(
+                fs::read_to_string(&extension).unwrap(),
+                crate::session::instance::SESSION_IDENTITY_EXTENSION
+            );
+        }
+        let unrelated = extension.with_file_name("user.js");
+        fs::write(&unrelated, "user extension").unwrap();
+        fs::write(&config_path, "[session]\npi_integration = 'none'\n").unwrap();
+        build();
+        assert!(!extension.exists());
+        assert_eq!(fs::read_to_string(&unrelated).unwrap(), "user extension");
+        for conflicting in [
+            "foreign extension",
+            crate::session::instance::SESSION_IDENTITY_EXTENSION,
+        ] {
+            fs::write(&extension, conflicting).unwrap();
+            if conflicting == crate::session::instance::SESSION_IDENTITY_EXTENSION {
+                let linked = extension.with_file_name("linked.js");
+                fs::hard_link(&extension, &linked).unwrap();
+            }
+            assert!(Build::new("pi")
+                .instance("pipolicy001")
+                .run(project.path())
+                .is_err());
+            assert_eq!(fs::read_to_string(&extension).unwrap(), conflicting);
+            fs::remove_file(&extension).unwrap();
+        }
+        std::os::unix::fs::symlink(&unrelated, &extension).unwrap();
+        assert!(Build::new("pi")
+            .instance("pipolicy001")
+            .run(project.path())
+            .is_err());
+        assert_eq!(fs::read_to_string(&unrelated).unwrap(), "user extension");
     }
 
     #[test]

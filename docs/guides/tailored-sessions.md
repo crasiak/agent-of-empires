@@ -185,7 +185,10 @@ temporary HOME and Pi directory, not the selected account's runtime settings/aut
 
 Document chat disables tools, MCP, ambient extensions, context files, skills and
 prompt templates. Only AoE's fixed host-owned Pi identity extension is explicitly
-loaded, for ordinary conversation identity/status/usage reporting. Document content
+loaded, for ordinary conversation identity/status/usage reporting. The selected
+AoE profile must explicitly enable
+[`session.pi_integration = "identity"` or `"afk"`](configuration.md#pi-integration);
+`none` is refused, not overridden. Document content
 cannot select extensions or change the account or system policy. These launch
 restrictions are not an OS sandbox.
 
