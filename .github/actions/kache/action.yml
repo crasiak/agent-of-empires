@@ -20,7 +20,9 @@ runs:
         HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
       run: |
         set -euo pipefail
-        if [ -n "$HEAD_REPO" ] && [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
+        # Fork PRs and other repositories have no access to the upstream bucket.
+        if [ "$GITHUB_REPOSITORY" != agent-of-empires/agent-of-empires ] \
+          || { [ -n "$HEAD_REPO" ] && [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]; }; then
           echo "role=" >> "$GITHUB_OUTPUT"
         elif [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
           echo "role=aoe-kache-ci-main" >> "$GITHUB_OUTPUT"
