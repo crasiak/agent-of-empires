@@ -128,8 +128,7 @@ fn highlight_rebuild_restores_shifted_group_and_attention_skips_filtered_waiting
     v.handle_key(key(KeyCode::Char('w')), None);
     assert!(
         matches!(&v.pending_namespace_intent, Some(super::super::NamespaceIntent::Reveal { id, .. }) if *id == waiting.id),
-        "{:?}",
-        v.pending_namespace_intent
+        "`w` must reveal the hidden waiting session"
     );
     crate::session::set_unread_enabled(unread);
 }
