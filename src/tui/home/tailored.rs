@@ -1266,6 +1266,214 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn rendered_capture_home_events_preserve_multiline_until_explicit_confirm() {
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+        let _ledger = crate::session::test_support::install_login_shell_path_command(
+            root.path(),
+            "ledger",
+            r#"#!/bin/sh
+case "$*" in
+  'lock show --profile aoe-capture-personal --harness pi')
+    printf '%s\n' '{"schema":"ledger-profile-lock-v4","profile":{"name":"aoe-capture-personal"},"binding":{"harness":"pi"},"resources":[{"key":"skill/capture-idea"}]}' ;;
+  *) exit 99 ;;
+esac
+"#,
+        );
+        let mut view = HomeView::new_for_test(
+            Some("test".into()),
+            crate::tmux::AvailableTools::with_tools(&["pi"]),
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .unwrap();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        let mut render = |view: &mut HomeView| {
+            terminal
+                .draw(|frame| {
+                    view.tailored_window.as_mut().unwrap().render(
+                        frame,
+                        frame.area(),
+                        &Theme::default(),
+                    );
+                })
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let shortcut = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
+        assert!(view.routes_tailored_key(&shortcut));
+        assert!(view.handle_key(shortcut, None).is_none());
+        let picker = render(&mut view);
+        let preset = picker
+            .content()
+            .chunks(picker.area.width as usize)
+            .enumerate()
+            .find(|(_, cells)| {
+                cells
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("+ Capture an idea")
+            })
+            .map(|(row, cells)| {
+                let col = cells.iter().position(|cell| cell.symbol() == "+").unwrap();
+                (col as u16, row as u16)
+            })
+            .unwrap();
+        assert!(view.handle_dialog_click(preset.0, preset.1));
+        let form = render(&mut view);
+        let rendered: String = form.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(rendered.contains("Tailored Sessions"));
+        assert!(rendered.contains("Enter newline · Ctrl+Enter capture"));
+        assert!(!rendered.contains("Verify idea"));
+        let idea_border = form
+            .content()
+            .chunks(form.area.width as usize)
+            .enumerate()
+            .find(|(_, cells)| {
+                cells
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains(" Idea ")
+            })
+            .map(|(row, _)| row as u16)
+            .unwrap();
+        let editor_click = (50, idea_border + 1);
+        assert!(view.tailored_window.as_ref().unwrap().composing);
+        view.handle_paste("leftRIGHT");
+        for code in [
+            KeyCode::Home,
+            KeyCode::Right,
+            KeyCode::Right,
+            KeyCode::Right,
+            KeyCode::Right,
+        ] {
+            assert!(view.handle_key(key(code), None).is_none());
+        }
+        view.handle_paste("🌱日本語\n\nmiddle\n");
+        view.handle_key(key(KeyCode::Enter), None);
+        view.handle_key(
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat),
+            None,
+        );
+        view.handle_key(key(KeyCode::Delete), None);
+        view.handle_key(key(KeyCode::Backspace), None);
+        let expected = "left🌱日本語\n\nmiddle\n\nIGHT";
+        let window = view.tailored_window.as_ref().unwrap();
+        assert_eq!(window.idea.lines().join("\n"), expected);
+        assert!(window.checking.is_none());
+        assert!(!window.immediately);
+        let cursor = window.idea.cursor();
+
+        let account_rect = window.account_rect;
+        assert!(view.handle_dialog_click(account_rect.x, account_rect.y));
+        assert_eq!(
+            view.tailored_window.as_ref().unwrap().account,
+            CaptureAccount::Work
+        );
+        view.handle_paste("must not enter the account control");
+        assert!(view.handle_dialog_click(editor_click.0, editor_click.1));
+        view.handle_paste("work only");
+        assert!(view.handle_dialog_click(account_rect.x, account_rect.y));
+        let window = view.tailored_window.as_ref().unwrap();
+        assert_eq!(window.account, CaptureAccount::Personal);
+        assert_eq!(window.idea.lines().join("\n"), expected);
+        assert_eq!(window.idea.cursor(), cursor);
+        assert!(!window.immediately);
+        assert!(view.handle_dialog_click(editor_click.0, editor_click.1));
+        for _ in 0..3 {
+            view.handle_key(key(KeyCode::Tab), None);
+        }
+        assert_eq!(view.tailored_window.as_ref().unwrap().focus, 3);
+        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+            view.handle_key(
+                KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::CONTROL, kind),
+                None,
+            );
+        }
+        assert!(view.tailored_window.as_ref().unwrap().checking.is_none());
+        assert!(view.handle_dialog_click(editor_click.0, editor_click.1));
+        assert_eq!(view.tailored_window.as_ref().unwrap().focus, 0);
+        view.handle_key(key(KeyCode::Enter), None);
+        let expected = "left🌱日本語\n\nmiddle\n\n\nIGHT";
+        assert_eq!(
+            view.tailored_window
+                .as_ref()
+                .unwrap()
+                .idea
+                .lines()
+                .join("\n"),
+            expected
+        );
+        assert!(view.tailored_window.as_ref().unwrap().checking.is_none());
+
+        for cancel in [
+            key(KeyCode::Esc),
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+        ] {
+            view.handle_key(cancel, None);
+            assert!(view.tailored_window.is_none());
+            let retained = view.retained_tailored_windows.first().unwrap();
+            assert!(retained.checking.is_none());
+            assert!(retained.terminal.is_none());
+            assert_eq!(retained.idea.lines().join("\n"), expected);
+            view.handle_key(shortcut, None);
+        }
+
+        for confirm in 0..3 {
+            render(&mut view);
+            match confirm {
+                0 => {
+                    view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), None);
+                }
+                1 => {
+                    for _ in 0..3 {
+                        view.handle_key(key(KeyCode::Tab), None);
+                    }
+                    view.handle_key(key(KeyCode::Enter), None);
+                }
+                _ => {
+                    let rect = view.tailored_window.as_ref().unwrap().submit_rect;
+                    assert!(view.handle_dialog_click(rect.x, rect.y));
+                }
+            }
+            let window = view.tailored_window.as_mut().unwrap();
+            let request = window
+                .checking
+                .take()
+                .expect("explicit confirmation starts profile check")
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.idea, expected);
+            assert_eq!(request.account, CaptureAccount::Personal);
+            assert!(!request.immediately);
+            let launch = request.launch().unwrap();
+            let prompt = shell_words::split(&launch.extra_args).unwrap();
+            assert_eq!(prompt.len(), 1);
+            assert!(prompt[0].contains(&format!("<idea>\n{expected}\n</idea>")));
+            assert!(prompt[0].contains("Immediately is OFF"));
+            assert!(launch.command.contains("aoe-capture-personal"));
+            assert_eq!(window.idea.lines().join("\n"), expected);
+            assert!(view.handle_dialog_click(editor_click.0, editor_click.1));
+        }
+        assert_eq!(view.instances().len(), 0);
+        if let Some((_, worker)) = view
+            .tailored_window
+            .as_mut()
+            .unwrap()
+            .workshop_history
+            .take()
+        {
+            worker
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn capture_enter_edits_and_editor_redo_does_not_close() {
         let mut window = TailoredWindow::new(CaptureAccount::Personal);
         window.picker_action(HistoryAction::New);
