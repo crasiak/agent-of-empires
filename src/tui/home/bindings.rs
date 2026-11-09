@@ -637,7 +637,7 @@ pub static BINDINGS: &[Binding] = &[
         context: Context::Always,
         help: Some(HelpMeta {
             section: HelpSection::Actions,
-            desc: "Toggle highlight (1-5, as in L menu)",
+            desc: "Toggle highlight (1 red … 5 teal)",
         }),
         palette: Some(PaletteMeta {
             title: "Toggle red highlight",

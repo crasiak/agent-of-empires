@@ -5151,20 +5151,24 @@ impl HomeView {
     }
 
     pub(super) fn set_selected_session_color(&mut self, color: Option<&'static str>) {
-        let Some(id) = self.selected_session.clone() else {
-            return;
-        };
-        if let Err(e) = self.apply_user_action(&id, move |inst| {
+        if let Some(id) = self.selected_session.clone() {
+            self.set_session_color(&id, color);
+        }
+    }
+
+    /// Set session `id` to `color`; the color it already has (or `None`) clears it.
+    pub(super) fn set_session_color(&mut self, id: &str, color: Option<&'static str>) {
+        if let Err(e) = self.apply_user_action(id, move |inst| {
             let requested = match color {
                 Some(color) if inst.color.as_deref() == Some(color) => None,
                 Some(color) => Some(color.to_string()),
                 None => None,
             };
             if let Err(err) = inst.set_color(requested) {
-                tracing::error!("set_color (context menu) failed: {}", err);
+                tracing::error!("set_color failed: {}", err);
             }
         }) {
-            tracing::error!("set_selected_session_color (context menu) failed: {}", e);
+            tracing::error!("set_session_color failed: {}", e);
         }
         self.rebuild_flat_items_keeping_cursor();
     }

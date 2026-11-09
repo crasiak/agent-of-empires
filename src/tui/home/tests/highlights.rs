@@ -627,3 +627,38 @@ fn digit_keys_respect_show_session_colors() {
         Some("Session highlights are off (session.show_session_colors)")
     );
 }
+
+#[test]
+#[serial]
+fn digit_keys_follow_the_cursor_when_selected_session_is_cleared() {
+    let inst = colored("cursor", "/repo/a", None);
+    let mut env = seeded_env(test_home(), std::slice::from_ref(&inst), false);
+    let v = &mut env.view;
+    v.select_session_by_id(&inst.id);
+    v.selected_session = None;
+    v.handle_key(key(KeyCode::Char('2')), None);
+    assert_eq!(stored_color(&inst.id).as_deref(), Some("amber"));
+}
+
+#[test]
+#[serial]
+fn digit_keys_ignore_a_trashed_session() {
+    let mut inst = colored("trashed", "/repo/a", None);
+    inst.trash();
+    let mut env = seeded_env(test_home(), std::slice::from_ref(&inst), false);
+    let v = &mut env.view;
+    v.trashed_section_collapsed = false;
+    v.rebuild_flat_items();
+    v.cursor = v
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Session { id, .. } if *id == inst.id))
+        .unwrap();
+    v.update_selected();
+    v.handle_key(key(KeyCode::Char('2')), None);
+    assert_eq!(stored_color(&inst.id), None);
+    assert_eq!(
+        v.status_flash_text(),
+        Some("Nothing to highlight: select a session")
+    );
+}

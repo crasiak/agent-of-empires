@@ -91,17 +91,18 @@ impl HomeView {
             self.flash_status("Session highlights are off (session.show_session_colors)");
             return;
         }
-        let on_session = match self.flat_items.get(self.cursor) {
-            Some(Item::Session { id, .. }) => {
-                self.get_instance(id).is_some_and(|inst| !inst.is_trashed())
+        let id = match self.flat_items.get(self.cursor) {
+            Some(Item::Session { id, .. })
+                if self.get_instance(id).is_some_and(|inst| !inst.is_trashed()) =>
+            {
+                id.clone()
             }
-            _ => false,
+            _ => {
+                self.flash_status("Nothing to highlight: select a session");
+                return;
+            }
         };
-        if !on_session {
-            self.flash_status("Nothing to highlight: select a session");
-            return;
-        }
-        self.set_selected_session_color(Some(SESSION_COLORS[index as usize]));
+        self.set_session_color(&id, Some(SESSION_COLORS[index as usize]));
     }
 
     /// Where a keyboard-opened menu sits: just below the cursor's row, found by
