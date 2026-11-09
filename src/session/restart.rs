@@ -224,7 +224,7 @@ mod tests {
         std::fs::write(
             &tmux,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" = list-panes ] && echo '0 0 %1'\nexit 0\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *\" list-panes \"*) echo '0 0 %1' ;; esac\nexit 0\n",
                 calls.display()
             ),
         )

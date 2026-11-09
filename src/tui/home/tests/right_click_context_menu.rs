@@ -549,9 +549,6 @@ fn context_menu_highlight_actions_hidden_when_setting_is_off() {
 #[serial]
 fn purple_and_teal_highlights_persist_and_draw_fixed_hue_dots() {
     use ratatui::style::Color;
-    // An unread row's status icon is the same glyph; keep it out of the dot count.
-    let unread = crate::session::unread_enabled();
-    crate::session::set_unread_enabled(false);
     for (action, name, rgb) in [
         (
             ContextMenuAction::SessionColor(Some("purple")),
@@ -586,18 +583,17 @@ fn purple_and_teal_highlights_persist_and_draw_fixed_hue_dots() {
             terminal
                 .draw(|f| env.view.render(f, f.area(), &theme, None, None, None))
                 .unwrap();
-            let dots: Vec<Color> = terminal
+            // Status icons share the glyph, so count only dots in the highlight hue.
+            let dots = terminal
                 .backend()
                 .buffer()
                 .content()
                 .iter()
-                .filter(|cell| cell.symbol() == "\u{25cf}")
-                .map(|cell| cell.fg)
-                .collect();
-            assert_eq!(dots, vec![want], "{name}, palette_mode={palette_mode}");
+                .filter(|cell| cell.symbol() == "\u{25cf}" && cell.fg == want)
+                .count();
+            assert_eq!(dots, 1, "{name}, palette_mode={palette_mode}");
         }
     }
-    crate::session::set_unread_enabled(unread);
 }
 
 fn menu_actions(env: &TestEnv) -> Vec<ContextMenuAction> {
