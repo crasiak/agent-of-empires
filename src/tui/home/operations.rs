@@ -262,7 +262,8 @@ impl HomeView {
     /// publishes the row from storage, and the display mirror shows it until then.
     pub(super) fn insert_new_session(&mut self, instance: Instance) -> anyhow::Result<String> {
         let session_id = instance.id.clone();
-        Storage::open_unwatched(&instance.source_profile)?.update(|rows, groups| {
+        // A new profile has no directory yet, so create rather than open it.
+        Storage::new_unwatched(&instance.source_profile)?.update(|rows, groups| {
             rows.push(instance.clone());
             if !instance.group_path.is_empty() {
                 let mut tree = GroupTree::new_with_groups(rows, groups);

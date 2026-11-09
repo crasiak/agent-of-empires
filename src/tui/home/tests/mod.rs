@@ -1153,6 +1153,24 @@ fn with_canonical_group_archive(env: &mut TestEnv, action: impl FnOnce(&mut Test
     publish_canonical_rows(env, &stamps, first_revision + stamps.len() as u64 - 1);
 }
 
+/// Publish every stored row, as the daemon does after an out-of-band storage write.
+fn publish_stored_rows(env: &mut TestEnv, revision: u64) {
+    use crate::tui::session_feed::SessionFeedResult;
+    let sessions = crate::session::list_profiles()
+        .unwrap()
+        .into_iter()
+        .flat_map(|profile| Storage::new_unwatched(&profile).unwrap().load().unwrap())
+        .map(|instance| {
+            crate::server::api::sessions::session_response_from_instance(&instance, false)
+        })
+        .collect();
+    let snapshot = fixture_snapshot(sessions, "test", "test", revision);
+    env.view
+        .session_feed
+        .publish_for_test(SessionFeedResult::Snapshot(Arc::new(snapshot)));
+    env.view.apply_session_feed();
+}
+
 /// Publish the view's rows with the daemon's archive stamps for this commit.
 fn publish_canonical_rows(env: &mut TestEnv, stamps: &[(String, bool)], revision: u64) {
     use crate::tui::session_feed::SessionFeedResult;

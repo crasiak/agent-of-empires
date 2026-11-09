@@ -458,7 +458,11 @@ fn run_migrations_inner(
     let _installed = progress::install(reporter);
     let _announced = progress::install_announced(announce);
     let _runner_lock = runner_lock::acquire(std::time::Duration::from_secs(30))?;
-    let current = ensure_schema_supported()?;
+    let app = crate::session::get_app_dir()?;
+    // Refuse unsupported state before the lifecycle transaction writes its lock files.
+    let current = afk_schema::read_cursor(&app)?;
+    ensure_supported_version(current, CURRENT_VERSION)?;
+    afk_schema::ensure_mainline(&app, current)?;
     // Older daemons know serve.lock but not the lifecycle transaction. Hold
     // both before the first schema write; standalone callers include the TUI.
     let owned_transaction;
@@ -473,7 +477,6 @@ fn run_migrations_inner(
         transaction
     };
     // Another migrator may have completed while we acquired its transaction.
-    let app = crate::session::get_app_dir()?;
     let current = afk_schema::read_cursor(&app)?;
     ensure_supported_version(current, CURRENT_VERSION)?;
     afk_schema::ensure_mainline(&app, current)?;
@@ -654,7 +657,7 @@ mod tests {
             migrated[0]["unrelated_current_main_field"],
             row["unrelated_current_main_field"]
         );
-        assert_eq!(get_current_version(), 55);
+        assert_eq!(get_current_version(), CURRENT_VERSION);
         let registry = fs::read(&path).unwrap();
         assert!(
             fs::read_dir(&profile)

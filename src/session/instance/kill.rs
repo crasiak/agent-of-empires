@@ -1041,11 +1041,12 @@ mod tests {
         let mut inst = Instance::new("pi", home.path().to_str().unwrap());
         inst.source_profile = profile.into();
         inst.tool = "pi".into();
-        inst.sandbox_info = Some(test_sandbox("aoe-pi-stop-hooks", None));
+        // Stop probes the container named from the session id.
+        let container = crate::containers::DockerContainer::generate_name(&inst.id);
+        inst.sandbox_info = Some(test_sandbox(&container, None));
         admit_sandbox_fixture(&inst);
         let config = inst.build_container_config_for_test().unwrap();
-        let _transport =
-            install_container_transport(home.path(), "aoe-pi-stop-hooks", &config.volumes);
+        let _transport = install_container_transport(home.path(), &container, &config.volumes);
         let storage = crate::session::storage::Storage::new_unwatched(profile).unwrap();
         storage
             .update(|rows, _| {

@@ -200,7 +200,7 @@ mod tests {
             std::fs::write(app.join(".schema_version"), "62")?;
             let backups = crate::session::migration_backups(&path)?.len();
             assert!(crate::migrations::run_migrations().is_err());
-            assert_eq!(crate::migrations::get_current_version(), 47);
+            assert_eq!(crate::migrations::get_current_version(), 62);
             assert_eq!(std::fs::read(&path)?, bytes);
             assert_eq!(crate::session::migration_backups(&path)?.len(), backups);
 

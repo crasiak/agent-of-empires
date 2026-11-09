@@ -207,8 +207,11 @@ fn work_arc_upgrade_from_review_preserves_authority_and_registry() {
 
     run_migrations_with(Some(report)).unwrap();
 
-    assert_eq!(*started.lock().unwrap(), (50..=55).collect::<Vec<_>>());
-    assert_eq!(get_current_version(), 55);
+    assert_eq!(
+        *started.lock().unwrap(),
+        (50..=CURRENT_VERSION).collect::<Vec<_>>()
+    );
+    assert_eq!(get_current_version(), CURRENT_VERSION);
     afk::authority::migration_v3::run_at(&app).unwrap();
     afk::review::annotations::initialize(&app).unwrap();
     let mut after = tree(&app);

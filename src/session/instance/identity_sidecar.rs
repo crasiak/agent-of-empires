@@ -670,11 +670,12 @@ mod tests {
             "stale-launch-conversation",
         )
         .unwrap();
+        // The launch's Pi capture admits its poller, which reads only that launch's leaf.
+        assert!(session.supports_session_poller());
         assert!(
-            !session.uses_pi_session_sidecar(),
-            "another launch or legacy leaf cannot admit the poller"
+            session.pi_published_conversation(true).is_none(),
+            "another launch or legacy leaf cannot be observed"
         );
-        assert!(!session.supports_session_poller());
     }
 
     #[test]

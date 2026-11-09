@@ -68,7 +68,8 @@ fn empty_groups_follow_settings_without_removing_stored_groups() {
             assert!(view.flat_items.iter().any(|item| matches!(item, Item::Group { path, .. } if crate::session::is_within_trash_section(path))));
         }
     }
-    env.view.reload_storage_only().unwrap();
+    // The daemon republishes the stored groups; hiding never removed them.
+    publish_canonical_rows(&mut env, &[], 1);
     assert!(env.view.group_trees["test"].group_exists("empty"));
 }
 

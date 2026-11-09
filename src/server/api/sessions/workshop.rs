@@ -2,17 +2,17 @@
 use super::*;
 use crate::session::tailored::workshop::{EffectOutcomeUncertain, Operation, Store};
 
-fn guard(state: &AppState, mutate: bool) -> Option<axum::response::Response> {
-    if mutate && state.read_only {
-        return Some(crate::server::api::read_only_response());
-    }
+fn guard(state: &AppState) -> Option<axum::response::Response> {
     crate::server::api::cityhall_block(state)
 }
 pub async fn workshop_operation(
     State(state): State<Arc<AppState>>,
     body: Result<Json<Operation>, axum::extract::rejection::JsonRejection>,
 ) -> axum::response::Response {
-    if let Some(response) = guard(&state, true) {
+    if let Some(response) = crate::server::api::read_only_block(&state) {
+        return response;
+    }
+    if let Some(response) = guard(&state) {
         return response;
     }
     let Json(operation) = match body {
@@ -41,7 +41,7 @@ pub async fn workshop_get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    if let Some(response) = guard(&state, false) {
+    if let Some(response) = guard(&state) {
         return response;
     }
     match tokio::task::spawn_blocking(move || Store::open()?.get(&id)).await {
@@ -54,7 +54,7 @@ pub async fn workshop_get(
     }
 }
 pub async fn workshop_defaults(State(state): State<Arc<AppState>>) -> axum::response::Response {
-    if let Some(response) = guard(&state, false) {
+    if let Some(response) = guard(&state) {
         return response;
     }
     match tokio::task::spawn_blocking(|| {
@@ -96,9 +96,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _guard = crate::session::test_support::isolate_app_dir_at(dir.path());
         for (readonly, cityhall) in [(true, false), (false, true)] {
-            let mut state = crate::server::test_support::build_test_app_state(vec![]);
-            Arc::get_mut(&mut state).unwrap().read_only = readonly;
-            Arc::get_mut(&mut state).unwrap().cityhall_mode = cityhall;
+            let state =
+                crate::server::test_support::build_test_app_state_configured(vec![], |state| {
+                    state.read_only = readonly;
+                    state.cityhall_mode = cityhall;
+                });
             let values = [
                 serde_json::json!({"operation":"commit","id":"missing","revision":0,"review_digest":"none"}),
                 serde_json::json!({"operation":"preview-publish","id":"missing","revision":0,"remote":"https://github.com/a/b.git","repository_id":1,"base_branch":"main","title":"x","body":""}),

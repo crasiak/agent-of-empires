@@ -124,6 +124,7 @@ pub const DEFAULT_TARGET_ROOTS: &[&str] = &[
     "push",
     "task",
     "daemon",
+    "usage",
 ];
 
 pub const KNOWN_SUB_TARGETS: &[&str] = &[

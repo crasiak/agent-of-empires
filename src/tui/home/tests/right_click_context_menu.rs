@@ -549,6 +549,9 @@ fn context_menu_highlight_actions_hidden_when_setting_is_off() {
 #[serial]
 fn purple_and_teal_highlights_persist_and_draw_fixed_hue_dots() {
     use ratatui::style::Color;
+    // An unread row's status icon is the same glyph; keep it out of the dot count.
+    let unread = crate::session::unread_enabled();
+    crate::session::set_unread_enabled(false);
     for (action, name, rgb) in [
         (
             ContextMenuAction::SessionColor(Some("purple")),
@@ -594,6 +597,7 @@ fn purple_and_teal_highlights_persist_and_draw_fixed_hue_dots() {
             assert_eq!(dots, vec![want], "{name}, palette_mode={palette_mode}");
         }
     }
+    crate::session::set_unread_enabled(unread);
 }
 
 fn menu_actions(env: &TestEnv) -> Vec<ContextMenuAction> {
@@ -698,8 +702,7 @@ fn context_menu_move_to_group_opens_edit_dialog_on_group_field() {
     assert_eq!(dialog.group_value(), "x");
 }
 
-/// "Remove from group" drops the session back to ungrouped immediately, with
-/// no follow-up dialog, and persists the change.
+/// "Remove from group" submits an ungroup for the session, with no follow-up dialog.
 #[test]
 #[serial]
 fn context_menu_remove_from_group_clears_group_path() {
@@ -708,19 +711,18 @@ fn context_menu_remove_from_group_clears_group_path() {
     env.view.handle_right_click(5, session_row(&env, true));
     let id = env.view.selected_session.clone().unwrap();
     env.view.context_menu = None;
+    let mut respond = env.view.session_feed.request_driver_for_test();
     env.view
         .dispatch_context_menu_action(ContextMenuAction::RemoveFromGroup);
 
     assert!(env.view.rename_dialog.is_none());
-    assert_eq!(env.view.get_instance(&id).unwrap().group_path, "");
-    let stored = crate::session::Storage::new_unwatched("test")
-        .unwrap()
-        .load()
-        .unwrap()
-        .into_iter()
-        .find(|inst| inst.id == id)
-        .unwrap();
-    assert_eq!(stored.group_path, "");
+    let (captured, request) = respond(Err("fixture".into())).expect("ungroup submitted");
+    assert_eq!(captured, id);
+    assert!(matches!(
+        request,
+        crate::tui::session_feed::SessionRequest::Rename(body)
+            if body.group.as_deref() == Some("") && body.title.is_none()
+    ));
 }
 
 /// The Snooze row mirrors the `'h'` keybinding, which fires only in Attention sort, so the

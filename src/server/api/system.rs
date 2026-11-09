@@ -4196,7 +4196,7 @@ mod repo_appearance_tests {
     async fn repo_appearances_per_entry_validation_auth_and_read_only() {
         let home = tempfile::tempdir().unwrap();
         let _home = crate::session::test_support::isolate_home(home.path());
-        let mut state = crate::server::test_support::build_test_app_state_with_policy(
+        let state = crate::server::test_support::build_test_app_state_with_policy(
             vec![],
             vec![],
             vec![],
@@ -4314,7 +4314,13 @@ mod repo_appearance_tests {
             );
         }
         drop(app);
-        Arc::get_mut(&mut state).unwrap().read_only = true;
+        let state = crate::server::test_support::build_test_app_state_with_policy_configured(
+            vec![],
+            vec![],
+            vec![],
+            Some("test-token".into()),
+            |state| state.read_only = true,
+        );
         let app = crate::server::router::build_router(state);
         assert_eq!(
             app.clone()

@@ -170,7 +170,7 @@ mod tests {
         let bytes = serde_json::to_vec(&serde_json::json!([row]))?;
         std::fs::write(&path, &bytes)?;
         assert!(crate::migrations::run_migrations().is_err());
-        assert_eq!(crate::migrations::get_current_version(), 44);
+        assert_eq!(crate::migrations::get_current_version(), 59);
         assert_eq!(std::fs::read(path)?, bytes);
         Ok(())
     }
@@ -190,7 +190,7 @@ mod tests {
             (38, true),
             (39, true),
             (40, true),
-            (45, true),
+            (60, true),
         ] {
             let home = tempfile::TempDir::with_prefix_in("aoe-lineage-", "/tmp")?;
             let _home = crate::session::test_support::isolate_app_dir_at(home.path());
@@ -319,7 +319,7 @@ mod tests {
             assert!(!crate::session::migration_backups(&record_path)?.is_empty());
             assert!(!crate::session::migration_backups(&config)?.is_empty());
             let journal = app.join(crate::session::purge_owners::FILE_NAME);
-            assert_eq!(journal.exists(), version < 41);
+            assert_eq!(journal.exists(), version < 56);
             let journal_before = if journal.exists() {
                 Some(std::fs::read(&journal)?)
             } else {
@@ -345,7 +345,7 @@ mod tests {
                     "version {version}, private {private}"
                 );
             }
-            assert_eq!(journal.exists(), version < 41);
+            assert_eq!(journal.exists(), version < 56);
             if let Some(before) = journal_before {
                 assert_eq!(std::fs::read(journal)?, before);
             }

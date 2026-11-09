@@ -479,6 +479,21 @@ mod tests {
             include_str!("sessions/list.rs"),
             &["update_workspace_ordering"],
         ),
+        (
+            "sessions/research.rs",
+            include_str!("sessions/research.rs"),
+            &["research_operation", "research_reply"],
+        ),
+        (
+            "sessions/workshop.rs",
+            include_str!("sessions/workshop.rs"),
+            &["workshop_operation"],
+        ),
+        (
+            "sessions/tailored.rs",
+            include_str!("sessions/tailored.rs"),
+            &["update_tailored_visibility"],
+        ),
         ("git.rs", include_str!("git.rs"), &["clone_repo"]),
         (
             "mcp.rs",

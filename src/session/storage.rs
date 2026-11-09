@@ -2169,6 +2169,8 @@ impl Storage {
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Vec<Instance>> {
         ensure_not_cancelled(cancel)?;
+        // Quarantine every corrupt row first, then refuse if one could own the target.
+        let concealed = std::cell::Cell::new(false);
         let instances = self.load_instances_with(ReadPolicy::Recover, |row| {
             Self::on_corrupt_session(row)?;
             let unrelated_id = row
@@ -2182,12 +2184,12 @@ impl Storage {
                 }
                 _ => false,
             };
-            anyhow::ensure!(
-                unrelated_id && unrelated_pi,
-                "corrupt session row conceals ownership"
-            );
+            if !(unrelated_id && unrelated_pi) {
+                concealed.set(true);
+            }
             Ok(())
         })?;
+        anyhow::ensure!(!concealed.get(), "corrupt session row conceals ownership");
         ensure_not_cancelled(cancel)?;
         Ok(instances)
     }

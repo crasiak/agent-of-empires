@@ -92,6 +92,16 @@ impl HomeView {
 
     /// Reveal the original session through profile-qualified canonical expansion.
     pub fn select_and_reveal_session(&mut self, session_id: &str) {
+        // A locally inserted row the daemon has not published yet is already listed.
+        if self.session_feed.applied_session(session_id).is_none() {
+            if let Some(position) = self.session_row(session_id) {
+                self.cursor = position;
+                self.update_selected();
+                self.preview_scroll_offset = 0;
+                self.manual_unread_hold = None;
+                return;
+            }
+        }
         if let Err(error) = self.reveal_session(session_id, false) {
             self.info_dialog = Some(InfoDialog::sized_to_fit(
                 "Session Not Revealed",

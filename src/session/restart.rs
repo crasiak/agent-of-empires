@@ -126,12 +126,19 @@ pub(crate) fn send_wake(instance: &Instance, message: &str) -> anyhow::Result<bo
     else {
         return Ok(false);
     };
+    // An attested launch must still be current; a launch without one (a plain
+    // command) is identified by its lifecycle generation.
+    let same_launch = match (&instance.active_execution, &current.active_execution) {
+        (None, None) => current.lifecycle_generation == instance.lifecycle_generation,
+        (Some(expected), current) => {
+            !expected.launch_id.is_empty() && current.as_ref() == Some(expected)
+        }
+        (None, Some(_)) => false,
+    };
     if current.tool != instance.tool
         || current.view != instance.view
         || current.command != instance.command
-        || !instance.active_execution.as_ref().is_some_and(|expected| {
-            !expected.launch_id.is_empty() && current.active_execution.as_ref() == Some(expected)
-        })
+        || !same_launch
     {
         return Ok(false);
     }
@@ -217,7 +224,7 @@ mod tests {
         std::fs::write(
             &tmux,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" = list-panes ] && echo '0 0 %1'\nexit 0\n",
                 calls.display()
             ),
         )

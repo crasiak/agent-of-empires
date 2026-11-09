@@ -4062,22 +4062,19 @@ fn same_named_groups_across_profiles_share_one_heading_and_picker_entry() {
         view.profile_for_cursor(view.cursor).as_deref(),
         Some("beta")
     );
+    // The shared heading still routes a row action to that row's own profile.
+    let mut respond = view.session_feed.command_driver_for_test();
     view.toggle_favorite_at_cursor().unwrap();
-    for profile in ["alpha", "beta"] {
-        let rows = Storage::open_unwatched(profile)
-            .unwrap()
-            .load_with_groups()
-            .unwrap()
-            .0;
-        assert!(rows.iter().all(|i| i.source_profile == profile));
-        assert_eq!(
-            rows.iter()
-                .find(|i| i.group_path == "work")
-                .unwrap()
-                .is_favorited(),
-            profile == "beta"
-        );
-    }
+    let (id, mutation) = respond(Ok(crate::daemon::RuntimeCursor {
+        epoch: "test".into(),
+        revision: view.session_feed.next_revision_for_test(),
+    }))
+    .expect("favorite submitted");
+    assert_eq!(id, beta_work);
+    assert!(matches!(
+        mutation,
+        crate::daemon::SessionMutation::Favorite(body) if body.favorited
+    ));
 
     let theme = crate::tui::styles::Theme::default();
     let labels: Vec<String> = view
@@ -4111,7 +4108,7 @@ fn same_named_groups_across_profiles_share_one_heading_and_picker_entry() {
 async fn reveal_expands_only_target_profile_and_keeps_creation_attach_until_all_receipts_apply() {
     use crate::daemon::{MutationReceipt, NamespaceMutation, NamespaceOutcome};
     let mut env = create_test_env_empty();
-    env.view.active_profile = None;
+    // A single-profile view: the all-profiles Manual view collapses locally.
     env.view.group_by = crate::session::config::GroupByMode::Manual;
     let mut target = Instance::new("created-exact", "/tmp/target");
     target.source_profile = "test".into();

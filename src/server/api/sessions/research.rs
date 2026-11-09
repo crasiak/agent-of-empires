@@ -2,17 +2,17 @@
 use super::*;
 use crate::session::tailored::research::{self, Operation, Store};
 
-fn guard(state: &AppState, mutate: bool) -> Option<axum::response::Response> {
-    if mutate && state.read_only {
-        return Some(crate::server::api::read_only_response());
-    }
+fn guard(state: &AppState) -> Option<axum::response::Response> {
     crate::server::api::cityhall_block(state)
 }
 pub async fn research_operation(
     State(state): State<Arc<AppState>>,
     body: Result<Json<Operation>, axum::extract::rejection::JsonRejection>,
 ) -> axum::response::Response {
-    if let Some(response) = guard(&state, true) {
+    if let Some(response) = crate::server::api::read_only_block(&state) {
+        return response;
+    }
+    if let Some(response) = guard(&state) {
         return response;
     }
     let Json(op) = match body {
@@ -29,7 +29,7 @@ pub async fn research_get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    if let Some(response) = guard(&state, false) {
+    if let Some(response) = guard(&state) {
         return response;
     }
     match tokio::task::spawn_blocking(move || Store::open()?.get(&id)).await {
@@ -45,7 +45,7 @@ pub async fn research_output(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    if let Some(response) = guard(&state, false) {
+    if let Some(response) = guard(&state) {
         return response;
     }
     match tokio::task::spawn_blocking(move || research::output(&Store::open()?.get(&id)?)).await {
@@ -72,7 +72,10 @@ pub async fn research_reply(
     Path(id): Path<String>,
     body: Result<Json<ResearchReply>, axum::extract::rejection::JsonRejection>,
 ) -> axum::response::Response {
-    if let Some(response) = guard(&state, true) {
+    if let Some(response) = crate::server::api::read_only_block(&state) {
+        return response;
+    }
+    if let Some(response) = guard(&state) {
         return response;
     }
     let Json(body) = match body {
@@ -107,9 +110,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _guard = crate::session::test_support::isolate_app_dir_at(dir.path());
         for (read_only, cityhall) in [(true, false), (false, true)] {
-            let mut state = crate::server::test_support::build_test_app_state(vec![]);
-            Arc::get_mut(&mut state).unwrap().read_only = read_only;
-            Arc::get_mut(&mut state).unwrap().cityhall_mode = cityhall;
+            let state =
+                crate::server::test_support::build_test_app_state_configured(vec![], |state| {
+                    state.read_only = read_only;
+                    state.cityhall_mode = cityhall;
+                });
             let op = Operation {
                 operation: "run".into(),
                 id: "does-not-exist".into(),
