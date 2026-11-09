@@ -2875,6 +2875,7 @@ impl HomeView {
             ActionId::SessionSearch => self.open_session_search(),
             ActionId::ProjectContext => self.open_project_context_menu((2, 2)),
             ActionId::HighlightMenu => self.open_highlight_menu(),
+            ActionId::ToggleHighlight(index) => self.toggle_selected_highlight(index),
             ActionId::SearchStart => {
                 self.search_active = true;
                 self.search_query = Input::default();

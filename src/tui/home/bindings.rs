@@ -33,6 +33,9 @@ pub enum ActionId {
     /// Open the highlight menu: color the selected session, clear colors from the
     /// shown sessions, or color every `/` search match.
     HighlightMenu,
+    /// Toggle the selected session's highlight to the `SESSION_COLORS` entry at this
+    /// index; the key for the color it already has clears it.
+    ToggleHighlight(u8),
     SessionSearch,
     ProjectContext,
     SearchNext,
@@ -628,6 +631,69 @@ pub static BINDINGS: &[Binding] = &[
         }),
     },
     Binding {
+        id: ActionId::ToggleHighlight(0),
+        non_strict: &[k('1')],
+        strict: &[k('1')],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Toggle highlight (1-5, as in L menu)",
+        }),
+        palette: Some(PaletteMeta {
+            title: "Toggle red highlight",
+            keywords: &["color", "highlight", "toggle", "red"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
+        id: ActionId::ToggleHighlight(1),
+        non_strict: &[k('2')],
+        strict: &[k('2')],
+        context: Context::Always,
+        help: None,
+        palette: Some(PaletteMeta {
+            title: "Toggle amber highlight",
+            keywords: &["color", "highlight", "toggle", "amber"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
+        id: ActionId::ToggleHighlight(2),
+        non_strict: &[k('3')],
+        strict: &[k('3')],
+        context: Context::Always,
+        help: None,
+        palette: Some(PaletteMeta {
+            title: "Toggle green highlight",
+            keywords: &["color", "highlight", "toggle", "green"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
+        id: ActionId::ToggleHighlight(3),
+        non_strict: &[k('4')],
+        strict: &[k('4')],
+        context: Context::Always,
+        help: None,
+        palette: Some(PaletteMeta {
+            title: "Toggle purple highlight",
+            keywords: &["color", "highlight", "toggle", "purple"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
+        id: ActionId::ToggleHighlight(4),
+        non_strict: &[k('5')],
+        strict: &[k('5')],
+        context: Context::Always,
+        help: None,
+        palette: Some(PaletteMeta {
+            title: "Toggle teal highlight",
+            keywords: &["color", "highlight", "toggle", "teal"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
         id: ActionId::SessionSearch,
         non_strict: &[ctrl('f')],
         strict: &[ctrl('f')],
@@ -1218,6 +1284,15 @@ pub static BINDINGS: &[Binding] = &[
     },
 ];
 
+/// Palette ids of [`ActionId::ToggleHighlight`], indexed like `SESSION_COLORS`.
+const TOGGLE_HIGHLIGHT_IDS: [&str; 5] = [
+    "toggle-highlight-red",
+    "toggle-highlight-amber",
+    "toggle-highlight-green",
+    "toggle-highlight-purple",
+    "toggle-highlight-teal",
+];
+
 /// Stable palette/test id for an action (matches the legacy `builtin_commands`
 /// ids). Only actions that surface in the palette need one.
 pub fn palette_id(id: ActionId) -> &'static str {
@@ -1263,6 +1338,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::SearchStart => "search",
         ActionId::HighlightFilter => "highlight-filter",
         ActionId::HighlightMenu => "highlight-menu",
+        ActionId::ToggleHighlight(index) => TOGGLE_HIGHLIGHT_IDS[index as usize],
         ActionId::SessionSearch => "session-search",
         ActionId::ProjectContext => "project-context",
         ActionId::SearchNext => "search-next",
@@ -1385,6 +1461,11 @@ mod tests {
             (key('U'), ActionId::ToggleUnread),
             (key('y'), ActionId::ToggleHideStopped),
             (ctrl_key('o'), ActionId::SortPicker),
+            (key('1'), ActionId::ToggleHighlight(0)),
+            (key('2'), ActionId::ToggleHighlight(1)),
+            (key('3'), ActionId::ToggleHighlight(2)),
+            (key('4'), ActionId::ToggleHighlight(3)),
+            (key('5'), ActionId::ToggleHighlight(4)),
         ];
         let strict = [
             (key('D'), ActionId::Delete),
@@ -1403,6 +1484,11 @@ mod tests {
             (ctrl_key('g'), ActionId::GroupBy),
             (ctrl_key('u'), ActionId::Update),
             (ctrl_key('o'), ActionId::SortPicker),
+            (key('1'), ActionId::ToggleHighlight(0)),
+            (key('2'), ActionId::ToggleHighlight(1)),
+            (key('3'), ActionId::ToggleHighlight(2)),
+            (key('4'), ActionId::ToggleHighlight(3)),
+            (key('5'), ActionId::ToggleHighlight(4)),
         ];
         for (strict_mode, cases) in [(false, &non_strict[..]), (true, &strict[..])] {
             for (event, want) in cases {
@@ -1522,6 +1608,7 @@ mod tests {
         assert_eq!(label(ActionId::Projects, true), "P");
         assert_eq!(label(ActionId::Profiles, true), "Ctrl+P");
         assert_eq!(label(ActionId::Restart, false), "e");
+        assert_eq!(label(ActionId::ToggleHighlight(0), false), "1");
         // NextWaiting has no strict binding.
         assert_eq!(label(ActionId::NextWaiting, true), "");
     }

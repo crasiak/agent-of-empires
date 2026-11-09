@@ -572,3 +572,58 @@ fn show_only_color_narrows_the_filter_and_f4_clear_respects_it() {
     assert_eq!(stored_color(&amber.id), None);
     assert_eq!(stored_color(&red.id).as_deref(), Some("red"));
 }
+
+#[test]
+#[serial]
+fn digit_keys_toggle_the_selected_session_highlight() {
+    let inst = colored("digits", "/repo/a", None);
+    let mut env = seeded_env(test_home(), std::slice::from_ref(&inst), false);
+    let v = &mut env.view;
+    v.select_session_by_id(&inst.id);
+    for (digit, want) in [
+        ('2', Some("amber")),
+        ('2', None),
+        ('3', Some("green")),
+        ('1', Some("red")),
+    ] {
+        v.handle_key(key(KeyCode::Char(digit)), None);
+        assert_eq!(stored_color(&inst.id).as_deref(), want, "after '{digit}'");
+    }
+}
+
+#[test]
+#[serial]
+fn digit_keys_need_a_session_under_the_cursor() {
+    let mut inst = colored("grouped", "/repo/a", Some("red"));
+    inst.group_path = "work".into();
+    let mut env = seeded_env(test_home(), std::slice::from_ref(&inst), true);
+    let v = &mut env.view;
+    v.cursor = v
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { .. }))
+        .unwrap();
+    v.update_selected();
+    v.handle_key(key(KeyCode::Char('2')), None);
+    assert_eq!(stored_color(&inst.id).as_deref(), Some("red"));
+    assert_eq!(
+        v.status_flash_text(),
+        Some("Nothing to highlight: select a session")
+    );
+}
+
+#[test]
+#[serial]
+fn digit_keys_respect_show_session_colors() {
+    let inst = colored("hidden-colors", "/repo/a", None);
+    let mut env = seeded_env(test_home(), std::slice::from_ref(&inst), false);
+    let v = &mut env.view;
+    v.show_session_colors = false;
+    v.select_session_by_id(&inst.id);
+    v.handle_key(key(KeyCode::Char('2')), None);
+    assert_eq!(stored_color(&inst.id), None);
+    assert_eq!(
+        v.status_flash_text(),
+        Some("Session highlights are off (session.show_session_colors)")
+    );
+}

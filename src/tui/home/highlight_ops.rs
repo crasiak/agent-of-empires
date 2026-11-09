@@ -85,6 +85,25 @@ impl HomeView {
         }
     }
 
+    /// `1`-`5`: toggle the cursor session's highlight to `SESSION_COLORS[index]`.
+    pub(super) fn toggle_selected_highlight(&mut self, index: u8) {
+        if !self.show_session_colors {
+            self.flash_status("Session highlights are off (session.show_session_colors)");
+            return;
+        }
+        let on_session = match self.flat_items.get(self.cursor) {
+            Some(Item::Session { id, .. }) => {
+                self.get_instance(id).is_some_and(|inst| !inst.is_trashed())
+            }
+            _ => false,
+        };
+        if !on_session {
+            self.flash_status("Nothing to highlight: select a session");
+            return;
+        }
+        self.set_selected_session_color(Some(SESSION_COLORS[index as usize]));
+    }
+
     /// Where a keyboard-opened menu sits: just below the cursor's row, found by
     /// hit-testing the rendered rows so it follows the list and shelf scroll.
     fn cursor_row_anchor(&self) -> (u16, u16) {
