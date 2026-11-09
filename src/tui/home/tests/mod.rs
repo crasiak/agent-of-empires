@@ -366,11 +366,6 @@ fn session_id_at(view: &HomeView, idx: usize) -> Option<String> {
     }
 }
 
-/// Session id under the cursor, or `None` when the cursor is not on a session row.
-fn cursor_session_id(view: &HomeView) -> Option<String> {
-    session_id_at(view, view.cursor)
-}
-
 /// An `Instance` filed under `group`. Empty group means ungrouped.
 fn instance_in(title: &str, path: &str, group: &str) -> Instance {
     let mut inst = Instance::new(title, path);
