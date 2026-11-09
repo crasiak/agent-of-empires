@@ -3671,7 +3671,7 @@ mod tests {
         });
     }
 
-    use super::test_helpers::TmuxTestSession;
+    use super::test_helpers::{tmux_available, TmuxTestSession};
     use super::*;
 
     #[test]

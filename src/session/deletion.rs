@@ -884,7 +884,7 @@ impl<S: SessionStore + 'static> PurgeTransaction<S> {
                     Some((CompletionGate::Proceed, _)) => {
                         result.disposition = DeletionDisposition::Removed;
                         crate::usage::record_lifecycle(
-                            &self.request.instance,
+                            &self.request().instance,
                             crate::usage::UsageKind::InstanceDeleted,
                         );
                         result

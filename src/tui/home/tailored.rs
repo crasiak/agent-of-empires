@@ -1169,6 +1169,7 @@ impl HomeView {
             sandbox_image: String::new(),
             yolo_mode: false,
             extra_env: Vec::new(),
+            hook_env: Vec::new(),
             extra_args: launch.extra_args,
             command_override: launch.command,
             scratch: true,
@@ -1244,7 +1245,11 @@ impl HomeView {
         capture.set_target(name.clone());
         capture.set_live(true);
         capture.set_capture_lines(40);
-        let send = live_send::LiveSendWorker::spawn(name, Some(capture.waker()));
+        let lease = self
+            .session_feed
+            .native_input_lease()
+            .ok_or_else(|| anyhow::anyhow!("Native terminal input is unavailable"))?;
+        let send = live_send::LiveSendWorker::spawn(name, Some(capture.waker()), lease);
         Ok(CaptureTerminal {
             session_id: id.to_owned(),
             title,

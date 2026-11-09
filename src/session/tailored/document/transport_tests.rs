@@ -150,12 +150,17 @@ fn shared_build_finalizes_before_return_and_cleans_partial_scratch_on_failure() 
         sandbox_image: String::new(),
         yolo_mode: false,
         extra_env: Vec::new(),
+        before_start_hook_env: Vec::new(),
         extra_args: restrictive_args(),
         command_override: "ledger run pi --profile aoe-document-personal --".into(),
         extra_repo_paths: Vec::new(),
         repo_base_branches: Vec::new(),
         scratch: true,
         fork_seed: None,
+        generated_name: false,
+        no_submodules: false,
+        tie_workdir_to_name: false,
+        worktree_path_id: None,
     };
     let root = crate::session::scratch::scratch_root().unwrap();
     assert!(build_prepared(params(), &[], &[], "default", |dir| {

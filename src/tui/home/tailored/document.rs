@@ -247,6 +247,7 @@ impl DocumentWindow {
                     sandbox_image: String::new(),
                     yolo_mode: false,
                     extra_env: Vec::new(),
+                    hook_env: Vec::new(),
                     extra_args: launch.extra_args,
                     command_override: launch.command,
                     scratch: true,

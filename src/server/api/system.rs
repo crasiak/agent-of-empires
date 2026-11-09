@@ -13,6 +13,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::api_error;
+use super::read_only_response;
 use super::validate_profile_name;
 use super::AppState;
 use crate::server::auth::AuthenticatedTokenHash;

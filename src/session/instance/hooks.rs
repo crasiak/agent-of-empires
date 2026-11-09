@@ -1423,7 +1423,7 @@ mod tests {
         ] {
             let mut inst = hook_inst(tool);
             inst.source_profile = "usage-off".to_string();
-            inst.install_agent_status_hooks(crate::agents::get_agent(tool), None);
+            inst.install_agent_status_hooks(crate::agents::get_agent(tool));
 
             let content = std::fs::read_to_string(&path).unwrap();
             assert!(!content.contains("__usage-event"), "{tool}: {content}");
@@ -1453,7 +1453,7 @@ mod tests {
 
         let mut inst = hook_inst("claude");
         inst.source_profile = "claude-status-off".to_string();
-        inst.install_agent_status_hooks(crate::agents::get_agent("claude"), None);
+        inst.install_agent_status_hooks(crate::agents::get_agent("claude"));
 
         let path = tmp.path().join(".claude").join("settings.json");
         let content = std::fs::read_to_string(&path).unwrap();

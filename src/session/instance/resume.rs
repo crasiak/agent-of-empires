@@ -1656,7 +1656,7 @@ mod tests {
         );
 
         let restarted = instance.restart_with_size(None).unwrap();
-        instance.kill_clean().unwrap();
+        instance.kill_clean_locked().unwrap();
         assert!(
             matches!(
                 restarted,

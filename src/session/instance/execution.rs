@@ -2951,6 +2951,7 @@ pub(super) fn validate_managed_arguments(
             "pi" => (
                 &[
                     "--model",
+                    "--thinking",
                     "-m",
                     "--system-prompt",
                     "--append-system-prompt",
@@ -2987,24 +2988,6 @@ pub(super) fn validate_managed_arguments(
                     "--no-themes",
                     "--no-context-files",
                     "-nc",
-                ],
-            ),
-            "pi" => (
-                &[
-                    "--model",
-                    "--thinking",
-                    "-m",
-                    "--system-prompt",
-                    "--append-system-prompt",
-                    "--agent",
-                    "--session-dir",
-                ],
-                &[
-                    "--yolo",
-                    "--dangerously-skip-permissions",
-                    "--allow-all-tools",
-                    "--trust-all-tools",
-                    "--verbose",
                 ],
             ),
             _ => (

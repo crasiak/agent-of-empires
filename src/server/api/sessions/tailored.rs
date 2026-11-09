@@ -1,6 +1,7 @@
 //! History visibility is UI state, never a Session lifecycle mutation.
 
 use super::*;
+use crate::server::api::find_instance;
 use crate::session::tailored::history;
 
 #[derive(Serialize)]
@@ -38,7 +39,7 @@ pub async fn list_tailored_sessions(
         .filter_map(|instance| {
             history::entry(instance, &hidden).map(|entry| HistorySession {
                 entry,
-                session: Some(SessionResponse::from_instance(instance, fullscreen)),
+                session: Some(super::session_response_from_instance(instance, fullscreen)),
                 research: None,
                 workshop: None,
             })

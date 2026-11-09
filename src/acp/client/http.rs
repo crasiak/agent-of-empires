@@ -397,8 +397,10 @@ impl HttpClient {
     pub async fn repo_appearances(
         &self,
     ) -> Result<crate::session::repo_appearance::RepoAppearances, HttpError> {
-        self.get_json("/api/app-state/repo-appearances", Scope::Global)
-            .await
+        let url = format!("{}/api/app-state/repo-appearances", self.endpoint.base_url);
+        let res = self.execute(self.http.get(&url)).await?;
+        let res = check_global_status(res)?;
+        Ok(crate::daemon::decode_json(res).await?)
     }
 
     /// `GET /api/plugins/ui-state`. The daemon-wide plugin UI snapshot

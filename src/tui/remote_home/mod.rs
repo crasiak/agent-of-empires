@@ -648,7 +648,7 @@ mod highlight_tests {
         let mut state = RemoteHomeState::new(DaemonEndpoint::new(
             "http://127.0.0.1:8080".into(),
             None,
-            crate::acp::client::discovery::Source::Env,
+            Source::Env,
         ))
         .unwrap();
         state.appearances.insert(
