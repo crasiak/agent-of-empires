@@ -106,9 +106,14 @@ fn highlight_rebuild_restores_shifted_group_and_attention_skips_filtered_waiting
     // daemon owns the collapse, so `w` asks it to reveal that row.
     v.instances.get_mut(&waiting.id).unwrap().color = Some("red".into());
     v.instances.get_mut(&waiting.id).unwrap().group_path = "hidden".into();
+    let stored: Vec<Instance> = [&waiting.id, &idle.id]
+        .iter()
+        .map(|id| v.instances[*id].clone())
+        .collect();
     Storage::open_unwatched("test")
         .unwrap()
-        .update(|_, groups| {
+        .update(|rows, groups| {
+            rows.extend(stored);
             let mut hidden = Group::new("hidden", "hidden");
             hidden.collapsed = true;
             groups.push(hidden);
