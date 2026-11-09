@@ -115,8 +115,8 @@ fn highlight_rebuild_restores_shifted_group_and_attention_skips_filtered_waiting
             Ok(())
         })
         .unwrap();
-    publish_canonical_rows(&mut env, &[], 1);
     let _driver = env.view.session_feed.namespace_driver_for_test();
+    publish_canonical_rows(&mut env, &[], 1);
     let v = &mut env.view;
     v.group_by = GroupByMode::Manual;
     v.rebuild_flat_items();
