@@ -2,7 +2,7 @@ use serial_test::parallel;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::harness::{require_tmux, TuiTestHarness};
+use crate::harness::{app_dir_in, require_tmux, TuiTestHarness};
 
 /// Read sessions.json from the harness's isolated home.
 fn read_sessions_json(h: &TuiTestHarness) -> serde_json::Value {
