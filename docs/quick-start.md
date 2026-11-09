@@ -21,6 +21,7 @@ aoe
 | `Ctrl+F` | Search past Claude and Pi sessions with `session-search`. Enter goes to the pane whose thread the hit is in; Alt+Enter reopens that exact conversation; Ctrl+P cycles the preview (exchange, thread, matches) |
 | `F4` | Filter by session and project highlights |
 | `L` | Highlight menu: color the session, clear colors from shown sessions, color `/` matches |
+| `1`–`5` | Toggle the selected session's highlight: 1 red, 2 amber, 3 green, 4 purple, 5 teal; the same key again clears it |
 | `F6` | Project context menu (project header selected) |
 | `?` | Full keymap |
 | `q` | Quit |
@@ -44,7 +45,7 @@ A **group** is unrelated: it is a label you assign to existing sessions to sort 
 
 Press `F4`, or choose **Filter session and project highlights** in the `Ctrl+K` command palette. Use arrows or Tab to move, and Space to toggle colors. Multiple colors in one selector match any of them; session and project selectors must both match. **All** means no restriction, and **None** means unhighlighted. Press `c` or activate **Clear both selectors** to reset the draft. Press `-` on a color to hide it: an **All** selector expands to every other color. Press `x` on a session color (or on **All session highlights**) to apply the draft and remove that color (or every color) from the sessions it shows, after a confirm. Enter applies and closes; Escape cancels the draft. Outside the editor, Escape clears active highlight filters before clearing a committed `/` search. The footer shows active selections. Filters are local to the current TUI, not saved preferences.
 
-Press `L`, or right-click a session and open **Highlight ›**, for highlight operations. Inside it a color's initial colors the selected session (again clears it), `x` removes its highlight, and **Show only <color>** narrows `F4` to that color. **Clear <color> from shown** and **Clear all shown highlights** (`c`) act only on the sessions the current filters show, collapsed groups included, Archived and Trash excluded. After a committed `/` search, **Color search matches ›** (`m`) colors every match. Every bulk change shows its count and asks first. Submenus open in place; `←`, Backspace or Escape steps back.
+Press `L`, or right-click a session and open **Highlight ›**, for highlight operations. Inside it a color's initial colors the selected session (again clears it), `x` removes its highlight, and **Show only <color>** narrows `F4` to that color. **Clear <color> from shown** and **Clear all shown highlights** (`c`) act only on the sessions the current filters show, collapsed groups included, Archived and Trash excluded. After a committed `/` search, **Color search matches ›** (`m`) colors every match. Every bulk change shows its count and asks first. Submenus open in place; `←`, Backspace or Escape steps back. With a session selected, `1`–`5` toggle its highlight directly (1 red, 2 amber, 3 green, 4 purple, 5 teal); the same key again removes it.
 
 Filtering removes nonmatching session rows in every grouping mode, including Archived. Trash remains reachable and is not filtered. Empty pinned projects remain only when their project highlight matches and no session highlight filter is selected. Clear filters before rearranging rows. `/` remains a separate fuzzy search within the filtered list.
 
