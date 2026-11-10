@@ -13223,3 +13223,43 @@ async fn an_explicit_wake_discards_a_stale_continuation_before_the_worker_can_dr
     lifecycle::discard_stale_continuation(&state, "stale", true, true).await;
     assert_eq!(pending(&state).await, None);
 }
+
+// The daemon republishes every 500 ms while a TUI subscribes, so a resolver
+// that reads disk once per request still costs seconds per publication at
+// ~100 unique pairs. A second publication on the same state must find every
+// pair resolved already and read nothing.
+#[tokio::test]
+#[serial_test::serial]
+async fn publish_reuses_resolved_config_across_publications() {
+    use std::sync::atomic::Ordering;
+
+    let tmp_home = tempfile::tempdir().expect("tempdir HOME");
+    let _home = crate::session::test_support::isolate_app_dir_at(tmp_home.path());
+
+    let mk = |project_path: &str| {
+        let mut inst = Instance::new("test-session", project_path);
+        inst.tool = "custom-tool-2603".to_string();
+        inst.source_profile = "default".to_string();
+        inst
+    };
+    let state = crate::server::test_support::build_test_app_state(vec![
+        mk("/tmp/repo-a-reuse"),
+        mk("/tmp/repo-b-reuse"),
+    ]);
+
+    // `publish` is what the 500 ms loop runs; `list_sessions` would be served
+    // from the snapshot it leaves behind and never touch the resolver.
+    for _ in 0..2 {
+        state
+            .runtime
+            .publish(&state)
+            .await
+            .expect("publish projects the sessions");
+    }
+    let misses = state.list_sessions_resolver_misses.load(Ordering::Relaxed);
+
+    assert_eq!(
+        misses, 2,
+        "the second publication must reuse the first one's resolutions; got {misses}",
+    );
+}

@@ -1,9 +1,11 @@
 //! Backend conversion to wire responses and per-request config resolution.
 
 use super::*;
+use crate::session::config::repo_config::ResolvedConfigCache;
 use crate::session::config::StructuredView;
 use crate::session::projection::SessionProjection;
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 
 /// Convert session facts with the user fullscreen setting read once per request.
 /// [`SessionResponse::claude_fullscreen`] exposes that setting only for Claude.
@@ -381,11 +383,14 @@ pub(super) fn custom_agent_acp_capable(
         || crate::acp::inherited_acp_base(tool, &session.agent_detect_as).is_some()
 }
 
-/// Per-request cache for `(profile, project_path)` config resolution, shared
-/// across the `list_sessions` overlays so a repo-local override is read from
-/// disk once per unique pair rather than once per row. See #2603.
+/// Per-request view of the `(profile, project_path)` config resolutions the
+/// `list_sessions` overlays share, so a repo-local override is read from disk
+/// once per unique pair rather than once per row (#2603). Backed by the
+/// cross-publication [`ResolvedConfigCache`] on `AppState`, so an unchanged
+/// pair is not re-read on the next publication either.
 pub(super) struct SessionCfgCache<'a> {
-    entries: HashMap<(String, String), (SessionConfig, StructuredView)>,
+    entries: HashMap<(String, String), Arc<crate::session::config::Config>>,
+    shared: &'a ResolvedConfigCache,
     /// Where this cache reports its disk reads. The counter belongs to the
     /// request, not to the cache, so every cache the request opens adds to
     /// one total: splitting the shared cache per overlay then shows up as
@@ -395,33 +400,37 @@ pub(super) struct SessionCfgCache<'a> {
 }
 
 impl<'a> SessionCfgCache<'a> {
-    pub(super) fn new(misses: &'a std::sync::atomic::AtomicUsize) -> Self {
+    pub(super) fn new(
+        shared: &'a ResolvedConfigCache,
+        misses: &'a std::sync::atomic::AtomicUsize,
+    ) -> Self {
         Self {
             entries: HashMap::new(),
+            shared,
             misses,
         }
     }
-    /// Resolve `(profile, project_path)`, reading from disk on first miss only.
-    fn entry(&mut self, profile: &str, project_path: &str) -> &(SessionConfig, StructuredView) {
-        let misses = self.misses;
+    /// Resolve `(profile, project_path)`, reading from disk only when the
+    /// shared cache has no fresh entry.
+    fn entry(&mut self, profile: &str, project_path: &str) -> &crate::session::config::Config {
+        let (misses, shared) = (self.misses, self.shared);
         self.entries
             .entry((profile.to_string(), project_path.to_string()))
             .or_insert_with(|| {
-                misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let config = crate::session::config::repo_config::resolve_config_with_repo_or_warn(
-                    profile,
-                    std::path::Path::new(project_path),
-                );
-                (config.session, config.acp.structured_view)
+                let resolved = shared.resolve_or_warn(profile, std::path::Path::new(project_path));
+                if resolved.miss {
+                    misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                resolved.config
             })
     }
 
     pub(super) fn resolve(&mut self, profile: &str, project_path: &str) -> &SessionConfig {
-        &self.entry(profile, project_path).0
+        &self.entry(profile, project_path).session
     }
 
     pub(super) fn structured_view(&mut self, profile: &str, project_path: &str) -> StructuredView {
-        self.entry(profile, project_path).1
+        self.entry(profile, project_path).acp.structured_view
     }
 }
 

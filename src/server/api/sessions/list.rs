@@ -118,7 +118,10 @@ pub(crate) async fn project_sessions(state: &Arc<AppState>) -> Vec<SessionRespon
     let misses_before = state
         .list_sessions_resolver_misses
         .load(std::sync::atomic::Ordering::Relaxed);
-    let mut session_cfg_cache = SessionCfgCache::new(&state.list_sessions_resolver_misses);
+    let mut session_cfg_cache = SessionCfgCache::new(
+        &state.session_cfg_cache,
+        &state.list_sessions_resolver_misses,
+    );
     let mut project_override_cache = ProjectRegistryCache::new();
 
     // Overlay custom-agent ACP capability; built-ins were resolved in the
@@ -278,8 +281,13 @@ pub(crate) async fn project_sessions(state: &Arc<AppState>) -> Vec<SessionRespon
         target: "http.api.sessions",
         rows = sessions.len(),
         resolver_misses,
-        "list_sessions resolved session config once per unique profile/project pair"
+        "list_sessions read session config from disk once per changed profile/project pair"
     );
+    // Pairs of sessions deleted since the last request stay cached until they
+    // have gone unused this long.
+    state
+        .session_cfg_cache
+        .evict_idle(std::time::Duration::from_secs(10 * 60));
 
     // The park probe touches config files and SQLite, so it runs with the
     // session registry unlocked rather than holding writers behind it.
