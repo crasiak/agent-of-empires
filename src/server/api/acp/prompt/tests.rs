@@ -6,6 +6,7 @@ use crate::acp::state::Event;
 fn structured_instance(id: &str, idle: bool) -> crate::session::Instance {
     let mut inst = crate::session::Instance::new(id, &format!("/tmp/aoe-{id}"));
     inst.id = id.to_string();
+    inst.source_profile = "default".into();
     inst.view = crate::session::View::Structured;
     if idle {
         inst.status = crate::session::Status::Idle;
@@ -13,8 +14,21 @@ fn structured_instance(id: &str, idle: bool) -> crate::session::Instance {
     inst
 }
 
-fn structured_state(id: &str, idle: bool) -> Arc<AppState> {
-    crate::server::test_support::build_test_app_state(vec![structured_instance(id, idle)])
+async fn seed_native_row(state: &Arc<AppState>) {
+    crate::session::purge_owners::initialize(&crate::session::get_app_dir().unwrap()).unwrap();
+    let row = state.instances.read().await[0].clone();
+    crate::server::test_support::seed_instances_on_disk_for_test(
+        &row.source_profile,
+        vec![row.clone()],
+    );
+    crate::server::test_support::refresh_canonical_metadata_for_test(state).await;
+}
+
+async fn structured_state(id: &str, idle: bool) -> Arc<AppState> {
+    let state =
+        crate::server::test_support::build_test_app_state(vec![structured_instance(id, idle)]);
+    seed_native_row(&state).await;
+    state
 }
 
 fn prompt_req(text: &str) -> Result<Json<PromptRequest>, axum::extract::rejection::JsonRejection> {
@@ -123,7 +137,7 @@ const PARKS: [(&str, fn(&AppState, &str)); 2] = [
 /// A structured session whose worker starts fail: on the provider limit when
 /// `rate_limited`, otherwise as a generic launch failure. The count proves a
 /// case reached the start it forced.
-fn failing_start_state(
+async fn failing_start_state(
     id: &str,
     rate_limited: bool,
 ) -> (Arc<AppState>, Arc<std::sync::atomic::AtomicUsize>) {
@@ -144,16 +158,9 @@ fn failing_start_state(
         })
     });
     let inst = structured_instance(id, false);
-    // The launch admission rereads the stored row, as it exists in production.
-    crate::session::Storage::new_unwatched(&inst.source_profile)
-        .unwrap()
-        .update(|rows, _| {
-            rows.push(inst.clone());
-            Ok(())
-        })
-        .unwrap();
     let state =
         crate::server::test_support::build_test_app_state_with_launcher(vec![inst], launcher);
+    seed_native_row(&state).await;
     (state, launches)
 }
 
@@ -166,7 +173,14 @@ async fn wake_prompt_frees_instance_lock_and_publishes_nothing_without_a_worker(
     use crate::acp::supervisor::{ResumeKind, ResumeReservationOutcome};
 
     let id = "sess-3172".to_string();
-    let state = structured_state(&id, false);
+    let state = structured_state(&id, false).await;
+    let seeded = crate::session::PendingInitialTurn {
+        text: "queued before the park".to_string(),
+        attachments: Vec::new(),
+        synthesized: true,
+    };
+    state.instances.write().await[0].pending_initial_turn = Some(seeded.clone());
+    seed_native_row(&state).await;
     let reservation = match state
         .acp_supervisor
         .begin_resume(
@@ -217,14 +231,86 @@ async fn wake_prompt_frees_instance_lock_and_publishes_nothing_without_a_worker(
         e,
         Event::UserPromptSent { .. }
     )));
+    assert_eq!(
+        state.instances.read().await[0].pending_initial_turn,
+        Some(seeded.clone()),
+        "a prompt refused before publication must keep the pending initial turn (#5253)"
+    );
+    assert_eq!(persisted_pending_turn(&state, &id).await, Some(seeded));
+}
+
+/// #5253: a prompt that dispatch queues supersedes a pending continuation only once
+/// the enqueue succeeds; a rejected one leaves it in place.
+#[tokio::test]
+async fn a_rejected_enqueue_keeps_the_pending_turn_and_an_accepted_one_clears_it() {
+    let _app_dir = crate::session::test_support::isolate_app_dir();
+    let id = "sess-5253-enqueue".to_string();
+    let state = structured_state(&id, false).await;
+    state
+        .acp_event_store
+        .record(&id, 1, &Event::ThinkingStarted)
+        .expect("seed a running turn");
+    state.acp_supervisor.hydrate_seqs([(id.clone(), 1)]);
+    let seeded = crate::session::PendingInitialTurn {
+        text: "queued before the park".to_string(),
+        attachments: Vec::new(),
+        synthesized: true,
+    };
+    state.instances.write().await[0].pending_initial_turn = Some(seeded.clone());
+    seed_native_row(&state).await;
+
+    let oversized = "x".repeat(300 * 1024);
+    let response = acp_prompt(
+        State(Arc::clone(&state)),
+        Path(id.clone()),
+        prompt_req(&oversized),
+    )
+    .await
+    .into_response();
+    assert!(response.status().is_client_error(), "{}", response.status());
+    assert_eq!(
+        state.instances.read().await[0].pending_initial_turn,
+        Some(seeded.clone())
+    );
+    assert_eq!(persisted_pending_turn(&state, &id).await, Some(seeded));
+
+    let response = acp_prompt(
+        State(Arc::clone(&state)),
+        Path(id.clone()),
+        prompt_req("follow up"),
+    )
+    .await
+    .into_response();
+    assert!(response.status().is_success(), "{}", response.status());
+    assert_eq!(
+        state
+            .session_service
+            .queued_prompts_snapshot(&id)
+            .await
+            .len(),
+        1
+    );
+    assert!(state.instances.read().await[0]
+        .pending_initial_turn
+        .is_none());
+    // One durable write: the row and the continuation's removal are never seen apart.
+    let profile = state.instances.read().await[0].source_profile.clone();
+    let on_disk = crate::server::test_support::load_instances_from_disk_for_test(&profile)
+        .into_iter()
+        .find(|i| i.id == id)
+        .expect("the session row must be on disk");
+    assert_eq!(on_disk.queued_prompts.len(), 1);
+    assert_eq!(on_disk.queued_prompts[0].text, "follow up");
+    assert!(on_disk.pending_initial_turn.is_none());
 }
 
 /// A Stop pressed right after Enter must wait out the prompt submission rather
 /// than reach the agent before the prompt it names.
 #[tokio::test]
 async fn cancel_waits_for_an_in_flight_prompt_submission() {
+    let _app_dir = crate::session::test_support::isolate_app_dir();
     let id = "sess-stop-order".to_string();
-    let state = structured_state(&id, false);
+    let state = structured_state(&id, false).await;
     let submission = state
         .session_service
         .prompt_submission_for_session(&id)
@@ -255,7 +341,7 @@ async fn prompt_handlers_claim_the_submission_guard_before_they_wake() {
     for diff_comments in [false, true] {
         let _app_dir = crate::session::test_support::isolate_app_dir();
         let id = "sess-3859".to_string();
-        let state = structured_state(&id, false);
+        let state = structured_state(&id, false).await;
         assert!(state.instances.read().await[0].last_accessed_at.is_none());
 
         let held = state
@@ -309,7 +395,7 @@ async fn rate_limit_park_is_sendable_at_the_shared_decision_point() {
     for (park, seed) in PARKS {
         let _app_dir = crate::session::test_support::isolate_app_dir();
         let id = format!("sess-{park}-park-shared");
-        let state = structured_state(&id, false);
+        let state = structured_state(&id, false).await;
         let service = &state.session_service;
         let id_ref = id.as_str();
         let decide = move || async move {
@@ -341,8 +427,9 @@ async fn rate_limit_park_is_sendable_at_the_shared_decision_point() {
 #[tokio::test]
 async fn no_revive_refuses_a_stopped_or_dormant_worker_without_side_effects() {
     for dormant in [false, true] {
+        let _app_dir = crate::session::test_support::isolate_app_dir();
         let id = format!("sess-no-revive-dormant-{dormant}");
-        let state = structured_state(&id, false);
+        let state = structured_state(&id, false).await;
         {
             let mut instances = state.instances.write().await;
             if dormant {
@@ -354,6 +441,7 @@ async fn no_revive_refuses_a_stopped_or_dormant_worker_without_side_effects() {
                 synthesized: true,
             });
         }
+        seed_native_row(&state).await;
 
         let response = acp_prompt(
             State(Arc::clone(&state)),
@@ -364,6 +452,11 @@ async fn no_revive_refuses_a_stopped_or_dormant_worker_without_side_effects() {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::CONFLICT, "dormant={dormant}");
+        assert_eq!(
+            crate::daemon::ApiErrorCode::from_headers(response.status(), response.headers(), false),
+            Some(crate::daemon::ApiErrorCode::NoRevive),
+            "dormant={dormant}"
+        );
         let inst = state.instances.read().await[0].clone();
         assert!(
             inst.pending_initial_turn.is_some(),
@@ -406,7 +499,7 @@ async fn turn_on_a_park_resumes_instead_of_queueing() {
                 );
                 let _app_dir = crate::session::test_support::isolate_app_dir();
                 let id = format!("sess-{park}-park-{rate_limited}-{diff_comments}");
-                let (state, launches) = failing_start_state(&id, rate_limited);
+                let (state, launches) = failing_start_state(&id, rate_limited).await;
                 seed(&state, &id);
                 // The detached start holds a `SessionService` clone until it ends.
                 let refs_at_rest = Arc::strong_count(&state.session_service);
@@ -483,7 +576,7 @@ async fn no_revive_refuses_a_prompt_on_a_rate_limit_park() {
     for (park, seed) in PARKS {
         let _app_dir = crate::session::test_support::isolate_app_dir();
         let id = format!("sess-no-revive-{park}-park");
-        let (state, launches) = failing_start_state(&id, true);
+        let (state, launches) = failing_start_state(&id, true).await;
         seed(&state, &id);
         state.instances.write().await[0].pending_initial_turn =
             Some(crate::session::PendingInitialTurn {
@@ -491,6 +584,7 @@ async fn no_revive_refuses_a_prompt_on_a_rate_limit_park() {
                 attachments: Vec::new(),
                 synthesized: true,
             });
+        seed_native_row(&state).await;
 
         let response = acp_prompt(
             State(Arc::clone(&state)),
@@ -541,7 +635,7 @@ async fn no_revive_refuses_a_prompt_on_a_rate_limit_park() {
 async fn no_revive_refuses_a_workerless_rate_limit_park_with_a_stale_turn() {
     let _app_dir = crate::session::test_support::isolate_app_dir();
     let id = "sess-no-revive-stale-rate-limit".to_string();
-    let (state, launches) = failing_start_state(&id, true);
+    let (state, launches) = failing_start_state(&id, true).await;
     seed_elapsed_rate_limit_park(&state, &id, true);
     state.instances.write().await[0].pending_initial_turn =
         Some(crate::session::PendingInitialTurn {
@@ -549,6 +643,7 @@ async fn no_revive_refuses_a_workerless_rate_limit_park_with_a_stale_turn() {
             attachments: Vec::new(),
             synthesized: true,
         });
+    seed_native_row(&state).await;
 
     assert!(!state.acp_supervisor.is_running(&id).await);
     assert!(
@@ -600,7 +695,7 @@ async fn no_revive_refuses_a_workerless_rate_limit_park_with_a_stale_turn() {
 async fn a_direct_prompt_and_the_queue_drain_cannot_both_own_the_same_turn() {
     let _app_dir = crate::session::test_support::isolate_app_dir();
     let id = "sess-3621-race".to_string();
-    let state = structured_state(&id, true);
+    let state = structured_state(&id, true).await;
     let cmds = state
         .acp_supervisor
         .test_insert_worker_cmd_recording(&id)
@@ -658,7 +753,7 @@ async fn a_direct_prompt_and_the_queue_drain_cannot_both_own_the_same_turn() {
 async fn diff_comments_refuse_to_open_a_turn_another_submission_started() {
     let _app_dir = crate::session::test_support::isolate_app_dir();
     let id = "sess-3649-diff".to_string();
-    let state = structured_state(&id, true);
+    let state = structured_state(&id, true).await;
     let cmds = state
         .acp_supervisor
         .test_insert_worker_cmd_recording(&id)
@@ -787,13 +882,8 @@ async fn a_manual_prompt_cannot_overtake_a_continuation_install() {
         let label = if queued { "queued" } else { "direct" };
         let id = format!("sess-4092-{label}");
         let inst = structured_instance(&id, false);
-        // An empty profile resolves the same way for the seeder, the writer and
-        // the reader, so all three land on one sessions.json.
-        crate::server::test_support::seed_instances_on_disk_for_test(
-            &inst.source_profile,
-            vec![inst.clone()],
-        );
         let state = crate::server::test_support::build_test_app_state(vec![inst]);
+        seed_native_row(&state).await;
         state
             .acp_supervisor
             .test_insert_worker_cmd_recording(&id)
@@ -830,7 +920,7 @@ async fn a_manual_prompt_cannot_overtake_a_continuation_install() {
                 .await;
                 assert!(matches!(
                     outcome,
-                    crate::server::acp_reconciler::ContinuationOutcome::Stands
+                    crate::server::acp_reconciler::ContinuationOutcome::Installed
                 ));
             }
         });
@@ -925,7 +1015,7 @@ fn prompt_persist_tiers() {
 async fn sending_a_queued_plugin_row_now_keeps_its_stored_sender() {
     let _app_dir = crate::session::test_support::isolate_app_dir();
     let id = "sess-send-now";
-    let state = structured_state(id, true);
+    let state = structured_state(id, true).await;
     let _cmds = state
         .acp_supervisor
         .test_insert_worker_cmd_recording(id)
@@ -972,7 +1062,7 @@ async fn sending_a_queued_plugin_row_now_keeps_its_stored_sender() {
 }
 
 async fn state_with_queued_plugin_row(id: &str, idle: bool) -> Arc<AppState> {
-    let state = structured_state(id, idle);
+    let state = structured_state(id, idle).await;
     state
         .session_service
         .enqueue_prompt(
@@ -1027,7 +1117,7 @@ async fn send_now_refuses_text_that_differs_from_the_stored_plugin_row() {
 async fn send_now_refuses_text_that_differs_from_a_user_row_too() {
     let _app_dir = crate::session::test_support::isolate_app_dir();
     let id = "sess-send-now-stale";
-    let state = structured_state(id, true);
+    let state = structured_state(id, true).await;
     let _cmds = state
         .acp_supervisor
         .test_insert_worker_cmd_recording(id)
@@ -1065,8 +1155,66 @@ fn shot_ref() -> crate::daemon::PromptAttachmentRef {
     }
 }
 
+/// #5253: a repost of a queued row that cannot be persisted leaves the row and the bytes it
+/// pointed at as they were, whether the repost carried new attachments or none.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_repost_keeps_the_rows_attachment_bytes() {
+    use crate::acp::event_store::AttachmentBlob;
+    use std::os::unix::fs::PermissionsExt;
+    let _app_dir = crate::session::test_support::isolate_app_dir();
+    let id = "sess-5253-bytes";
+    let state = state_with_attachment_row(id, true).await;
+    let profile = state.instances.read().await[0].source_profile.clone();
+    crate::server::test_support::seed_instances_on_disk_for_test(
+        &profile,
+        vec![state.instances.read().await[0].clone()],
+    );
+    let dir = crate::session::Storage::new_unwatched(&profile)
+        .expect("storage")
+        .sessions_path()
+        .parent()
+        .expect("sessions dir")
+        .to_path_buf();
+    let original = std::fs::metadata(&dir).unwrap().permissions();
+    let replacement = AttachmentBlob {
+        id: "att-2".into(),
+        kind: crate::daemon::PromptAttachmentKind::Image,
+        mime_type: "image/png".into(),
+        name: None,
+        data: b"newer".to_vec(),
+    };
+    for blobs in [vec![replacement], Vec::new()] {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = super::super::super::queue::buffer_and_enqueue(
+            &state,
+            id,
+            super::super::super::queue::QueuedPrompt {
+                prompt_id: "q1",
+                text: "caption".to_string(),
+                blobs: &blobs,
+                origin_device: None,
+                origin_plugin: None,
+                supersede_pending_turn: true,
+            },
+        )
+        .await;
+        std::fs::set_permissions(&dir, original.clone()).unwrap();
+        assert!(result.is_err(), "the failed write must be reported");
+        let rows = state.session_service.queued_prompts_snapshot(id).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].attachments, vec![shot_ref()]);
+        let stored = state
+            .acp_event_store
+            .load_pending_attachments_for_ref(id, "q1");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, "att-1");
+        assert_eq!(stored[0].data, b"stored".to_vec());
+    }
+}
+
 async fn state_with_attachment_row(id: &str, store_bytes: bool) -> Arc<AppState> {
-    let state = structured_state(id, true);
+    let state = structured_state(id, true).await;
     state
         .session_service
         .enqueue_prompt(
@@ -1229,4 +1377,88 @@ async fn send_now_behind_a_busy_agent_keeps_the_one_queued_row() {
     assert_eq!(queue.len(), 1);
     assert_eq!(queue[0].id, "q1");
     assert_eq!(queue[0].origin_plugin.as_deref(), Some("cron"));
+}
+
+/// The 202 names how the prompt was dispatched and, when it became a turn, the seq of its
+/// `UserPromptSent`; a queued prompt has a row id and no seq.
+#[tokio::test]
+async fn a_prompt_reports_its_dispatch_and_the_seq_it_was_recorded_at() {
+    let caps = |steering| Event::PromptCapabilities {
+        image: false,
+        audio: false,
+        embedded_context: false,
+        load_session: None,
+        steering,
+    };
+    let earlier_turn = || Event::UserPromptSent {
+        text: "an earlier turn".into(),
+        attachments: Vec::new(),
+        prompt_id: None,
+        synthesized: false,
+        origin_plugin: None,
+    };
+    // (case, events already on disk, disposition)
+    let cases = [
+        ("idle", vec![], "sent"),
+        (
+            "mid-turn, steerable",
+            vec![caps(true), earlier_turn()],
+            "steered",
+        ),
+        (
+            "mid-turn, not steerable",
+            vec![caps(false), earlier_turn()],
+            "queued",
+        ),
+    ];
+    for (case, events, disposition) in cases {
+        let _app_dir = crate::session::test_support::isolate_app_dir();
+        let id = "sess-dispatch-seq";
+        let state = structured_state(id, true).await;
+        let _cmds = state
+            .acp_supervisor
+            .test_insert_worker_cmd_recording(id)
+            .await;
+        for (seq, event) in events.iter().enumerate() {
+            state
+                .acp_event_store
+                .record(id, seq as u64 + 1, event)
+                .expect("seed");
+        }
+        state
+            .acp_supervisor
+            .hydrate_seqs([(id.to_string(), state.acp_event_store.highest_seq(id))]);
+
+        let response = acp_prompt(
+            State(Arc::clone(&state)),
+            Path(id.to_string()),
+            prompt_req("the new prompt"),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED, "{case}");
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["disposition"], disposition, "{case}: {body}");
+        let recorded = state
+            .acp_event_store
+            .replay_from(id, 0)
+            .into_iter()
+            .find_map(|(seq, e)| {
+                matches!(&e, Event::UserPromptSent { text, .. } if text == "the new prompt")
+                    .then_some(seq)
+            });
+        if disposition == "queued" {
+            assert!(body.get("seq").is_none(), "{case}: {body}");
+            assert!(body["queued_id"].is_string(), "{case}: {body}");
+            assert_eq!(recorded, None, "{case}");
+        } else {
+            assert_eq!(body["seq"].as_u64(), recorded, "{case}: {body}");
+            assert!(recorded.is_some(), "{case}");
+        }
+    }
 }

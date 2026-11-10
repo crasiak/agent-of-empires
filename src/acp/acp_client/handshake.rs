@@ -1,11 +1,11 @@
 //! The `initialize` request aoe sends and the wait for the agent's reply.
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::v1::schema::{
     ClientCapabilities, ClientSessionCapabilities, CompactionCapabilities, ElicitationCapabilities,
     ElicitationFormCapabilities, FileSystemCapabilities, Implementation, InitializeRequest,
     NoticeCapabilities,
 };
-use agent_client_protocol::schema::ProtocolVersion;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::warn;
@@ -57,9 +57,11 @@ pub(super) async fn wait_for_handshake(
     ready_rx: oneshot::Receiver<Result<(), AcpError>>,
     child: Option<&Arc<Mutex<tokio::process::Child>>>,
     install_binary: &str,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<(), AcpError> {
     let timeout = std::time::Duration::from_secs(30);
-    match tokio::time::timeout(timeout, ready_rx).await {
+    let end = deadline.unwrap_or_else(|| tokio::time::Instant::now() + timeout);
+    match tokio::time::timeout_at(end, ready_rx).await {
         Ok(Ok(Ok(()))) => Ok(()),
         Ok(Ok(Err(e))) => {
             warn!(target: "acp.protocol", session = %session_label, "ACP handshake failed: {e}");
@@ -69,6 +71,7 @@ pub(super) async fn wait_for_handshake(
         Ok(Err(_canceled)) => Err(AcpError::Spawn(
             "ACP connection task ended before completing the initialize handshake".into(),
         )),
+        Err(_) if deadline.is_some() => Err(AcpError::AttachTimedOut),
         Err(_elapsed) => {
             warn!(
                 target: "acp.protocol",
@@ -120,7 +123,7 @@ mod tests {
         // downgrade) or fail the response parse, and the fake agent sends these
         // exact keys, so it would otherwise mask the drift.
         {
-            use agent_client_protocol::schema::v1::{ForkSessionResponse, SessionCapabilities};
+            use agent_client_protocol::v1::schema::{ForkSessionResponse, SessionCapabilities};
 
             let caps: SessionCapabilities =
                 serde_json::from_value(serde_json::json!({ "fork": {} })).expect("caps parse");
@@ -135,6 +138,19 @@ mod tests {
                     .expect("fork response parse");
             assert_eq!(resp.session_id.0.as_ref(), "child-123");
         }
+    }
+
+    /// Any `_meta.jetbrains.air` makes claude-agent-acp treat aoe as the AIR
+    /// client, which strips the text and `rawOutput` of a Read that names a
+    /// path (the Read card would show only "completed").
+    #[test]
+    fn initialize_does_not_declare_the_air_extension() {
+        let wire = serde_json::to_value(build_initialize_request()).expect("serialize");
+        assert_eq!(
+            wire.pointer("/clientCapabilities/_meta/jetbrains"),
+            None,
+            "AIR client mode changes tool output: {wire}"
+        );
     }
 
     /// The adapter silently falls back to untyped text unless these exact keys

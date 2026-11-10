@@ -64,6 +64,9 @@ fn highlight_filters_preserve_live_target_and_footer_on_external_color_change() 
 #[test]
 #[serial]
 fn highlight_rebuild_restores_shifted_group_and_attention_skips_filtered_waiting() {
+    // Unread rows are actionable too; keep `w` on the waiting and idle fallbacks.
+    let unread = crate::session::unread_enabled();
+    crate::session::set_unread_enabled(false);
     let mut a = Instance::new("alpha", "/repo/alpha");
     a.color = Some("red".into());
     let mut b = Instance::new("beta", "/repo/beta");
@@ -99,17 +102,41 @@ fn highlight_rebuild_restores_shifted_group_and_attention_skips_filtered_waiting
     v.select_session_by_id(&b.id);
     v.handle_key(key(KeyCode::Char('w')), None);
     assert_eq!(v.selected_session.as_deref(), Some(idle.id.as_str()));
-    // A matching collapsed row remains eligible for the hidden fallback.
+    // A matching collapsed row remains eligible for the hidden fallback: the
+    // daemon owns the collapse, so `w` asks it to reveal that row.
     v.instances.get_mut(&waiting.id).unwrap().color = Some("red".into());
     v.instances.get_mut(&waiting.id).unwrap().group_path = "hidden".into();
-    v.rebuild_group_trees();
-    v.group_trees
-        .get_mut("test")
+    let stored: Vec<Instance> = [&waiting.id, &idle.id]
+        .iter()
+        .map(|id| v.instances[*id].clone())
+        .collect();
+    Storage::open_unwatched("test")
         .unwrap()
-        .set_collapsed("hidden", true);
+        .update(|rows, groups| {
+            rows.extend(stored);
+            let mut hidden = Group::new("hidden", "hidden");
+            hidden.collapsed = true;
+            groups.push(hidden);
+            Ok(())
+        })
+        .unwrap();
+    let _driver = env.view.session_feed.namespace_driver_for_test();
+    let revision = env.view.session_feed.next_revision_for_test();
+    publish_canonical_rows(&mut env, &[], revision);
+    let v = &mut env.view;
+    v.group_by = GroupByMode::Manual;
     v.rebuild_flat_items();
+    assert!(!v
+        .flat_items
+        .iter()
+        .any(|item| matches!(item, Item::Session { id, .. } if *id == waiting.id)));
+    v.select_session_by_id(&idle.id);
     v.handle_key(key(KeyCode::Char('w')), None);
-    assert_eq!(v.selected_session.as_deref(), Some(waiting.id.as_str()));
+    assert!(
+        matches!(&v.pending_namespace_intent, Some(super::super::NamespaceIntent::Reveal { id, .. }) if *id == waiting.id),
+        "`w` must reveal the hidden waiting session"
+    );
+    crate::session::set_unread_enabled(unread);
 }
 
 #[test]

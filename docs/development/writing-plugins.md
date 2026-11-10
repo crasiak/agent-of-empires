@@ -20,7 +20,7 @@ Every plugin declares identity, what it contributes, and, with a worker, how to 
 id = "dev.example.my-plugin"
 name = "My Plugin"
 version = "0.1.0"
-api_version = 14
+api_version = 19
 aoe_version = ">=1.11.0, <2.0.0"
 description = "What the plugin does."
 
@@ -45,6 +45,10 @@ Pick an `id` outside the reserved `aoe.*` and `agent-of-empires.*` namespaces, s
 
 A worker requests only the grants it uses. `runtime.worker` is required to run any code at all; add `net`, `session.read`, `notifications`, and so on as needed. Static contributions (commands, keybinds, themes, ui, status) need no capability. The user grants the exact declared set at install, pinned to the manifest hash, so an update that widens capabilities must be re-approved. Keep the list honest and minimal.
 
+Agent integrations are optional contributions, not worker RPCs. They require `api_version >= 19`; provider-native status and replies also require `session.integration`. When declared, `session.integration` requires valid, nonempty `provider_versions` on every integration entry. See [Agent integrations](../plugin-api.md#agent-integrations) for the launch grammar and communication contract.
+
+The install approval lists each declared tool and exact launch command. Updates that add an agent integration or change its launch command require approval again; removals alone do not. The command runs as the host user only when a user launches that agent.
+
 ## The worker
 
 The host spawns the worker, sends one JSON-RPC request per line on stdin, and reads one response per line on stdout; the worker exits when stdin reaches EOF.
@@ -56,7 +60,7 @@ The host spawns the worker, sends one JSON-RPC request per line on stdin, and re
 
 The host maps a command id to a fully namespaced method, `plugin.<id>.<command-id>`, so a worker for `dev.example.my-plugin` actually receives `plugin.dev.example.my-plugin.status`. Dispatch on the trailing segment so either form works, return a JSON-RPC error with code `-32601` for an unknown method, and never respond to a message with no `id`.
 
-The host also pushes notifications that carry no `id`, such as `session.status.changed` for plugins that target `api_version >= 14` and hold `session.read`. Ignore methods you do not handle and never reply. See [Session status events](../plugin-api.md#session-driving-rpcs) in the Plugin API reference.
+The host also pushes notifications that carry no `id`, such as `session.status.changed` (`api_version >= 14`) and `session.lifecycle.changed` (`api_version >= 19`) for plugins that hold `session.read`. Ignore methods you do not handle and never reply. See [Session status events](../plugin-api.md#session-driving-rpcs) in the Plugin API reference.
 
 ## Build and launch
 
@@ -85,6 +89,8 @@ aoe plugin install ./my-plugin     # runs the build steps, prompts for grants
 aoe plugin update my-plugin        # re-runs the build, re-approves changed grants
 aoe plugin uninstall my-plugin
 ```
+
+To work on a plugin whose id is in a reserved namespace (`aoe.*`, `agent-of-empires.*`), install the checkout with `--dev`. TypeScript plugins can run Node through `AOE_NODE`, which build steps and workers receive.
 
 Drive the worker by hand before installing, to confirm the protocol:
 

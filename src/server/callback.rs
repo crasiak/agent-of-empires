@@ -1,4 +1,15 @@
 //! Per-session HTTP completion callbacks for external work-queue dispatchers.
+//!
+//! A session created with `callback_url` set receives a fire-and-forget HTTP
+//! POST when it transitions into Idle, Waiting, or Error, so a headless
+//! dispatcher can react to completion without polling `GET /api/sessions`.
+//! Subscribes to the same `state.status_tx` broadcast the web-push consumer
+//! (`push.rs`) uses, but applies a short debounce instead of push's
+//! dwell+cooldown: a legitimate second Idle a minute later is real signal a
+//! dispatcher needs, not noise to suppress, so only sub-second tmux-scrape
+//! flicker gets collapsed. The debounce mirrors `status_hooks.rs`'s
+//! generation-counter pattern (the TUI's own status-command hooks), ported
+//! to async. See #3156.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -15,7 +26,9 @@ use crate::public_network::{
 };
 use crate::session::Status;
 
-/// Debounce window before firing.
+/// Debounce window before firing: absorbs sub-second tmux-scrape flicker
+/// (Waiting -> Running -> Waiting) without push's 60s cooldown, since a real
+/// second Idle a minute later is signal a dispatcher needs, not noise.
 const DEBOUNCE_MS: u64 = 500;
 
 /// Bounded concurrency for outbound callback POSTs, mirrors `push.rs`'s
@@ -31,8 +44,9 @@ struct CallbackPayload {
     old_status: &'static str,
     new_status: &'static str,
     at: String,
-    /// Per-process monotonic counter (resets on daemon restart) so a dispatcher can discard
-    /// an out-of-order delivery caused by network jitter between two async POSTs.
+    /// Per-process monotonic counter (resets on daemon restart) so a
+    /// dispatcher can discard an out-of-order delivery caused by network
+    /// jitter between two async POSTs.
     seq: u64,
 }
 
@@ -46,7 +60,9 @@ fn debounce_state() -> &'static Mutex<HashMap<String, DebounceEntry>> {
     STATE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Register a transition for `session_id` and return its generation.
+/// Register a transition for `session_id` and return its generation. The
+/// newest generation is the one allowed to fire, so a burst within the
+/// debounce window collapses to its last member.
 fn bump_debounce(session_id: &str) -> u64 {
     let mut guard = debounce_state().lock().unwrap();
     let entry = guard
@@ -56,8 +72,16 @@ fn bump_debounce(session_id: &str) -> u64 {
     entry.generation
 }
 
-/// Whether the waking debounce task still owns firing for `session_id`, and if so drop its
-/// entry.
+/// Whether the waking debounce task still owns firing for `session_id`, and
+/// if so drop its entry: the map only needs to hold sessions with a debounce
+/// window in flight, otherwise it would retain one entry per session id for
+/// the daemon's lifetime.
+///
+/// Check and removal share one lock acquisition on purpose. Releasing between
+/// them would let a transition arriving in that gap insert a fresh entry that
+/// this call then deletes, stranding that newer task with nothing to claim.
+/// A superseded task removes nothing: the newer generation's task owns the
+/// entry and will clean it up when it fires.
 fn claim_debounce(session_id: &str, generation: u64) -> bool {
     let mut guard = debounce_state().lock().unwrap();
     match guard.get(session_id) {
@@ -93,17 +117,20 @@ fn is_fire_worthy(status: Status) -> bool {
     matches!(status, Status::Idle | Status::Waiting | Status::Error)
 }
 
-/// Spawn the consumer task.
-pub fn spawn_consumer(state: Arc<AppState>) {
-    tokio::spawn(async move {
+/// Dispatch debounced callbacks for fire-worthy status transitions.
+pub async fn spawn_consumer(state: Arc<AppState>) {
+    let work = state.runtime.work.clone();
+    work.spawn("server.callback_consumer", async move {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(DISPATCH_CONCURRENCY));
         let mut rx = state.status_tx.subscribe();
         loop {
             tokio::select! {
+                biased;
+                _ = state.shutdown.cancelled() => return,
                 recv = rx.recv() => {
                     match recv {
                         Ok(change) => {
-                            handle_status_change(state.clone(), semaphore.clone(), change);
+                            handle_status_change(state.clone(), semaphore.clone(), change).await;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!(target: "http.middleware", lagged = n, "callback: consumer lagged, skipped events");
@@ -114,16 +141,12 @@ pub fn spawn_consumer(state: Arc<AppState>) {
                         }
                     }
                 }
-                _ = state.shutdown.cancelled() => {
-                    tracing::info!(target: "http.middleware", "callback: shutdown signaled, consumer exiting");
-                    return;
-                }
             }
         }
     });
 }
 
-fn handle_status_change(
+async fn handle_status_change(
     state: Arc<AppState>,
     semaphore: Arc<tokio::sync::Semaphore>,
     change: StatusChange,
@@ -134,9 +157,15 @@ fn handle_status_change(
     let session_id = change.instance_id.clone();
     let generation = bump_debounce(&session_id);
 
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
-        // Superseded by a later transition within the debounce window?
+    let work = state.runtime.work.clone();
+    work.spawn("server.callback_send", async move {
+        tokio::select! {
+            biased;
+            _ = state.shutdown.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)) => {}
+        }
+        // Superseded by a later transition within the debounce window? That
+        // later transition owns firing (or dropping).
         if !claim_debounce(&session_id, generation) {
             return;
         }
@@ -284,7 +313,10 @@ mod tests {
         debounce_state().lock().unwrap().contains_key(session_id)
     }
 
-    /// A flicker inside the debounce window collapses to its last transition.
+    /// A flicker inside the debounce window collapses to its last transition:
+    /// the superseded task must not fire, the newest one must, and the entry
+    /// must not outlive the window (it used to be inserted and never removed
+    /// outside tests, growing one entry per session id forever).
     #[test]
     fn debounce_collapses_flicker_and_leaves_no_entry() {
         let session_id = "cb-debounce-flicker";

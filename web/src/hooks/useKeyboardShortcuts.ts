@@ -4,7 +4,8 @@ import type { ShortcutActions } from "../lib/shortcuts";
 
 export type { ShortcutActions };
 
-export function useKeyboardShortcuts(getActions: () => ShortcutActions) {
+/** `ready` is false while the actions can't act yet, for example before the server's read-only state is known. */
+export function useKeyboardShortcuts(getActions: () => ShortcutActions, ready = true) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.isComposing || e.keyCode === 229 || e.repeat) return;
@@ -12,6 +13,9 @@ export function useKeyboardShortcuts(getActions: () => ShortcutActions) {
       const isInput =
         target instanceof HTMLElement &&
         (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+
+      // A field that marks itself closes its own open list on Escape; the surface around it stays.
+      if (e.key === "Escape" && target?.closest('[data-owns-escape][aria-expanded="true"]')) return;
 
       const isSessionInput = !!target?.closest(
         '[data-term="agent"], [data-term="paired"], [data-session-composer], [data-keyboard-proxy][data-session-input]',
@@ -32,8 +36,8 @@ export function useKeyboardShortcuts(getActions: () => ShortcutActions) {
 
     // Capture phase: xterm.js stops propagation of Cmd/Ctrl combos.
     document.addEventListener("keydown", handler, true);
-    // Lets browser tests wait for the listener instead of racing the effect flush.
-    document.documentElement.dataset.shortcutsReady = "true";
+    // Lets browser tests wait until a shortcut can act, instead of racing the effect flush or the load.
+    if (ready) document.documentElement.dataset.shortcutsReady = "true";
     return () => document.removeEventListener("keydown", handler, true);
-  }, [getActions]);
+  }, [getActions, ready]);
 }

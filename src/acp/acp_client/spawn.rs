@@ -3,13 +3,13 @@
 
 use crate::acp::agent_registry::AgentSpec;
 use crate::session::SandboxInfo;
-use agent_client_protocol::schema::v1::McpServer;
+use agent_client_protocol::v1::schema::McpServer;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tracing::{debug, info, warn};
 
 use super::errors::AcpError;
-use super::resolve_command::resolve_agent_command;
+use super::resolve_command::{resolve_agent_command, Unresolved};
 
 #[derive(Debug, Clone)]
 pub struct SpawnConfig {
@@ -62,6 +62,8 @@ pub struct SpawnConfig {
     pub wrapper_substitution: Option<(String, String)>,
     /// Lifecycle epoch stamped on the runner's registry record.
     pub generation: u64,
+    /// Producer cancellation and pre-publication runner identity for the admitted epoch.
+    pub launch_lease: Option<crate::acp::runner_lifecycle::Lease>,
     pub claude_store_pin: Option<crate::session::capture::ClaudeStorePin>,
     /// Trusted environment before the current hook overlay or Claude routing.
     pub base_host_environment: Vec<(String, String)>,
@@ -179,6 +181,16 @@ pub(super) fn allowlisted_env_pairs(config: &SpawnConfig) -> Vec<(String, String
     pairs
 }
 
+/// AoE's own adapter defaults, applied below every explicit env layer so a
+/// user-set value always wins.
+pub(super) fn adapter_default_env_pairs(config: &SpawnConfig) -> Vec<(String, String)> {
+    crate::acp::agent_compat::ExpectedAgent::from_command(&config.spec.command)
+        .default_env()
+        .iter()
+        .map(|&(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
 /// Key names applied per layer, for the spawn log. Values are never logged.
 #[derive(Debug, Default)]
 pub(super) struct EnvKeys {
@@ -198,6 +210,10 @@ pub(super) fn apply_env_filter(
     extra_path_dirs: &[PathBuf],
 ) -> EnvKeys {
     let mut keys = EnvKeys::default();
+    for (key, value) in adapter_default_env_pairs(config) {
+        cmd.env(&key, value);
+        keys.forwarded.push(key);
+    }
     for (key, value) in inherited_host_env_pairs(config) {
         cmd.env(&key, value);
         keys.inherited.push(key);
@@ -462,7 +478,16 @@ pub(super) fn spawn_subprocess(
             r.path.to_string_lossy().into_owned(),
             r.prepend_paths.clone(),
         ),
-        Err(_) => (config.spec.command.clone(), Vec::new()),
+        Err(Unresolved::NotBare) => (config.spec.command.clone(), Vec::new()),
+        Err(error) => {
+            debug!(
+                target: "acp.protocol.spawn",
+                command = %config.spec.command,
+                ?error,
+                "could not resolve command via node-manager dirs; using bare command"
+            );
+            (config.spec.command.clone(), Vec::new())
+        }
     };
 
     let mut cmd = tokio::process::Command::new(&spawn_command);
@@ -528,7 +553,7 @@ pub(super) fn spawn_subprocess(
         // ProjectPathMissing (#1089) before the unresolved-binary hint (#1048).
         match &resolved {
             Err(reason) if e.kind() == std::io::ErrorKind::NotFound && config.cwd.exists() => {
-                AcpError::unresolved_adapter_spawn_error(&e, &config.spec.command, reason)
+                AcpError::unresolved_adapter_spawn_error(&e, config, reason)
             }
             _ => AcpError::classify_spawn_error(e, &config.cwd, &spawn_command),
         }
@@ -616,6 +641,24 @@ mod tests {
         let result = AcpClient::spawn(config, AcpSessionId("s-1".into())).await;
         assert!(matches!(result, Err(AcpError::Spawn(_))));
 
+        // A bare adapter missing from a configured PATH names that PATH.
+        let empty = tempfile::tempdir().unwrap();
+        let mut config = env_test_spawn_config(std::env::temp_dir());
+        config.spec.command = format!("aoe-test-no-such-adapter-{}", std::process::id());
+        config.base_host_environment = vec![("PATH".into(), empty.path().display().to_string())];
+        config.host_environment = config.base_host_environment.clone();
+        match AcpClient::spawn(config, AcpSessionId("s-1".into())).await {
+            Err(AcpError::Spawn(msg)) => {
+                assert!(
+                    msg.contains("the PATH `environment` sets for the agent"),
+                    "{msg}"
+                );
+                assert!(!msg.contains("restart `aoe serve`"), "{msg}");
+            }
+            Err(other) => panic!("expected a missing-adapter error, got {other:?}"),
+            Ok(_) => panic!("expected a missing-adapter error, got Ok"),
+        }
+
         // #1089: a renamed project path is typed, not a bare ENOENT.
         let missing =
             std::env::temp_dir().join(format!("aoe-test-missing-cwd-{}", std::process::id()));
@@ -694,9 +737,93 @@ mod tests {
             extra_env: None,
             custom_instruction: None,
             before_start_env: Vec::new(),
+            before_start_hook_env: Vec::new(),
             container_workdir: None,
         });
         assert!(inherited_host_env_pairs(&config).is_empty());
+    }
+
+    /// #5088: `claude-agent-acp` gets a summarized thinking default, other
+    /// adapters do not, and every explicit env layer wins over it.
+    #[test]
+    #[serial_test::serial]
+    fn claude_thinking_default_is_the_lowest_env_layer() {
+        const KEY: &str = "CLAUDE_CODE_THINKING_DISPLAY";
+        let tmp = tempfile::tempdir().unwrap();
+        let _app_dir = crate::session::test_support::isolate_app_dir_at(tmp.path());
+        let config_path = crate::session::config::config_path().unwrap();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let reg = crate::acp::agent_registry::AgentRegistry::with_defaults();
+        let stdio_value = |config: &SpawnConfig| {
+            let mut cmd = tokio::process::Command::new("/bin/true");
+            apply_stdio_env(&mut cmd, config, &[]);
+            effective_env_value(cmd.as_std(), KEY)
+        };
+
+        let base = || {
+            let mut config = env_test_spawn_config(tmp.path().to_path_buf());
+            config.spec = reg.get("claude").unwrap().clone();
+            config
+        };
+        let explicit = || vec![(KEY.to_string(), "omitted".to_string())];
+        let cases: [(&str, SpawnConfig, Option<&str>); 6] = [
+            ("default", base(), Some("summarized")),
+            (
+                "absolute .exe path",
+                SpawnConfig {
+                    spec: crate::acp::AgentSpec::from_acp_cmd(
+                        "claude",
+                        "/opt/bin/claude-agent-acp.exe",
+                    )
+                    .unwrap(),
+                    ..base()
+                },
+                Some("summarized"),
+            ),
+            (
+                "codex",
+                SpawnConfig {
+                    spec: reg.get("codex").unwrap().clone(),
+                    ..base()
+                },
+                None,
+            ),
+            (
+                "custom",
+                SpawnConfig {
+                    spec: crate::acp::AgentSpec::from_acp_cmd("custom", "/bin/true").unwrap(),
+                    ..base()
+                },
+                None,
+            ),
+            (
+                "provider_env",
+                SpawnConfig {
+                    provider_env: explicit(),
+                    ..base()
+                },
+                Some("omitted"),
+            ),
+            (
+                "environment",
+                SpawnConfig {
+                    host_environment: explicit(),
+                    ..base()
+                },
+                Some("omitted"),
+            ),
+        ];
+        for (name, config, want) in cases {
+            assert_eq!(stdio_value(&config).as_deref(), want, "{name}");
+        }
+
+        std::fs::write(&config_path, "[session]\ninherit_host_environment = true\n").unwrap();
+        let _env = crate::session::test_support::EnvGuard::set(&[(KEY, "omitted")]);
+        assert_eq!(
+            stdio_value(&base()).as_deref(),
+            Some("omitted"),
+            "inherited"
+        );
     }
 
     /// #3238: each adapter receives only its own allowlisted credentials, and

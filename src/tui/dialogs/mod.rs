@@ -11,11 +11,13 @@ pub mod afk;
 pub mod afk_batch;
 pub mod afk_overview;
 pub mod afk_review;
+mod agent_question;
 pub mod attach_project;
 mod changelog;
 mod cheats;
 mod command_palette;
 mod confirm;
+mod connections;
 mod context_menu;
 mod custom_instruction;
 mod delete_options;
@@ -45,12 +47,14 @@ mod tool_picker;
 mod update_confirm;
 mod worktree_name;
 
+pub use agent_question::AgentQuestionDialog;
 pub use attach_project::AttachProjectDialog;
 pub use changelog::ChangelogDialog;
 pub use command_palette::{
     builtin_commands, CommandPaletteDialog, PaletteAction, PaletteCommand, PaletteGroup,
 };
 pub use confirm::ConfirmDialog;
+pub use connections::{ConnectionsView, DaemonAttention, WebState};
 pub use context_menu::{ContextMenuAction, ContextMenuDialog, HighlightOps, Submenu};
 pub use custom_instruction::CustomInstructionDialog;
 pub use delete_options::{DeleteDialogConfig, DeleteOptions, UnifiedDeleteDialog};
@@ -71,8 +75,7 @@ pub use rename::{RenameData, RenameDialog, RenameMode};
 pub use repo_trust::{RepoTrustAction, RepoTrustDialog};
 pub use restart::{RestartData, RestartDialog};
 pub use send_message::SendMessageDialog;
-pub(crate) use serve::start_local_daemon_and_wait;
-pub use serve::{ServeAction, ServeView};
+pub use serve::{served_via, DashboardLaunch, ServeAction, ServeLaunchRequest, ServeView};
 pub use session_search::{SearchOutcome, SessionSearchDialog};
 pub use skills_manager::SkillsManagerDialog;
 pub use snooze_duration::SnoozeDurationDialog;
@@ -189,6 +192,18 @@ pub fn navigate_list(selected: &mut usize, len: usize, code: KeyCode) -> bool {
     true
 }
 
+/// Next (or previous, if `backwards`) focus index among `len` elements, wrapping at both ends.
+pub fn cycle_focus(current: usize, len: usize, backwards: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    if backwards {
+        (current + len - 1) % len
+    } else {
+        (current + 1) % len
+    }
+}
+
 /// Move `selected` to the hovered row; returns whether it changed.
 pub fn hover_select(selected: &mut usize, hovered: Option<usize>) -> bool {
     match hovered {
@@ -197,6 +212,32 @@ pub fn hover_select(selected: &mut usize, hovered: Option<usize>) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cycle_focus;
+
+    #[test]
+    fn cycle_focus_wraps_both_ways() {
+        // (current, len, backwards, expected)
+        for (current, len, backwards, expected) in [
+            (0, 3, false, 1),
+            (2, 3, false, 0),
+            (0, 3, true, 2),
+            (2, 3, true, 1),
+            (0, 1, false, 0),
+            (0, 1, true, 0),
+            (0, 0, false, 0),
+            (0, 0, true, 0),
+        ] {
+            assert_eq!(
+                cycle_focus(current, len, backwards),
+                expected,
+                "current={current} len={len} backwards={backwards}"
+            );
+        }
     }
 }
 
@@ -236,6 +277,19 @@ pub(crate) mod test_render {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| render(f, &theme)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    /// The drawn rows joined by newlines, for matching text a fixed needle can't.
+    pub fn text(buf: &Buffer) -> String {
+        let area = buf.area;
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Cell of the first occurrence of `needle`, for clicking what was drawn.

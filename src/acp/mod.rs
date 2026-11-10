@@ -32,13 +32,15 @@ pub mod session_paths;
 pub mod session_tee;
 pub mod state;
 pub mod supervisor;
+pub mod task_transcript;
 pub mod terminal_handler;
 pub mod transcript;
 pub mod version_probe;
+pub mod workflow_journal;
 
 pub use agent_registry::{
     display_name_for, inherited_acp_base, pick_acp_agent_name, pinned_model_for_tool,
-    AgentRegistry, AgentSpec,
+    runs_always_yolo, AgentRegistry, AgentSpec,
 };
 pub use approvals::{Approval, ApprovalDecision, Nonce};
 pub use state::{AcpState, Event};

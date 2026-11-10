@@ -19,9 +19,8 @@ use crate::daemon::AcpWorkerState;
 use crate::session::Instance;
 
 pub(crate) use rate_limit::install_rate_limit_continuation;
-#[cfg(test)]
 pub(crate) use rate_limit::ContinuationOutcome;
-pub(crate) use resume::{command_override_for_spawn, trigger_resume_background, ResumeTrigger};
+pub(crate) use resume::{trigger_resume_background, ResumeTrigger};
 
 use resume::{resume_one, ResumeTarget};
 
@@ -85,8 +84,8 @@ fn park_message(project_path: &str) -> String {
 #[derive(Debug, Clone)]
 enum ResumeOutcome {
     Attached,
-    /// The orphan registry entry was swept; retry next tick unless parked.
-    RetryAfterAttachTimeout,
+    /// Attachment, retirement or launch prep lost a race; retry next tick unless parked.
+    Retry,
     /// Spawn finished with or without error; `attempted` stays set so a
     /// permanently failing spawn does not loop.
     SpawnFinished,
@@ -94,6 +93,8 @@ enum ResumeOutcome {
     /// once. `message` is its Display, matched by the front-end regex (#1027).
     CapacityDeferred {
         message: String,
+        source_profile: String,
+        lifecycle_generation: u64,
     },
 }
 
@@ -115,12 +116,16 @@ fn due(last: &mut Option<Instant>, interval: Duration) -> bool {
 
 /// Structured and not archived, snoozed or trashed.
 fn is_untriaged_structured(i: &Instance) -> bool {
-    i.is_structured() && !i.is_archived() && !i.is_snoozed() && !i.is_trashed()
+    i.is_structured()
+        && i.terminal_handoff.is_none()
+        && !i.is_archived()
+        && !i.is_snoozed()
+        && !i.is_trashed()
 }
 
 /// Eligible for a reconciler-driven worker.
 fn is_resumable(i: &Instance) -> bool {
-    is_untriaged_structured(i) && !i.is_idle_dormant()
+    is_untriaged_structured(i) && !i.is_idle_dormant() && i.launch_is_finalized()
 }
 
 /// Runs a blocking event-store query for `id` off the runtime; `None` (logged) if the task panicked.
@@ -171,18 +176,30 @@ pub async fn reconcile_acp_workers(
 ) {
     let supervisor = &state.acp_supervisor;
     supervisor.retry_pending_teardowns().await;
+    crate::server::api::recover_pending_terminal_handoffs(
+        state,
+        crate::server::api::HandoffRecovery::Maintenance,
+    )
+    .await;
 
     // Before the reaper, so this tick's reaper tears down the drained handle.
     resume::respawn_drained_stale_workers(state).await;
 
     // `aoe acp stop|kill|restart` runs out of process; the reaper surfaces it
     // and returns restart ids, which, like respawn requests (#2109), get a clean slate.
-    for id in supervisor
-        .reap_user_stopped()
-        .await
-        .into_iter()
-        .chain(supervisor.take_respawn_requests())
-    {
+    for id in supervisor.reap_user_stopped().await {
+        forget_session_budget(&id, attempted, parked, respawn_history, capacity_deferred);
+    }
+    for id in supervisor.take_respawn_requests() {
+        // A teardown in flight settles later; the request waits for it, or the
+        // loop below would pin the session as attempted.
+        if matches!(
+            supervisor.worker_state(&id).await,
+            AcpWorkerState::Resuming | AcpWorkerState::Stopping
+        ) {
+            supervisor.request_respawn(&id);
+            continue;
+        }
         forget_session_budget(&id, attempted, parked, respawn_history, capacity_deferred);
     }
     // Pre-session startup failures re-arm under the ordinary budget.
@@ -212,7 +229,11 @@ pub async fn reconcile_acp_workers(
     };
 
     // Triaged sessions are excluded so an archive/snooze teardown is not undone (#1581).
-    let (targets, with_queued_prompts): (Vec<ResumeTarget>, HashSet<String>) = {
+    let (targets, with_queued_prompts, queued_not_stopped): (
+        Vec<ResumeTarget>,
+        HashSet<String>,
+        HashSet<String>,
+    ) = {
         let instances = state.instances.read().await;
         (
             instances
@@ -223,6 +244,13 @@ pub async fn reconcile_acp_workers(
             instances
                 .iter()
                 .filter(|i| !i.queued_prompts.is_empty())
+                .map(|i| i.id.clone())
+                .collect(),
+            instances
+                .iter()
+                .filter(|i| {
+                    !i.queued_prompts.is_empty() && i.status != crate::session::Status::Stopped
+                })
                 .map(|i| i.id.clone())
                 .collect(),
         )
@@ -243,15 +271,23 @@ pub async fn reconcile_acp_workers(
     let mut tasks = Vec::new();
     for mut target in targets {
         let id = target.id.clone();
+        // A session with a queue and no worker is retried under the normal
+        // budget, whatever its status short of Stopped (a failed spawn leaves
+        // Error): an earlier attempt must not strand the queue (#5200).
+        let retry_for_queue = attempted.contains(&id)
+            && queued_not_stopped.contains(&id)
+            && supervisor.worker_state(&id).await == AcpWorkerState::Absent;
         if attempted.contains(&id) {
             // A restart marker can land after the reaper ran: add-project (#3103)
             // writes it only once the moved workspace is durable.
-            if supervisor.worker_state(&id).await == AcpWorkerState::Stopping
-                || !supervisor.take_late_restart_marker(&id)
-            {
+            let restart_marker = supervisor.worker_state(&id).await != AcpWorkerState::Stopping
+                && supervisor.take_late_restart_marker(&id);
+            if !retry_for_queue && !restart_marker {
                 continue;
             }
-            forget_session_budget(&id, attempted, parked, respawn_history, capacity_deferred);
+            if restart_marker {
+                forget_session_budget(&id, attempted, parked, respawn_history, capacity_deferred);
+            }
         }
         match supervisor.worker_state(&id).await {
             AcpWorkerState::Running | AcpWorkerState::Resuming => {
@@ -300,7 +336,14 @@ pub async fn reconcile_acp_workers(
                 "structured-view worker respawn budget exhausted; parking session"
             );
             if parked.insert(id.clone()) {
-                supervisor.publish_startup_error(&id, park_message(&target.project_path));
+                crate::server::api::publish_startup_error_if_current(
+                    state,
+                    &id,
+                    &target.source_profile,
+                    target.lifecycle_generation,
+                    park_message(&target.project_path),
+                )
+                .await;
             }
             attempted.insert(id);
             continue;
@@ -318,10 +361,18 @@ pub async fn reconcile_acp_workers(
         return;
     }
 
-    let cfg = crate::session::config::profile_config::resolve_config_or_warn(&state.profile);
-    let resume_limit = MAX_CONCURRENT_RESUMES
-        .min(cfg.acp.max_concurrent_workers)
-        .max(1);
+    // Live served-profile config bounds cold resumes; the supervisor owns the total cap.
+    let namespace = state.profile_namespace.read().await;
+    let served = state.served_profile().to_string();
+    let live_max_workers = tokio::task::spawn_blocking(move || {
+        crate::session::config::profile_config::resolve_config_or_warn(&served)
+            .acp
+            .max_concurrent_workers
+    })
+    .await
+    .unwrap_or_else(|_| state.acp_supervisor.max_concurrent_workers());
+    drop(namespace);
+    let resume_limit = MAX_CONCURRENT_RESUMES.min(live_max_workers).max(1);
     let semaphore = Arc::new(Semaphore::new(resume_limit as usize));
     let mut set: JoinSet<(String, ResumeOutcome)> = JoinSet::new();
     for target in tasks {
@@ -338,12 +389,19 @@ pub async fn reconcile_acp_workers(
 
     while let Some(result) = set.join_next().await {
         match result {
-            Ok((id, ResumeOutcome::RetryAfterAttachTimeout)) => {
+            Ok((id, ResumeOutcome::Retry)) => {
                 if !parked.contains(&id) {
                     attempted.remove(&id);
                 }
             }
-            Ok((id, ResumeOutcome::CapacityDeferred { message })) => {
+            Ok((
+                id,
+                ResumeOutcome::CapacityDeferred {
+                    message,
+                    source_profile,
+                    lifecycle_generation,
+                },
+            )) => {
                 // Refund only this tick's budget entry so prior crash history survives.
                 if let Some(entries) = respawn_history.get_mut(&id) {
                     entries.pop();
@@ -355,7 +413,14 @@ pub async fn reconcile_acp_workers(
                 attempted.remove(&id);
                 // `publish_startup_error` does not dedup, so publish once per transition.
                 if capacity_deferred.insert(id.clone()) {
-                    supervisor.publish_startup_error(&id, message);
+                    crate::server::api::publish_startup_error_if_current(
+                        state,
+                        &id,
+                        &source_profile,
+                        lifecycle_generation,
+                        message,
+                    )
+                    .await;
                 }
             }
             Ok((id, ResumeOutcome::Attached | ResumeOutcome::SpawnFinished)) => {
@@ -374,7 +439,7 @@ async fn drain_pending_initial_turns(state: &Arc<AppState>) {
         let instances = state.instances.read().await;
         instances
             .iter()
-            .filter(|i| i.pending_initial_turn.is_some() && is_untriaged_structured(i))
+            .filter(|i| i.pending_initial_turn.is_some() && is_resumable(i))
             .map(|i| i.id.clone())
             .collect()
     };
@@ -465,8 +530,17 @@ async fn sweep_orphan_workers(state: &Arc<AppState>, live: &HashSet<&String>) {
     let Ok(records) = crate::process::worker_registry::list() else {
         return;
     };
+    let pending_handoffs: HashSet<String> = state
+        .instances
+        .read()
+        .await
+        .iter()
+        .filter(|row| row.terminal_handoff.is_some())
+        .map(|row| row.id.clone())
+        .collect();
     for record in records {
-        if live.contains(&record.session_id)
+        if pending_handoffs.contains(&record.session_id)
+            || live.contains(&record.session_id)
             || state.acp_supervisor.is_owned(&record.session_id).await
         {
             continue;
@@ -500,7 +574,7 @@ async fn sweep_orphan_workers(state: &Arc<AppState>, live: &HashSet<&String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::test_fixtures::{capacity_startup_errors, test_state, Tick};
+    use super::test_fixtures::{capacity_startup_errors, startup_errors, test_state, Tick};
     use super::*;
 
     #[test]
@@ -766,6 +840,33 @@ mod tests {
         }
     }
 
+    /// A respawn request made while the worker is still mid-teardown is kept
+    /// until it settles; spent early, the tick would pin the session as attempted
+    /// and nothing would bring the worker back.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_respawn_request_waits_out_a_teardown_in_flight() {
+        let id = "s-req";
+        let (_home, state, _project) = test_state(id);
+        let mut tick = Tick::default();
+        tick.run(&state).await;
+        let attempts = startup_errors(&state, id);
+        assert!(tick.attempted.contains(id), "precondition");
+
+        let lease = state.acp_supervisor.test_hold_stopping(id).unwrap();
+        state.acp_supervisor.request_respawn(id);
+        tick.run(&state).await;
+        assert_eq!(startup_errors(&state, id), attempts, "nothing spawns yet");
+
+        state.acp_supervisor.test_settle_stopping(&lease);
+        tick.run(&state).await;
+        assert_eq!(
+            startup_errors(&state, id),
+            attempts + 1,
+            "the kept request respawns the session once the teardown ends"
+        );
+    }
+
     /// Wake-on-drain: a dormant session with a queue must be woken, or its
     /// queue sits behind a worker the resume pass never respawns.
     #[tokio::test]
@@ -791,5 +892,93 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// A resume attempt that launch admission cancelled (row still `Stopped`)
+    /// pins the id; once the row reads `Idle` with a queue, the pin must lift
+    /// so the queue is not stranded behind a worker nothing starts (#5200).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_pinned_idle_session_with_a_queue_is_resumed() {
+        use crate::session::Status;
+
+        let cases = [
+            ("idle with a queue", Status::Idle, 1),
+            ("error with a queue", Status::Error, 1),
+            ("deliberately stopped with a queue", Status::Stopped, 0),
+        ];
+        for (name, status, expected_attempts) in cases {
+            let id = "sess-pinned";
+            let (_home, state, _project) = test_fixtures::test_state(id);
+            {
+                let mut instances = state.instances.write().await;
+                instances[0].status = status;
+                instances[0]
+                    .queued_prompts
+                    .push(test_fixtures::queued_prompt());
+            }
+
+            let mut tick = test_fixtures::Tick::default();
+            tick.attempted.insert(id.to_string());
+            tick.run(&state).await;
+
+            assert_eq!(
+                test_fixtures::startup_errors(&state, id),
+                expected_attempts,
+                "{name}"
+            );
+        }
+    }
+
+    /// A launch-prep race (here: memory and disk disagree on the row) must not
+    /// pin the session out of the resume set, or a queued prompt never drains.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn launch_prep_race_does_not_pin_the_session() {
+        let id = "sess-race";
+        let (_home, state, _project) = test_fixtures::test_state(id);
+        state.instances.write().await[0].title = "renamed in memory only".to_string();
+
+        let mut tick = test_fixtures::Tick::default();
+        tick.run(&state).await;
+
+        assert!(!tick.attempted.contains(id));
+    }
+
+    /// A durable `aoe acp stop` fence refuses automatic resume; repeated ticks
+    /// must not count that as a crash loop, and explicit resume still clears it.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn durable_user_stop_does_not_crash_loop() {
+        use crate::process::worker_registry::{self, ResumeAuthority, WorkerRecord};
+
+        let id = "sess-stopped";
+        let (_home, state, project) = test_fixtures::test_state(id);
+        let record = WorkerRecord::new(
+            id.into(),
+            std::process::id(),
+            worker_registry::socket_path_for(id).unwrap(),
+            "aoe-agent".into(),
+            "aoe-agent".into(),
+            project.path().to_path_buf(),
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+        );
+        worker_registry::save(&record).unwrap();
+        worker_registry::request_stop(&record).unwrap();
+        worker_registry::retire_selected(&record).unwrap();
+
+        let mut tick = test_fixtures::Tick::default();
+        for _ in 0..=RECONCILER_MAX_RESPAWNS_IN_WINDOW {
+            tick.run(&state).await;
+        }
+
+        assert_eq!(test_fixtures::startup_errors(&state, id), 0);
+        assert!(tick.parked.is_empty());
+        let observed = worker_registry::stop_intent(id).unwrap();
+        worker_registry::admit_resume(id, ResumeAuthority::Explicit, &observed).unwrap();
     }
 }

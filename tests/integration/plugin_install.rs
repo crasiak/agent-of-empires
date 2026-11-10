@@ -24,6 +24,22 @@ fn isolate() -> crate::common::TestHome {
     home.env = home.env.and_set("AOE_UPDATE_API_BASE", "");
     std::env::remove_var("AOE_GITHUB_CLONE_BASE");
     std::env::remove_var("AOE_UPDATE_API_BASE");
+    // Build-step fixtures resolve Node; a local stub keeps them off the download.
+    let node = home.path().join("fake-node");
+    std::fs::write(
+        &node,
+        format!(
+            "#!/bin/sh\necho {}\n",
+            agent_of_empires::acp::node::PINNED_NODE_VERSION
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    home.env = home.env.and_set("AOE_ACP_NODE", &node);
     home
 }
 
@@ -36,6 +52,54 @@ fn write_plugin_dir(parent: &Path, manifest: &str) -> PathBuf {
 
 fn load_registry() -> PluginRegistry {
     PluginRegistry::load(&Config::load().expect("config"))
+}
+
+#[test]
+#[serial]
+fn legacy_runtime_requires_worker_declaration() {
+    use agent_of_empires::session::config::{CapabilityGrant, PluginConfig};
+    use aoe_plugin_api::PluginManifest;
+
+    let _home = isolate();
+    let id = "acme.legacy-runtime";
+    let dir = agent_of_empires::plugin::plugins_dir().unwrap().join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    for runtime in [
+        "[runtime]\nkind = \"command\"\ncommand = [\"./worker\"]\n",
+        "[runtime]\nkind = \"release-binary\"\nasset = \"worker-${target}.tar.gz\"\n",
+    ] {
+        let manifest = format!(
+            "id = \"{id}\"\nname = \"Legacy worker\"\nversion = \"0.1.0\"\napi_version = 2\n{runtime}"
+        );
+        std::fs::write(dir.join("aoe-plugin.toml"), &manifest).unwrap();
+        for capabilities in [vec![], vec!["runtime.worker".to_string()]] {
+            let mut config = Config::default();
+            config.plugins.insert(
+                id.to_string(),
+                PluginConfig {
+                    grant: Some(CapabilityGrant {
+                        manifest_hash: PluginManifest::hash_bytes(manifest.as_bytes()),
+                        capabilities,
+                        granted_at: chrono::Utc::now(),
+                    }),
+                    ..Default::default()
+                },
+            );
+            let registry = PluginRegistry::load(&config);
+            assert!(
+                registry.get(id).is_none(),
+                "a stored grant must not admit an invalid runtime declaration"
+            );
+            assert!(
+                registry
+                    .load_errors()
+                    .iter()
+                    .any(|error| error.contains(id) && error.contains("runtime.worker")),
+                "{:?}",
+                registry.load_errors()
+            );
+        }
+    }
 }
 
 fn git(args: &[&str], cwd: &Path) {
@@ -152,7 +216,9 @@ api_version = 2
 "#,
     );
 
-    let report = install::install(dir.to_str().unwrap(), true).await.unwrap();
+    let report = install::install(dir.to_str().unwrap(), true, false)
+        .await
+        .unwrap();
     assert_eq!(report.id, "acme.local");
     assert!(report.granted);
 
@@ -213,7 +279,7 @@ async fn invalid_manifests_are_rejected() {
     ] {
         let src = tempfile::tempdir().unwrap();
         let dir = write_plugin_dir(src.path(), manifest);
-        let err = install::install(dir.to_str().unwrap(), true)
+        let err = install::install(dir.to_str().unwrap(), true, false)
             .await
             .unwrap_err()
             .to_string();
@@ -240,7 +306,9 @@ api_version = 2
 capabilities = ["net"]
 "#,
     );
-    install::install(dir.to_str().unwrap(), true).await.unwrap();
+    install::install(dir.to_str().unwrap(), true, false)
+        .await
+        .unwrap();
     assert!(load_registry().get("acme.regrant").unwrap().active());
 
     // The grant pins the manifest bytes: a comment-only edit revokes it.
@@ -271,6 +339,7 @@ capabilities = ["net"]
 
     let consent = install::reapprove_consent("acme.regrant").unwrap();
     assert_eq!(consent.capabilities, vec!["net", "notifications"]);
+    assert!(consent.agent_integrations.is_empty());
 
     // A pin that no longer matches the on-disk manifest refuses.
     let err = install::approve_installed("acme.regrant", "sha256:stale")
@@ -314,7 +383,9 @@ api_version = 2
 capabilities = ["net"]
 "#,
     );
-    install::install(dir.to_str().unwrap(), true).await.unwrap();
+    install::install(dir.to_str().unwrap(), true, false)
+        .await
+        .unwrap();
 
     // Stale the grant so there is a disclosure to approve.
     let installed = agent_of_empires::plugin::plugins_dir()
@@ -370,7 +441,9 @@ api_version = 2
 
     // An explicit `@ref` installs that ref directly (no release resolution);
     // --yes bypasses the unverified confirmation.
-    let report = install::install("gh:acme/widget@main", true).await.unwrap();
+    let report = install::install("gh:acme/widget@main", true, false)
+        .await
+        .unwrap();
     assert_eq!(report.id, "acme.widget");
     assert_eq!(
         report.validation.as_str(),
@@ -433,7 +506,7 @@ api_version = 2
     // No `@ref`: resolves and installs the latest release tag. `false` (no
     // --yes) proves the resolved-release path is not treated as unverified, so
     // it installs without an interactive confirmation.
-    install::install("gh:acme/rel", false).await.unwrap();
+    install::install("gh:acme/rel", false, false).await.unwrap();
 
     let lock = Lockfile::load().unwrap();
     let locked = lock.get("acme.rel").expect("lock entry");
@@ -505,7 +578,7 @@ async fn unverified_github_sources_require_confirmation_without_yes() {
         );
         let server = spawn_latest_release("other", "repo", "v9").await;
 
-        let err = install::install(source, false)
+        let err = install::install(source, false, false)
             .await
             .unwrap_err()
             .to_string();
@@ -534,7 +607,7 @@ async fn outdated_tracks_release_not_default_branch() {
     );
     tag_bare_repo(base.path(), "acme", "rel", "v1.0.0", false);
     let server = spawn_latest_release("acme", "rel", "v1.0.0").await;
-    install::install("gh:acme/rel", true).await.unwrap();
+    install::install("gh:acme/rel", true, false).await.unwrap();
 
     // Advance the default branch but leave the release tag at v1.0.0. A
     // release-tracking install must NOT report this as an update.
@@ -578,7 +651,9 @@ api_version = 2
         dir.to_str().unwrap(),
         &tree_hash,
     );
-    install::install(dir.to_str().unwrap(), true).await.unwrap();
+    install::install(dir.to_str().unwrap(), true, false)
+        .await
+        .unwrap();
 
     // Simulate a build that creates the reserved build-output dir with a symlink
     // inside the installed plugin, the way plugin-github's venv build would.
@@ -629,6 +704,41 @@ fn write_featured(dir: &Path, id: &str, source: &str, tree_hash: &str) -> PathBu
     write_featured_versions(dir, id, source, &[("1.0.0", tree_hash)])
 }
 
+/// `--dev` lets a local reserved id load, records dev provenance, outranks a
+/// matching featured pin, and stays dev across update. `--dev` on a gh: source
+/// is refused.
+#[tokio::test]
+#[serial]
+async fn dev_install_claims_reserved_id_and_stays_dev() {
+    let _home = isolate();
+    let id = "agent-of-empires.claude";
+    let src = tempfile::tempdir().unwrap();
+    let dir = write_plugin_dir(
+        src.path(),
+        &format!("id = \"{id}\"\nname = \"Dev\"\nversion = \"1.0.0\"\napi_version = 2\n"),
+    );
+    let tree_hash = agent_of_empires::plugin::integrity::tree_hash(&dir).unwrap();
+    write_featured(src.path(), id, dir.to_str().unwrap(), &tree_hash);
+
+    let err = install::install("gh:acme/widget", true, true)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("--dev requires a local"), "{err}");
+
+    let report = install::install(dir.to_str().unwrap(), true, true)
+        .await
+        .unwrap();
+    assert_eq!(report.validation.as_str(), "dev");
+    assert_eq!(Lockfile::load().unwrap().get(id).unwrap().trust, "dev");
+    assert!(Config::load().unwrap().plugins[id].dev);
+    assert_eq!(load_registry().get(id).unwrap().validation.as_str(), "dev");
+
+    let report = install::update(id, true).await.unwrap();
+    assert_eq!(report.validation.as_str(), "dev");
+    assert_eq!(Lockfile::load().unwrap().get(id).unwrap().trust, "dev");
+    assert_eq!(load_registry().get(id).unwrap().validation.as_str(), "dev");
+}
+
 /// Only a vetted featured release lifts the reserved-namespace gate. The same
 /// unvetted pin on a non-reserved id still installs, labelled by its source.
 #[tokio::test]
@@ -660,7 +770,7 @@ async fn featured_pins_gate_the_reserved_namespace() {
             &[("0.9.0", UNVETTED), ("1.0.0", current)],
         );
 
-        let result = install::install(dir.to_str().unwrap(), true).await;
+        let result = install::install(dir.to_str().unwrap(), true, false).await;
         match expected {
             Ok(validation) => {
                 let report = result.unwrap_or_else(|e| panic!("{id} vetted={vetted}: {e}"));
@@ -740,6 +850,7 @@ id = "acme.bin"
 name = "Bin"
 version = "1.0.0"
 api_version = 2
+capabilities = ["runtime.worker"]
 
 [runtime]
 kind = "release-binary"
@@ -749,7 +860,7 @@ asset = "bin-${os}-${arch}"
     );
     tag_bare_repo(base.path(), "acme", "bin", "v1.0.0", false);
 
-    install::install("gh:acme/bin", true).await.unwrap();
+    install::install("gh:acme/bin", true, false).await.unwrap();
 
     let placed = agent_of_empires::plugin::plugins_dir()
         .unwrap()
@@ -793,6 +904,7 @@ id = "acme.built"
 name = "Built"
 version = "0.1.0"
 api_version = 2
+capabilities = ["runtime.worker"]
 
 [runtime]
 kind = "command"
@@ -808,7 +920,9 @@ platforms = ["windows"]
 "#,
     );
 
-    install::install(dir.to_str().unwrap(), true).await.unwrap();
+    install::install(dir.to_str().unwrap(), true, false)
+        .await
+        .unwrap();
 
     let installed = agent_of_empires::plugin::plugins_dir()
         .unwrap()
@@ -840,6 +954,7 @@ id = "acme.systool"
 name = "SysTool"
 version = "0.1.0"
 api_version = 2
+capabilities = ["runtime.worker"]
 
 [runtime]
 kind = "command"
@@ -848,7 +963,7 @@ system = true
 "#,
     );
 
-    install::install(dir.to_str().unwrap(), true)
+    install::install(dir.to_str().unwrap(), true, false)
         .await
         .expect("system-tool worker installs without an install-time PATH check");
 
@@ -874,6 +989,7 @@ id = "acme.failbuild"
 name = "FailBuild"
 version = "0.1.0"
 api_version = 2
+capabilities = ["runtime.worker"]
 
 [runtime]
 kind = "command"
@@ -885,7 +1001,7 @@ command = ["false"]
 "#,
     );
 
-    let err = install::install(dir.to_str().unwrap(), true)
+    let err = install::install(dir.to_str().unwrap(), true, false)
         .await
         .unwrap_err()
         .to_string();
@@ -916,6 +1032,7 @@ id = "acme.upd"
 name = "Upd"
 version = "0.1.0"
 api_version = 2
+capabilities = ["runtime.worker"]
 
 [runtime]
 kind = "command"
@@ -927,7 +1044,9 @@ command = ["cp", "aoe-plugin.toml", "v1-marker"]
 "#,
     );
     let dir = src.path().join("src-plugin");
-    install::install(dir.to_str().unwrap(), true).await.unwrap();
+    install::install(dir.to_str().unwrap(), true, false)
+        .await
+        .unwrap();
     let installed = agent_of_empires::plugin::plugins_dir()
         .unwrap()
         .join("acme.upd");
@@ -941,6 +1060,7 @@ id = "acme.upd"
 name = "Upd"
 version = "0.2.0"
 api_version = 2
+capabilities = ["runtime.worker"]
 
 [runtime]
 kind = "command"
@@ -1002,7 +1122,7 @@ id = "acme.recipe"
 name = "Recipe"
 version = "0.1.0"
 api_version = 2
-capabilities = ["net"]
+capabilities = ["runtime.worker", "net"]
 
 [runtime]
 kind = "command"
@@ -1014,7 +1134,9 @@ command = ["cp", "aoe-plugin.toml", "marker-v1"]
 "#,
     );
     let dir = src.path().join("src-plugin");
-    install::install(dir.to_str().unwrap(), true).await.unwrap();
+    install::install(dir.to_str().unwrap(), true, false)
+        .await
+        .unwrap();
 
     // Same capability, but the build recipe changed.
     std::fs::write(
@@ -1024,7 +1146,7 @@ id = "acme.recipe"
 name = "Recipe"
 version = "0.2.0"
 api_version = 2
-capabilities = ["net"]
+capabilities = ["runtime.worker", "net"]
 
 [runtime]
 kind = "command"
@@ -1078,6 +1200,107 @@ command = ["cp", "aoe-plugin.toml", "marker-v2"]
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn update_reprompts_when_plugin_agent_command_changes() {
+    let _home = isolate();
+    let src = tempfile::tempdir().unwrap();
+    let dir = write_plugin_dir(
+        src.path(),
+        r#"
+id = "acme.agent"
+name = "Agent"
+version = "0.1.0"
+api_version = 19
+
+[[agent_integrations]]
+tool = "session-helper"
+command = "session-helper --safe"
+"#,
+    );
+    install::install(dir.to_str().unwrap(), true, false)
+        .await
+        .unwrap();
+
+    std::fs::write(
+        dir.join("aoe-plugin.toml"),
+        r#"
+id = "acme.agent"
+name = "Agent"
+version = "0.1.1"
+api_version = 19
+
+[[agent_integrations]]
+tool = "session-helper"
+command = "session-helper --safe"
+"#,
+    )
+    .unwrap();
+    install::update("acme.agent", false).await.unwrap();
+
+    std::fs::write(
+        dir.join("aoe-plugin.toml"),
+        r#"
+id = "acme.agent"
+name = "Agent"
+version = "0.2.0"
+api_version = 19
+
+[[agent_integrations]]
+tool = "session-helper"
+command = "session-helper --unsafe"
+"#,
+    )
+    .unwrap();
+
+    let err = install::update("acme.agent", false)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not a terminal"), "got: {err}");
+    assert_eq!(
+        Lockfile::load().unwrap().get("acme.agent").unwrap().version,
+        "0.1.1"
+    );
+
+    assert!(std::fs::read_to_string(
+        agent_of_empires::plugin::plugins_dir()
+            .unwrap()
+            .join("acme.agent/aoe-plugin.toml")
+    )
+    .unwrap()
+    .contains("command = \"session-helper --safe\""));
+
+    install::update("acme.agent", true).await.unwrap();
+    assert_eq!(
+        Lockfile::load().unwrap().get("acme.agent").unwrap().version,
+        "0.2.0"
+    );
+    assert!(std::fs::read_to_string(
+        agent_of_empires::plugin::plugins_dir()
+            .unwrap()
+            .join("acme.agent/aoe-plugin.toml")
+    )
+    .unwrap()
+    .contains("command = \"session-helper --unsafe\""));
+    std::fs::write(
+        dir.join("aoe-plugin.toml"),
+        r#"
+id = "acme.agent"
+name = "Agent"
+version = "0.3.0"
+api_version = 19
+"#,
+    )
+    .unwrap();
+    install::update("acme.agent", false).await.unwrap();
+    assert_eq!(
+        Lockfile::load().unwrap().get("acme.agent").unwrap().version,
+        "0.3.0"
+    );
+}
+
 const PLAIN_MANIFEST: &str = r#"
 id = "acme.upd"
 name = "Upd"
@@ -1099,7 +1322,9 @@ async fn auto_update_applies_clean_github_update() {
     );
     // Branch tracking is now an explicit-ref opt-in: `@main` follows the default
     // branch (no release resolution), which these update-mechanics tests need.
-    install::install("gh:acme/upd@main", true).await.unwrap();
+    install::install("gh:acme/upd@main", true, false)
+        .await
+        .unwrap();
     let before = update_check::outdated().await;
     let s = before.iter().find(|s| s.id == "acme.upd").expect("present");
     assert!(
@@ -1148,7 +1373,9 @@ async fn install_then_push_cap_update() -> TempDir {
         "upd",
         &[("aoe-plugin.toml", PLAIN_MANIFEST)],
     );
-    install::install("gh:acme/upd@main", true).await.unwrap();
+    install::install("gh:acme/upd@main", true, false)
+        .await
+        .unwrap();
     push_new_commit(
         base.path(),
         "acme",

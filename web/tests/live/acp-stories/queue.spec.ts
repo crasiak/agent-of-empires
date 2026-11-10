@@ -106,8 +106,8 @@ test("queued follow-up fires after navigation away and back", async ({ page, spa
   await waitForStructuredView(page);
 
   releaseTurn(serve);
-  // Count 1 catches a double fire after remount.
-  await expect(page.getByText("Second turn after nav.", { exact: true })).toHaveCount(1, { timeout: 20_000 });
+  // The renderer may prepend an inline empty-command marker to the same paragraph.
+  await expect(page.getByText("Second turn after nav.")).toHaveCount(1, { timeout: 20_000 });
 });
 
 test("sidebar row shows the queued-prompt count badge", async ({ page, spawnServe }) => {
@@ -126,5 +126,5 @@ test("sidebar row shows the queued-prompt count badge", async ({ page, spawnServ
   await expect(page.getByText("Queued (2)", { exact: true })).toBeVisible();
 
   await page.goto(serve.baseUrl);
-  await expect(page.getByTitle("2 queued prompts")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTitle("2 queued messages")).toBeVisible({ timeout: 15_000 });
 });

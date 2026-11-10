@@ -282,7 +282,8 @@ async fn slice1_session_arc_preview_two_sessions_handoff_pause_restart_and_histo
             Ok(())
         })
         .unwrap();
-    env.view.reload_storage_only().unwrap();
+    // The daemon owns the conversation fields, so the handoff arrives in its next frame.
+    publish_stored_rows(&mut env, 1);
     select(&mut env.view, &first_id);
     assert_eq!(
         env.view

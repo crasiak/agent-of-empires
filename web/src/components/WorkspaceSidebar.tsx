@@ -2,8 +2,9 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { usePluginUiEntries } from "../lib/pluginUiContext";
 import { pluginSortSpecs } from "../lib/pluginUi";
 import type { ProjectInfo, RepoGroup, Workspace } from "../lib/types";
+import type { RuntimeCursor, SessionMutation } from "../lib/api";
 import { SidebarSystemHealth } from "./SystemHealthStrip";
-import type { SidebarAxis } from "../lib/sidebarAxis";
+import { axisDrawsRepoHeaders, type SidebarAxis } from "../lib/sidebarAxis";
 import {
   archivableWorkspaces,
   type NestedSidebarGroup,
@@ -20,10 +21,12 @@ import { TOUR_ANCHORS, tourAnchor } from "../lib/tourSteps";
 import { useServerDown } from "../lib/connectionState";
 import type { SidebarSortMode } from "../lib/sidebarSort";
 import { useSidebarTriage } from "../hooks/useSidebarTriage";
+import { sessionWorkspaces } from "../lib/sessionWorkspace";
 import { ProjectsSection } from "./ProjectsSection";
 import { FoldChevron, PlusIcon, StrokeIcon } from "./icons";
 import { usePersistedFlag } from "./usePersistedFlag";
-import { useSuppressClickAfterDrag } from "./sidebar/dnd";
+import { NAV_ITEM, ROWS, onSidebarArrowKey } from "./sidebar/keyboardNav";
+import { newDragClickGuard, useSuppressClickAfterDrag, type DragClickGuard } from "./sidebar/dnd";
 import {
   filterFlat,
   filterNested,
@@ -44,8 +47,14 @@ import { useSidebarSelection } from "./sidebar/useSidebarSelection";
 import { useSidebarWidth } from "./sidebar/useSidebarWidth";
 
 const NO_HIGHLIGHTS: readonly (string | null)[] = [];
+/** Rows of the "Snoozed & archived" section. Outside `rowsId`'s "sidebar-rows-" namespace, so no Group,
+ *  whatever its name, can share it. */
+const SUNK_ROWS = "sidebar-sunk-rows";
 
 interface Props {
+  observedById: Record<string, RuntimeCursor>;
+  runtimeEpoch: string | null;
+  onSessionMutation: (mutation: SessionMutation) => void;
   groups: SidebarGroup[];
   repoGroups: RepoGroup[];
   /** Used only when `axis === "repo+group"`. */
@@ -54,6 +63,10 @@ interface Props {
   orgGroups: OrgNestedGroup[];
   /** Workspaces whose every session is trashed, computed by the parent from the unsliced list. */
   trashedWorkspaces?: Workspace[];
+  /** Trashed sessions the daemon holds; the rows load on demand, so this keeps the Trash control visible before then. */
+  trashedCount?: number;
+  trashLoaded?: boolean;
+  onLoadTrash?: () => void;
   onToggleSubgroup: (repoId: string, groupPath: string) => void;
   onToggleOrg: (orgId: string) => void;
   onToggleOrgRepo: (orgId: string, repoId: string) => void;
@@ -62,6 +75,8 @@ interface Props {
   activeId: string | null;
   /** Keyboard focus is inside the main panel, so keystrokes go to the open session. */
   mainPanelFocused: boolean;
+  /** The session the URL currently points at; lets an expanded sibling row tell it apart from the rest of its group. */
+  activeSessionId: string | null;
   open: boolean;
   onToggle: () => void;
   onSelect: (workspaceId: string, sessionId: string | null) => void;
@@ -82,9 +97,10 @@ interface Props {
   onDeleteSession?: (sessionIds: string[]) => void;
   /** Receives every session id of the trashed workspace. */
   onRestoreSession?: (sessionIds: string[]) => void;
-  onEmptyTrash?: () => void;
+  onEmptyTrash?: (workspaces: Workspace[]) => void;
   onStopSession?: (sessionId: string) => void;
   onStartSession?: (sessionId: string) => void;
+  onRestartForUpdate?: (sessionId: string) => void;
   onSwitchView?: (sessionId: string, toStructured: boolean) => void;
   readOnly?: boolean;
   /** False in CityHall client mode, which hides project management. */
@@ -112,8 +128,8 @@ export function WorkspaceSidebar(props: Props) {
     props.pluginSortRef != null &&
     pluginSorts.some((s) => s.pluginId === props.pluginSortRef!.pluginId && s.entryId === props.pluginSortRef!.entryId);
 
-  const dragSuppressRef = useRef<number>(0);
-  useSuppressClickAfterDrag(dragSuppressRef);
+  const dragClickGuard = useRef<DragClickGuard>(newDragClickGuard());
+  useSuppressClickAfterDrag(dragClickGuard);
 
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterQuery, setFilterQuery] = useState("");
@@ -187,7 +203,16 @@ export function WorkspaceSidebar(props: Props) {
   const isOrgAxis = axis === "org";
 
   const allWorkspaces = useMemo(() => uniqueWorkspaces(groups), [groups]);
-  const triage = useSidebarTriage(allWorkspaces);
+  // An expanded sibling keeps its own optimistic override, which has to reconcile against its one session,
+  // also after its siblings are gone. `allWorkspaces` keeps one slice per id, so the records come from every
+  // slice of every axis.
+  const triageWorkspaces = useMemo(() => {
+    const slices = [groups, ...nestedGroups.map((n) => n.subgroups), ...orgGroups.map((o) => o.repos)]
+      .flat()
+      .flatMap((g) => g.workspaces.map((v) => v.workspace));
+    return [...allWorkspaces, ...sessionWorkspaces(slices)];
+  }, [allWorkspaces, groups, nestedGroups, orgGroups]);
+  const triage = useSidebarTriage(triageWorkspaces);
   const orderedIds = useMemo(
     () => renderedOrder(filteredGroups, hasFilter, sunkExpanded),
     [filteredGroups, hasFilter, sunkExpanded],
@@ -226,27 +251,32 @@ export function WorkspaceSidebar(props: Props) {
     onUnpinProject: props.onUnpinProject,
     onEditProjectSettings: props.onEditProjectSettings,
     onArchiveGroup,
-    rowProps: (v: SidebarWorkspaceView) => {
-      const isActive = v.workspace.id === selection.displayedActiveId;
-      return {
-        workspace: v.workspace,
-        isActive,
-        isSelected: selection.isSelected(v.workspace.id),
-        hasInputFocus: isActive && props.mainPanelFocused,
-        onActivate: selection.handleRowActivate,
-        onDelete: props.onDeleteSession,
-        onStop: props.onStopSession,
-        onStart: props.onStartSession,
-        onSwitchView: props.onSwitchView,
-        readOnly,
-        optimistic: triage.optimisticFor(v.workspace.id),
-        onPinToggle: triage.pinToggle,
-        onArchiveToggle: triage.archiveToggle,
-        onSnooze: triage.snooze,
-        onUnreadToggle: triage.unreadToggle,
-        bulkApi: selection.rowBulkApi,
-      };
-    },
+    rowProps: (v: SidebarWorkspaceView) => ({
+      workspace: v.workspace,
+      observedById: props.observedById,
+      runtimeEpoch: props.runtimeEpoch,
+      onSessionMutation: props.onSessionMutation,
+      isActive: v.workspace.id === selection.displayedActiveId,
+      isSelected: selection.isSelected(v.workspace.id),
+      hasInputFocus: v.workspace.id === selection.displayedActiveId && props.mainPanelFocused,
+      onActivate: selection.handleRowActivate,
+      ...(v.workspace.sessions.length > 1 && {
+        activeSessionId: props.activeSessionId,
+        optimisticFor: triage.optimisticFor,
+      }),
+      onDelete: props.onDeleteSession,
+      onStop: props.onStopSession,
+      onStart: props.onStartSession,
+      onRestartForUpdate: props.onRestartForUpdate,
+      onSwitchView: props.onSwitchView,
+      readOnly,
+      optimistic: triage.optimisticFor(v.workspace.id),
+      onPinToggle: triage.pinToggle,
+      onArchiveToggle: triage.archiveToggle,
+      onSnooze: triage.snooze,
+      onUnreadToggle: triage.unreadToggle,
+      bulkApi: selection.rowBulkApi,
+    }),
   };
 
   const filteredProjects = props.savedProjects.filter(
@@ -389,7 +419,7 @@ export function WorkspaceSidebar(props: Props) {
               onToggleGroup={props.onToggleGroup}
               onReorderGroups={props.onReorderGroups}
               onReorderWorkspaces={props.onReorderWorkspaces}
-              dragSuppressRef={dragSuppressRef}
+              dragClickGuard={dragClickGuard}
             />
           )}
 
@@ -397,9 +427,13 @@ export function WorkspaceSidebar(props: Props) {
             <div data-testid="sidebar-sunk-section">
               <button
                 onClick={toggleSunkExpanded}
+                onKeyDown={onSidebarArrowKey}
                 data-testid="sidebar-sunk-toggle"
                 aria-expanded={sunkExpanded}
-                className={`w-full flex items-center gap-2 py-1.5 text-[11px] font-mono uppercase text-text-muted hover:text-text-secondary hover:bg-surface-800/40 cursor-pointer transition-colors border-t border-surface-800/60 ${
+                // A header for the arrow keys like a Group's, so Left on one of its rows comes back here.
+                aria-controls={SUNK_ROWS}
+                {...{ [NAV_ITEM]: "" }}
+                className={`w-full flex items-center gap-2 py-1.5 text-[11px] font-mono uppercase text-text-muted hover:text-text-secondary hover:bg-surface-800/40 cursor-pointer transition-colors border-t border-surface-800/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-500 ${
                   compact ? "px-2" : "px-3 tracking-widest"
                 }`}
               >
@@ -409,7 +443,9 @@ export function WorkspaceSidebar(props: Props) {
                 {/* The count and wide tracking do not fit the compact rail. */}
                 <span className="truncate">Snoozed &amp; archived{compact ? "" : ` (${sunk.length})`}</span>
               </button>
-              {sunkExpanded && sunk.map((v) => <SessionRow key={v.key} {...ctx.rowProps(v)} indented />)}
+              <div id={SUNK_ROWS} {...{ [ROWS]: "" }}>
+                {sunkExpanded && sunk.map((v) => <SessionRow key={v.key} {...ctx.rowProps(v)} indented />)}
+              </div>
             </div>
           )}
 
@@ -417,6 +453,7 @@ export function WorkspaceSidebar(props: Props) {
             ((!hasHighlightFilter && !hasFacets) || filteredProjects.length > 0) && (
               <ProjectsSection
                 projects={filteredProjects}
+                drawsRepoHeaders={axisDrawsRepoHeaders(axis)}
                 query={q}
                 readOnly={readOnly}
                 offline={offline}
@@ -455,14 +492,17 @@ export function WorkspaceSidebar(props: Props) {
         <SidebarSystemHealth />
 
         <div className="border-t border-surface-700/20 p-2 max-md:pb-[max(0.5rem,env(safe-area-inset-bottom))] flex items-center gap-1">
-          {trashedWorkspaces.length > 0 && (
+          {(trashedWorkspaces.length > 0 || (props.trashedCount ?? 0) > 0) && (
             <TrashMenu
               trashedWorkspaces={trashedWorkspaces}
+              trashedCount={props.trashedCount ?? 0}
+              loaded={props.trashLoaded ?? true}
+              onLoad={() => props.onLoadTrash?.()}
               readOnly={readOnly}
               onOpen={selection.handleRowActivate}
               onRestore={(ids) => props.onRestoreSession?.(ids)}
               onDelete={(ids) => props.onDeleteSession?.(ids)}
-              onEmptyTrash={() => props.onEmptyTrash?.()}
+              onEmptyTrash={(workspaces) => props.onEmptyTrash?.(workspaces)}
             />
           )}
           <button

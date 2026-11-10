@@ -45,7 +45,9 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe session attach`↴](#aoe-session-attach)
 * [`aoe session focus`↴](#aoe-session-focus)
 * [`aoe session show`↴](#aoe-session-show)
+* [`aoe session wait`↴](#aoe-session-wait)
 * [`aoe session rename`↴](#aoe-session-rename)
+* [`aoe session move`↴](#aoe-session-move)
 * [`aoe session set-worktree-name`↴](#aoe-session-set-worktree-name)
 * [`aoe session capture`↴](#aoe-session-capture)
 * [`aoe session current`↴](#aoe-session-current)
@@ -122,6 +124,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe mcp add`↴](#aoe-mcp-add)
 * [`aoe mcp edit`↴](#aoe-mcp-edit)
 * [`aoe mcp remove`↴](#aoe-mcp-remove)
+* [`aoe mcp config`↴](#aoe-mcp-config)
 * [`aoe skill`↴](#aoe-skill)
 * [`aoe skill list`↴](#aoe-skill-list)
 * [`aoe skill view`↴](#aoe-skill-view)
@@ -134,6 +137,11 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe hooks status`↴](#aoe-hooks-status)
 * [`aoe hooks approve`↴](#aoe-hooks-approve)
 * [`aoe serve`↴](#aoe-serve)
+* [`aoe daemon`↴](#aoe-daemon)
+* [`aoe daemon start`↴](#aoe-daemon-start)
+* [`aoe daemon stop`↴](#aoe-daemon-stop)
+* [`aoe daemon status`↴](#aoe-daemon-status)
+* [`aoe daemon restart`↴](#aoe-daemon-restart)
 * [`aoe url`↴](#aoe-url)
 * [`aoe acp`↴](#aoe-acp)
 * [`aoe acp doctor`↴](#aoe-acp-doctor)
@@ -152,6 +160,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe acp tail`↴](#aoe-acp-tail)
 * [`aoe acp attach`↴](#aoe-acp-attach)
 * [`aoe acp switch-agent`↴](#aoe-acp-switch-agent)
+* [`aoe acp switch-account`↴](#aoe-acp-switch-account)
 * [`aoe acp switch-provider`↴](#aoe-acp-switch-provider)
 * [`aoe uninstall`↴](#aoe-uninstall)
 * [`aoe update`↴](#aoe-update)
@@ -197,19 +206,23 @@ Run without arguments to launch the TUI dashboard.
 * `skill` — Query and manage agent skills
 * `hooks` — Let AoE write agent hooks into each agent's own config, for every agent and every profile
 * `serve` — Start the aoe daemon: REST/WebSocket API, plus the web dashboard in builds that embed it
+* `daemon` — Control the background aoe daemon; each verb is the matching `aoe serve` flag (`--daemon`, `--stop`, `--status`, `--restart`)
 * `url` — Print the URL of a running `aoe serve` daemon
 * `acp` — Manage the ACP structured-view workers (doctor, ps, logs, prompt, approve, ...)
 * `uninstall` — Uninstall Agent of Empires
 * `update` — Update aoe to the latest release
-* `migrate` — Run pending data migrations now, showing progress. A sandboxed session moves its own agent store when it starts; use this to move every eligible store at once instead. Trashed and archived sessions are skipped; each moves when it is started, or restore or unarchive it and run this again. Refuses while the aoe serve daemon runs; stop it with `aoe serve --stop` first
+* `migrate` — Run pending migrations or restore complete original lifecycle authority. Stop the daemon with `aoe serve --stop` first. By default, also move eligible sandbox stores and retry deferred ownership recovery
 * `completion` — Generate shell completions
 
 ###### **Options:**
 
 * `-p`, `--profile <PROFILE>` — Profile to use (separate workspace with its own sessions). Commands that consume or create profile state require an existing profile: an unknown name is refused, not created (make one with `aoe profile create`). Profile-independent commands such as `list --all` and `serve --stop` ignore it. `AGENT_OF_EMPIRES_PROFILE` names one too, and an explicit `-p` wins over it
-* `--daemon-url <DAEMON_URL>` — Select a daemon endpoint for read-only CLI commands or the TUI
+* `--daemon-url <DAEMON_URL>` — Select a daemon endpoint for read-only CLI commands or the TUI.
 
-   Explicit CLI endpoints never fall back. `AOE_DAEMON_URL` discovery may fall back to local storage before reaching a TCP peer, with a notice. Authenticate CLI reads with `AOE_DAEMON_TOKEN` or `AOE_DAEMON_PASSPHRASE`; TUI session lists support bearer tokens only. An unauthenticated daemon needs neither. See the HTTP API reference for transport and fallback rules.
+   Explicit endpoints and `AOE_DAEMON_URL` never fall back to local storage or start a local daemon. Authenticate with `AOE_DAEMON_TOKEN` or `AOE_DAEMON_PASSPHRASE`. An unauthenticated daemon needs neither. See the HTTP API reference for transport and authentication rules.
+* `--no-autostart` — Fail instead of starting a local daemon when none is running
+
+   Also read from `AOE_NO_AUTOSTART=1`. Has no effect with `--daemon-url` or `AOE_DAEMON_URL`, which never start a daemon.
 
 
 
@@ -225,7 +238,7 @@ Add a new session
 
 ###### **Options:**
 
-* `-t`, `--title <TITLE>` — Session title (defaults to folder name)
+* `-t`, `--title <TITLE>` — Session title (defaults to a civilization name, or the worktree branch)
 * `-i`, `--interactive` — Prompt for the session name, mirroring the TUI `n` flow. Shows the generated default; press Enter to accept it. Ignored when --title is given. Requires an interactive terminal
 * `-g`, `--group <GROUP>` — Group path (defaults to parent folder)
 * `-c`, `--cmd <COMMAND>` — Command to run (e.g., 'claude' or any other supported agent)
@@ -243,6 +256,7 @@ Add a new session
 * `--no-submodules` — Skip `git submodule update --init --recursive` after creating the worktree, overriding the `worktree.init_submodules` config (default true). Useful for repos with large or deeply nested submodule trees that you don't need inside the agent session
 * `-s`, `--sandbox` — Run session in a container sandbox
 * `--sandbox-image <SANDBOX_IMAGE>` — Custom container image for sandbox (implies --sandbox)
+* `--hook-env <KEY[=VALUE]>` — Env var for the host `before_start` hook only, never the container (`KEY=VALUE` or `KEY`; repeatable; requires --sandbox)
 * `-y`, `--yolo` — Enable YOLO mode (skip permission prompts)
 * `--trust-hooks` — Automatically trust this repository's hooks and project-local MCP servers without prompting
 * `--extra-args <EXTRA_ARGS>` — Extra arguments to append after the agent binary
@@ -369,7 +383,9 @@ Remove a session
 
 ###### **Options:**
 
-* `--delete-worktree` — Delete worktree directory (default: keep worktree)
+* `--delete-worktree` — With --purge, delete the worktree directory (default: keep it).
+
+   Without --purge, trashing moves a managed worktree into a sibling `.aoe-trash` folder, unless another session uses it.
 * `--delete-branch` — Delete git branch after worktree removal (default: per config)
 * `--force` — Force worktree removal even with untracked/modified files
 * `--keep-container` — Keep container instead of deleting it (default: delete per config)
@@ -499,7 +515,9 @@ Manage session lifecycle (start, stop, attach, etc.)
 * `attach` — Attach to session interactively
 * `focus` — Ask one running TUI to show a session (dashboard: attach; attached elsewhere: switch its own client). Never starts a stopped session
 * `show` — Show session details
+* `wait` — Block until a session's agent activity status matches one of the `--until` values. Exits 0 on a match, 124 on timeout (like `timeout(1)`), and 1 if the session stops. Tmux sessions only
 * `rename` — Rename a session
+* `move` — Move sessions to another profile. Sessions that look active when the command starts are refused; one that starts mid-batch can still move. Each keeps its title, group and worktree; the target profile's config applies from the next start
 * `set-worktree-name` — Edit a managed worktree session's workdir directory name (and, optionally, its git branch). Moves the worktree directory in place; the session must not be running. See #1723
 * `capture` — Capture tmux pane output
 * `current` — Auto-detect current session
@@ -834,6 +852,8 @@ Restart session (or all sessions with `--all`)
 * `--parallel <PARALLEL>` — Concurrency cap for `--all`. Restarting many sandboxed sessions in parallel pressures dockerd, so the default is intentionally modest. Ignored when `--all` is not set
 
   Default value: `3`
+* `--tool <TOOL>` — Restart as this tool, through the Daemon. Swapping between tools that run the same agent under different `[session.agent_config_dir]` accounts keeps the conversation (Claude). Any other swap starts a fresh conversation. Use `aoe acp switch-account` to refuse instead
+* `--to-profile <TO_PROFILE>` — Move the session to this existing profile while restarting, through the Daemon
 
 
 
@@ -881,6 +901,28 @@ Show session details
 
 
 
+## `aoe session wait`
+
+Block until a session's agent activity status matches one of the `--until` values. Exits 0 on a match, 124 on timeout (like `timeout(1)`), and 1 if the session stops. Tmux sessions only
+
+**Usage:** `aoe session wait [OPTIONS] --until <UNTIL> <IDENTIFIER>`
+
+###### **Arguments:**
+
+* `<IDENTIFIER>` — Session ID or title
+
+###### **Options:**
+
+* `--until <UNTIL>` — Activity status to wait for; repeat to accept any of several
+
+  Possible values: `running`, `waiting`, `idle`, `error`
+
+* `--timeout <TIMEOUT>` — Give up after this many milliseconds
+
+  Default value: `300000`
+
+
+
 ## `aoe session rename`
 
 Rename a session
@@ -897,6 +939,22 @@ Rename a session
 * `-g`, `--group <GROUP>` — New group for the session (empty string to ungroup)
 * `--rename-branch` — When the session is tied (session.tie_workdir_to_name) and an aoe-managed worktree, also rename the underlying git branch to match. Off by default; ignored for untied / non-worktree sessions
 * `--branch <BRANCH>` — Rename the Git branch without moving the worktree directory
+
+
+
+## `aoe session move`
+
+Move sessions to another profile. Sessions that look active when the command starts are refused; one that starts mid-batch can still move. Each keeps its title, group and worktree; the target profile's config applies from the next start
+
+**Usage:** `aoe session move --to-profile <TO_PROFILE> <IDENTIFIERS>...`
+
+###### **Arguments:**
+
+* `<IDENTIFIERS>` — Session IDs or titles to move
+
+###### **Options:**
+
+* `--to-profile <TO_PROFILE>` — Destination profile; it must already exist
 
 
 
@@ -980,7 +1038,7 @@ Set the resume target for a session; an agent whose exact native resume AoE cann
 
 ###### **Options:**
 
-* `--store <STORE>` — Assert the native store: a Claude store directory, or a Pi/OMP transcript file
+* `--store <STORE>` — Assert the native store: the Claude config root (the directory containing `projects/`), or a Pi/OMP transcript file
 
 
 
@@ -1307,6 +1365,7 @@ Install an external plugin from a `gh:owner/repo[@ref]` slug or a local director
 ###### **Options:**
 
 * `--yes` — Grant all requested capabilities without prompting
+* `--dev` — Install a local directory as a dev plugin: it may claim a reserved `aoe.*` / `agent-of-empires.*` id, is never featured, and is refused under `aoe serve --remote`
 
 
 
@@ -1506,7 +1565,7 @@ Add a project to the registry
 
   Possible values: `global`, `profile`
 
-* `--allow-override` — Allow registering this path even if it already exists in the other scope. Without this flag the command errors when the same canonical path is already registered globally (when adding to profile) or in any profile (when adding globally). When override is allowed and both scopes hold the same path, the profile entry shadows the global one
+* `--allow-override` — Allow the same canonical path in the global and selected profile scopes. The profile entry shadows the global entry in merged views
 * `--base-branch <BASE_BRANCH>` — Default base branch for new worktree branches created against this project, whether it is the launch repo or an extra repo in a multi-repo workspace. An explicit session base wins; when omitted, falls back to the global/profile `worktree.default_base_branch`, then the repo's detected default branch
 
 
@@ -1836,6 +1895,7 @@ Inspect the effective MCP server set (provenance, conflicts, drift)
 * `add` — Add an AoE-owned MCP server to the global mcp.json
 * `edit` — Edit an AoE-owned MCP server. Secrets you do not mention keep their stored value
 * `remove` — Remove an AoE-owned MCP server
+* `config` — Print an MCP client config for the running daemon's `/mcp` server, ready to paste into an agent's `mcpServers` (for example a Claude Code `.mcp.json`)
 
 
 
@@ -1910,6 +1970,14 @@ Remove an AoE-owned MCP server
 ###### **Arguments:**
 
 * `<NAME>` — Name of the AoE-owned server to remove
+
+
+
+## `aoe mcp config`
+
+Print an MCP client config for the running daemon's `/mcp` server, ready to paste into an agent's `mcpServers` (for example a Claude Code `.mcp.json`)
+
+**Usage:** `aoe mcp config`
 
 
 
@@ -2075,6 +2143,7 @@ Start the aoe daemon: REST/WebSocket API, plus the web dashboard in builds that 
 
 ###### **Options:**
 
+* `--core-only` — Serve the private local API without opening TCP or a dashboard
 * `--port <PORT>` — Port to listen on (default: 8080; debug builds default to 8081 so a `cargo run` instance does not collide with an installed release `aoe`)
 * `--host <HOST>` — Host/IP to bind to (use 0.0.0.0 for LAN/VPN access)
 
@@ -2084,8 +2153,9 @@ Start the aoe daemon: REST/WebSocket API, plus the web dashboard in builds that 
   Possible values: `token`, `passphrase`, `none`
 
 * `--no-auth` — Disable authentication (only allowed with localhost binding). Alias for --auth=none
-* `--behind-proxy` — Mark this server as sitting behind a reverse proxy that terminates TLS upstream. Sets cookies as `; Secure` and trusts the `X-Forwarded-For` / `cf-connecting-ip` headers from loopback peers. Does NOT auto-spawn a tunnel (unlike --remote). Required when --auth=passphrase or --auth=none is combined with a non-loopback bind
-* `--allowed-host <HOST>` — Extra `Host` header value to accept (repeatable). The DNS-rebinding gate trusts loopback, any routable IP literal (LAN/tailnet IPs can't be rebound), and a non-wildcard `--host` by default; add a HOSTNAME or mDNS name here when serving behind a reverse proxy, a custom tunnel, or by name when binding `0.0.0.0` (access by IP needs no flag). Auto-injected tunnel hosts (`--remote`) need no flag
+* `--behind-proxy` — Mark this server as sitting behind a reverse proxy that terminates TLS upstream. Sets cookies as `; Secure` and trusts the `X-Forwarded-For` header from loopback peers. Does NOT auto-spawn a tunnel (unlike --remote). Required when --auth=passphrase or --auth=none is combined with a non-loopback bind
+* `--dangerously-allow-plaintext-remote` — Accept plain HTTP from non-loopback peers. By default the server answers those with 426 before authentication: bearer tokens and passphrases would cross the network in the clear. A TLS proxy or tunnel in front of a loopback listener (`--behind-proxy`, `--remote`) needs no opt-out. This applies to this bind only, is never inferred from the address, and is logged at every start
+* `--allowed-host <HOST>` — Extra `Host` header value to accept (repeatable). The DNS-rebinding gate trusts loopback, any routable IP-literal `Host` (LAN/tailnet IPs can't be rebound), and a non-wildcard `--host` by default. A browser `Origin` is accepted without `--allowed-origin` only when it is allowlisted or has the exact same authority as `Host`; add a HOSTNAME or mDNS name here when serving behind a reverse proxy, a custom tunnel, or by name when binding `0.0.0.0` (access by IP needs no flag). Auto-injected tunnel hosts (`--remote`) need no flag
 * `--allowed-origin <ORIGIN>` — Extra browser `Origin` to accept (repeatable, full origin `scheme://host[:port]`, e.g. `https://aoe.example.com:8443`). Needed only for a reverse proxy on a nonstandard port; standard 80/443 origins for `--allowed-host` entries are derived automatically
 * `--read-only` — Read-only mode: view terminals but cannot send keystrokes
 * `--cityhall` — CityHall client mode: a locked-down, composer-first dashboard for non-technical users (structured view only; no terminal/diff/project management). Equivalent to `AOE_CITYHALL_MODE=1`; the flag is what the daemon replays to its restart child so the mode survives `aoe update` and `aoe serve --restart`. See #7
@@ -2095,12 +2165,60 @@ Start the aoe daemon: REST/WebSocket API, plus the web dashboard in builds that 
 * `--tunnel-url <TUNNEL_URL>` — Hostname for a named tunnel (e.g., aoe.example.com)
 * `--daemon` — Run as a background daemon (detach from terminal)
 * `--stop` — Stop a running daemon
-* `--status` — Print the running daemon's PID, mode, URLs, and log path. Exits non-zero when no daemon is running. Useful for shell scripts that want to know whether a daemon is up without parsing `ps`.
+* `--status` — Print the local daemon's PID, mode, URLs, and log path. With `AOE_DAEMON_URL` set, report the remote daemon's reachability and token state instead. Exits non-zero when no daemon is running. Useful for shell scripts that want to know whether a daemon is up without parsing `ps`.
 
    `--status` is read-only and incompatible with every flag that would change daemon state (`--stop`, `--daemon`, `--remote`) or the bind config of a fresh daemon (`--no-auth`, `--auth`, `--behind-proxy`, `--read-only`, `--passphrase`, `--port`, `--tunnel-name`, `--no-tailscale`, `--tunnel-url`, `--open`, `--allowed-host`, `--allowed-origin`). Clap reports the misuse instead of silently ignoring the extras.
 * `--passphrase <PASSPHRASE>` — Require a passphrase for login (second-factor auth). Can also be set via AOE_SERVE_PASSPHRASE environment variable
 * `--open` — Open the dashboard URL in the default browser once the server is ready. Ignored in a build with no dashboard bundle, under --daemon or --remote, and whenever no browser the user could see is reachable (see `tui::open_url`): over SSH without a forwarded display, or on Linux/BSD with no display server. `BROWSER` overrides the check on platforms whose launcher reads it, which excludes macOS
-* `--restart` — Restart a running `aoe serve` daemon, replaying the host, port, mode, and auth it was launched with (read from `serve.launch`). The passphrase is recalled from `serve.passphrase` or `AOE_SERVE_PASSPHRASE` before the old daemon is stopped, so a passphrase-protected daemon is never left down. Incompatible with the flags that would change the daemon's bind config: that config comes from the persisted launch state
+* `--restart` — Restart the running managed daemon with its recorded policy. Missing credentials are rejected before stopping it
+* `--rollback` — Restore the retained managed launch, including a core replaced by the dashboard
+
+
+
+## `aoe daemon`
+
+Control the background aoe daemon; each verb is the matching `aoe serve` flag (`--daemon`, `--stop`, `--status`, `--restart`)
+
+**Usage:** `aoe daemon <COMMAND>`
+
+###### **Subcommands:**
+
+* `start` — Start the daemon in the background (`aoe serve --daemon`)
+* `stop` — Stop the running daemon (`aoe serve --stop`)
+* `status` — Print the daemon's PID, mode, URLs and log path, or remote reachability with `AOE_DAEMON_URL` (`aoe serve --status`)
+* `restart` — Restart the daemon with its persisted launch config (`aoe serve --restart`)
+
+
+
+## `aoe daemon start`
+
+Start the daemon in the background (`aoe serve --daemon`)
+
+**Usage:** `aoe daemon start`
+
+
+
+## `aoe daemon stop`
+
+Stop the running daemon (`aoe serve --stop`)
+
+**Usage:** `aoe daemon stop`
+
+
+
+## `aoe daemon status`
+
+Print the daemon's PID, mode, URLs and log path, or remote reachability with `AOE_DAEMON_URL` (`aoe serve --status`)
+
+**Usage:** `aoe daemon status`
+
+
+
+## `aoe daemon restart`
+
+Restart the daemon with its persisted launch config (`aoe serve --restart`)
+
+**Usage:** `aoe daemon restart`
 
 
 
@@ -2125,7 +2243,7 @@ Manage the ACP structured-view workers (doctor, ps, logs, prompt, approve, ...)
 
 ###### **Subcommands:**
 
-* `doctor` — Verify the structured view can start: Node runtime, configured agents, provider auth (claude login)
+* `doctor` — Verify the structured view can start: Node runtime, configured agents, provider auth (claude auth login)
 * `agents` — List configured agents (claude-code, aoe-agent, etc.)
 * `stop` — Stop an agent worker and settle its owned native processes. Unlike `aoe serve --stop`, this ends the worker rather than detaching
 * `recover` — Retire unprovable worker ownership after external shutdown confirmation
@@ -2141,13 +2259,14 @@ Manage the ACP structured-view workers (doctor, ps, logs, prompt, approve, ...)
 * `tail` — Stream the agent broadcast for a session to stdout as JSON lines (one frame per line). Press Ctrl-C to stop
 * `attach` — Open the TUI structured view directly for a known session id. Combine with `AOE_DAEMON_URL` (+ `AOE_DAEMON_TOKEN`, or `AOE_DAEMON_PASSPHRASE` against a `--auth=passphrase` daemon) to attach across machines without going through the home session list
 * `switch-agent` — Switch an agent session to a different ACP agent, keeping the transcript. Valid targets are built-in registry agents and any custom agent configured in `[session.agent_acp_cmd]`. The new agent starts fresh; use `aoe acp agents` to list built-in targets. Handy for returning to claude after a rate-limit handoff to codex
+* `switch-account` — Switch a structured session to another account of the same agent, keeping the conversation. Accounts are tool names with their own `[session.agent_config_dir]`; the transcript is copied into the new account's store and the worker resumes it. A session parked on a rate limit continues with the interrupted prompt; otherwise it gets the usual restart wake message. Refuses, changing nothing, where the swap would start a fresh conversation (not Claude, no recorded conversation, other agent)
 * `switch-provider` — Re-route a Claude session to a different LLM provider, keeping the transcript. Refused mid-turn; once idle the worker restarts and resumes the same conversation. Credentials are not provisioned by this: the target provider's own variables must already be set on the host (for example `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` for vertex). The model resets to the new provider's default, because model ids differ between providers
 
 
 
 ## `aoe acp doctor`
 
-Verify the structured view can start: Node runtime, configured agents, provider auth (claude login)
+Verify the structured view can start: Node runtime, configured agents, provider auth (claude auth login)
 
 **Usage:** `aoe acp doctor [OPTIONS]`
 
@@ -2384,6 +2503,19 @@ Switch an agent session to a different ACP agent, keeping the transcript. Valid 
 
 
 
+## `aoe acp switch-account`
+
+Switch a structured session to another account of the same agent, keeping the conversation. Accounts are tool names with their own `[session.agent_config_dir]`; the transcript is copied into the new account's store and the worker resumes it. A session parked on a rate limit continues with the interrupted prompt; otherwise it gets the usual restart wake message. Refuses, changing nothing, where the swap would start a fresh conversation (not Claude, no recorded conversation, other agent)
+
+**Usage:** `aoe acp switch-account <SESSION> <TOOL>`
+
+###### **Arguments:**
+
+* `<SESSION>` — Acp session id
+* `<TOOL>` — Tool name of the target account, as declared in `[session.agent_config_dir]` (e.g. `claude-b`)
+
+
+
 ## `aoe acp switch-provider`
 
 Re-route a Claude session to a different LLM provider, keeping the transcript. Refused mid-turn; once idle the worker restarts and resumes the same conversation. Credentials are not provisioned by this: the target provider's own variables must already be set on the host (for example `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` for vertex). The model resets to the new provider's default, because model ids differ between providers
@@ -2431,9 +2563,15 @@ Update aoe to the latest release
 
 ## `aoe migrate`
 
-Run pending data migrations now, showing progress. A sandboxed session moves its own agent store when it starts; use this to move every eligible store at once instead. Trashed and archived sessions are skipped; each moves when it is started, or restore or unarchive it and run this again. Refuses while the aoe serve daemon runs; stop it with `aoe serve --stop` first
+Run pending migrations or restore complete original lifecycle authority. Stop the daemon with `aoe serve --stop` first. By default, also move eligible sandbox stores and retry deferred ownership recovery
 
-**Usage:** `aoe migrate`
+**Usage:** `aoe migrate [OPTIONS]`
+
+###### **Options:**
+
+* `--restore-purge-journal <FILE>` — Restore a complete original purge journal from a consistent application backup
+* `--restore-tool-journal <FILE>` — Restore complete original tool retirement receipts from a consistent application backup
+* `--confirm-complete-original-authority` — Attest that FILE contains all original authority, not a stale or partial copy
 
 
 

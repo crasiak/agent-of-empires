@@ -207,18 +207,35 @@ fn work_arc_upgrade_from_review_preserves_authority_and_registry() {
 
     run_migrations_with(Some(report)).unwrap();
 
-    assert_eq!(*started.lock().unwrap(), (50..=55).collect::<Vec<_>>());
-    assert_eq!(get_current_version(), 55);
+    assert_eq!(
+        *started.lock().unwrap(),
+        (50..=CURRENT_VERSION).collect::<Vec<_>>()
+    );
+    assert_eq!(get_current_version(), CURRENT_VERSION);
     afk::authority::migration_v3::run_at(&app).unwrap();
     afk::review::annotations::initialize(&app).unwrap();
     let mut after = tree(&app);
     after.remove(&app.join(VERSION_FILE));
-    // Stores and locks created by the tailored-session migrations 51 and 53.
+    // Stores and locks created by the tailored-session migrations 51 and 53,
+    // and by upstream's ownership and lifecycle migrations 56 to 68.
     for name in [
         "research.json",
         ".research.json.lock",
         "workshop.json",
         ".workshop.json.lock",
+        "pending-purge-owners.json",
+        ".pending-purge-owners.json.lock",
+        "tool-retirements.json",
+        ".tool-retirements.json.lock",
+        "state.toml",
+        ".state.toml.lock",
+        ".title-mutation.lock",
+        "serve.lock",
+        "serve.state.lock",
+        "daemon",
+        "daemon/lifetime.lock",
+        "daemon/transaction.lock",
+        "profiles/alpha/.storage.lock",
     ] {
         after.remove(&app.join(name));
     }

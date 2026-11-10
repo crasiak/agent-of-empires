@@ -27,8 +27,10 @@ import {
   SCHEDULE_TOOLS,
   SkillToolCard,
   SpecialToolCard,
+  WorkflowToolCard,
   classifySkill,
   classifySpecialTool,
+  classifyWorkflow,
 } from "./NamedToolCards";
 import { classifyTodoWrite, TodoUpdateCard } from "./TodoCards";
 import { statusFor } from "./ToolCardChrome";
@@ -45,14 +47,16 @@ interface Props {
 export function ToolCard({ tool, result, nested }: Props) {
   const profile = useAgentProfile();
   const card = renderToolCard(tool, result, profile);
-  const content = result?.output?.length ? (
-    <>
-      {card}
-      <ToolOutputMedia blocks={result.output} />
-    </>
-  ) : (
-    card
-  );
+  // The read card shows its own output media inside its body.
+  const content =
+    result?.output?.length && card.type !== ReadToolCard ? (
+      <>
+        {card}
+        <ToolOutputMedia blocks={result.output} />
+      </>
+    ) : (
+      card
+    );
   const wrapped =
     !nested && pickStr(parseJsonObject(tool.args_preview), "_aoe_parent_tool_call_id") ? (
       <SubagentChildWrap>{content}</SubagentChildWrap>
@@ -88,6 +92,7 @@ function renderToolCard(tool: ToolCall, result: ActivityRow | undefined, profile
     const todos = classifyTodoWrite(tool, profile);
     if (todos.isTodoWrite) return <TodoUpdateCard tool={tool} result={result} todos={todos.todos} />;
   }
+  if (classifyWorkflow(tool, profile)) return <WorkflowToolCard tool={tool} result={result} />;
   const special =
     (capabilities.wakeup ? classifySpecialTool(tool, specialTitles.scheduleNames, SCHEDULE_TOOLS) : null) ??
     classifySpecialTool(tool, specialTitles.harnessNames, HARNESS_TOOLS);

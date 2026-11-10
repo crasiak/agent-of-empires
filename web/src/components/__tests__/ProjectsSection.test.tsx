@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { ProjectsSection } from "../ProjectsSection";
+import { SidebarCompactContext } from "../../lib/sidebarCompact";
+import { MARK_MEANING, meaningText } from "../../lib/sidebarMarks";
 import type { ProjectInfo, RepoGroup } from "../../lib/types";
 
 afterEach(cleanup);
@@ -75,6 +77,25 @@ describe("ProjectsSection", () => {
     expect(h.onCreateSession).toHaveBeenCalledWith("/work/alpha");
   });
 
+  it("explains the row's marker with the shared tooltip, not a native title", () => {
+    const pinned: ProjectInfo = { name: "alpha", path: "/work/alpha", scope: "global", pinned: true };
+    // (registrations, marker, meaning); a pinned Project is listed here when the axis draws no ◆ header (#5065).
+    const cases: [ProjectInfo[] | undefined, string, (typeof MARK_MEANING)[keyof typeof MARK_MEANING]][] = [
+      [undefined, "◇", MARK_MEANING.project],
+      [[pinned], "◆", MARK_MEANING.pinnedProject],
+    ];
+    for (const [registeredProjects, marker, meaning] of cases) {
+      renderSection({
+        projects: [emptyProject("/work/alpha", registeredProjects ? { registeredProjects } : {})],
+      });
+      const mark = screen.getByText(marker);
+      expect(mark.hasAttribute("title"), marker).toBe(false);
+      fireEvent.mouseEnter(mark.parentElement!);
+      expect(screen.getByRole("tooltip").textContent, marker).toBe(meaningText(meaning));
+      cleanup();
+    }
+  });
+
   it("hides add and disables create for read-only viewers", () => {
     const h = renderSection({ readOnly: true });
     expect(screen.queryByTestId("sidebar-projects-add")).toBeNull();
@@ -129,13 +150,71 @@ describe("ProjectsSection", () => {
     expect(menu.className).toContain("overflow-y-auto");
   });
 
+  it("names what it lists, with a count that matches the rows, and stays short in the rail", () => {
+    for (const paths of [[], ["/work/alpha"], ["/work/alpha", "/work/beta"]]) {
+      renderSection({ projects: paths.map((p) => emptyProject(p)) });
+      const toggle = screen.getByTestId("sidebar-projects-toggle");
+      expect(Array.from(toggle.querySelectorAll("span"), (span) => span.textContent)).toEqual([
+        "Projects, no sessions",
+        `(${paths.length})`,
+      ]);
+      expect(screen.queryAllByTestId("sidebar-project-row")).toHaveLength(paths.length);
+      cleanup();
+    }
+    render(
+      <SidebarCompactContext.Provider value={true}>
+        <ProjectsSection
+          projects={[emptyProject("/work/alpha")]}
+          query=""
+          offline={false}
+          onCreateSession={vi.fn()}
+          onAddProject={vi.fn()}
+          onEditProject={vi.fn()}
+          onRemoveProject={vi.fn()}
+        />
+      </SidebarCompactContext.Provider>,
+    );
+    const label = screen.getByTestId("sidebar-projects-toggle").querySelector("span[title]")!;
+    expect([label.textContent, label.getAttribute("title")]).toEqual(["Projects", "Projects, no sessions"]);
+  });
+
+  // #5065: an axis without repository headers lists every Project, so the label drops "no sessions".
+  it("labels the section by whether the axis draws repository headers; compact stays Projects", () => {
+    // (draws repository headers, compact, label, title)
+    const cases: [boolean, boolean, string, string][] = [
+      [true, false, "Projects, no sessions", "Projects, no sessions"],
+      [false, false, "Projects", "Projects"],
+      [true, true, "Projects", "Projects, no sessions"],
+      [false, true, "Projects", "Projects"],
+    ];
+    for (const [drawsRepoHeaders, compact, text, title] of cases) {
+      render(
+        <SidebarCompactContext.Provider value={compact}>
+          <ProjectsSection
+            projects={[emptyProject("/work/alpha")]}
+            query=""
+            offline={false}
+            drawsRepoHeaders={drawsRepoHeaders}
+            onCreateSession={vi.fn()}
+            onAddProject={vi.fn()}
+            onEditProject={vi.fn()}
+            onRemoveProject={vi.fn()}
+          />
+        </SidebarCompactContext.Provider>,
+      );
+      const label = screen.getByTestId("sidebar-projects-toggle").querySelector("span[title]")!;
+      expect([label.textContent, label.getAttribute("title")], `${drawsRepoHeaders} ${compact}`).toEqual([text, title]);
+      cleanup();
+    }
+  });
+
   it("shows the no-match and empty hints, and nothing when there is no way to add", () => {
     renderSection({ query: "zzz" });
     expect(screen.queryByTestId("sidebar-project-row")).toBeNull();
     expect(screen.getByText("No matching projects.")).toBeTruthy();
     cleanup();
     renderSection({ projects: [] });
-    expect(screen.getByText(/No saved projects/)).toBeTruthy();
+    expect(screen.getByText(/No registered Projects\./)).toBeTruthy();
     cleanup();
     renderSection({ projects: [], readOnly: true });
     expect(screen.queryByTestId("sidebar-projects-section")).toBeNull();

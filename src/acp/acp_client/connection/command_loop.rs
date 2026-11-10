@@ -2,12 +2,13 @@
 //! the driven conversation reset.
 
 use crate::acp::state::Event;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     CancelNotification, ContentBlock, McpServer, NewSessionRequest, NewSessionResponse,
     SessionConfigId, SessionConfigOption, SessionConfigValueId, SessionId,
     SetSessionConfigOptionRequest,
 };
-use agent_client_protocol::{Agent, ConnectionTo};
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::Agent;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -160,7 +161,9 @@ impl Session {
                     // The supervisor publishes the terminal here (#1100).
                     info!(target: "acp.protocol", "force-stop requested with no prompt in flight; best-effort cancel only");
                     self.stand_down_idle_completion();
-                    let _ = self.send_cancel().await;
+                    if let Err(error) = self.send_cancel().await {
+                        debug!(target: "acp.protocol", %error, "cancel notification failed");
+                    }
                 }
                 Some(ClientCmd::SetMode(mode_id)) => self.dispatch_mode(mode_id, false),
                 Some(ClientCmd::DeleteSession {
@@ -172,6 +175,11 @@ impl Session {
                 }
                 Some(ClientCmd::ResumeBackgroundTailing(launches)) => {
                     self.shared.resume_background_tailing(launches)
+                }
+                Some(ClientCmd::ResumeTaskTailing(task_ids)) => {
+                    self.shared
+                        .resume_task_tailing(&self.acp_session_id.0, task_ids)
+                        .await
                 }
                 Some(ClientCmd::ResetSession {
                     text,
@@ -278,7 +286,7 @@ impl Session {
             return Ok(());
         };
         let work = self.shared.between_prompt.work_state();
-        if work.is_busy() {
+        if work.is_busy() || !self.shared.bg_tasks.is_empty() {
             // Old-session events would be attributed to the new conversation.
             warn!(
                 target: "acp.protocol",

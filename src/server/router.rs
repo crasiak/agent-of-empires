@@ -2,24 +2,43 @@
 
 use axum::Router;
 use std::sync::Arc;
+use tower_http::compression::predicate::{Predicate, SizeAbove};
 use tracing::Instrument;
 
 use super::access::{access_policy, cityhall_gate, security_headers};
 #[cfg(feature = "web")]
 use super::assets::{serve_asset, serve_index, serve_public_file};
 use super::state::AppState;
-use crate::server::{acp_ws, api, auth, live_ws, login, passkeys, push, runtime_ws};
+use crate::server::{
+    acp_ws, api, auth, live_ws, login, passkeys, push, runtime_ws, session_status_ws,
+};
 
 pub(super) fn build_router(state: Arc<AppState>) -> Router {
     use axum::routing::{delete, get, patch, post, put};
+    let read_only = axum::middleware::from_fn_with_state(state.clone(), api::read_only_gate);
 
     let app = Router::new()
-        // Explicit browser visibility heartbeat.
+        .route("/api/runtime", get(super::runtime::get_runtime_info))
+        .route(
+            "/api/runtime/snapshot",
+            get(super::runtime::get_runtime_snapshot),
+        )
+        .route("/api/runtime/ws", get(super::runtime::runtime_ws))
+        // Explicit browser visibility heartbeat. Ordinary API requests do not
+        // imply the dashboard is foregrounded, so they must not suppress push.
         .route("/api/presence", post(api::post_dashboard_presence))
         // Sessions
         .route(
             "/api/sessions",
             get(api::list_sessions).post(api::create_session),
+        )
+        .route(
+            "/api/sessions/creation-trust",
+            post(api::review_creation_trust).layer(read_only.clone()),
+        )
+        .route(
+            "/api/sessions/{id}/creation/cancel",
+            post(api::cancel_creation).layer(read_only.clone()),
         )
         // Static segment; registered before /api/sessions/{id} so the
         // literal "search" never resolves as a session id. See #2515.
@@ -46,7 +65,10 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
             put(api::update_workspace_ordering),
         )
         // Atomic multi-session workspace delete.
-        .route("/api/workspaces", delete(api::delete_workspace))
+        .route(
+            "/api/workspaces",
+            delete(api::delete_workspace).layer(read_only.clone()),
+        )
         // Unified MCP management surface (#1996)
         .route(
             "/api/mcp/servers",
@@ -77,8 +99,14 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
             put(api::edit_skill).delete(api::delete_skill),
         )
         .route(
+            "/api/sessions/empty-trash",
+            post(api::empty_trash).layer(read_only.clone()),
+        )
+        .route(
             "/api/sessions/{id}",
-            patch(api::rename_session).delete(api::delete_session),
+            patch(api::rename_session)
+                .delete(api::delete_session)
+                .layer(read_only.clone()),
         )
         .route("/api/sessions/{id}/group", patch(api::update_session_group))
         .route(
@@ -94,6 +122,10 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{id}/file/raw", get(api::session_file_raw))
         // Read-only runtime read: one Hello, one Snapshot, one clean close.
         .route("/api/runtime/read/ws", get(runtime_ws::runtime_ws))
+        .route(
+            "/api/sessions/status/ws",
+            get(session_status_ws::session_status_ws),
+        )
         .route(
             "/api/sessions/{id}/artifacts/{*path}",
             get(api::serve_session_artifact),
@@ -128,17 +160,32 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
             post(api::attach_session_project),
         )
         .route("/api/sessions/{id}/pin", patch(api::update_session_pin))
+        .route(
+            "/api/sessions/{id}/favorite",
+            patch(api::update_session_favorite).layer(read_only.clone()),
+        )
         .route("/api/sessions/{id}/color", patch(api::update_session_color))
         .route(
             "/api/sessions/{id}/archive",
             patch(api::update_session_archive),
         )
         .route(
+            "/api/sessions/{id}/access",
+            patch(api::touch_session_access).layer(read_only.clone()),
+        )
+        .route(
             "/api/sessions/{id}/snooze",
             patch(api::update_session_snooze),
         )
-        .route("/api/sessions/{id}/trash", post(api::trash_session))
+        .route(
+            "/api/sessions/{id}/trash",
+            post(api::trash_session).layer(read_only.clone()),
+        )
         .route("/api/sessions/{id}/restore", post(api::restore_session))
+        .route(
+            "/api/sessions/{id}/purge/abandon",
+            post(api::abandon_purge).layer(read_only.clone()),
+        )
         .route(
             "/api/sessions/{id}/unread",
             patch(api::update_session_unread),
@@ -151,12 +198,32 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{id}/summarize", post(api::summarize_session))
         .route("/api/sessions/{id}/start", post(api::start_session))
         .route(
+            "/api/sessions/{id}/restart",
+            post(api::restart_session).layer(read_only.clone()),
+        )
+        .route(
+            "/api/sessions/{id}/recreate-container",
+            post(api::recreate_container).layer(read_only.clone()),
+        )
+        .route(
+            "/api/sessions/{id}/restart-for-update",
+            post(api::restart_for_update).layer(read_only.clone()),
+        )
+        .route(
             "/api/sessions/{id}/terminal",
             post(api::ensure_terminal).delete(api::kill_terminal),
         )
         .route(
             "/api/sessions/{id}/container-terminal",
             post(api::ensure_container_terminal),
+        )
+        .route(
+            "/api/sessions/{id}/tools/ensure",
+            post(api::ensure_tool).layer(read_only.clone()),
+        )
+        .route(
+            "/api/sessions/{id}/auxiliary/stop",
+            post(api::stop_auxiliary).layer(read_only.clone()),
         )
         // Agents
         .route("/api/agents", get(api::list_agents))
@@ -178,7 +245,19 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/git/worktrees", get(api::list_worktrees))
         .route("/api/git/is-repo", get(api::is_git_repo))
         .route("/api/git/clone", post(api::clone_repo))
-        .route("/api/groups", get(api::list_groups))
+        .route(
+            "/api/groups",
+            get(api::list_groups)
+                .post(api::create_group)
+                .patch(api::move_group)
+                .delete(api::delete_group)
+                .layer(read_only.clone()),
+        )
+        .route(
+            "/api/groups/collapse",
+            patch(api::collapse_group).layer(read_only.clone()),
+        )
+        .route("/api/reorder", post(api::reorder).layer(read_only.clone()))
         .route(
             "/api/projects",
             get(api::list_projects).post(api::create_project),
@@ -188,6 +267,15 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
             patch(api::update_project).delete(api::delete_project),
         )
         .route("/api/docker/status", get(api::docker_status))
+        .route("/api/sandbox/image-status", get(api::sandbox_image_status))
+        .route(
+            "/api/sandbox/image-pull",
+            post(api::sandbox_image_pull).layer(read_only.clone()),
+        )
+        .route(
+            "/api/sandbox/image-dismiss",
+            post(api::sandbox_image_dismiss).layer(read_only.clone()),
+        )
         .route("/api/system/health", get(api::system_health))
         .route("/api/system/logs", get(api::get_logs))
         // Settings + themes
@@ -199,6 +287,7 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/settings/resolved", get(api::get_settings_resolved))
         // The CityHall config bundle an admin hands to CityHall.
         .route("/api/cityhall/bundle", get(api::get_cityhall_bundle))
+        .route("/api/cityhall/apply", post(api::apply_cityhall_bundle))
         .route("/api/tips", get(api::get_tips))
         .route("/api/tips/show", post(api::set_show_tips))
         .route("/api/app-state/tip-seen", post(api::mark_tip_seen))
@@ -216,16 +305,19 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/plugins/commands", get(api::plugin_commands))
         .route(
             "/api/plugins/commands/{fqid}/invoke",
-            post(api::invoke_plugin_command),
+            post(api::invoke_plugin_command).layer(read_only.clone()),
         )
         .route("/api/plugins/ui-state", get(api::plugin_ui_state))
         .route("/api/plugins/updates", get(api::plugin_updates))
         .route("/api/plugins/discover", get(api::plugin_discover))
         .route("/api/plugins/details", get(api::plugin_details))
-        .route("/api/plugins/{id}/enabled", post(api::set_plugin_enabled))
+        .route(
+            "/api/plugins/{id}/enabled",
+            post(api::set_plugin_enabled).layer(read_only.clone()),
+        )
         .route(
             "/api/plugins/{id}/worker/restart",
-            post(api::restart_plugin_worker),
+            post(api::restart_plugin_worker).layer(read_only.clone()),
         )
         .route("/api/plugins/{id}/action", post(api::invoke_plugin_action))
         .route("/api/plugins/{id}/sessions", get(api::plugin_sessions))
@@ -235,12 +327,15 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/plugins/install/preview",
-            post(api::preview_plugin_install),
+            post(api::preview_plugin_install).layer(read_only.clone()),
         )
-        .route("/api/plugins/install", post(api::start_plugin_install))
+        .route(
+            "/api/plugins/install",
+            post(api::start_plugin_install).layer(read_only.clone()),
+        )
         .route(
             "/api/plugins/{id}/uninstall",
-            post(api::start_plugin_uninstall),
+            post(api::start_plugin_uninstall).layer(read_only.clone()),
         )
         .route("/api/plugins/jobs/{job_id}", get(api::plugin_job_status))
         .route(
@@ -249,11 +344,11 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/plugins/{id}/update/apply",
-            post(api::apply_plugin_update),
+            post(api::apply_plugin_update).layer(read_only.clone()),
         )
         .route(
             "/api/plugins/{id}/update/dismiss",
-            post(api::dismiss_plugin_update),
+            post(api::dismiss_plugin_update).layer(read_only.clone()),
         )
         .route(
             "/api/app-state/web-tour-seen",
@@ -342,6 +437,7 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         // posts to the telemetry backend directly).
         .route("/api/telemetry/status", get(api::get_telemetry_status))
         .route("/api/telemetry/consent", post(api::set_telemetry_consent))
+        .route("/api/telemetry/reset-id", post(api::reset_telemetry_id))
         .route("/api/telemetry/seen", post(api::post_telemetry_seen))
         .route(
             "/api/telemetry/structured-interaction",
@@ -362,6 +458,7 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
     let app = app
         .route("/sessions/{id}/acp/ws", get(acp_ws::acp_ws))
         .route("/api/sessions/{id}/acp/spawn", post(api::spawn_acp))
+        .route("/api/sessions/{id}/acp/restart", post(api::restart_acp))
         .route(
             "/api/sessions/{id}/acp/install-agent",
             post(api::install_agent),
@@ -373,7 +470,7 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{id}/acp", delete(api::shutdown_acp))
         .route(
             "/api/sessions/{id}/acp/switch-agent",
-            post(api::switch_acp_agent),
+            post(api::switch_acp_agent).layer(read_only.clone()),
         )
         .route(
             "/api/sessions/{id}/acp/switch-provider",
@@ -448,15 +545,26 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
 
     // Dashboard bundle (Vite build output) plus the SPA fallback.
     #[cfg(feature = "web")]
-    let app = app
-        .route("/assets/{*path}", get(serve_asset))
-        .route("/manifest.json", get(serve_public_file))
-        .route("/sw.js", get(serve_public_file))
-        .route("/icon-192.png", get(serve_public_file))
-        .route("/icon-512.png", get(serve_public_file))
-        .fallback(get(serve_index));
+    let app = if state.core_only {
+        app
+    } else {
+        app.route("/assets/{*path}", get(serve_asset))
+            .route("/manifest.json", get(serve_public_file))
+            .route("/sw.js", get(serve_public_file))
+            .route("/icon-192.png", get(serve_public_file))
+            .route("/icon-512.png", get(serve_public_file))
+            .fallback(get(serve_index))
+    };
 
     app.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        super::runtime::mutation_scope,
+    ))
+    .layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        super::runtime::epoch_gate,
+    ))
+    .layer(axum::middleware::from_fn_with_state(
         state.clone(),
         cityhall_gate,
     ))
@@ -468,16 +576,54 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         state.clone(),
         access_policy,
     ))
+    .layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        super::ingress::plaintext_gate,
+    ))
     .layer(axum::middleware::from_fn(security_headers))
     .layer(axum::middleware::from_fn(http_request_span))
+    .layer(compression_layer())
     .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
     .with_state(state)
 }
 
-/// Placeholder logged in place of a route template when axum matched no route.
+/// gzip/zstd for JSON bodies only. Upgrades, SSE, replay streams and assets
+/// carry other content types and pass through untouched.
+fn compression_layer() -> tower_http::compression::CompressionLayer<impl Predicate> {
+    let json = |_: axum::http::StatusCode,
+                _: axum::http::Version,
+                headers: &axum::http::HeaderMap,
+                _: &axum::http::Extensions| {
+        headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("application/json"))
+    };
+    tower_http::compression::CompressionLayer::new()
+        .no_br()
+        .no_deflate()
+        .compress_when(SizeAbove::new(1024).and(json))
+}
+
+/// Placeholder logged in place of a route template when axum matched no
+/// route: the SPA fallback, and the 405 that fallback returns for a
+/// non-GET method. A request whose *path* matched a registered route still
+/// carries its template even when the method router rejects it, because
+/// axum matches on path before it dispatches on method. The raw URI is never
+/// substituted here: it is attacker- or user-controlled text, and the whole
+/// point of [`log_route`] is that only strings we wrote ourselves reach the
+/// log file.
 pub(super) const UNMATCHED_ROUTE: &str = "<unmatched>";
 
 /// Route template for a request, for logging only.
+///
+/// Deliberately never the raw URI. `aoe serve` puts the auth token in the
+/// URL's query string, path segments carry session ids, and `debug.log` is a
+/// file users paste into issue reports. `MatchedPath` is the template we
+/// registered in [`build_router`] (`/api/sessions/{id}/acp/replay`), a
+/// compile-time constant with no request data in it, so logging it cannot
+/// leak a token or an id no matter what the client sent. Axum fills the
+/// extension during routing, before any `Router::layer` middleware runs.
 pub(super) fn log_route(request: &axum::extract::Request) -> &str {
     request
         .extensions()
@@ -485,10 +631,21 @@ pub(super) fn log_route(request: &axum::extract::Request) -> &str {
         .map_or(UNMATCHED_ROUTE, |m| m.as_str())
 }
 
-/// Longest client-supplied `X-Request-Id` we are willing to echo.
+/// Longest client-supplied `X-Request-Id` we are willing to echo. A
+/// correlation token needs far less; anything longer is a caller padding
+/// every one of its log lines.
 pub(super) const MAX_CLIENT_REQUEST_ID: usize = 64;
 
 /// Whether a client-supplied `X-Request-Id` can be reused verbatim.
+///
+/// Held to the same rule as [`log_route`]. `request_id` is a field of the
+/// completion event, so it renders under the default `show_spans = false`
+/// formatter, and `HeaderValue::to_str` accepts any visible ASCII, spaces
+/// and `=` included. An unfiltered value therefore lets an unauthenticated
+/// caller (the event fires outside the auth layer) forge `status=` and
+/// `path=` pairs on the very line #3402 added for triage, or pad every 4xx
+/// line to churn the file through rotation. Anything outside a bounded
+/// token charset is replaced by a generated uuid.
 pub(super) fn is_log_safe_request_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_CLIENT_REQUEST_ID
@@ -497,11 +654,15 @@ pub(super) fn is_log_safe_request_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
+/// The request's `X-Request-Id`, generated or echoed, for handlers that report it.
+#[derive(Debug, Clone)]
+pub struct RequestId(pub String);
+
 /// Middleware that wraps every request in an `http.request` span with a generated or echoed
 /// `X-Request-Id`, then emits one completion event at the level matching the response
 /// status.
 pub(super) async fn http_request_span(
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let rid = request
@@ -511,6 +672,7 @@ pub(super) async fn http_request_span(
         .filter(|v| is_log_safe_request_id(v))
         .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    request.extensions_mut().insert(RequestId(rid.clone()));
     let method = request.method().clone();
     let route = log_route(&request).to_string();
     let span = tracing::debug_span!(
@@ -555,23 +717,8 @@ pub(super) async fn http_request_span(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::test_helpers::vecs;
+    use crate::server::test_helpers::{capture_logs, vecs};
     use crate::server::test_support;
-
-    /// `MakeWriter` sink so the request-log test can read back exactly the
-    /// bytes a daemon would have appended to `debug.log`.
-    #[derive(Clone)]
-    struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for LogSink {
-        fn write(&mut self, src: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(src);
-            Ok(src.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
 
     /// #3402.
     #[tokio::test]
@@ -580,15 +727,7 @@ mod tests {
         const TOKEN: &str = "super-secret-token";
         const SESSION: &str = "sess-9f3a";
 
-        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-        let sink = LogSink(buf.clone());
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_writer(move || sink.clone())
-            .with_ansi(false)
-            .event_format(crate::logging::NoSpanFormat)
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_guard, buf) = capture_logs();
 
         // (request URI, expected level, expected `path` field, expected status)
         let cases = [
@@ -696,22 +835,78 @@ mod tests {
             ("6f1c2b7e-0f2a-4a1e-9d3c-2b8f5a0c7d11", true),
         ];
         for (header, echoed) in ids {
+            // Handlers see the id the line logs and the response echoes.
             let app = axum::Router::new()
-                .route("/api/sessions", axum::routing::get(|| async { "[]" }))
+                .route(
+                    "/api/sessions",
+                    axum::routing::get(|axum::Extension(id): axum::Extension<RequestId>| async {
+                        id.0
+                    }),
+                )
                 .layer(axum::middleware::from_fn(http_request_span));
             let req = axum::http::Request::builder()
                 .uri("/api/sessions")
                 .header("x-request-id", header)
                 .body(axum::body::Body::empty())
                 .unwrap();
-            app.oneshot(req).await.unwrap();
+            let response = app.oneshot(req).await.unwrap();
+            let echoed_id = response.headers()["x-request-id"]
+                .to_str()
+                .unwrap()
+                .to_string();
+            let seen = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(seen, echoed_id.as_bytes(), "{header:?}");
             let line = take_line();
+            assert!(line.contains(&format!("request_id={echoed_id}")), "{line}");
             assert_eq!(
                 line.contains(&format!("request_id={header}")),
                 echoed,
                 "{header:?}: got {line}"
             );
             assert!(line.contains("request_id="), "no request id at all: {line}");
+        }
+    }
+
+    /// Only large JSON is compressed; streams, other types and small bodies
+    /// pass through byte-identical.
+    #[tokio::test]
+    async fn compression_skips_non_json_and_small_bodies() {
+        use tower::ServiceExt;
+        let big = "x".repeat(8192);
+        let cases = [
+            ("application/json", big.clone(), true),
+            ("application/json; charset=utf-8", big.clone(), true),
+            ("application/json", "{}".to_string(), false),
+            ("text/event-stream", big.clone(), false),
+            ("text/plain", big.clone(), false),
+            ("application/octet-stream", big.clone(), false),
+        ];
+        for (content_type, body, compressed) in cases {
+            let payload = body.clone();
+            let app = axum::Router::new()
+                .route(
+                    "/",
+                    axum::routing::get(move || async move {
+                        ([(axum::http::header::CONTENT_TYPE, content_type)], payload)
+                    }),
+                )
+                .layer(compression_layer());
+            let req = axum::http::Request::builder()
+                .uri("/")
+                .header("accept-encoding", "gzip, zstd")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            let encoded = resp.headers().contains_key("content-encoding");
+            assert_eq!(encoded, compressed, "{content_type} len={}", body.len());
+            if !compressed {
+                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert_eq!(bytes, body.as_bytes(), "{content_type}");
+            }
         }
     }
 }

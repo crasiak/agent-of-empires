@@ -4,7 +4,7 @@
 
 use crate::acp::control_protocol::PromptOutcome;
 use crate::acp::state::{Event, RateLimitInfo};
-use agent_client_protocol::schema::v1::{ContentBlock, PromptRequest, PromptResponse, StopReason};
+use agent_client_protocol::v1::schema::{ContentBlock, PromptRequest, PromptResponse, StopReason};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -84,6 +84,8 @@ struct TurnFlags {
     prompt_cancelled: bool,
     orphan_cancel_sent: bool,
     cancelling: bool,
+    /// What the adapter reported; `None` when no `PromptResponse` arrived.
+    agent_stop_reason: Option<StopReason>,
 }
 
 struct Turn {
@@ -144,6 +146,7 @@ impl Session {
             control.supersede_adopted_turn();
         }
         shared.reset_message_dedup();
+        shared.seed_user_replay.store(false, Ordering::Relaxed);
         if shared
             .suppress_history_replay
             .swap(false, Ordering::Relaxed)
@@ -304,6 +307,7 @@ impl Session {
         let e = match res {
             Ok(resp) => {
                 turn.flags.prompt_cancelled = matches!(resp.stop_reason, StopReason::Cancelled);
+                turn.flags.agent_stop_reason = Some(resp.stop_reason);
                 if !turn.flags.prompt_cancelled {
                     if let Some(info) = self.take_parking_rejection() {
                         self.shared.emit(Event::RateLimit { info }).await;
@@ -400,7 +404,9 @@ impl Session {
                     target: "acp.protocol",
                     "force-stop requested during in-flight prompt; ending turn and restarting worker"
                 );
-                let _ = self.send_cancel().await;
+                if let Err(error) = self.send_cancel().await {
+                    debug!(target: "acp.protocol", %error, "cancel notification failed");
+                }
                 turn.flags.force_stopped = true;
                 turn.flags.shutdown = true;
                 return Ok(Flow::Break);
@@ -415,6 +421,11 @@ impl Session {
             }) => handle_delete_session_cmd(&self.connection, acp_session_id, respond_to),
             Some(ClientCmd::ResumeBackgroundTailing(launches)) => {
                 self.shared.resume_background_tailing(launches)
+            }
+            Some(ClientCmd::ResumeTaskTailing(task_ids)) => {
+                self.shared
+                    .resume_task_tailing(&self.acp_session_id.0, task_ids)
+                    .await
             }
             Some(ClientCmd::Prompt(blocks)) => return Ok(self.on_follow_up(turn, blocks).await),
             Some(ClientCmd::ResetSession {
@@ -517,6 +528,11 @@ impl Session {
                 grace_secs = turn.watchdog.effective_grace(turn.cfg).as_secs(),
                 "silent-orphan watchdog: turn wrapped up (cost-populated usage) without PromptResponse; ending cleanly as prompt_complete"
             );
+            // The runner may still be running the turn; without this the next
+            // local prompt hits the stale waiter and kills the connection.
+            if let Some(control) = self.control.as_ref() {
+                control.release_local_prompt();
+            }
             return Flow::Break;
         }
         if fire {
@@ -637,11 +653,13 @@ impl Session {
         shared.reset_message_dedup();
         shared.prompt_in_flight.store(false, Ordering::Relaxed);
         // Missing after a Stopped, this line signals a stranded prompt (#3190).
-        debug!(
+        info!(
             target: "acp.protocol",
             session = %shared.session_label,
             reason,
-            "prompt drain complete; between-prompt idle ownership restored"
+            agent_stop_reason = ?f.agent_stop_reason,
+            duration_ms = now_ms() - prompt_started_at_ms,
+            "turn finished; between-prompt idle ownership restored"
         );
     }
 }

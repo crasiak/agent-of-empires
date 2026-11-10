@@ -251,9 +251,24 @@ fn test_row_tag_agent_maps_known_terminal_tools() {
 #[serial]
 fn test_row_tag_profile_modes_in_filtered_view() {
     use crate::session::config::RowTagMode;
-    let (_temp, _guard) = test_home();
-    seed_profile("alpha", &[Instance::new("A1", "/tmp/a")]);
-    let mut view = test_view(Some("alpha"));
+    let temp = TempDir::new().unwrap();
+    let _guard = setup_test_home(&temp);
+    let storage = Storage::new_unwatched("alpha").unwrap();
+    let instances = vec![Instance::new("A1", "/tmp/a")];
+    storage
+        .update(|i, g| {
+            *i = instances.to_vec();
+            *g = GroupTree::new_with_groups(&instances, &[]).get_all_groups();
+            Ok(())
+        })
+        .unwrap();
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let mut view = HomeView::new_for_test(
+        Some("alpha".to_string()),
+        tools,
+        crate::file_watch::FileWatchService::noop(),
+    )
+    .unwrap();
     view.group_by = crate::session::config::GroupByMode::Manual;
     let rendered = crate::tui::home::render::RowTag {
         content: crate::tui::home::render::profile_short_code("alpha"),
@@ -271,6 +286,100 @@ fn test_row_tag_profile_modes_in_filtered_view() {
         let text = rendered_row_text(&view, row);
         assert_eq!(text.contains(&rendered), expect_tag, "{mode:?}: {text:?}");
     }
+}
+
+#[test]
+#[serial]
+fn plugin_statuses_align_before_activity_age() {
+    let (_temp, _guard) = test_home();
+    let mut first = Instance::new("short", "/tmp/a");
+    first.status = Status::Idle;
+    first.idle_entered_at = Some(chrono::Utc::now() - chrono::Duration::minutes(5));
+    let mut second = Instance::new("a longer title", "/tmp/a");
+    second.view = crate::session::View::Structured;
+    let ids = [first.id.clone(), second.id.clone()];
+    seed_profile("alpha", &[first, second]);
+    let mut view = test_view(Some("alpha"));
+    view.group_by = crate::session::config::GroupByMode::Manual;
+    view.show_activity_age = true;
+    view.flat_items = view.build_flat_items();
+    view.plugin_ui.snapshot = serde_json::from_value(serde_json::json!({
+        "entries": [
+            {"plugin_id":"gh","slot":"row-badge","id":"a","session_id":ids[0],"payload":{"text":"LONG"}},
+            {"plugin_id":"linear","slot":"row-badge","id":"b","session_id":ids[1],"payload":{"text":"X"}}
+        ],
+        "notifications": []
+    })).unwrap();
+    let theme = crate::tui::styles::Theme::default();
+    for (id, label) in ids.iter().zip(["LONG", "X"]) {
+        let row = view
+            .flat_items
+            .iter()
+            .find(|item| matches!(item, Item::Session { id: row_id, .. } if row_id == id))
+            .unwrap();
+        let line = view.render_item_line(row, false, false, &theme, 60, false);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            crate::tui::components::rendered_width(&text),
+            60,
+            "{text:?}"
+        );
+        let end = text.find(label).unwrap() + label.len();
+        assert_eq!(
+            crate::tui::components::rendered_width(&text[..end]),
+            53,
+            "{text:?}"
+        );
+        if id == &ids[0] {
+            assert!(text.ends_with("5m "), "{text:?}");
+        } else {
+            assert!(text.ends_with("       "), "{text:?}");
+        }
+    }
+    view.plugin_ui.snapshot.entries[0].payload["text"] = serde_json::json!("日本語日本語");
+    let row = view
+        .flat_items
+        .iter()
+        .find(|item| matches!(item, Item::Session { id, .. } if id == &ids[0]))
+        .unwrap()
+        .clone();
+    let mut saw_truncated = false;
+    for width in 20..60 {
+        let line = view.render_item_line(&row, false, false, &theme, width, false);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        if text.contains("日…") && text.ends_with("5m ") {
+            saw_truncated = true;
+            assert_eq!(
+                crate::tui::components::rendered_width(&text),
+                width as usize,
+                "{text:?}"
+            );
+        }
+    }
+    assert!(saw_truncated, "expected a truncated wide glyph");
+
+    let row = view
+        .flat_items
+        .iter()
+        .find(|item| matches!(item, Item::Session { id, .. } if id == &ids[1]))
+        .unwrap()
+        .clone();
+    let mut saw_fallback = false;
+    for width in 20..60 {
+        view.show_activity_age = false;
+        let without = view.render_item_line(&row, false, false, &theme, width, false);
+        view.show_activity_age = true;
+        let with = view.render_item_line(&row, false, false, &theme, width, false);
+        let without: String = without.spans.iter().map(|s| s.content.as_ref()).collect();
+        let with: String = with.spans.iter().map(|s| s.content.as_ref()).collect();
+        if without.contains('X') && with.ends_with("X ") {
+            saw_fallback = true;
+        }
+    }
+    assert!(
+        saw_fallback,
+        "expected status to use the empty age slot when necessary"
+    );
 }
 
 /// `show_activity_age` hides the right-edge age column on an Idle row, and a title too
@@ -392,7 +501,9 @@ fn test_agent_row_marks_running_paired_terminal() {
         .find(|item| matches!(item, Item::Session { .. }))
         .cloned()
         .expect("session row");
-    let cache = crate::tmux::SessionCacheGuard::capture();
+    let Item::Session { id, .. } = &row else {
+        unreachable!("session row");
+    };
     let line = |view: &HomeView| {
         view.render_item_line(
             &row,
@@ -414,8 +525,20 @@ fn test_agent_row_marks_running_paired_terminal() {
         ("terminal view", true, ViewMode::Terminal, false),
     ];
     for (name, running, mode, expect_badge) in cases {
-        let present: &[&str] = if running { &[term.as_str()] } else { &[] };
-        cache.force_present(present);
+        view.mutate_instance(id, |instance| {
+            instance.auxiliary = vec![crate::session::AuxiliaryObservation {
+                target: crate::session::AuxiliaryTarget::Host { index: 0 },
+                pane: crate::session::PaneObservation {
+                    state: if running {
+                        crate::session::PanePresence::Alive
+                    } else {
+                        crate::session::PanePresence::Absent
+                    },
+                    tmux_session: running.then(|| term.clone()),
+                    legacy_tool: None,
+                },
+            }];
+        });
         view.view_mode = mode;
         let text = line(&view);
         assert_eq!(
@@ -468,11 +591,9 @@ fn test_branch_tag_yields_to_title_on_narrow_row() {
     assert!(!narrow.contains("[foo"), "{narrow:?}");
 }
 
-#[test]
+#[tokio::test]
 #[serial]
-fn test_create_session_in_all_mode_is_findable() {
-    use crate::tui::dialogs::NewSessionData;
-
+async fn test_create_session_in_all_mode_is_findable() {
     let temp = TempDir::new().unwrap();
     let _guard = setup_test_home(&temp);
 
@@ -489,46 +610,27 @@ fn test_create_session_in_all_mode_is_findable() {
             .unwrap();
     }
 
-    let project_dir = temp.path().join("project");
-    std::fs::create_dir_all(&project_dir).unwrap();
-
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view =
         HomeView::new_for_test(None, tools, crate::file_watch::FileWatchService::noop()).unwrap();
+    let state = native_state(&["alpha"]).await;
+    apply_published(&mut view, &state).await;
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
     view.update_selected();
 
-    let data = NewSessionData {
-        profile: "alpha".to_string(),
-        title: "New Session".to_string(),
-        title_typed: false,
-        path: project_dir.to_str().unwrap().to_string(),
-        group: String::new(),
-        tool: "claude".to_string(),
-        worktree_enabled: false,
-        worktree_branch: None,
-        create_new_branch: false,
-        base_branch: None,
-        extra_repo_paths: Vec::new(),
-        sandbox: false,
-        sandbox_image: String::new(),
-        yolo_mode: false,
-        extra_env: Vec::new(),
-        extra_args: String::new(),
-        command_override: String::new(),
-        scratch: false,
-        fork_seed: None,
-        structured: false,
-    };
-
-    let session_id = view.create_session(data).unwrap();
-    assert_eq!(
-        crate::session::config::AppStateConfig::load()
-            .unwrap()
-            .sessions_created,
-        1
-    );
+    // A row created elsewhere (the daemon, the CLI) lands through the reload
+    // path, which is the only creator left once creation is daemon-owned.
+    let mut created = Instance::new("New Session", "/tmp/new-session");
+    created.source_profile = "alpha".to_string();
+    let session_id = created.id.clone();
+    storage
+        .update(|rows, _| {
+            rows.push(created.clone());
+            Ok(())
+        })
+        .unwrap();
+    super::pickers_groups_sort::refresh_native_fixture(&state, &mut view).await;
 
     // In unified view, the session IS findable (fixes #419)
     assert!(
@@ -541,9 +643,9 @@ fn test_create_session_in_all_mode_is_findable() {
     );
 }
 
-#[test]
+#[tokio::test]
 #[serial]
-fn test_save_preserves_per_profile_collapsed_state() {
+async fn test_canonical_refresh_preserves_per_profile_collapsed_state() {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
@@ -580,6 +682,9 @@ fn test_save_preserves_per_profile_collapsed_state() {
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view =
         HomeView::new_for_test(None, tools, crate::file_watch::FileWatchService::noop()).unwrap();
+    let profiles = crate::session::list_profiles().unwrap();
+    let state = native_state(&profiles.iter().map(String::as_str).collect::<Vec<_>>()).await;
+    apply_published(&mut view, &state).await;
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
     view.update_selected();
@@ -607,8 +712,8 @@ fn test_save_preserves_per_profile_collapsed_state() {
         "beta's 'work' group should be expanded"
     );
 
-    // Save and reload to verify persistence
-    view.save().unwrap();
+    // A canonical refresh preserves each profile's persisted collapse state.
+    super::pickers_groups_sort::refresh_native_fixture(&state, &mut view).await;
 
     // Reload from disk and verify alpha's collapsed state survived
     let (_, groups_a) = storage_a.load_with_groups().unwrap();
@@ -633,13 +738,28 @@ fn test_save_preserves_per_profile_collapsed_state() {
 }
 
 /// Filtering scopes group deletion, including an empty group with populated twins.
-#[test]
+#[tokio::test]
 #[serial]
-fn test_group_delete_scoped_to_owning_profile() {
-    let (_temp, _guard) = test_home();
+async fn test_group_delete_scoped_to_owning_profile() {
+    let temp = TempDir::new().unwrap();
+    let _guard = setup_test_home(&temp);
     crate::session::update_config(|config| config.session.hide_empty_groups = false).unwrap();
-    seed_profile("alpha", &[instance_in("A1", "/tmp/a", "work")]);
-    seed_profile("beta", &[instance_in("B1", "/tmp/b", "work")]);
+    for (profile, instance) in [
+        ("alpha", Instance::new("A1", "/tmp/a")),
+        ("beta", Instance::new("B1", "/tmp/b")),
+    ] {
+        let mut instance = instance;
+        instance.group_path = "work".to_string();
+        let instances = vec![instance];
+        Storage::new_unwatched(profile)
+            .unwrap()
+            .update(|i, g| {
+                *i = instances.to_vec();
+                *g = GroupTree::new_with_groups(&instances, &[]).get_all_groups();
+                Ok(())
+            })
+            .unwrap();
+    }
     Storage::new_unwatched("gamma")
         .unwrap()
         .update(|_instances, groups| {
@@ -647,7 +767,12 @@ fn test_group_delete_scoped_to_owning_profile() {
             Ok(())
         })
         .unwrap();
-    let mut view = test_view(None);
+    let tools = AvailableTools::with_tools(&["claude"]);
+    let mut view =
+        HomeView::new_for_test(None, tools, crate::file_watch::FileWatchService::noop()).unwrap();
+    let profiles = crate::session::list_profiles().unwrap();
+    let state = native_state(&profiles.iter().map(String::as_str).collect::<Vec<_>>()).await;
+    apply_published(&mut view, &state).await;
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
     view.update_selected();
@@ -687,7 +812,8 @@ fn test_group_delete_scoped_to_owning_profile() {
     view.confirm_dialog = None;
 
     select_work(&mut view, "alpha");
-    view.delete_selected_group(&crate::tui::dialogs::GroupDeleteOptions::default())
+    super::pickers_groups_sort::settle_delete_group(&state, &mut view)
+        .await
         .unwrap();
     assert!(
         !view.group_trees.get("alpha").unwrap().group_exists("work"),
@@ -728,9 +854,9 @@ fn test_group_delete_scoped_to_owning_profile() {
 // tied derived-destination collision, cross-profile target collision) share one test because
 // they need the same `#[serial]`-forcing setup: an isolated home, several HomeView/Storage
 // instances, and a process-global `tie_workdir_to_name` flip. Each asserts independently.
-#[test]
+#[tokio::test]
 #[serial]
-fn test_rename_selected_rejects_all_identity_collisions_and_allows_group_only_change() {
+async fn test_rename_selected_rejects_all_identity_collisions_and_allows_group_only_change() {
     let temp = TempDir::new().unwrap();
     let _guard = setup_test_home(&temp);
     let storage = Storage::new_unwatched("test").unwrap();
@@ -750,6 +876,8 @@ fn test_rename_selected_rejects_all_identity_collisions_and_allows_group_only_ch
         crate::file_watch::FileWatchService::noop(),
     )
     .unwrap();
+    let state = native_state(&["test"]).await;
+    apply_published(&mut view, &state).await;
     view.selected_session = Some(target_id.clone());
     storage
         .update(|instances, _groups| {
@@ -762,8 +890,16 @@ fn test_rename_selected_rejects_all_identity_collisions_and_allows_group_only_ch
         })
         .unwrap();
 
-    view.rename_selected("main branch", None, None, false)
-        .unwrap();
+    // Model the daemon ingesting the peer's durable edit while Home still displays /tmp/stale.
+    let mut canonical_rows = storage.load_complete_with_groups().unwrap().0;
+    for row in &mut canonical_rows {
+        row.source_profile = "test".to_owned();
+    }
+    *state.instances.write().await = canonical_rows;
+    crate::server::test_support::refresh_canonical_metadata_for_test(&state).await;
+    super::pickers_groups_sort::settle_rename(&state, &mut view, "main branch", None, None, false)
+        .await
+        .expect_err("durable identity collision");
     assert!(view.info_dialog.is_some());
     assert_eq!(view.get_instance(&target_id).unwrap().title, "throwaway");
     assert_eq!(
@@ -772,7 +908,9 @@ fn test_rename_selected_rejects_all_identity_collisions_and_allows_group_only_ch
     );
 
     view.info_dialog = None;
-    view.rename_selected("", Some("work"), None, false).unwrap();
+    super::pickers_groups_sort::settle_rename(&state, &mut view, "", Some("work"), None, false)
+        .await
+        .unwrap();
     assert!(view.info_dialog.is_none());
     assert_eq!(view.get_instance(&target_id).unwrap().group_path, "work");
     let stored = storage.load().unwrap();
@@ -802,15 +940,13 @@ fn test_rename_selected_rejects_all_identity_collisions_and_allows_group_only_ch
             Ok(())
         })
         .unwrap();
-    view.reload().unwrap();
+    super::pickers_groups_sort::refresh_native_fixture(&state, &mut view).await;
     view.selected_session = Some(tied_id.clone());
     view.info_dialog = None;
-    view.rename_selected("main branch", None, None, false)
-        .unwrap();
-    assert!(
-        view.info_dialog.is_some(),
-        "tied derived-destination collision must be rejected"
-    );
+    super::pickers_groups_sort::settle_rename(&state, &mut view, "main branch", None, None, false)
+        .await
+        .expect_err("durable derived-destination collision");
+    assert!(view.info_dialog.is_some());
     let tied_stored = storage.load().unwrap();
     let tied_target = tied_stored
         .iter()
@@ -844,16 +980,20 @@ fn test_rename_selected_rejects_all_identity_collisions_and_allows_group_only_ch
         crate::file_watch::FileWatchService::noop(),
     )
     .unwrap();
+    let unified_state = native_state(&["alpha", "beta"]).await;
+    apply_published(&mut unified, &unified_state).await;
     unified.selected_session = Some(source_id.clone());
-    let error = unified
-        .rename_selected("occupied", None, Some("beta"), false)
-        .expect_err("target-profile identity collision must reject the transaction");
-    assert!(
-        error
-            .to_string()
-            .contains("Session already exists with same title and path"),
-        "unexpected collision error: {error:#}"
-    );
+    let error = super::pickers_groups_sort::settle_rename(
+        &unified_state,
+        &mut unified,
+        "occupied",
+        None,
+        Some("beta"),
+        false,
+    )
+    .await
+    .expect_err("target-profile identity collision must reject the transaction");
+    assert!(error.to_string().contains("duplicate"));
     assert_eq!(
         alpha
             .load()
@@ -870,9 +1010,9 @@ fn test_rename_selected_rejects_all_identity_collisions_and_allows_group_only_ch
 /// Changing a session's profile via the rename dialog must transfer its group metadata in
 /// the same storage transaction, or the source reloads an empty duplicate while the target
 /// row renders under a separately created group.
-#[test]
+#[tokio::test]
 #[serial]
-fn test_rename_profile_change_prunes_source_group() {
+async fn test_rename_profile_change_prunes_source_group() {
     use crate::session::GroupTree;
 
     let temp = TempDir::new().unwrap();
@@ -896,12 +1036,17 @@ fn test_rename_profile_change_prunes_source_group() {
     let tools = AvailableTools::with_tools(&["claude"]);
     let mut view =
         HomeView::new_for_test(None, tools, crate::file_watch::FileWatchService::noop()).unwrap();
+    let profiles = crate::session::list_profiles().unwrap();
+    let state = native_state(&profiles.iter().map(String::as_str).collect::<Vec<_>>()).await;
+    apply_published(&mut view, &state).await;
     view.group_by = crate::session::config::GroupByMode::Manual;
     view.flat_items = view.build_flat_items();
     view.selected_session = Some(id.clone());
 
     // Move the session alpha -> beta, keeping the same group name.
-    view.rename_selected("", None, Some("beta"), false).unwrap();
+    super::pickers_groups_sort::settle_rename(&state, &mut view, "", None, Some("beta"), false)
+        .await
+        .unwrap();
 
     let moved = view.get_instance(&id).unwrap();
     assert_eq!(moved.source_profile, "beta");

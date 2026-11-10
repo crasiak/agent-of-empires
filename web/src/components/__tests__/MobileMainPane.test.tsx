@@ -72,6 +72,7 @@ function setup(overrides: Partial<Parameters<typeof MobileMainPane>[0]> = {}) {
   const onBackToAgent = vi.fn();
   const props: Parameters<typeof MobileMainPane>[0] = {
     view: "agent",
+    readOnly: false,
     pluginPanes: [],
     onBackToAgent,
     onOpenAgentsPane: vi.fn(),
@@ -80,7 +81,13 @@ function setup(overrides: Partial<Parameters<typeof MobileMainPane>[0]> = {}) {
     activeSessionId: "s1",
     sessions: [session()],
     cityhall: false,
-    webSettings: { persistentTerminals: false, maxPersistentTerminals: 3 },
+    serverAbout: null,
+    webSettings: {
+      persistentTerminals: false,
+      maxPersistentTerminals: 3,
+      persistentStructuredViews: false,
+      maxPersistentStructuredViews: 3,
+    },
     selectedFilePath: null,
     selectedRepoName: undefined,
     revision: 0,
@@ -121,13 +128,15 @@ describe("MobileMainPane", () => {
   });
 
   it("does not mount local session info for CityHall sessions", async () => {
-    setup({ cityhall: true, activeSession: session({ view: "structured" }) });
+    const structured = session({ view: "structured" });
+    setup({ cityhall: true, activeSession: structured, sessions: [structured] });
     expect(await screen.findByTestId("acp-view")).toBeDefined();
     expect(screen.queryByTestId("session-info")).toBeNull();
   });
 
   it("renders the structured view for structured view sessions", async () => {
-    setup({ view: "agent", activeSession: session({ view: "structured" }) });
+    const structured = session({ view: "structured" });
+    setup({ view: "agent", activeSession: structured, sessions: [structured] });
     // StructuredView is lazy-loaded behind Suspense, so await its resolution.
     expect(await screen.findByTestId("acp-view")).toBeDefined();
   });

@@ -11,6 +11,7 @@ import { badgeLabel, badgeTone, resolveSkillSource, type SkillIndex } from "../.
 import { TOUR_ANCHORS, tourAnchor } from "../../lib/tourSteps";
 import { ProvenanceBadge } from "../ProvenanceBadge";
 import { Tooltip } from "../Tooltip";
+import { SignInButton, type SignInContext } from "./SignInPopover";
 
 /** Flat item list shared by the `@` and `/` popovers; `/` passes a skill index for provenance badges. */
 export function PopoverItems({ trigger, skillIndex }: { trigger: string; skillIndex?: SkillIndex }) {
@@ -285,7 +286,7 @@ function formatCost(amount: number, currency: string): string {
 /** The agent's own auth identity. Reporting only: the extension says which
  *  identity is in use, never whether its credentials still work, so a healthy
  *  looking chip is not a claim that the key is valid. */
-export function AuthStatusHint({ authStatus }: { authStatus: AcpState["authStatus"] }) {
+export function AuthStatusHint({ authStatus, signIn }: { authStatus: AcpState["authStatus"]; signIn?: SignInContext }) {
   // Silence means "not reported", which is not the same as logged out.
   if (!authStatus) return null;
   const loggedOut = authStatus.kind === "none";
@@ -300,6 +301,7 @@ export function AuthStatusHint({ authStatus }: { authStatus: AcpState["authStatu
   const explanation = loggedOut
     ? `The agent reports it is not logged in. Prompts will fail until you authenticate.${details.length ? ` ${details.join(" · ")}` : ""}`
     : `This session runs under ${authStatus.label}.${details.length ? ` ${details.join(" · ")}` : ""} Reported by the agent; it does not confirm the credentials are still valid.`;
+  if (loggedOut) return <SignInButton label={authStatus.label} explanation={explanation} signIn={signIn} />;
   return (
     <Tooltip text={explanation} multiline>
       <span
@@ -307,7 +309,7 @@ export function AuthStatusHint({ authStatus }: { authStatus: AcpState["authStatu
         data-auth-kind={authStatus.kind}
         role="img"
         tabIndex={0}
-        className={`inline-flex max-w-[12rem] items-center gap-1 truncate text-[11px] ${loggedOut ? "text-status-error-text" : "text-text-dim"}`}
+        className="inline-flex max-w-[12rem] items-center gap-1 truncate text-[11px] text-text-dim"
         aria-label={explanation}
       >
         <ShieldCheck className="size-3 shrink-0 opacity-70" aria-hidden />
@@ -359,25 +361,38 @@ function sendButtonClass(disabled: boolean, extra = "") {
   ].join(" ");
 }
 
-/** Stays clickable while disconnected: `sendPrompt` queues until the session resumes. */
+/** Remains clickable while disconnected so `sendPrompt` can queue the message. */
 export function SendButton({
   connected = true,
   disabled = false,
+  waitingFor = null,
+  connecting = false,
   onSend,
 }: {
   connected?: boolean;
   disabled?: boolean;
+  /** For a Session that has never started: the Agent it waits for. */
+  waitingFor?: string | null;
+  /** The Worker is running; only the connection is down. */
+  connecting?: boolean;
   onSend: () => void;
 }) {
+  const disconnectedLabel = waitingFor
+    ? `Pending until ${waitingFor} is ready`
+    : connecting
+      ? "Send while disconnected"
+      : "Queue message until session resumes";
   const title = disabled
     ? "Type a message to send"
     : connected
       ? "Send, Enter"
-      : "Session not active, will send on resume";
+      : waitingFor || connecting
+        ? disconnectedLabel
+        : "Session not active, will send on resume";
   return (
     <button
       type="button"
-      aria-label={connected ? "Send message" : "Queue message until session resumes"}
+      aria-label={connected ? "Send message" : disconnectedLabel}
       title={title}
       onClick={onSend}
       disabled={disabled}
@@ -415,25 +430,38 @@ export function StopButton() {
 export function QueueSendButton({
   connected,
   steering,
+  waitingFor = null,
+  connecting = false,
   disabled = false,
   onSend,
 }: {
   connected: boolean;
   steering: boolean;
+  waitingFor?: string | null;
+  connecting?: boolean;
   disabled?: boolean;
   onSend: () => void;
 }) {
+  const pendingLabel = connected
+    ? null
+    : waitingFor
+      ? `Pending until ${waitingFor} is ready`
+      : connecting
+        ? "Queue follow-up while disconnected, Enter"
+        : null;
   const title = disabled
     ? "Type a message to queue"
     : !connected
-      ? "Queue follow-up, will send on resume, Enter"
+      ? (pendingLabel ?? "Queue follow-up, will send on resume, Enter")
       : steering
         ? "Send into the current turn, Enter"
         : "Queue follow-up (sent when current turn ends), Enter";
   return (
     <button
       type="button"
-      aria-label={connected && steering ? "Send message into the current turn" : "Queue follow-up message"}
+      aria-label={
+        connected && steering ? "Send message into the current turn" : (pendingLabel ?? "Queue follow-up message")
+      }
       {...tourAnchor(TOUR_ANCHORS.queueSend)}
       title={title}
       onClick={onSend}

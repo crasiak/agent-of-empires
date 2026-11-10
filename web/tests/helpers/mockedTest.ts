@@ -22,9 +22,11 @@ export const test = base.extend({
       const state = window as typeof window & {
         __mockedRequests: Array<{ path: string; method: string }>;
         __mockedBodies: string[];
+        __mockedFailures: string[];
       };
       state.__mockedRequests = [];
       state.__mockedBodies = [];
+      state.__mockedFailures = [];
       const originalFetch = window.fetch;
       window.fetch = async (...args) => {
         const [input, init] = args;
@@ -35,6 +37,7 @@ export const test = base.extend({
           method: init?.method ?? (input instanceof Request ? input.method : "GET"),
         });
         const response = await originalFetch(...args);
+        if (!response.ok) setTimeout(() => state.__mockedFailures.push(path), 0);
         const json = response.json.bind(response);
         response.json = async () => {
           const body = await json();
@@ -45,6 +48,9 @@ export const test = base.extend({
         return response;
       };
     });
+    // A writable Daemon's answer. The dashboard hides write actions while /api/about has no answer, so a spec
+    // that wants that state, or another answer, routes it itself (later routes take precedence).
+    await page.route("**/api/about", (r) => r.fulfill({ json: { read_only: false } }));
     const started = await startCoverage(page);
     await use(page);
     await stopAndWriteCoverage(page, testInfo.titlePath.join(" > "), started);

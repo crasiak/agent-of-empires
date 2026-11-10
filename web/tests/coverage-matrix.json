@@ -129,14 +129,19 @@
         "web/src/components/command-palette/CommandPalette.tsx",
         "web/src/components/settings/PluginJobProgressModal.tsx"
       ],
-      "notes": "Real Escape keys dismiss uninstall, plugin details and its nested lightbox, and Web dashboard disable confirmation without leaving Settings or issuing a mutation; Escape in the command palette preserves the underlying uninstall confirmation; Escape without a dialog still closes Settings. Running plugin jobs retain their dialog; successful, failed and missing jobs dismiss through the existing close callback and reload plugins without leaving Settings. The command palette retains Escape priority over a completed job."
+      "notes": "Real Escape keys dismiss uninstall, plugin details and its nested lightbox, and Web dashboard disable confirmation without leaving Settings or issuing a mutation; Escape in the command palette preserves the underlying uninstall confirmation; Escape without a dialog still closes Settings. Running plugin jobs retain their dialog; successful, failed and missing jobs dismiss through the existing close callback and reload plugins without leaving Settings. The command palette retains Escape priority over a completed job. About opened over an uninstall confirmation wraps Tab and Shift+Tab inside itself, so the first Escape closes only About."
     },
     {
       "id": "terminal.paired-shell",
       "kind": "vitest",
       "risk": "medium",
-      "specs": ["src/components/__tests__/PairedShellPane.test.tsx"],
-      "components": ["web/src/components/PairedTerminal.tsx"]
+      "specs": [
+        "src/components/__tests__/PairedShellPane.test.tsx",
+        "src/components/__tests__/LiveTerminalView.focus.test.tsx",
+        "src/hooks/__tests__/usePairedTerminalReveal.test.ts"
+      ],
+      "components": ["web/src/components/PairedTerminal.tsx", "web/src/hooks/usePairedTerminalReveal.ts"],
+      "notes": "The shell's Host/Container mode is per Session and terminal tab. Revealing it focuses at once only when it is shown and stays mounted; otherwise focus is latched and activateTab reveals the tab, opening a collapsed dock. The focus and the latch name that terminal, so with one shown in each dock, Cmd+` and Open Terminal never land in the other."
     },
     {
       "id": "app-shell.docks",
@@ -262,7 +267,7 @@
       "kind": "vitest",
       "risk": "medium",
       "specs": ["src/components/__tests__/DashboardUpdateBanner.test.tsx", "src/lib/webBuildId.test.ts"],
-      "components": ["web/src/components/DashboardUpdateBanner.tsx"]
+      "components": ["web/src/components/DashboardUpdateBanner.tsx", "web/src/hooks/useDashboardUpdate.ts"]
     },
     {
       "id": "app-shell.loading-skeleton",
@@ -281,12 +286,14 @@
         "tests/mobile-keyboard.spec.ts",
         "src/hooks/useMobileViewportLock.test.ts",
         "src/components/__tests__/LiveTerminalView.recover.test.tsx",
-        "src/components/__tests__/LiveTerminalView.restart.test.tsx"
+        "src/components/__tests__/LiveTerminalView.restart.test.tsx",
+        "src/components/__tests__/LiveTerminalView.keyboardResume.test.tsx"
       ],
       "components": [
         "web/src/App.tsx",
         "web/src/components/MobileLiveTerminal.tsx",
         "web/src/components/LiveTerminalView.tsx",
+        "web/src/hooks/useMobileKeyboard.ts",
         "web/src/hooks/useMobileViewportLock.ts",
         "web/src/hooks/useLiveTerminal.ts"
       ]
@@ -295,8 +302,24 @@
       "id": "terminal.live-split-composite",
       "kind": "vitest",
       "risk": "high",
-      "specs": ["src/components/__tests__/MobileLiveTerminal.forward.test.tsx", "src/hooks/useLiveTerminal.test.ts"],
-      "components": ["web/src/hooks/useLiveTerminal.ts", "web/src/components/MobileLiveTerminal.tsx"]
+      "specs": [
+        "src/components/__tests__/MobileLiveTerminal.forward.test.tsx",
+        "src/hooks/useLiveTerminal.test.ts",
+        "src/components/__tests__/LiveTerminalView.restart.test.tsx",
+        "src/lib/api.test.ts"
+      ],
+      "components": [
+        "web/src/hooks/useLiveTerminal.ts",
+        "web/src/components/MobileLiveTerminal.tsx",
+        "web/src/components/LiveTerminalView.tsx",
+        "web/src/components/TerminalView.tsx",
+        "web/src/components/PairedTerminal.tsx",
+        "web/src/components/MobileTerminalToolbar.tsx",
+        "web/src/components/live-terminal/useTerminalInput.ts",
+        "web/src/components/TerminalComposeSheet.tsx",
+        "web/src/components/TerminalConnectionBanners.tsx"
+      ],
+      "notes": "Deterministic real WebSocket and terminal consumers cover read-only agent, host and container observation, suppressed ensure/claim/resize/input/mouse/restart writes, late open and reconnect after revocation, retained callbacks and proxy refusal, no unsent replay, preserved compose drafts, accepted in-flight ensure results, and fresh writable takeover/paste. Real consumer cases revoke and restore policy while image decoding, dispatched upload responses and toolbar clipboard reads are pending; only fresh gesture admission permits later upload/paste, while dispatched upload receipts remain accepted. API tests also gate decoding before HTTP dispatch. Backend ownership heartbeat fences require the live read-only recheck; these unit cases do not claim physical tmux-lock coverage."
     },
     {
       "id": "terminal.live-grid-transport",
@@ -311,6 +334,14 @@
       "risk": "high",
       "specs": ["src/hooks/useLiveTerminal.test.ts"],
       "components": ["web/src/hooks/useLiveTerminal.ts", "web/src/components/live-terminal/TermRow.tsx"]
+    },
+    {
+      "id": "terminal.live-pipe-contention-notice",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/hooks/useLiveTerminal.test.ts", "src/components/__tests__/LiveTerminalView.recover.test.tsx"],
+      "components": ["web/src/hooks/useLiveTerminal.ts", "web/src/components/LiveTerminalView.tsx"],
+      "notes": "A transport message with reason pipe_owned shows the contention notice while connected; a grid transport, an absent reason, or a newly opened socket clears it. Retry reconnects; a per-session dismissal persists until a grid transport or a user-initiated reconnect."
     },
     {
       "id": "terminal.live-alt-screen-scroll",
@@ -397,9 +428,15 @@
         "src/components/__tests__/LiveTerminalView.compose.test.tsx",
         "src/components/__tests__/MobileTerminalToolbar.test.tsx",
         "src/components/__tests__/ArrowJoystick.test.tsx",
-        "src/components/settings/__tests__/MobileKeysSettings.test.tsx"
+        "src/components/settings/__tests__/MobileKeysSettings.test.tsx",
+        "tests/live-terminal-forward-scrollbar.spec.ts",
+        "src/components/live-terminal/ForwardScrollbar.test.tsx",
+        "src/components/__tests__/MobileLiveTerminal.scrollbar.test.tsx",
+        "src/lib/__tests__/forwardScrollbar.test.ts"
       ],
       "components": [
+        "web/src/components/live-terminal/ForwardScrollbar.tsx",
+        "web/src/lib/forwardScrollbar.ts",
         "web/src/components/TerminalComposeSheet.tsx",
         "web/src/components/LiveTerminalView.tsx",
         "web/src/components/MobileTerminalToolbar.tsx",
@@ -660,14 +697,29 @@
     },
     {
       "id": "settings.mcp-server-toggle",
-      "kind": "vitest",
+      "kind": "live-playwright",
       "risk": "medium",
-      "specs": ["src/components/__tests__/SettingsView.mcpToggle.test.tsx"],
+      "specs": ["tests/live/settings-persistence.spec.ts"],
       "components": [
         "web/src/components/SettingsView.tsx",
         "web/src/components/settings/SchemaSection.tsx",
         "src/server/mcp.rs"
-      ]
+      ],
+      "notes": "The real schema-driven switch persists machine-wide, rejects profile overrides, survives reload, and changes MCP route availability only after daemon restart."
+    },
+    {
+      "id": "settings.startup-recovery-wake",
+      "kind": "live-playwright",
+      "risk": "high",
+      "specs": ["tests/live/settings-persistence.spec.ts", "tests/live/startup-recovery.spec.ts"],
+      "components": [
+        "web/src/components/SettingsView.tsx",
+        "web/src/components/settings/SchemaSection.tsx",
+        "src/session/config/mod.rs",
+        "src/server/api/sessions/lifecycle.rs",
+        "src/server/startup_recovery.rs"
+      ],
+      "notes": "The real schema switch defaults off, validates boolean PATCH values, persists per profile, and resets to machine inheritance. Missing Idle/Waiting/Running panes still resume; opted-in default/custom text, empty opt-out, profile precedence, failed resume, and unchanged explicit API/CLI restart wake behavior use private fake agents."
     },
     {
       "id": "settings.list-field",
@@ -686,6 +738,16 @@
         "web/src/components/settings/SettingsHeader.tsx",
         "web/src/components/settings/ProfileSelector.tsx"
       ]
+    },
+    {
+      "id": "settings.field-deep-link",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": [
+        "src/components/__tests__/SettingsView.navigation.test.tsx",
+        "src/components/__tests__/SettingsView.schema-load.test.tsx"
+      ],
+      "components": ["web/src/components/SettingsView.tsx", "web/src/App.tsx"]
     },
     {
       "id": "settings.tui-only-fold",
@@ -801,9 +863,22 @@
       ]
     },
     {
+      "id": "settings.sandbox-passphrase-elevation",
+      "kind": "live-playwright",
+      "risk": "high",
+      "description": "Direct and proxied TCP sandbox image saves require real browser elevation; forwarding headers never grant Unix owner authority.",
+      "specs": ["tests/live/settings-persistence.spec.ts"],
+      "components": [
+        "web/src/components/settings/SchemaSection.tsx",
+        "web/src/components/ElevationPrompt.tsx",
+        "web/src/lib/fetchInterceptor.ts"
+      ]
+    },
+    {
       "id": "settings.custom-widgets",
       "kind": "vitest",
       "risk": "medium",
+      "description": "Server, migration and session area controls preserve unrelated logging overrides when edited or cleared.",
       "specs": ["src/components/settings/__tests__/customWidgets.test.tsx"],
       "components": ["web/src/components/settings/customWidgets.tsx"]
     },
@@ -834,6 +909,7 @@
       "id": "settings.schema-persistence",
       "kind": "live-playwright",
       "risk": "medium",
+      "description": "Server and migration logging overrides survive reload and restart; clearing one retains the other area overrides.",
       "specs": ["tests/live/settings-persistence.spec.ts"],
       "components": [
         "web/src/components/SettingsView.tsx",
@@ -962,6 +1038,34 @@
       "components": ["web/src/components/NotificationSettings.tsx"]
     },
     {
+      "id": "sessions.focus-mode",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": [
+        "tests/focus-mode.spec.ts",
+        "src/components/__tests__/SessionRowTriage.test.tsx",
+        "src/components/__tests__/TopBar.test.tsx",
+        "src/components/__tests__/FocusModeNote.test.tsx",
+        "src/components/__tests__/FocusSessionGone.test.tsx",
+        "src/hooks/__tests__/useCommandActions.test.tsx",
+        "src/hooks/useDashboardPresence.test.ts",
+        "src/hooks/useFocusMode.test.tsx",
+        "src/lib/__tests__/focusMode.test.ts",
+        "src/lib/__tests__/sessionRoute.test.ts",
+        "src/__tests__/sw.test.ts"
+      ],
+      "components": [
+        "web/src/App.tsx",
+        "web/src/components/sidebar/SessionRowMenu.tsx",
+        "web/src/components/sidebar/SessionActions.tsx",
+        "web/src/components/TopBar.tsx",
+        "web/src/components/FocusModeNote.tsx",
+        "web/src/components/FocusSessionGone.tsx",
+        "web/public/sw.js"
+      ],
+      "notes": "The Session menu's More lists Show only this Session, which reloads the current window as `/session/<id>?focus=1`, and, on desktop, Open in its own window; the palette offers both under the same names. A focus window hides the sidebar, the dashboard link and the switching shortcuts, titles the tab after its session, shows a dismissible first-use note, and reports its focus session with its presence; its All Sessions button, which replaces the sidebar toggle and the logo, reloads the window back to the regular view. Because both transitions load a new document, the service worker reads the current mode from the window's URL: it sends pushes about other sessions to the OS rather than a focus window's toasts, and never navigates a focus window to another session on a notification click. A focus window counts badges and sounds for its own session only; the spec checks that a plugin link to another session, a plugin page button, the settings shortcut and a palette settings entry each open a new window while the focus window keeps its URL, and that a trashed or deleted session shows a screen naming it whose Show all Sessions button reloads to the dashboard. A router navigation that changes the mode, such as an in-app link to a `?focus=1` URL, reloads the document so the service worker sees it (spec and `useFocusMode.test.tsx`). Background session creates started elsewhere add their session without a toast in a focus window. The palette offers neither enter command for a trashed session. Server-side push scoping and presence expiry are covered by `web_watch_follows_foreground_windows_and_their_focus`, `web_presence_writes_prune_abandoned_windows`, `due_events_hold_sessions_a_window_shows_until_it_stops_showing_them` and `presence_is_recorded_per_window_with_its_focus`."
+    },
+    {
       "id": "notifications.service-worker-clear",
       "kind": "vitest",
       "risk": "medium",
@@ -981,13 +1085,19 @@
       "kind": "vitest",
       "risk": "medium",
       "specs": ["src/components/__tests__/PushHealthBanner.test.tsx"],
-      "components": ["web/src/components/PushHealthBanner.tsx"]
+      "components": ["web/src/components/PushHealthBanner.tsx"],
+      "notes": "The dismiss test asserts the contrast-safe token classes: text-subtle dismiss, text-primary body, no hover opacity on Re-enable."
     },
     {
       "id": "notifications.status-sounds",
       "kind": "vitest",
       "risk": "medium",
-      "specs": ["src/lib/statusSounds.test.ts", "src/hooks/useStatusSounds.test.ts"],
+      "specs": [
+        "src/lib/statusSounds.test.ts",
+        "src/hooks/useStatusSounds.test.ts",
+        "src/hooks/useSessionStatusStream.test.ts",
+        "src/hooks/useSessions.test.ts"
+      ],
       "components": ["web/src/lib/statusSounds.ts", "web/src/hooks/useStatusSounds.ts", "web/src/lib/soundPlayer.ts"]
     },
     {
@@ -1029,6 +1139,22 @@
       "components": ["web/src/components/WorkspaceSidebar.tsx", "web/src/components/sidebar/RowBadges.tsx"]
     },
     {
+      "id": "sidebar.group-expand",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": [
+        "src/components/__tests__/SessionRowGroupExpand.test.tsx",
+        "src/components/__tests__/WorkspaceSidebarGroupSlices.test.tsx",
+        "src/lib/__tests__/sessionWorkspace.test.ts"
+      ],
+      "components": [
+        "web/src/components/sidebar/RowBadges.tsx",
+        "web/src/components/sidebar/SessionRow.tsx",
+        "web/src/components/WorkspaceSidebar.tsx"
+      ],
+      "notes": "A worktree row that collapsed more than one session into itself can expand into a full, indented row per session behind a guide line, instead of leaving every session but the row's picked one unreachable. Each expanded row has its own click-to-navigate (a modified click never selects the group), single-session context menu, optimistic triage and active-session marking; none of them read or write the group's selection or triage state. Expanded rows hide in the compact rail. On the group axis one workspace is split across groups under a single id, so every slice's children reconcile their optimistic overrides, and a later canonical update is not masked by a stale pin. A session keeps reconciling after its siblings leave, so a worktree going 2 -> 1 -> 2 sessions does not resurrect a stale override."
+    },
+    {
       "id": "app-shell.mobile-chrome-collapse",
       "kind": "mocked-playwright",
       "risk": "medium",
@@ -1048,7 +1174,11 @@
       "id": "sidebar.terminal-focus-handoff",
       "kind": "mocked-playwright",
       "risk": "medium",
-      "specs": ["tests/terminal-focus-shortcut.spec.ts", "src/hooks/useKeyboardShortcuts.test.ts"],
+      "specs": [
+        "tests/terminal-focus-shortcut.spec.ts",
+        "tests/acp-retained-focus-sidebar-nav.spec.ts",
+        "src/hooks/useKeyboardShortcuts.test.ts"
+      ],
       "components": [
         "web/src/App.tsx",
         "web/src/components/WorkspaceSidebar.tsx",
@@ -1226,7 +1356,13 @@
       "specs": [
         "tests/wizard.spec.ts",
         "tests/wizard-project.spec.ts",
-        "src/components/session-wizard/__tests__/SessionWizard.test.tsx"
+        "src/components/session-wizard/__tests__/SessionWizard.test.tsx",
+        "src/components/session-wizard/__tests__/SandboxPanel.test.tsx",
+        "src/components/session-wizard/wizardReducer.test.ts",
+        "src/lib/api.test.ts",
+        "src/components/session-wizard/__tests__/CreateFailureBox.test.tsx",
+        "src/components/session-wizard/createFailureView.test.ts",
+        "src/components/__tests__/Toasts.test.tsx"
       ],
       "components": [
         "web/src/components/DirectoryBrowser.tsx",
@@ -1242,8 +1378,31 @@
         "web/src/components/session-wizard/steps/ProjectSearchList.tsx",
         "web/src/components/session-wizard/WizardRows.tsx",
         "web/src/components/session-wizard/steps/SandboxPanel.tsx",
-        "web/src/components/session-wizard/steps/LaunchFields.tsx"
-      ]
+        "web/src/components/session-wizard/steps/LaunchFields.tsx",
+        "web/src/components/session-wizard/CreateFailureBox.tsx",
+        "web/src/components/session-wizard/createFailureView.ts",
+        "web/src/components/Toasts.tsx"
+      ],
+      "notes": "The View row is a Structured view | Terminal view radio group: arrow keys move the selection, Structured view is disabled with the reason for an agent that can't run it, and at 375px the summary wraps under the label and segments. The Yolo mode row says what each value does and is locked on for an Agent whose /api/agents?profile= row for the selected Profile has always_yolo (Terminal view) or acp_always_yolo (Structured view), so a custom agent with its own adapter and an always-Yolo base locks only in Terminal view; the create sends the user's value and the server forces it; until /api/agents answers for that Profile (retried on failure) the row promises neither value and Launch waits, and a list loaded for another Profile is not used; a 404 profile_not_found is not retried and the footer asks for another Profile, with the Profile row shown even when only one is left; the unavailable Sandbox names the configured Container runtime from /api/docker/status. A refused create shows a box with its title, failed step, one recovery action per code and its reference, outlines the row it blames, and takes focus; Retry re-reads /api/docker/status, and every relaunch, Launch without Sandbox included, uses a new idempotency key. A background refusal toasts with Reopen, which stays until used or dismissed, stays in view when the toasts overflow the column, and restores the form as sent and the box; an adopted create toasts plainly. A reopened wizard sends its own form, never another wizard's unresolved create, shows an agent-list error beside the box, and applies only the newest runtime check."
+    },
+    {
+      "id": "wizard.structured-view-exposure",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": [
+        "tests/wizard.spec.ts",
+        "src/components/session-wizard/__tests__/SessionWizard.test.tsx",
+        "src/components/session-wizard/wizardReducer.test.ts",
+        "src/components/__tests__/SessionRowSiblingTargets.test.tsx",
+        "src/hooks/__tests__/useSessionsApply.test.tsx"
+      ],
+      "components": [
+        "web/src/components/session-wizard/profileDefaults.ts",
+        "web/src/components/session-wizard/wizardReducer.ts",
+        "web/src/components/sidebar/sessionActionTargets.ts",
+        "web/src/hooks/useSessions.ts"
+      ],
+      "notes": "acp.structured_view = auto or structured preselects structured in the wizard, while terminal preselects terminal; off hides the wizard toggle and sidebar switch to structured view, including across profile changes, import exit and pin responses."
     },
     {
       "id": "wizard.create-progress",
@@ -1301,7 +1460,16 @@
       ]
     },
     {
+      "id": "wizard.agent-switch-model-reset",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/components/session-wizard/wizardReducer.test.ts"],
+      "components": ["web/src/components/session-wizard/wizardReducer.ts"],
+      "notes": "Switching the wizard agent clears the seeded model and effort so the create request omits them and the server uses the new agent's defaults; re-selecting the same agent keeps them."
+    },
+    {
       "id": "wizard.project-sandbox-override",
+      "notes": "Tri-state project container defaults resolve from the acknowledged served or explicitly selected profile; registry retries preserve unknown versus empty, profile switches commit atomically, manual edits and host-only imports outrank late defaults, and saves preserve explicit false while omitting inherited values.",
       "kind": "vitest",
       "risk": "medium",
       "specs": [
@@ -1323,6 +1491,13 @@
     },
     {
       "id": "wizard.agent-lifecycle",
+      "kind": "vitest",
+      "risk": "low",
+      "specs": ["src/components/session-wizard/__tests__/AgentPanel.test.tsx"],
+      "components": ["web/src/components/session-wizard/steps/AgentPickerEssentials.tsx"]
+    },
+    {
+      "id": "wizard.plugin-agents",
       "kind": "vitest",
       "risk": "low",
       "specs": ["src/components/session-wizard/__tests__/AgentPanel.test.tsx"],
@@ -1565,7 +1740,12 @@
       "id": "wizard.import-session.unit",
       "kind": "vitest",
       "risk": "high",
-      "specs": ["src/components/session-wizard/__tests__/ProjectStep.test.tsx"],
+      "notes": "Generic ACP import reads the acknowledged served or explicitly selected profile, waits while Server default is unresolved, never writes the implicit profile choice into the form, clears worktree/container/branch/attach/scratch/extra-repo state, and ignores late registry and profile defaults.",
+      "specs": [
+        "src/components/session-wizard/__tests__/ProjectStep.test.tsx",
+        "src/components/session-wizard/__tests__/SessionWizard.test.tsx",
+        "src/components/session-wizard/wizardReducer.test.ts"
+      ],
       "components": [
         "web/src/components/session-wizard/steps/ProjectStep.tsx",
         "web/src/components/session-wizard/steps/ImportSessionPicker.tsx"
@@ -1691,15 +1871,20 @@
       "id": "sidebar.compact-mode",
       "kind": "mocked-playwright",
       "risk": "medium",
-      "specs": ["tests/sidebar-chrome.spec.ts"],
-      "components": ["web/src/components/WorkspaceSidebar.tsx"]
+      "specs": ["tests/sidebar-chrome.spec.ts", "tests/sidebar-legend.spec.ts"],
+      "components": [
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/SidebarToolbar.tsx",
+        "web/src/components/sidebar/SidebarLegend.tsx"
+      ]
     },
     {
       "id": "sidebar.drawer-swipe",
       "kind": "vitest",
       "risk": "medium",
-      "specs": ["src/hooks/useDrawerSwipe.test.ts"],
-      "components": ["web/src/hooks/useDrawerSwipe.ts"]
+      "specs": ["src/hooks/useDrawerSwipe.test.ts", "tests/mobile-panes.spec.ts"],
+      "components": ["web/src/hooks/useDrawerSwipe.ts"],
+      "notes": "Active chat text selection blocks both drawer swipe directions, including selection beginning mid-gesture. Cancellation lasts through touchend; a fresh swipe works after selection clears. Browser coverage preserves a DOM selection in the mobile chat while both drawers stay closed."
     },
     {
       "id": "sidebar.context-resume",
@@ -1718,9 +1903,23 @@
     {
       "id": "sidebar.session-color",
       "kind": "vitest",
-      "risk": "low",
-      "specs": ["src/components/__tests__/SessionRowTriage.test.tsx"],
-      "components": ["web/src/components/WorkspaceSidebar.tsx"]
+      "risk": "high",
+      "specs": [
+        "src/components/__tests__/SessionRowTriage.test.tsx",
+        "src/components/__tests__/SessionRowReceipts.test.tsx",
+        "src/hooks/__tests__/useSessionsPolling.test.tsx",
+        "src/lib/api.test.ts"
+      ],
+      "description": "Accepted color and notification resets survive visual unmount and temporary polling failure. Dispatched receipts survive read-only changes; revoked unsent work and true identity invalidation never replay.",
+      "components": [
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/SessionActionProvider.tsx",
+        "web/src/components/sidebar/usePendingSetting.ts",
+        "web/src/components/sidebar/SessionRow.tsx",
+        "web/src/components/sidebar/useSessionRowModel.ts",
+        "web/src/hooks/useSessions.ts",
+        "web/src/lib/api.ts"
+      ]
     },
     {
       "id": "sidebar.bookmark-highlights",
@@ -1749,7 +1948,7 @@
       "risk": "medium",
       "specs": [
         "src/components/__tests__/SessionRowTriage.test.tsx",
-        "src/components/sidebar/usePendingSetting.test.ts"
+        "src/components/__tests__/SessionRowReceipts.test.tsx"
       ],
       "components": [
         "web/src/components/sidebar/SessionRow.tsx",
@@ -1769,7 +1968,7 @@
       "kind": "mocked-playwright",
       "risk": "medium",
       "specs": ["tests/sidebar-context-menu.spec.ts"],
-      "components": ["web/src/components/ContextMenu.tsx", "web/src/components/sidebar/SidebarGroupHeader.tsx"]
+      "components": ["web/src/components/ContextMenu.tsx"]
     },
     {
       "id": "sidebar.system-health",
@@ -1831,8 +2030,20 @@
       "id": "sidebar.session-color-toggle",
       "kind": "vitest",
       "risk": "low",
-      "specs": ["src/lib/__tests__/sessionColors.test.ts", "src/components/__tests__/SessionRowTriage.test.tsx"],
-      "components": ["web/src/lib/sessionColors.ts", "web/src/components/WorkspaceSidebar.tsx"]
+      "specs": [
+        "src/lib/__tests__/sessionColors.test.ts",
+        "src/components/__tests__/SessionRowTriage.test.tsx",
+        "src/components/__tests__/SessionRowReceipts.test.tsx"
+      ],
+      "notes": "Accepted color queues survive visual unmount. Independent canonical values permanently surrender only the optimistic overlay; away-and-back observations cannot resurrect a stale choice or suppress a new pick.",
+      "components": [
+        "web/src/lib/sessionColors.ts",
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/usePendingSetting.ts",
+        "web/src/components/sidebar/SessionActionProvider.tsx",
+        "web/src/components/sidebar/rowModel.ts",
+        "web/src/components/sidebar/useSessionRowModel.ts"
+      ]
     },
     {
       "id": "sidebar.dormant-dot",
@@ -1859,6 +2070,46 @@
         "web/src/components/sidebar/SessionActions.tsx",
         "web/src/components/sidebar/rowModel.ts"
       ]
+    },
+    {
+      "id": "sidebar.restart-for-update",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/components/__tests__/SessionRowSiblingTargets.test.tsx", "src/lib/restartForUpdate.test.ts"],
+      "components": [
+        "web/src/components/sidebar/sessionActionTargets.ts",
+        "web/src/components/sidebar/SessionRowMenu.tsx",
+        "web/src/components/sidebar/SessionActions.tsx",
+        "web/src/lib/restartForUpdate.ts"
+      ]
+    },
+    {
+      "id": "sidebar.recreate-container",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": [
+        "src/components/__tests__/RecreateContainerDialog.test.tsx",
+        "src/components/__tests__/SessionRowSiblingTargets.test.tsx"
+      ],
+      "components": [
+        "web/src/components/sidebar/RecreateContainerDialog.tsx",
+        "web/src/components/sidebar/sessionActionTargets.ts",
+        "web/src/components/sidebar/SessionRowMenu.tsx",
+        "web/src/components/sidebar/SessionActions.tsx",
+        "web/src/lib/api.ts"
+      ],
+      "notes": "Offered only for a sandboxed, unarchived session that is not creating or deleting. The confirmation names what is lost, sends one POST, and stays open with the server's message on a refusal. The daemon side is covered by recreate_container_removes_the_container_before_the_agent_restarts."
+    },
+    {
+      "id": "sidebar.recreate-container-layout",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/sidebar-recreate-container.spec.ts"],
+      "components": [
+        "web/src/components/sidebar/RecreateContainerDialog.tsx",
+        "web/src/components/sidebar/SessionRowMenu.tsx"
+      ],
+      "notes": "The item is reachable under More on desktop and in the 375 px bottom sheet, and the dialog and both buttons fit that viewport."
     },
     {
       "id": "sidebar.repo-appearance",
@@ -1908,6 +2159,31 @@
       "risk": "medium",
       "specs": ["src/components/__tests__/WorkspaceSidebarTrash.test.tsx"],
       "components": ["web/src/components/WorkspaceSidebar.tsx", "web/src/components/sidebar/TrashMenu.tsx"]
+    },
+    {
+      "id": "sidebar.trash-on-demand",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": [
+        "src/hooks/useSessions.test.ts",
+        "src/hooks/__tests__/useOrphanSweep.test.tsx",
+        "src/hooks/useLastSessionRestore.test.tsx",
+        "src/components/__tests__/WorkspaceSidebarTrash.test.tsx",
+        "src/components/__tests__/TrashReadFailed.test.tsx",
+        "tests/session-trash-read-failure.spec.ts",
+        "tests/plugin-pages.spec.ts"
+      ],
+      "components": [
+        "web/src/hooks/useSessions.ts",
+        "web/src/hooks/useOrphanSweep.ts",
+        "web/src/hooks/useLastSessionRestore.ts",
+        "web/src/lib/api.ts",
+        "web/src/App.tsx",
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/TrashReadFailed.tsx",
+        "web/src/components/sidebar/TrashMenu.tsx"
+      ],
+      "notes": "The polled session list omits trashed rows and reports their count, so the Trash control shows it before any row exists. Opening Trash, or opening a session absent from the list, fetches the trashed rows, which then follow every poll and drop out when restored. The orphan draft and comment sweep takes its ids from one complete snapshot when a trash exists. A slow trash read lands despite newer list revisions, with each row fenced by its own newer receipt, and a pushed status for a trashed row survives older reads. A row last observed at a newer revision is not rolled back by a delayed list read, and a trash read's omission is fenced the same way in both directions: it does not drop a held row with a newer receipt, and it is remembered so an older list read cannot bring the row back. The newest observation of each row outlives its omission from the list, so an older trash read cannot reinstall a row that was shown and then left. A standalone cold launch whose saved session is trashed resolves it through the trash lookup instead of dropping it. A failed or timed-out trash read keeps the known rows and, for an opened session the list does not carry, shows an error with Retry instead of the skeleton or a gone screen; the next read that lands clears it. The daemon answers an unchanged list or UI state with a header-only 304 that the browser turns back into the stored body (Rust tests `unchanged_listing_answers_not_modified_without_a_body`, `unchanged_ui_state_answers_not_modified_without_a_body`)."
     },
     {
       "id": "sidebar.trash-row-context-menu",
@@ -1962,6 +2238,18 @@
       "components": ["web/src/components/WorkspaceSidebar.tsx", "web/src/components/sidebar/SessionRow.tsx"]
     },
     {
+      "id": "session.degraded-move-warning-shown",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/lib/__tests__/trashActions.test.ts", "src/lib/api.test.ts"],
+      "components": [
+        "web/src/lib/api.ts",
+        "web/src/lib/trashActions.ts",
+        "web/src/components/sidebar/SessionActions.tsx"
+      ],
+      "notes": "A trash, restore or workdir rename whose worktree move landed with git degraded keeps the new path and toasts the server's warnings instead of reporting plain success."
+    },
+    {
       "id": "session.delete-shared-worktree-kept",
       "kind": "mocked-playwright",
       "risk": "high",
@@ -1993,8 +2281,14 @@
       "id": "sidebar.reorder-click-after-drag-suppressed",
       "kind": "mocked-playwright",
       "risk": "high",
-      "specs": ["tests/sidebar-reorder.spec.ts"],
-      "components": ["web/src/components/WorkspaceSidebar.tsx"]
+      "specs": ["tests/sidebar-reorder.spec.ts", "src/components/sidebar/dnd.test.ts"],
+      "components": [
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/SidebarGroupHeader.tsx",
+        "web/src/components/sidebar/dnd.ts",
+        "web/src/components/sidebar/Sortable.tsx"
+      ],
+      "notes": "End, cancel and mid-drag unmount suppress only the release click; a fresh press disarms the guard. Browser regressions observe installation and removal of the sensor click listener before one deliberate click, without a fixed delay or click retries."
     },
     {
       "id": "sidebar.reorder-cross-group-noop",
@@ -2071,8 +2365,12 @@
       "kind": "vitest",
       "risk": "low",
       "specs": ["src/components/__tests__/SessionRowTriage.test.tsx"],
-      "components": ["web/src/components/WorkspaceSidebar.tsx", "web/src/components/sidebar/SessionRow.tsx"],
-      "reason": "Favorite markers remain distinct from pin in normal and compact rows, including favorite-to-nonfavorite updates."
+      "components": [
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/SessionRow.tsx",
+        "web/src/lib/sidebarMarks.ts"
+      ],
+      "reason": "Favorite markers remain distinct from pin in normal and compact rows, including favorite-to-nonfavorite updates, and explain themselves with a Tooltip rather than title."
     },
     {
       "id": "sidebar.unread-indicator",
@@ -2083,7 +2381,44 @@
         "src/lib/api.test.ts",
         "src/lib/__tests__/sidebarOptimistic.test.ts"
       ],
-      "components": ["web/src/components/WorkspaceSidebar.tsx"]
+      "components": [
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/SessionRow.tsx",
+        "web/src/lib/sidebarMarks.ts"
+      ]
+    },
+    {
+      "id": "sidebar.status-legend",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/sidebar-legend.spec.ts"],
+      "components": [
+        "web/src/components/sidebar/SidebarLegend.tsx",
+        "web/src/components/sidebar/SidebarToolbar.tsx",
+        "web/src/components/sidebar/SessionRow.tsx",
+        "web/src/components/sidebar/SidebarGroupHeader.tsx",
+        "web/src/components/Tooltip.tsx"
+      ],
+      "reason": "The ? legend opens as a popover on desktop and a sheet at 375px with touch; a keyboard-focused row is described by its glyph's tooltip; a tap opens the Session without a tooltip."
+    },
+    {
+      "id": "sidebar.status-legend-unit",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": [
+        "src/lib/__tests__/statusLegend.test.ts",
+        "src/components/__tests__/SidebarLegend.test.tsx",
+        "src/components/__tests__/Tooltip.test.tsx",
+        "src/components/__tests__/SessionRowTriage.test.tsx"
+      ],
+      "components": [
+        "web/src/lib/statusLegend.ts",
+        "web/src/lib/sidebarMarks.ts",
+        "web/src/components/StatusGlyph.tsx",
+        "web/src/components/Tooltip.tsx",
+        "web/src/components/sidebar/SidebarLegend.tsx"
+      ],
+      "reason": "Every SessionStatus has a legend row; animated glyphs hold still under reduced motion; Tooltip describes its trigger; row marks carry no title."
     },
     {
       "id": "sidebar.row-tag",
@@ -2174,10 +2509,12 @@
         "web/src/components/plugin/PluginSessionMenu.tsx",
         "web/src/components/sidebar/SessionActions.tsx",
         "web/src/lib/pluginBridge.ts",
+        "web/src/lib/api.ts",
+        "web/src/hooks/useSessions.ts",
         "web/src/components/TopBar.tsx",
         "web/src/App.tsx"
       ],
-      "notes": "TopBar page buttons and palette entries appear only with a declared page, the button marking the open page; the route hides the sidebar, mints a page ticket before framing, and Back pops history. A fixture page served under the daemon's page CSP proves the sandboxed frame cannot read storage, cookies or call the API. A bridge fixture page round-trips ready, sessions.list, plugins.uiState, its own action, session.archive, session.trash and openSession, a page without session.write is refused both lifecycle calls, and it receives a theme change without reloading; with split view on, openSession shows the session below the page with its docks, in `?session=` rather than navigating, pushes the selection, maximizes over the page without reloading it, and Open full navigates; session.contextMenu opens the sidebar's session menu at the frame-relative point, resolves with a picked page item or null, opens the snooze picker and a rename dialog that PATCHes the title, and a click over the frame dismisses it; a page that navigates to another plugin's page before ready never hands that page the bridge. Mint ordering, empty states, the nonce-checked ready-only channel handoff, theme pushes, teardown on a second load and remount resets are unit-tested in PluginPageView.test.tsx; envelope validation and gating in pluginBridge.test.ts; the ticket's server side in src/server/api/plugins.rs."
+      "notes": "TopBar page buttons and palette entries appear only with a declared page, the button marking the open page; the route hides the sidebar, mints a page ticket before framing, and Back pops history. A fixture page served under the daemon's page CSP proves the sandboxed frame cannot read storage, cookies or call the API. A bridge fixture page round-trips ready, sessions.list, plugins.uiState, its own action, session.archive, session.trash and openSession, a page without session.write is refused both lifecycle calls, and it receives a theme change without reloading; with split view on, openSession shows the session below the page with its docks, in `?session=` rather than navigating, pushes the selection, maximizes over the page without reloading it, and Open full navigates; session.contextMenu opens the sidebar's session menu at the frame-relative point, resolves with a picked page item or null, opens the snooze picker and a rename dialog that PATCHes the title, and a click over the frame dismisses it; a page that navigates to another plugin's page before ready never hands that page the bridge; a page that declares `deep_link` gets the URL's `?link=` value over the bridge (never in the frame URL), a page without it or an unsafe value gets null, and a notification toast carrying a link keeps its tone and opens the page on that item. Mint ordering, empty states, the nonce-checked ready-only channel handoff, theme pushes, teardown on a second load and remount resets are unit-tested in PluginPageView.test.tsx; envelope validation and gating in pluginBridge.test.ts; the ticket's server side in src/server/api/plugins.rs. Session lists carry canonical runtime epoch/revision headers, and rename completion consumes a matching advancing receipt and outcome."
     },
     {
       "id": "sidebar.plugin-row-slots",
@@ -2189,7 +2526,14 @@
         "web/src/components/plugin/PluginSlots.tsx",
         "web/src/components/plugin/SlotChrome.tsx"
       ],
-      "notes": "Grouped badge items collapse into one chip that cycles on click. The Playwright story clicks it inside the real session-row link, which jsdom cannot cover: the click must cycle without the row selecting or the browser following the row href. Group, wrap-around and clamping logic is in PluginSlots.test.tsx."
+      "notes": "Grouped badge items collapse into one chip that cycles on click. The Playwright story clicks it inside the real session-row link, which jsdom cannot cover: the click must cycle without the row selecting or the browser following the row href. Group, wrap-around and clamping logic is in PluginSlots.test.tsx, which also verifies that changing the addressed session resets a detail badge cycle."
+    },
+    {
+      "id": "sidebar.plugin-row-badge-link",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/components/plugin/__tests__/PluginSlots.test.tsx"],
+      "components": ["web/src/components/plugin/PluginSlots.tsx", "web/src/components/plugin/SlotChrome.tsx"]
     },
     {
       "id": "sidebar.group-axis-pure",
@@ -2302,6 +2646,7 @@
         "web/src/App.tsx",
         "web/src/components/WorkspaceSidebar.tsx",
         "web/src/components/EmptyTrashConfirm.tsx",
+        "web/src/lib/api.ts",
         "web/src/lib/trashActions.ts"
       ]
     },
@@ -2421,6 +2766,73 @@
       "notes": "A prompt a plugin sent through sessions.message.send carries a \"Sent by plugin\" label instead of passing for the user's own; the server stamps the sender on the row, and Send now on a queued row names it so the daemon keeps that sender."
     },
     {
+      "id": "acp.agent-message-boundaries",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/components/acp/activityMessages.test.ts", "tests/live/acp-transcript.spec.ts"],
+      "components": ["web/src/components/acp/activityMessages.ts", "web/src/lib/acpTypes.ts"],
+      "notes": "Back-to-back agent messages render as separate paragraphs: the server marks the row that opens a new ACP message (message_start), and only that mark breaks the text, so one streamed message never splits mid-word."
+    },
+    {
+      "id": "acp.thinking-row",
+      "kind": "vitest",
+      "risk": "low",
+      "specs": ["src/components/acp/activityMessages.test.ts", "src/components/acp/ThreadMessages.test.tsx"],
+      "components": [
+        "web/src/components/acp/activityMessages.ts",
+        "web/src/components/acp/ThreadMessages.tsx",
+        "web/src/lib/acpTypes.ts"
+      ],
+      "notes": "Summarized model thinking renders as a collapsed Thinking block in place among the reply's parts; adjacent chunks join, and a server-marked new thought or any other part splits them. Folding and grouping are covered by Rust transcript tests."
+    },
+    {
+      "id": "acp.copy-message-markdown",
+      "kind": "mocked-playwright",
+      "risk": "low",
+      "specs": [
+        "src/components/acp/ThreadMessages.test.tsx",
+        "src/components/acp/messageMarkdown.test.ts",
+        "src/components/acp/Markdown.test.tsx",
+        "tests/acp-message-copy.spec.ts"
+      ],
+      "components": [
+        "web/src/components/acp/ThreadMessages.tsx",
+        "web/src/components/acp/MessageCopyMenu.tsx",
+        "web/src/components/acp/CopyMarkdownButton.tsx",
+        "web/src/components/acp/Markdown.tsx"
+      ],
+      "notes": "Text parts of a multi-part message and the whole message copy as raw markdown; the message menu can add tool calls. The mocked browser spec pins hover reveal, touch visibility and that the buttons do not overlap."
+    },
+    {
+      "id": "acp.copy-blocks",
+      "kind": "mocked-playwright",
+      "risk": "low",
+      "specs": [
+        "src/components/acp/__tests__/copyActions.test.tsx",
+        "src/components/acp/__tests__/StartupErrorScreen.test.tsx",
+        "src/components/acp/__tests__/BackgroundAgentsPanel.test.tsx",
+        "src/components/acp/ToolCards.render.test.tsx",
+        "src/components/diff/comments/__tests__/DiffCommentsUserCard.test.tsx",
+        "src/lib/unifiedDiff.test.ts",
+        "src/lib/checklistMarkdown.test.ts",
+        "tests/acp-copy-blocks.spec.ts"
+      ],
+      "components": [
+        "web/src/components/acp/CopyRow.tsx",
+        "web/src/components/acp/ToolOutputMedia.tsx",
+        "web/src/components/acp/ToolCardChrome.tsx",
+        "web/src/components/acp/ToolErrorBody.tsx",
+        "web/src/components/acp/TodoCards.tsx",
+        "web/src/components/acp/PlanStrip.tsx",
+        "web/src/components/acp/ElicitationAnswerCard.tsx",
+        "web/src/components/acp/StartupErrorScreen.tsx",
+        "web/src/components/acp/BackgroundAgentsPanel.tsx",
+        "web/src/components/diff/StringDiff.tsx",
+        "web/src/components/diff/comments/DiffCommentsUserCard.tsx"
+      ],
+      "notes": "Tool input and output, tool errors, edit diffs, todo lists, the plan, answers, review prompts, sub-agent prompt and result, and install commands each copy their own content. Prompt, diff and error copies are pinned in a mocked browser; the rest are unit tests."
+    },
+    {
       "id": "acp.tool-group-chunking",
       "kind": "vitest",
       "risk": "medium",
@@ -2493,8 +2905,12 @@
         "web/src/components/diff/comments/CommentsBanner.tsx",
         "web/src/components/diff/comments/DiffCommentsUserCard.tsx",
         "web/src/components/diff/comments/SendCommentsDialog.tsx",
-        "web/src/lib/paneLayout.ts"
-      ]
+        "web/src/lib/paneLayout.ts",
+        "web/src/components/ContentSplit.tsx",
+        "web/src/App.tsx",
+        "web/src/hooks/useDiffFiles.ts"
+      ],
+      "notes": "Holding the first canonical session list through the diff-files effect leaves no persisted layout while the session is unknown. Releasing it pins Terminal but not Diff for a non-git session; explicitly opening Diff shows the neutral non-git message without a repository error. useDiffFiles.test.ts holds the next session's response and asserts the previous session's repository state is cleared (#4847). A dock action taken while the status is unknown persists as usual, and Diff is added back once a git Session is known; covered in paneLayout.test.ts (#4846)."
     },
     {
       "id": "right-panel.markdown-viewer",
@@ -2608,6 +3024,7 @@
     },
     {
       "id": "acp.history-window",
+      "notes": "Warm-cache tests hold catch-up after cached messages are readable, verify the same rendered window survives completion, and exercise reconnect without new events. Canonical overlap updates do not discard the loaded prefix or reset the oldest cursor.",
       "kind": "mocked-playwright",
       "risk": "medium",
       "specs": [
@@ -2720,6 +3137,7 @@
       "risk": "medium",
       "specs": [
         "tests/diff.spec.ts",
+        "src/lib/snippetHighlighter.themes.test.ts",
         "src/components/diff/find/findMatches.test.ts",
         "src/components/diff/find/changedLines.test.ts",
         "src/components/diff/find/FindBar.test.tsx",
@@ -2729,6 +3147,7 @@
       ],
       "components": [
         "web/src/components/diff/find/FindBar.tsx",
+        "web/src/lib/snippetHighlighter.ts",
         "web/src/components/diff/pierre/DiffWorkerPoolProvider.tsx"
       ]
     },
@@ -2758,6 +3177,24 @@
       ]
     },
     {
+      "id": "settings.persistent-structured-views",
+      "kind": "vitest",
+      "risk": "low",
+      "specs": [
+        "src/components/__tests__/StructuredSessionStack.test.tsx",
+        "src/lib/__tests__/persistentStructuredViews.test.ts",
+        "src/components/settings/__tests__/StructuredViewDisplaySettings.test.tsx",
+        "src/components/acp/__tests__/StructuredViewRoot.test.tsx"
+      ],
+      "components": [
+        "web/src/components/StructuredSessionStack.tsx",
+        "web/src/components/TerminalSessionStack.tsx",
+        "web/src/hooks/usePersistentSessionIds.ts",
+        "web/src/lib/persistentStructuredViews.ts",
+        "web/src/components/MobileMainPane.tsx"
+      ]
+    },
+    {
       "id": "settings.panels-section",
       "kind": "vitest",
       "risk": "low",
@@ -2772,8 +3209,17 @@
       "id": "devices",
       "kind": "live-playwright",
       "risk": "medium",
+      "description": "Authenticated TCP device management requires real browser elevation before revoke and sign-out-all; revoked credentials stop authenticating.",
       "specs": ["tests/live/auth.spec.ts"],
       "components": ["web/src/components/ConnectedDevices.tsx"]
+    },
+    {
+      "id": "connectivity.update-banner-how-to-update",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/update-banner.spec.ts", "src/components/__tests__/UpdateBanner.test.tsx"],
+      "components": ["web/src/components/UpdateBanner.tsx"],
+      "notes": "The dismiss test asserts text-subtle, not text-muted or text-secondary, on the dismiss control."
     },
     {
       "id": "connectivity.banner-stack",
@@ -2790,7 +3236,26 @@
         "web/src/components/DisconnectBanner.tsx",
         "web/src/components/UpdateBanner.tsx",
         "web/src/components/DashboardUpdateBanner.tsx",
-        "web/src/components/PushHealthBanner.tsx"
+        "web/src/components/PushHealthBanner.tsx",
+        "web/src/hooks/useConnectionBanner.ts",
+        "web/src/hooks/useUpdateBanner.ts",
+        "web/src/components/SandboxImageBanner.tsx"
+      ]
+    },
+    {
+      "id": "connectivity.sandbox-image-banner",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": [
+        "src/components/__tests__/SandboxImageBanner.test.tsx",
+        "src/components/__tests__/BannerStack.test.tsx",
+        "src/components/acp/__tests__/StartupErrorScreen.test.tsx",
+        "src/lib/api.test.ts"
+      ],
+      "components": [
+        "web/src/components/SandboxImageBanner.tsx",
+        "web/src/hooks/useSandboxImageBanner.ts",
+        "web/src/components/acp/StartupErrorScreen.tsx"
       ]
     },
     {
@@ -2835,6 +3300,7 @@
       "id": "acp.background-agents",
       "kind": "vitest",
       "risk": "medium",
+      "notes": "Includes Claude Workflow runs: agents grouped by run and phase in the pane, and the Workflow tool card.",
       "specs": [
         "src/components/acp/__tests__/BackgroundAgentsPanel.test.tsx",
         "src/lib/acpTypes.reducer.test.ts",
@@ -2853,6 +3319,13 @@
         "web/src/components/acp/ToolCardChrome.tsx",
         "web/src/components/acp/ToolOutputMedia.tsx"
       ]
+    },
+    {
+      "id": "acp.background-tasks",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/lib/acpTypes.test.ts", "src/lib/acpTypes.reducer.test.ts"],
+      "components": ["web/src/lib/acpTypes.ts", "web/src/components/acp/AcpRuntime.tsx"]
     },
     {
       "id": "acp.background-agent-composer",
@@ -3106,7 +3579,8 @@
         "web/src/components/acp/AcpRuntime.tsx",
         "web/src/hooks/useAcpSession.ts",
         "web/src/lib/acpTypes.ts"
-      ]
+      ],
+      "notes": "Provider requests remain single-flight across keyed session-view remounts and keep controls locked until settlement. Canonical changes observed during a pending request invalidate its late echo, including a return to the previous provider. Open model menus close when turn or provider locks arrive. Model search filters case-insensitively by display name and provider/model id with whitespace-separated terms. Unit tests cover empty results, pending choices, confirmed values, and reset on reopen; mocked browser tests cover search focus, Arrow/Enter selection without prompt submission, Escape/outside dismissal, and pinned search with scrollable results. Desktop and short viewports center the current model on open, reopen, and search clearing without moving the page or taking search focus. Before searching, Enter preserves the current model and arrows navigate from it; reopening after a switch reveals the newly confirmed model. Keyboard selection from the search field or from a result returns focus to the chip while pointer clicks are left alone, Escape during IME composition cancels the candidate without closing the menu, and an advertised list with no options reads as unavailable rather than as a failed search."
     },
     {
       "id": "acp.mode-switch",
@@ -3135,6 +3609,7 @@
       "id": "acp.mode-switch-tmux-teardown",
       "kind": "live-playwright",
       "risk": "high",
+      "description": "Mode switches reap verified owned panes and preserve tools whose matching name lacks owner evidence.",
       "specs": ["tests/live/session-lifecycle.spec.ts"],
       "components": ["src/server/api/acp.rs"]
     },
@@ -3166,9 +3641,11 @@
       "specs": [
         "src/lib/acpTypes.test.ts",
         "src/hooks/useRespawnSession.test.tsx",
-        "src/components/acp/SystemNotices.test.tsx",
+        "src/components/acp/UsageLimitBanner.test.tsx",
         "src/components/acp/SwitchAgentModal.test.tsx",
-        "src/hooks/useAcpSession.test.ts"
+        "src/hooks/useAcpSession.test.ts",
+        "src/lib/__tests__/autoResumeSettingsHref.test.ts",
+        "tests/acp-usage-limit.spec.ts"
       ],
       "components": [
         "src/server/api/acp.rs",
@@ -3177,7 +3654,8 @@
         "web/src/hooks/useAcpSession.ts",
         "web/src/hooks/useRespawnSession.ts",
         "web/src/lib/acpTypes.ts",
-        "web/src/components/acp/SystemNotices.tsx"
+        "web/src/components/acp/UsageLimitBanner.tsx",
+        "web/src/lib/autoResumeSettingsHref.ts"
       ]
     },
     {
@@ -3241,8 +3719,13 @@
       "id": "acp.reduced-state-channel",
       "kind": "vitest",
       "risk": "high",
-      "specs": ["src/lib/acpTypes.reducer.test.ts"],
-      "components": ["web/src/lib/acpTypes.ts", "web/src/hooks/useAcpSession.ts"]
+      "specs": ["src/lib/acpTypes.reducer.test.ts", "src/hooks/useAcpSession.test.ts"],
+      "components": [
+        "web/src/lib/acpTypes.ts",
+        "web/src/hooks/useAcpSession.ts",
+        "web/src/hooks/acpSession/useAcpConnection.ts"
+      ],
+      "notes": "Web negotiates projection=web on initial and reconnect sockets, omitting only the duplicate reduced_state.background_agents field without an unchanged marker. Default and explicit full snapshots preserve native busy state. Raw launch, progress and completion events retain complete prompt, tools and result for browser panels and Copy. The hook reconnects from the last lifecycle seq with an empty raw replay and an agent-free Web snapshot, preserving the existing agent details. Rust query, projection and WebSocket tests cover connect, live updates, reconnect and lag rebuilds."
     },
     {
       "id": "acp.drafts",
@@ -3328,8 +3811,16 @@
       "id": "acp.ws-reconnect-liveness",
       "kind": "vitest",
       "risk": "high",
-      "specs": ["src/hooks/useAcpSession.test.ts", "tests/acp-reconnect-hung-dial.spec.ts"],
-      "components": ["web/src/hooks/useAcpSession.ts", "web/src/hooks/acpSession/useAcpConnection.ts"]
+      "specs": [
+        "src/hooks/useAcpSession.test.ts",
+        "src/components/acp/SystemNotices.test.tsx",
+        "tests/acp-reconnect-hung-dial.spec.ts"
+      ],
+      "components": [
+        "web/src/hooks/useAcpSession.ts",
+        "web/src/hooks/acpSession/useAcpConnection.ts",
+        "web/src/components/acp/SystemNotices.tsx"
+      ]
     },
     {
       "id": "acp.args",
@@ -3343,7 +3834,14 @@
       "kind": "vitest",
       "risk": "high",
       "specs": ["src/components/acp/ApprovalCard.test.tsx"],
-      "components": ["web/src/components/acp/ApprovalCard.tsx"]
+      "components": ["web/src/components/acp/ApprovalCard.tsx", "web/src/components/acp/PlanModal.tsx"]
+    },
+    {
+      "id": "acp.plan-modal",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/acp-plan-modal.spec.ts"],
+      "components": ["web/src/components/acp/PlanModal.tsx"]
     },
     {
       "id": "acp.markdown",
@@ -3462,6 +3960,14 @@
         "web/src/lib/acpTypes.ts"
       ],
       "notes": "#4475: notice_timeout_secs is capped at 2147483 so its millisecond delay fits a browser setTimeout, and PromptStrips clamps the delay for older configs above the cap. SessionNoticesStrip.test.tsx covers the boundary: a timeout past the timer limit does not dismiss at once and fires only after the clamped delay."
+    },
+    {
+      "id": "acp.queued-strip-tooltip",
+      "kind": "mocked-playwright",
+      "risk": "low",
+      "specs": ["tests/acp-queued-tooltip.spec.ts", "src/components/acp/QueuedPromptsStrip.test.tsx"],
+      "components": ["web/src/components/acp/PromptStrips.tsx", "web/src/components/acp/StructuredView.tsx"],
+      "reason": "The queued-messages header is a keyboard-reachable Tooltip trigger, not a title, and says the Daemon holds the queue; a strip with an unconfirmed row says it isn't sent yet."
     },
     {
       "id": "acp.queue-send-now",
@@ -3603,18 +4109,88 @@
       "components": ["web/src/components/acp/ToolErrorBody.tsx"]
     },
     {
+      "id": "acp.startup-wait-line",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": [
+        "src/components/acp/__tests__/SessionBanners.test.tsx",
+        "src/components/acp/startupWait.test.ts",
+        "src/lib/agentDisplayName.test.tsx",
+        "src/components/acp/SystemNotices.test.tsx",
+        "src/components/acp/QueuedPromptsStrip.test.tsx",
+        "src/components/acp/SendButton.test.tsx",
+        "src/hooks/useRespawnSession.test.tsx",
+        "src/hooks/acpSession/reducer.test.ts",
+        "src/hooks/acpSession/stateCache.test.ts",
+        "tests/acp-startup-wait.spec.ts",
+        "tests/live/acp-restart-start.spec.ts"
+      ],
+      "components": [
+        "web/src/components/acp/startupWait.ts",
+        "web/src/lib/acpTypes.ts",
+        "web/src/hooks/acpSession/reducer.ts",
+        "web/src/hooks/acpSession/stateCache.ts",
+        "web/src/hooks/useAcpSession.ts",
+        "web/src/components/acp/AcpRuntime.tsx",
+        "web/src/hooks/useRespawnSession.ts",
+        "web/src/components/acp/StructuredView.tsx",
+        "web/src/components/acp/SessionBanners.tsx",
+        "web/src/components/acp/SystemNotices.tsx",
+        "web/src/components/acp/PromptStrips.tsx",
+        "web/src/components/acp/ComposerControls.tsx"
+      ],
+      "notes": "A new Session shows one startup line naming the Agent with an elapsed count, switching to a neutral line at 15s with no duration or delivery promise; the queued strip and Send button say what they wait for. Reduced motion holds one breathe frame. First-dial backoff keeps the startup line; exhausted retries stop it and expose Reconnect even before the first successful connection. The disconnected new-Session Send and Queue follow-up labels and titles use Pending until the Agent is ready; connected Send and resumed-Session copy remain unchanged. A Session that already has an acp_session_id (an older one) never shows the startup line, including before its replay loads; an import still pending its history does show it. A running Worker never shows it while the first connection or replay loads; its disconnected Send, follow-up and queue strip copy say \"while disconnected\" instead of \"until session resumes\", and its queue strip says \"Queued\" unless a row is unconfirmed. A running Worker whose session/new hasn't answered (no AcpSessionAssigned yet, even past initialize's events) keeps the line; one assigned only before the 1,000-frame replay tail (no stored id) shows no line and keeps Stop and run. Past the 30s handshake bound the line offers Restart <Agent>, which posts {} to /acp/restart and starts the count again; a failure while the line is up keeps the button and says why, and one after the restart's stop unmounted the line, or any server error, shows the reason and any stopped message on the stopped-worker banner until the next restart, assignment or prompt. While a prompt is sent, a caption under Restart says restarting stops it; while prompts are queued, it says they are sent once the Agent is ready. After Restart the line stays (the restart's own stop doesn't read as a stopped Worker) and offers Restart again if the replacement stalls too; its caption says the sent message was stopped until it is sent again, also when the restart's stop arrives before the restart answers and unmounts the line. A restart acknowledged after its replacement was assigned or failed to start doesn't hide a later Stop. Read-only and CityHall dashboards keep the elapsed line without Restart or the caption. Restart after a stalled start, and again after a stalled replacement; a prompt sent during the stall is stopped, and a resend is delivered once, counted after its turn completes."
+    },
+    {
+      "id": "acp.queued-strip-reason",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": [
+        "src/components/acp/queuedReason.test.ts",
+        "src/components/acp/QueuedPromptsStrip.test.tsx",
+        "tests/acp-startup-wait.spec.ts",
+        "tests/acp-queued-stop-and-run.spec.ts"
+      ],
+      "components": [
+        "web/src/components/acp/queuedReason.ts",
+        "web/src/components/acp/PromptStrips.tsx",
+        "web/src/components/acp/StructuredView.tsx"
+      ],
+      "notes": "The queued strip header says why the queue waits (Agent starting, rate limit, compacting, cancelling, a running turn, a solo command, or offline with an unconfirmed row as Not sent (n)) at text-text-subtle, and each row's action matches: Send now, Stop and send, Stop and run, Start and send, an aria-disabled waiting button with its reason, or none. Stop and run on a solo command behind a steerable turn posts a real cancel, while message rows still steer. Rate-limit copy promises delivery only while auto-resume is armed. Enabled action labels use text-text-primary. A row that can't send yet shows the queue's reason on a focusable aria-disabled button. At 375px a long reason wraps inside the strip without horizontal scroll or overlapping Clear all."
+    },
+    {
       "id": "acp.startup-error-screen",
       "kind": "vitest",
       "risk": "high",
-      "specs": ["src/components/acp/__tests__/StartupErrorScreen.test.tsx"],
-      "components": ["web/src/components/acp/StartupErrorScreen.tsx"]
+      "specs": ["src/components/acp/__tests__/StartupErrorScreen.test.tsx", "tests/acp-startup-error-screen.spec.ts"],
+      "components": ["web/src/components/acp/StartupErrorScreen.tsx", "web/src/components/acp/RecoveryActionRow.tsx"],
+      "notes": "Steps follow install-info: installs allowed, read-only or CityHall, sandboxed, a stopped container (whose manual steps start with Check again, which starts it), npm-installable. Re-reads it on focus so a setting turned on in the TUI unlocks Update; the in-container command comes from the Daemon. Descriptive text uses text-text-subtle, with no text-text-secondary or text-text-dim classes, asserted across install-off, allowed, sandboxed, non-npm and protocol states."
     },
     {
       "id": "acp.startup-error-banner",
       "kind": "vitest",
       "risk": "high",
       "specs": ["src/components/acp/__tests__/StartupErrorBanner.test.tsx"],
-      "components": ["web/src/components/acp/StructuredView.tsx", "web/src/components/acp/StartupErrorBanner.tsx"]
+      "components": [
+        "web/src/components/acp/StructuredView.tsx",
+        "web/src/components/acp/StartupErrorBanner.tsx",
+        "web/src/components/acp/RecoveryActionRow.tsx",
+        "web/src/components/acp/signInSteps.ts"
+      ],
+      "notes": "Auth-required startup errors name the agent's own sign-in step from signInSteps.ts: Claude gets claude auth login and ANTHROPIC_API_KEY, Codex gets codex login (codex login --device-auth in a Container) and OPENAI_API_KEY, other agents get generic sign-in copy with no Claude or Codex commands. A sandboxed Session with install off runs the command inside the container and points new Sessions at the dashboard's \"Sandbox image update available\" banner, which offers Update now to pull it or shows the command to run, never at the TUI."
+    },
+    {
+      "id": "acp.startup-error-banner-actions",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/acp-startup-error-banner.spec.ts", "src/components/acp/__tests__/StartupErrorBanner.test.tsx"],
+      "components": [
+        "web/src/components/acp/StartupErrorBanner.tsx",
+        "web/src/components/acp/RecoveryActionRow.tsx",
+        "web/src/components/acp/adapterRecovery.ts",
+        "web/src/App.tsx"
+      ],
+      "notes": "Retry restarts through /acp/restart while a Worker is present and spawns through /acp/spawn when it is absent. A retry failing with the same cause, after spawn failed: or restart spawn failed: and any reason code, reads as the same error. When a restart from the startup line stopped a sent message, also when its answer arrives after the startup error, the banner says to send it again."
     },
     {
       "id": "acp.startup-error-banner-live",
@@ -3628,7 +4204,27 @@
       "kind": "live-playwright",
       "risk": "high",
       "specs": ["tests/live/read-only-mode.spec.ts"],
-      "components": ["web/src/components/MobileTerminalToolbar.tsx"]
+      "components": ["web/src/components/Dashboard.tsx"],
+      "notes": "Live coverage checks authoritative /api/about policy, pre-extraction mutation refusal and dashboard shortcut suppression. Terminal policy transitions and passive consumers are exercised by terminal.live-split-composite; this live spec does not open an existing terminal."
+    },
+    {
+      "id": "read-only.unknown-about",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": [
+        "src/lib/__tests__/clientCapabilities.test.ts",
+        "src/lib/__tests__/serverAbout.test.ts",
+        "src/components/__tests__/BannerStack.test.tsx",
+        "src/hooks/useKeyboardShortcuts.test.ts"
+      ],
+      "components": [
+        "web/src/lib/clientCapabilities.ts",
+        "web/src/lib/serverAbout.ts",
+        "web/src/components/ServerSettingsBanner.tsx",
+        "web/src/components/BannerStack.tsx",
+        "web/src/App.tsx"
+      ],
+      "notes": "The dashboard asks /api/about three times before rendering its shell. With no answer, every write gate (Restart Agent, Switch to Terminal view, new-terminal buttons, new session, the readOnly props) stays hidden, a notice explains why with Retry, and the answer is asked for again on reconnect; any answer is followed. Shortcuts report ready only once the answer is in."
     },
     {
       "id": "ensure-session-restart",
@@ -3639,8 +4235,13 @@
         "web/src/lib/api.ts",
         "web/src/components/LiveTerminalView.tsx",
         "web/src/App.tsx",
-        "web/src/lib/types.ts"
-      ]
+        "web/src/lib/types.ts",
+        "src/server/api/sessions/ensure.rs",
+        "src/session/instance/start.rs",
+        "src/tmux/session.rs",
+        "src/tmux/mod.rs"
+      ],
+      "notes": "A deferred CLI creation starts Stopped. The real daemon starts its pane, observes Error after an acknowledged pane loss, and returns HTTP 200 with restarted/alive before and immediately after a subsequent exact-session kill without waiting for a cache or poller refresh. A live pane stays alive; the frontend's held ensure request keeps Starting visible until release."
     },
     {
       "id": "modals",
@@ -3656,7 +4257,7 @@
     {
       "id": "projects-form-modal",
       "kind": "vitest",
-      "risk": "low",
+      "risk": "medium",
       "specs": ["src/components/__tests__/ProjectFormModal.test.tsx"],
       "components": ["web/src/components/ProjectFormModal.tsx", "web/src/components/ProjectPluginSettings.tsx"]
     },
@@ -3671,8 +4272,21 @@
       "id": "projects-section-unit",
       "kind": "vitest",
       "risk": "low",
-      "specs": ["src/components/__tests__/ProjectsSection.test.tsx"],
-      "components": ["web/src/components/ProjectsSection.tsx"]
+      "specs": ["src/components/__tests__/ProjectsSection.test.tsx", "src/lib/__tests__/registeredProjects.test.ts"],
+      "components": [
+        "web/src/components/ProjectsSection.tsx",
+        "web/src/lib/registeredProjects.ts",
+        "web/src/lib/sidebarAxis.ts"
+      ],
+      "notes": "Where the grouping draws repository headers (By repo, By organization, By repo and group) the section is \"Projects, no sessions\" and lists unpinned Projects without a live group; By group draws none, so it is \"Projects\" and lists every registered Project once, pinned or with live sessions included, a pinned row marked ◆ (#5065). Compact is \"Projects\" on every axis. The per-axis rule is axisDrawsRepoHeaders, a Record over SidebarAxis."
+    },
+    {
+      "id": "story.settings-paired-terminal-sizing",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": ["src/components/settings/__tests__/SchemaFieldPatches.test.tsx"],
+      "components": ["web/src/components/settings/SchemaSection.tsx", "web/src/components/settings/FormFields.tsx"],
+      "notes": "Terminal UI sizing controls expose bounds and global scope and save sparse numeric patches."
     },
     {
       "id": "story.settings-tmux-select",
@@ -3858,8 +4472,15 @@
       "id": "story.sidebar-keyboard-row-navigation",
       "kind": "mocked-playwright",
       "risk": "medium",
-      "specs": ["tests/sidebar-keyboard-navigation.spec.ts"],
-      "components": ["web/src/components/WorkspaceSidebar.tsx", "web/src/components/sidebar/SessionRow.tsx"]
+      "specs": ["tests/sidebar-keyboard-navigation.spec.ts", "src/components/__tests__/SidebarGroupHeader.test.tsx"],
+      "components": [
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/SessionRow.tsx",
+        "web/src/components/sidebar/SidebarGroupHeader.tsx",
+        "web/src/components/sidebar/GroupLists.tsx",
+        "web/src/components/sidebar/keyboardNav.ts"
+      ],
+      "notes": "Arrow keys over headers and rows on every axis, including nested and org lists; Left on a collapsed nested header goes to its parent; the Snoozed & archived toggle is a header for its rows; Archive all that empties a Group moves focus to the nearest remaining Group header, never the toggle, and not after focus moved elsewhere."
     },
     {
       "id": "story.sidebar-plan-progress",
@@ -4009,7 +4630,8 @@
       "components": [
         "web/src/components/settings/SchemaSection.tsx",
         "web/src/components/SettingsView.tsx",
-        "web/src/hooks/useResolvedTheme.ts"
+        "web/src/hooks/useResolvedTheme.ts",
+        "web/src/lib/themeWrites.ts"
       ]
     },
     {
@@ -4032,6 +4654,13 @@
       "risk": "low",
       "specs": ["src/components/settings/__tests__/SchemaFieldPatches.test.tsx"],
       "components": ["web/src/components/settings/SchemaSection.tsx"]
+    },
+    {
+      "id": "story.settings-sound-controls",
+      "kind": "vitest",
+      "risk": "low",
+      "specs": ["src/components/settings/__tests__/SchemaFieldPatches.test.tsx"],
+      "components": ["web/src/components/settings/customWidgets.tsx"]
     },
     {
       "id": "story.settings-session-id-poller-threads",
@@ -4361,9 +4990,17 @@
       "specs": [
         "src/lib/diffPair.test.ts",
         "src/components/diff/__tests__/StringDiff.test.tsx",
-        "src/components/acp/ToolCards.render.test.tsx"
+        "src/components/acp/ToolCards.render.test.tsx",
+        "src/components/acp/activityMessages.test.ts",
+        "src/components/acp/ThreadMessages.test.tsx"
       ],
-      "components": ["web/src/components/acp/ToolCards.tsx", "web/src/components/diff/StringDiff.tsx"]
+      "components": [
+        "web/src/components/acp/ToolCards.tsx",
+        "web/src/components/acp/NamedToolCards.tsx",
+        "web/src/components/acp/activityMessages.ts",
+        "web/src/components/acp/ThreadMessages.tsx",
+        "web/src/components/diff/StringDiff.tsx"
+      ]
     },
     {
       "id": "acp.story.queue-follow-up-with-nav",
@@ -4388,7 +5025,27 @@
       "kind": "vitest",
       "risk": "medium",
       "specs": ["src/components/acp/__tests__/AuthStatusHint.test.tsx", "src/lib/acpTypes.test.ts"],
-      "components": ["web/src/components/acp/ComposerControls.tsx", "web/src/lib/acpTypes.ts"]
+      "components": [
+        "web/src/components/acp/ComposerControls.tsx",
+        "web/src/components/acp/SignInPopover.tsx",
+        "web/src/lib/acpTypes.ts"
+      ],
+      "notes": "A signed-out label is a button opening the Agent's sign-in steps; Open Terminal and Restart Agent follow the server's terminal and mutation gates."
+    },
+    {
+      "id": "acp.sign-in-steps",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/acp-sign-in-steps.spec.ts"],
+      "components": [
+        "web/src/components/acp/ComposerControls.tsx",
+        "web/src/components/acp/SignInPopover.tsx",
+        "web/src/components/acp/signInSteps.ts",
+        "web/src/components/PairedTerminal.tsx",
+        "web/src/hooks/usePairedShellModes.ts",
+        "web/src/hooks/usePairedTerminalReveal.ts"
+      ],
+      "notes": "Keyboard open, Escape returns focus, Copy takes claude auth login, Open Terminal shows the host paired shell, Restart Agent posts once; read-only and CityHall servers show only the command. A sandboxed Session's open Host shell switches to a focused Container shell, and a collapsed dock whose active tab is the terminal is revealed."
     },
     {
       "id": "story.wizard-open-close",
@@ -4414,9 +5071,27 @@
     {
       "id": "story.wizard-saved-projects",
       "kind": "mocked-playwright",
-      "risk": "low",
+      "risk": "high",
       "specs": ["tests/wizard-project.spec.ts"],
-      "components": ["web/src/components/session-wizard/steps/ProjectStep.tsx"]
+      "components": [
+        "web/src/components/session-wizard/steps/ProjectStep.tsx",
+        "web/src/components/session-wizard/steps/projectPicker.ts",
+        "web/src/components/session-wizard/SessionWizard.tsx",
+        "web/src/lib/api.ts"
+      ]
+    },
+    {
+      "id": "wizard.project-default-agent",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["tests/wizard-project.spec.ts"],
+      "components": [
+        "web/src/App.tsx",
+        "web/src/components/ProjectsSection.tsx",
+        "web/src/components/session-wizard/SessionWizard.tsx",
+        "web/src/components/session-wizard/profileDefaults.ts"
+      ],
+      "notes": "A saved project with no sessions opens the wizard on the profile default_tool (#5008)."
     },
     {
       "id": "story.wizard-browse-disk",
@@ -4466,9 +5141,10 @@
     {
       "id": "story.wizard-group-field",
       "kind": "mocked-playwright",
-      "risk": "low",
-      "specs": ["tests/wizard.spec.ts"],
-      "components": ["web/src/components/session-wizard/steps/WorktreePanel.tsx"]
+      "risk": "medium",
+      "specs": ["tests/wizard.spec.ts", "src/components/session-wizard/__tests__/GroupCombobox.test.tsx"],
+      "components": ["web/src/components/session-wizard/steps/GroupCombobox.tsx"],
+      "notes": "The Group field reads the selected canonical daemon profile and counts only non-archived, non-trashed sessions. Selecting a create row commits its displayed trimmed path; Esc and blur keep typed text. The popup opens upward inside the sheet when needed."
     },
     {
       "id": "story.wizard-extra-repos",
@@ -4478,7 +5154,9 @@
       "components": [
         "web/src/components/session-wizard/steps/ExtraReposPicker.tsx",
         "web/src/components/session-wizard/steps/projectPicker.ts",
-        "web/src/components/session-wizard/steps/ProjectSearchList.tsx"
+        "web/src/components/session-wizard/steps/ProjectSearchList.tsx",
+        "web/src/components/session-wizard/SessionWizard.tsx",
+        "web/src/lib/api.ts"
       ]
     },
     {
@@ -4529,7 +5207,8 @@
         "web/src/lib/registeredProjects.ts",
         "web/src/lib/sidebarGroups.ts",
         "web/src/hooks/useRepoGroups.ts",
-        "web/src/hooks/useProjects.ts"
+        "web/src/hooks/useProjects.ts",
+        "web/src/components/sidebar/SidebarGroupHeader.tsx"
       ]
     },
     {
@@ -4537,7 +5216,12 @@
       "kind": "mocked-playwright",
       "risk": "high",
       "specs": ["tests/sidebar-project-pin.spec.ts"],
-      "components": ["web/src/App.tsx", "web/src/lib/api.ts"]
+      "components": [
+        "web/src/App.tsx",
+        "web/src/lib/api.ts",
+        "web/src/hooks/useProjects.ts",
+        "web/src/components/ProjectsSection.tsx"
+      ]
     },
     {
       "id": "sidebar.active-project-settings",
@@ -4620,13 +5304,22 @@
       "id": "sidebar.add-project",
       "kind": "vitest",
       "risk": "high",
-      "description": "Picker lists saved and recent projects, and a clicked row or typed path posts to attach; attach eligibility and worker outcomes; native conversation continuation is best-effort, not a modal guarantee.",
+      "description": "Profile-scoped picker, canonical attach receipts, retained warnings and restart failures, and explicit unconfirmed results on captured target invalidation.",
       "specs": ["src/components/__tests__/AddProjectAction.test.tsx"],
       "components": [
         "web/src/components/WorkspaceSidebar.tsx",
         "web/src/lib/api.ts",
+        "web/src/components/sidebar/SessionActionProvider.tsx",
         "web/src/components/sidebar/AddProjectModal.tsx"
       ]
+    },
+    {
+      "id": "sidebar.add-project-regrouping",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/native-session-receipts.spec.ts"],
+      "components": ["web/src/App.tsx", "web/src/components/sidebar/SessionActionProvider.tsx"],
+      "description": "Actual canonical Multi-repo regrouping preserves the attach result, moved path, warning and failed restart until Done."
     },
     {
       "id": "sidebar.add-project-daemon",
@@ -4634,6 +5327,23 @@
       "risk": "high",
       "specs": ["tests/live/workspaces.spec.ts"],
       "components": ["web/src/components/WorkspaceSidebar.tsx", "web/src/lib/api.ts"]
+    },
+    {
+      "id": "sidebar.session-menu-tiers",
+      "kind": "vitest",
+      "risk": "medium",
+      "specs": [
+        "src/components/__tests__/SessionRowMenuOrder.test.tsx",
+        "src/components/plugin/__tests__/PluginSessionMenu.test.tsx",
+        "tests/sidebar-context-menu.spec.ts"
+      ],
+      "components": [
+        "web/src/components/sidebar/SessionRowMenu.tsx",
+        "web/src/components/sidebar/SessionActions.tsx",
+        "web/src/components/ContextMenu.tsx",
+        "web/src/components/plugin/PluginSessionMenu.tsx"
+      ],
+      "notes": "The Session menu groups its items into tiers (quick row, Rename, Run, Start another, More, Settings, plugin items, Move to Trash…) with a separator only between tiers that show something, in the popover and the mobile sheet. Restart to update and Recreate container carry a second line as their description. The Notify hint shows only for Off and All. The heading adds the Session's status and view, or a count for a row with several. Read-only leaves only Notify."
     },
     {
       "id": "sidebar.context-menu-clamp",
@@ -4753,7 +5463,26 @@
         "web/src/components/WorkspaceSidebar.tsx",
         "web/src/components/Dock.tsx",
         "web/src/components/acp/Composer.tsx",
-        "web/src/components/SettingsView.tsx"
+        "web/src/components/SettingsView.tsx",
+        "web/src/components/settings/SettingsIntro.tsx"
+      ]
+    },
+    {
+      "id": "onboarding.settings-tab-intros",
+      "kind": "vitest",
+      "risk": "low",
+      "specs": [
+        "src/components/__tests__/SettingsView.intros.test.tsx",
+        "src/components/settings/__tests__/SettingsIntro.test.tsx",
+        "src/hooks/useTour.test.tsx",
+        "src/lib/__tests__/webUiSync.test.ts"
+      ],
+      "components": [
+        "web/src/components/settings/SettingsIntro.tsx",
+        "web/src/components/SettingsView.tsx",
+        "web/src/lib/settingsIntros.ts",
+        "web/src/lib/webUiSync.ts",
+        "web/src/hooks/useTour.tsx"
       ]
     },
     {
@@ -4791,7 +5520,11 @@
       "kind": "vitest",
       "risk": "low",
       "specs": ["src/components/onboarding/__tests__/ThemeIntro.test.tsx", "src/lib/__tests__/onboarding.test.ts"],
-      "components": ["web/src/components/onboarding/ThemeIntro.tsx", "web/src/hooks/useThemeMutation.ts"]
+      "components": [
+        "web/src/components/onboarding/ThemeIntro.tsx",
+        "web/src/hooks/useThemeMutation.ts",
+        "web/src/lib/themeWrites.ts"
+      ]
     },
     {
       "id": "shortcuts.single-source",
@@ -4817,6 +5550,7 @@
       "id": "settings.plugins",
       "kind": "vitest",
       "risk": "high",
+      "description": "Plugin cards show validation, including a warning-styled dev badge.",
       "specs": [
         "src/components/settings/__tests__/PluginsSettings.test.tsx",
         "src/components/settings/__tests__/PluginIdentityIcon.test.tsx"
@@ -4841,9 +5575,10 @@
       "components": ["web/src/components/settings/PluginsSettings.tsx"]
     },
     {
-      "id": "settings.plugins-passphrase-loopback",
+      "id": "settings.plugins-passphrase-elevation",
       "kind": "live-playwright",
       "risk": "high",
+      "description": "Direct TCP plugin changes require passphrase elevation, explicit retry and persisted UI/backend state.",
       "specs": ["tests/live/settings-panels.spec.ts"],
       "components": [
         "web/src/components/settings/PluginsSettings.tsx",
@@ -4907,6 +5642,152 @@
         "web/src/components/plugin/PluginSlots.tsx",
         "web/src/components/acp/Composer.tsx",
         "web/src/components/acp/ComposerControls.tsx"
+      ]
+    },
+    {
+      "id": "projects.served-profile-registry.unit",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": ["src/hooks/__tests__/useProjects.test.tsx"],
+      "components": ["web/src/hooks/useProjects.ts", "web/src/hooks/app/useProjectActions.ts"]
+    },
+    {
+      "id": "projects.served-profile-registry",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/served-profile-browser.spec.ts"],
+      "components": ["web/src/hooks/useProjects.ts", "web/src/hooks/app/useProjectActions.ts"],
+      "notes": "Focus refresh retains acknowledged registry on failure. Both same-tab rename origins refresh served-profile authority before implicit wizard registry reads."
+    },
+    {
+      "id": "wizard.served-profile-scope.unit",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": [
+        "src/components/session-wizard/__tests__/SessionWizard.test.tsx",
+        "src/components/session-wizard/__tests__/ProjectStep.test.tsx",
+        "src/components/session-wizard/__tests__/SessionWizard.projectWorktreeOverride.test.tsx",
+        "src/components/session-wizard/__tests__/SessionWizard.lastProject.test.tsx",
+        "src/components/session-wizard/__tests__/projectPickerScope.test.ts"
+      ],
+      "components": [
+        "web/src/App.tsx",
+        "web/src/components/session-wizard/SessionWizard.tsx",
+        "web/src/components/session-wizard/steps/ProjectStep.tsx",
+        "web/src/components/session-wizard/steps/ImportSessionPicker.tsx",
+        "web/src/components/session-wizard/steps/projectPicker.ts",
+        "web/src/components/session-wizard/steps/ExtraReposPicker.tsx"
+      ]
+    },
+    {
+      "id": "wizard.served-profile-scope",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/served-profile-browser.spec.ts"],
+      "components": [
+        "web/src/App.tsx",
+        "web/src/components/session-wizard/SessionWizard.tsx",
+        "web/src/components/session-wizard/steps/projectPicker.ts",
+        "web/src/components/session-wizard/steps/ExtraReposPicker.tsx"
+      ],
+      "notes": "Both Settings rename origins invalidate implicit authority until refresh or explicit retry succeeds, without old-profile reads or dirty-field loss. Existing explicit-profile and no-default fallback cases remain."
+    },
+    {
+      "id": "connectivity.poll-abort-deadline.unit",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": [
+        "src/hooks/__tests__/useSessionsPolling.test.tsx",
+        "src/hooks/__tests__/useProjects.test.tsx",
+        "src/components/__tests__/TopBar.test.tsx",
+        "src/lib/api.test.ts"
+      ],
+      "components": [
+        "web/src/hooks/useSessions.ts",
+        "web/src/hooks/useProjects.ts",
+        "web/src/lib/api.ts",
+        "web/src/lib/connectionState.ts",
+        "web/src/components/TopBar.tsx"
+      ]
+    },
+    {
+      "id": "connectivity.poll-abort-deadline",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/native-session-receipts.spec.ts"],
+      "components": [
+        "web/src/hooks/useSessions.ts",
+        "web/src/hooks/useProjects.ts",
+        "web/src/lib/api.ts",
+        "web/src/lib/connectionState.ts",
+        "web/src/components/TopBar.tsx"
+      ],
+      "notes": "Browser: valid stale same epoch polls restore online state without admitting stale rows or settings; valid stale abandoned epoch polls restore online state without admitting stale rows or settings; a hung sessions poll aborts at its deadline and the next canonical poll restores online controls."
+    },
+    {
+      "id": "sidebar.canonical-settings-receipts.unit",
+      "kind": "vitest",
+      "risk": "high",
+      "specs": [
+        "src/components/__tests__/SessionRowReceipts.test.tsx",
+        "src/hooks/__tests__/useSessionsPolling.test.tsx",
+        "src/lib/api.test.ts"
+      ],
+      "components": [
+        "web/src/App.tsx",
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/SessionActionProvider.tsx",
+        "web/src/components/sidebar/SessionRow.tsx",
+        "web/src/components/sidebar/useSessionRowModel.ts",
+        "web/src/components/sidebar/usePendingSetting.ts",
+        "web/src/hooks/useSessions.ts",
+        "web/src/lib/api.ts"
+      ]
+    },
+    {
+      "id": "sidebar.canonical-settings-receipts",
+      "kind": "mocked-playwright",
+      "risk": "high",
+      "specs": ["tests/native-session-receipts.spec.ts"],
+      "components": [
+        "web/src/App.tsx",
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/SessionActionProvider.tsx",
+        "web/src/components/sidebar/SessionRow.tsx",
+        "web/src/components/sidebar/useSessionRowModel.ts",
+        "web/src/components/sidebar/usePendingSetting.ts",
+        "web/src/hooks/useSessions.ts",
+        "web/src/lib/api.ts"
+      ],
+      "notes": "Color and notification receipt ordering remains exact above Number.MAX_SAFE_INTEGER. Accepted color reset survives Settings navigation before its first ACK; true invalidation never replays queued work."
+    },
+    {
+      "id": "sidebar.canonical-settings-receipts.live",
+      "kind": "live-playwright",
+      "risk": "high",
+      "specs": ["tests/live/native-session-receipts.spec.ts"],
+      "components": [
+        "web/src/App.tsx",
+        "web/src/components/WorkspaceSidebar.tsx",
+        "web/src/components/sidebar/SessionRow.tsx",
+        "web/src/components/sidebar/SessionActionProvider.tsx",
+        "web/src/components/sidebar/useSessionRowModel.ts",
+        "web/src/components/sidebar/usePendingSetting.ts",
+        "web/src/hooks/useSessions.ts",
+        "web/src/lib/api.ts"
+      ],
+      "notes": "Browser: isolated serve publishes advancing native epoch revision receipts for color and notifications. Uses the isolated spawnServe fixture; native HTTP receipts and canonical persistence are asserted, then a page reload verifies the sidebar without pending overlays."
+    },
+    {
+      "id": "selected-item-contrast",
+      "kind": "deferred",
+      "issue": "https://github.com/agent-of-empires/agent-of-empires/issues/4898",
+      "risk": "low",
+      "reason": "Styling-only selected-item fill; contrast is pinned across built-in themes by the Rust builtins_clear_contrast_floors test.",
+      "components": [
+        "web/src/components/acp/SessionConfigControls.tsx",
+        "web/src/components/profiles/ProfilesSection.tsx",
+        "web/src/components/sidebar/SessionRowMenu.tsx"
       ]
     }
   ]

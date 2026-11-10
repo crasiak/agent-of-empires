@@ -37,7 +37,16 @@ pub struct CreateProgressSnapshot {
     pub output: Vec<String>,
 }
 
-pub struct CreateProgress(Mutex<State>);
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CreateProgressVisibility {
+    WebReadable,
+    UnixOwnerOnly,
+}
+
+pub struct CreateProgress {
+    state: Mutex<State>,
+    visibility: CreateProgressVisibility,
+}
 
 struct State {
     stage: CreateStage,
@@ -45,21 +54,32 @@ struct State {
     output: VecDeque<String>,
 }
 
+/// Unregistered, for a create without an idempotency key: nothing polls it,
+/// but its failure still reports the stage.
+impl Default for CreateProgress {
+    fn default() -> Self {
+        Self::new(CreateProgressVisibility::UnixOwnerOnly)
+    }
+}
+
 impl CreateProgress {
-    fn new() -> Self {
-        Self(Mutex::new(State {
-            stage: CreateStage::Preparing,
-            hook: None,
-            output: VecDeque::new(),
-        }))
+    fn new(visibility: CreateProgressVisibility) -> Self {
+        Self {
+            state: Mutex::new(State {
+                stage: CreateStage::Preparing,
+                hook: None,
+                output: VecDeque::new(),
+            }),
+            visibility,
+        }
     }
 
     pub fn set_stage(&self, stage: CreateStage) {
-        self.0.lock().expect("create progress poisoned").stage = stage;
+        self.state.lock().expect("create progress poisoned").stage = stage;
     }
 
     pub fn record(&self, progress: HookProgress) {
-        let mut state = self.0.lock().expect("create progress poisoned");
+        let mut state = self.state.lock().expect("create progress poisoned");
         match progress {
             HookProgress::Started(cmd) => {
                 state.stage = CreateStage::RunningHooks;
@@ -76,8 +96,13 @@ impl CreateProgress {
         }
     }
 
-    pub fn snapshot(&self) -> CreateProgressSnapshot {
-        let state = self.0.lock().expect("create progress poisoned");
+    /// The stage alone, which a failure may report whoever made the request.
+    pub fn stage(&self) -> CreateStage {
+        self.state.lock().expect("create progress poisoned").stage
+    }
+
+    fn snapshot(&self) -> CreateProgressSnapshot {
+        let state = self.state.lock().expect("create progress poisoned");
         CreateProgressSnapshot {
             stage: state.stage,
             hook: state.hook.clone(),
@@ -87,12 +112,50 @@ impl CreateProgress {
 }
 
 /// A failed create's response. A retry whose first response was lost gets it
-/// back instead of running the create, and its hooks, again.
+/// back, with the original `stage` and `reference`, instead of running the
+/// create, and its hooks, again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateFailure {
     pub status: axum::http::StatusCode,
     pub code: &'static str,
     pub message: String,
+    pub stage: CreateStage,
+    /// The `X-Request-Id` of the attempt that failed, as logged with it.
+    pub reference: String,
+}
+
+impl CreateFailure {
+    /// The one place a failure message is capped.
+    pub fn new(
+        status: axum::http::StatusCode,
+        code: &'static str,
+        message: &str,
+        stage: CreateStage,
+        reference: &str,
+    ) -> Self {
+        Self {
+            status,
+            code,
+            message: message.chars().take(MAX_FAILURE_MESSAGE_CHARS).collect(),
+            stage,
+            reference: reference.to_owned(),
+        }
+    }
+}
+
+impl axum::response::IntoResponse for CreateFailure {
+    fn into_response(self) -> axum::response::Response {
+        (
+            self.status,
+            axum::Json(serde_json::json!({
+                "error": self.code,
+                "message": self.message,
+                "stage": self.stage,
+                "reference": self.reference,
+            })),
+        )
+            .into_response()
+    }
 }
 
 pub struct CreateProgressRegistry {
@@ -138,8 +201,12 @@ impl CreateProgressRegistry {
         &self.boot_id
     }
 
-    pub fn register(&self, key: &str) -> CreateProgressRegistration {
-        let progress = Arc::new(CreateProgress::new());
+    pub fn register(
+        &self,
+        key: &str,
+        visibility: CreateProgressVisibility,
+    ) -> CreateProgressRegistration {
+        let progress = Arc::new(CreateProgress::new(visibility));
         self.live
             .lock()
             .expect("create progress registry poisoned")
@@ -151,22 +218,28 @@ impl CreateProgressRegistry {
         }
     }
 
-    pub fn snapshot(&self, key: &str) -> Option<CreateProgressSnapshot> {
+    pub fn snapshot(
+        &self,
+        key: &str,
+        local: Option<&super::principal::Principal>,
+    ) -> Option<CreateProgressSnapshot> {
         self.live
             .lock()
             .expect("create progress registry poisoned")
             .get(key)
+            .filter(|p| {
+                p.visibility == CreateProgressVisibility::WebReadable
+                    || super::principal::authorize(
+                        local,
+                        super::principal::Capability::CreationProgress,
+                    )
+            })
             .map(|p| p.snapshot())
     }
 
     /// Record before the create releases its idempotency lock, so a waiting retry sees it.
     /// The cap is soft: creates admitted by `has_failure_capacity` still record.
-    pub fn record_failure(&self, key: &str, mut failure: CreateFailure) {
-        failure.message = failure
-            .message
-            .chars()
-            .take(MAX_FAILURE_MESSAGE_CHARS)
-            .collect();
+    pub fn record_failure(&self, key: &str, failure: CreateFailure) {
         let mut failures = self.failures.lock().expect("create failures poisoned");
         if failures.len() >= MAX_FAILURES {
             failures.retain(|_, (at, _)| at.elapsed() < FAILURE_TTL);
@@ -204,6 +277,8 @@ mod tests {
             status: axum::http::StatusCode::BAD_REQUEST,
             code: "create_failed",
             message: format!("failure {n}"),
+            stage: CreateStage::Preparing,
+            reference: format!("ref-{n}"),
         };
         for n in 0..MAX_FAILURES {
             assert!(registry.has_failure_capacity());
@@ -215,25 +290,22 @@ mod tests {
         assert_eq!(registry.recent_failure("k0"), Some(failure(0)));
         assert_eq!(registry.recent_failure("late"), Some(failure(MAX_FAILURES)));
 
-        registry.record_failure(
-            "long",
-            CreateFailure {
-                message: "x".repeat(5000),
-                ..failure(0)
-            },
+        let long = CreateFailure::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "create_failed",
+            &"x".repeat(5000),
+            CreateStage::Preparing,
+            "ref",
         );
-        assert_eq!(
-            registry.recent_failure("long").unwrap().message.len(),
-            MAX_FAILURE_MESSAGE_CHARS
-        );
+        assert_eq!(long.message.len(), MAX_FAILURE_MESSAGE_CHARS);
     }
 
     #[test]
     fn progress_tracks_hooks_caps_output_and_unregisters_on_drop() {
         let registry = CreateProgressRegistry::default();
-        let reg = registry.register("k");
+        let reg = registry.register("k", CreateProgressVisibility::WebReadable);
         assert_eq!(
-            registry.snapshot("k").unwrap().stage,
+            registry.snapshot("k", None).unwrap().stage,
             CreateStage::Preparing
         );
 
@@ -246,7 +318,7 @@ mod tests {
         reg.progress
             .record(HookProgress::Output("x".repeat(MAX_LINE_CHARS * 2)));
 
-        let snap = registry.snapshot("k").unwrap();
+        let snap = registry.snapshot("k", None).unwrap();
         assert_eq!(snap.stage, CreateStage::RunningHooks);
         assert_eq!(snap.hook.as_deref(), Some("npm install"));
         assert_eq!(snap.output.len(), MAX_OUTPUT_LINES);
@@ -254,6 +326,6 @@ mod tests {
         assert_eq!(snap.output.last().unwrap().len(), MAX_LINE_CHARS);
 
         drop(reg);
-        assert!(registry.snapshot("k").is_none());
+        assert!(registry.snapshot("k", None).is_none());
     }
 }

@@ -33,15 +33,22 @@ export const HOST_STATE_VARS = new Set([
   // Discovery must not prefer a host endpoint over the private daemon.
   "AOE_DAEMON_TOKEN",
   "AOE_DAEMON_URL",
+  // Browser origin used to resolve plugin-relative links. A host value would
+  // point the private daemon's own navigation at a host dashboard.
+  "AOE_DASHBOARD_URL",
   // A host passphrase would let discovery log in against a host daemon's
   // session store instead of the private one the harness spawned.
   "AOE_DAEMON_PASSPHRASE",
+  // A host opt-out would make the harness's CLI calls fail instead of starting
+  // the private daemon.
+  "AOE_NO_AUTOSTART",
   // SDK roots and subprocess controls belong to their own isolated fixtures.
   "AOE_AFK_SHARED_CHILD",
   "AOE_ASK_USER_SOURCE_ROOT",
   "AOE_PI_ROOT",
   "AOE_PI_SOURCE_ROOT",
   "AOE_E2E_INPUT_BARRIER",
+  "AOE_E2E_RUNTIME_STATE",
   "AOE_E2E_PARTIAL_FRAME_FILE",
   "AOE_E2E_PROMPT_COMPLETED_FILE",
   "AOE_E2E_STORAGE_LOCK_CONTENDED",
@@ -49,6 +56,7 @@ export const HOST_STATE_VARS = new Set([
   "AOE_LEDGER_FIXTURE_ROOT",
   "AOE_PROJECT_FIFO_TEST_CHILD",
   "AOE_PROJECT_FIFO_TEST_ENTERED",
+  "AOE_HOOK_ATOMIC_UMASK_CHILD_BASE",
   "AOE_PRIME_CENSUS_CHILD",
   "AOE_RUNNER_EXPIRY_CHILD",
   "AOE_TUI_TEST_CHILD",
@@ -89,10 +97,11 @@ export const HOST_STATE_VARS = new Set([
   "INVOCATION_ID",
   "NOTIFY_SOCKET", // the host service manager's notification endpoint
   // Re-pinned to the private socket by spawnAoeServe.
+  "DBUS_SESSION_BUS_ADDRESS",
   "AOE_TMUX_SOCKET",
 ]);
 
-/** Kept path variables: toolchain and system locations. XDG_RUNTIME_DIR names host sockets, not data. */
+/** Kept path variables name toolchain and system locations, never host sockets. */
 export const INHERITED_PATH_VARS = new Set([
   "CARGO_HOME",
   "DYLD_FALLBACK_LIBRARY_PATH",
@@ -100,7 +109,6 @@ export const INHERITED_PATH_VARS = new Set([
   "LD_LIBRARY_PATH",
   "RUSTUP_HOME",
   "SSL_CERT_DIR",
-  "XDG_RUNTIME_DIR",
 ]);
 
 /** Pinned rather than dropped, since git falls back to /etc/gitconfig and $HOME/.gitconfig; keeps daemon writes in the test home. */
@@ -108,6 +116,8 @@ export function pinnedVars(paths: IsolatedPaths): Record<string, string> {
   return {
     GIT_CONFIG_GLOBAL: join(paths.home, ".gitconfig"),
     GIT_CONFIG_SYSTEM: "/dev/null",
+    XDG_RUNTIME_DIR: join(paths.home, "runtime"),
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/dev/null",
   };
 }
 

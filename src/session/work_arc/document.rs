@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn failed_row_commit_leaves_only_an_orphan_not_a_false_latest() {
         let root = tempfile::tempdir().unwrap();
-        let mut storage = crate::session::Storage::new_for_test_path(
+        let storage = crate::session::Storage::new_for_test_path(
             "failure",
             root.path().join("sessions.json"),
         );
@@ -266,7 +266,7 @@ mod tests {
             })
             .unwrap();
         let pointer = session.work_arc.revision.clone().unwrap();
-        storage.set_fail_writes_for_test(true);
+        let failing = storage.fail_writes_for_test();
         assert!(storage
             .update(|rows, _| {
                 let mut later = initial.clone();
@@ -278,6 +278,7 @@ mod tests {
                 Ok(())
             })
             .is_err());
+        drop(failing);
         let stored = storage.load().unwrap().remove(0);
         assert_eq!(stored.work_arc.revision.as_deref(), Some(pointer.as_str()));
         assert_eq!(history(root.path(), &stored, 10).unwrap().len(), 1);

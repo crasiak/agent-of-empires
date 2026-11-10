@@ -153,6 +153,7 @@ fn pi_fork_keeps_distinct_child_ids_and_restarts_without_reforking() {
     let parent_row = session_by_title(&h.read_sessions(), "PiParent").clone();
     let project = h.project_path();
     let mut ids = Vec::new();
+    let mut transcripts = Vec::new();
     for (index, title) in ["PiChildA", "PiChildB"].into_iter().enumerate() {
         h.run_cli_ok(&[
             "add",
@@ -191,9 +192,50 @@ fn pi_fork_keeps_distinct_child_ids_and_restarts_without_reforking() {
                 .is_none(),
             "the one-shot fork intent must be consumed"
         );
+        let sessions = h.read_sessions();
+        let child = session_by_title(&sessions, title);
+        let active = &child["active_execution"];
+        let launch = active["launch_id"].as_str().unwrap();
+        let sidecar = PathBuf::from(
+            active["capture"]["Pi"]["source"]["HostHooks"]
+                .as_str()
+                .unwrap(),
+        );
+        assert!(!sidecar.join("session_id").exists());
+        assert_eq!(
+            std::fs::read_to_string(sidecar.join(format!("session_id.{launch}"))).unwrap(),
+            id
+        );
+        let child_path = PathBuf::from(
+            std::fs::read_to_string(sidecar.join(format!("session_path.{launch}"))).unwrap(),
+        );
+        let content = std::fs::read_to_string(&child_path).unwrap();
+        let header: Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
+        assert_eq!(header["id"], id);
+        assert_eq!(header["cwd"], project.to_str().unwrap());
+        assert_eq!(
+            content.lines().skip(1).collect::<Vec<_>>(),
+            std::str::from_utf8(&parent_bytes)
+                .unwrap()
+                .lines()
+                .skip(1)
+                .collect::<Vec<_>>()
+        );
+        assert_ne!(child_path, transcript);
+        transcripts.push((child_path, content.into_bytes()));
         ids.push(id);
     }
-    h.run_cli_ok(&["session", "stop", "PiChildA"]);
+    let stopped = h.run_cli_ok(&["session", "stop", "PiChildA"]);
+    assert!(stopped.contains("Stopped session: PiChildA"), "{stopped}");
+    let sessions = h.read_sessions();
+    let child = session_by_title(&sessions, "PiChildA");
+    assert_eq!(child["status"], "stopped");
+    assert_eq!(child["pi_session_path"], transcripts[0].0.to_str().unwrap());
+    assert_eq!(
+        child["agent_session_binding"]["transcript_path"],
+        transcripts[0].0.to_str().unwrap()
+    );
+    assert_eq!(child["agent_session_binding"]["provenance"], "observed");
     h.run_cli_ok(&["session", "start", "PiChildA"]);
     let recorded = launches(&h, 3);
     let resume = recorded
@@ -202,6 +244,10 @@ fn pi_fork_keeps_distinct_child_ids_and_restarts_without_reforking() {
         .unwrap();
     assert_eq!(flag_value(resume, "--fork"), None);
     let file = PathBuf::from(flag_value(resume, "--session").unwrap());
+    assert_eq!(file, transcripts[0].0);
+    assert_ne!(file, transcript);
+    assert_ne!(file, transcripts[1].0);
+    assert_eq!(flag_value(resume, "--session-id"), None);
     let header: Value = serde_json::from_str(
         std::fs::read_to_string(&file)
             .unwrap()
@@ -211,9 +257,25 @@ fn pi_fork_keeps_distinct_child_ids_and_restarts_without_reforking() {
     )
     .unwrap();
     assert_eq!(header["id"], ids[0]);
+    h.run_cli_ok(&["session", "stop", "PiChildB"]);
     let sessions = h.read_sessions();
     assert_eq!(child_id(&sessions, "PiChildA"), ids[0]);
     assert_eq!(child_id(&sessions, "PiChildB"), ids[1]);
+    for (index, title) in ["PiChildA", "PiChildB"].into_iter().enumerate() {
+        let child = session_by_title(&sessions, title);
+        assert_eq!(
+            child["pi_session_path"],
+            transcripts[index].0.to_str().unwrap()
+        );
+        assert_eq!(
+            child["agent_session_binding"]["transcript_path"],
+            transcripts[index].0.to_str().unwrap()
+        );
+        assert_eq!(
+            std::fs::read(&transcripts[index].0).unwrap(),
+            transcripts[index].1
+        );
+    }
     assert_eq!(session_by_title(&sessions, "PiParent"), &parent_row);
     assert_eq!(std::fs::read(&transcript).unwrap(), parent_bytes);
 }

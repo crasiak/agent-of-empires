@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { useRespawnSession } from "../../hooks/useRespawnSession";
 import type { AcpState } from "../../lib/acpTypes";
+import { RATTLES } from "../../lib/rattles";
+import { SECONDARY_BUTTON } from "./RecoveryActionRow";
 import { StartupErrorBanner } from "./StartupErrorBanner";
 import { pickWorkerStoppedVariant, showWorkerStoppingBanner } from "./workerStoppedBanner";
 
@@ -14,15 +16,27 @@ export function SessionBanners({
   archivedAt,
   snoozedUntil,
   onRestore,
+  onSwitchToTerminal,
   dismissError,
+  startingAgent,
+  canRestart,
+  onRestarted,
+  onRestartFailed,
 }: {
   sessionId: string;
   state: AcpState;
+  /** Set while a new Session starts: the Agent, as copy names it. */
+  startingAgent: string | null;
+  /** False where the server refuses a restart: read-only and CityHall dashboards. */
+  canRestart: boolean;
+  onRestarted?: (epoch: number, stoppedSent: boolean) => void;
+  onRestartFailed?: (epoch: number, message: string, stoppedSent: boolean) => void;
   acpWorkerState: "absent" | "resuming" | "running" | "stopping";
   trashedAt: string | null;
   archivedAt: string | null;
   snoozedUntil: string | null;
   onRestore?: () => Promise<boolean> | void;
+  onSwitchToTerminal?: () => void;
   dismissError: () => void;
 }) {
   const variant = pickWorkerStoppedVariant({
@@ -37,26 +51,52 @@ export function SessionBanners({
   const idle = healthy && !state.turnActive;
   return (
     <>
-      {state.startupError && <StartupErrorBanner sessionId={sessionId} message={state.startupError} />}
+      {state.startupError && (
+        <StartupErrorBanner
+          sessionId={sessionId}
+          message={state.startupError}
+          acpWorkerState={acpWorkerState}
+          sentStopped={state.restartStoppedSent}
+          onSwitchToTerminal={onSwitchToTerminal}
+        />
+      )}
       {variant === "trashed" && <TrashedWorkerStoppedBanner sessionId={sessionId} onRestore={onRestore} />}
       {variant === "archived" && <ArchivedWorkerStoppedBanner sessionId={sessionId} />}
       {variant === "snoozed" && snoozedUntil && (
         <SnoozedWorkerStoppedBanner sessionId={sessionId} snoozedUntil={snoozedUntil} />
       )}
-      {variant === "generic" && <WorkerStoppedBanner sessionId={sessionId} />}
+      {variant === "generic" && (
+        <WorkerStoppedBanner
+          sessionId={sessionId}
+          restartFailure={state.restartFailure}
+          sentStopped={state.restartStoppedSent}
+        />
+      )}
       {state.workerRestarting && !state.startupError && !state.workerStopped && (
         <WorkerRestartingBanner agentUnresponsive={state.agentUnresponsive} agentOrphaned={state.agentOrphaned} />
       )}
-      {acpWorkerState === "resuming" &&
+      {startingAgent ? (
+        <StartupWaitLine
+          sessionId={sessionId}
+          agent={startingAgent}
+          sentPending={state.turnActive}
+          queuedPending={state.queuedPrompts.length > 0}
+          canRestart={canRestart}
+          restartEpoch={state.restartEpoch}
+          sentStopped={state.restartStoppedSent}
+          onRestarted={onRestarted}
+          onRestartFailed={onRestartFailed}
+        />
+      ) : (
+        acpWorkerState === "resuming" &&
         healthy &&
-        (state.lastSeq === 0 ? (
-          <PulseBanner>Starting structured view worker for new session… this can take a few seconds.</PulseBanner>
-        ) : (
+        state.lastSeq > 0 && (
           <PulseBanner>
             Resuming structured view worker… cached transcript still available. Queued prompts will send once the agent
             is back online.
           </PulseBanner>
-        ))}
+        )
+      )}
       {showWorkerStoppingBanner({ acpWorkerState, startupError: state.startupError }) && <WorkerStoppingBanner />}
       {state.nextWakeupAt && idle && (
         <ScheduledWakeupBanner wakeAt={state.nextWakeupAt} reason={state.nextWakeupReason} />
@@ -68,6 +108,133 @@ export function SessionBanners({
       )}
       {state.lastError && <InteractionErrorBanner message={state.lastError} onDismiss={dismissError} />}
     </>
+  );
+}
+
+/** From this many seconds the line stops saying "You can type now" and only says it's still starting. */
+const STILL_STARTING_AFTER_S = 15;
+/** Restart is offered once the initialize handshake's 30s bound has passed with no error:
+ *  a start still going after that is waiting on `session/new` or `session/load`, which are unbounded. */
+const RESTART_OFFERED_AFTER_S = 30;
+
+const reducedMotion = () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+
+/** The one line shown while a new Session starts: the Agent, an elapsed count and
+ *  Starting's breathe glyph. Mounting or a restart starts the count; unmounting resets it. */
+export function StartupWaitLine({
+  sessionId,
+  agent,
+  sentPending,
+  queuedPending,
+  canRestart,
+  restartEpoch,
+  sentStopped,
+  onRestarted,
+  onRestartFailed,
+}: {
+  sessionId: string;
+  agent: string;
+  /** A sent prompt waits on this start; a restart stops it. */
+  sentPending: boolean;
+  /** Queued prompts wait on this start; the Daemon sends them to the replacement. */
+  queuedPending: boolean;
+  canRestart: boolean;
+  restartEpoch: number;
+  /** A restart stopped the sent message and it hasn't been sent again. */
+  sentStopped: boolean;
+  onRestarted?: (epoch: number, stoppedSent: boolean) => void;
+  onRestartFailed?: (epoch: number, message: string, stoppedSent: boolean) => void;
+}) {
+  const [startedAt, setStartedAt] = useState(() => Date.now());
+  const [seconds, setSeconds] = useState(0);
+  const [frame, setFrame] = useState(0);
+  const [still] = useState(reducedMotion);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const {
+    state: restartState,
+    error: restartError,
+    respawn,
+  } = useRespawnSession(sessionId, null, {
+    restart: true,
+    // A mounted line shows the failure itself; once the restart's stop has unmounted it, or for a server
+    // error, which only follows the stop, the stopped banner names it.
+    onFailed: (status, error) => {
+      if ((status !== null && status >= 500) || !mounted.current) onRestartFailed?.(restartEpoch, error, sentPending);
+    },
+  });
+  useEffect(() => {
+    const tick = setInterval(() => setSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(tick);
+  }, [startedAt]);
+  useEffect(() => {
+    if (still) return;
+    const spin = setInterval(() => setFrame((f) => (f + 1) % RATTLES.breathe.frames.length), RATTLES.breathe.interval);
+    return () => clearInterval(spin);
+  }, [still]);
+  const glyph = still ? "⣿" : RATTLES.breathe.frames[frame];
+  const elapsed = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  const restart = async () => {
+    const epoch = restartEpoch;
+    const stopsSent = sentPending;
+    if (!(await respawn())) return;
+    onRestarted?.(epoch, stopsSent);
+    setStartedAt(Date.now());
+    setSeconds(0);
+  };
+  const costId = useId();
+  const cost = [
+    sentPending && `Restarting stops the message you sent. Send it again once ${agent} is ready.`,
+    !sentPending && sentStopped && `The message you sent was stopped. Send it again once ${agent} is ready.`,
+    queuedPending && `Queued messages are sent once ${agent} is ready.`,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const offerRestart =
+    canRestart && (seconds >= RESTART_OFFERED_AFTER_S || restartState === "retrying" || restartState === "failed");
+  return (
+    <div
+      data-testid="startup-wait-line"
+      // Right padding below md clears the header collapse toggle that overhangs this edge.
+      className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-surface-700/60 bg-surface-850 py-2 pl-4 pr-12 text-xs text-text-muted md:pr-4"
+    >
+      <span aria-hidden className="w-3 shrink-0 font-mono text-text-secondary">
+        {glyph}
+      </span>
+      <span className="min-w-0 flex-1 wrap-anywhere">
+        {seconds < STILL_STARTING_AFTER_S ? `Starting ${agent}… You can type now.` : `Still starting ${agent}…`}
+      </span>
+      <span data-testid="startup-wait-elapsed" className="ml-auto shrink-0 font-mono tabular-nums">
+        {elapsed}
+      </span>
+      {offerRestart && (
+        <button
+          type="button"
+          data-testid="startup-wait-restart"
+          onClick={() => void restart()}
+          disabled={restartState === "retrying"}
+          aria-describedby={cost ? costId : undefined}
+          className={`${SECONDARY_BUTTON} shrink-0`}
+        >
+          {restartState === "retrying" ? "Restarting…" : `Restart ${agent}`}
+        </button>
+      )}
+      {offerRestart && cost && (
+        <span id={costId} data-testid="startup-wait-restart-cost" className="basis-full">
+          {cost}
+        </span>
+      )}
+      {restartState === "failed" && restartError && (
+        <span data-testid="startup-wait-restart-error" className="basis-full text-status-error-text">
+          Restart failed: {restartError}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -237,7 +404,15 @@ function StoppedPanel({
   );
 }
 
-function WorkerStoppedBanner({ sessionId }: { sessionId: string }) {
+function WorkerStoppedBanner({
+  sessionId,
+  restartFailure,
+  sentStopped,
+}: {
+  sessionId: string;
+  restartFailure: string | null;
+  sentStopped: boolean;
+}) {
   const { state: retryState, error: retryError, respawn: handleReconnect } = useRespawnSession(sessionId);
   return (
     <StoppedPanel
@@ -249,6 +424,12 @@ function WorkerStoppedBanner({ sessionId }: { sessionId: string }) {
       }
       footer={
         <>
+          {restartFailure && (
+            <div data-testid="worker-stopped-restart-failure" className="mt-2 text-xs text-status-warning/90">
+              Restart failed: {restartFailure}
+              {sentStopped && " The message you sent was stopped. Send it again once you reconnect."}
+            </div>
+          )}
           {retryState === "ok" && (
             <div className="mt-2 text-xs text-emerald-200/90">
               Spawn requested. The composer will re-enable when the agent is back online.

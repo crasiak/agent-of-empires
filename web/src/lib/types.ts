@@ -17,15 +17,19 @@ export interface LaunchIdentity {
 
 export interface SessionResponse {
   id: string;
+  idempotency_key?: string | null;
+  parent_session_id?: string | null;
   title: string;
   project_path: string;
   /** Host path of the session's managed artifact directory. */
   artifact_dir: string;
   group_path: string;
+  sort_index?: number | null;
   tool: string;
   status: SessionStatus;
   /** Worker auto-stopped for inactivity (resumable), unlike a deliberate Stop. */
   dormant: boolean;
+  lifecycle_generation: number;
   yolo_mode: boolean;
   created_at: string;
   last_accessed_at: string | null;
@@ -63,6 +67,7 @@ export interface SessionResponse {
   /** Null once the snooze expires, so any non-null value is an active snooze. */
   snoozed_until?: string | null;
   trashed_at?: string | null;
+  trash_lifecycle_id?: string | null;
   /** Needs attention (unreviewed finished turn or manual flag). */
   unread?: boolean;
   has_managed_worktree: boolean;
@@ -93,6 +98,8 @@ export interface SessionResponse {
   acp_capable?: boolean;
   /** Captured ACP session id; required for a structured fork. */
   acp_session_id?: string;
+  /** An import whose history arrives once its Agent loads it; its `acp_session_id` is set from creation. */
+  import_pending?: boolean;
   /** Resolved ACP registry key, used as the current agent before any `AgentSwitched`. */
   acp_agent?: string;
   /** Pinned LLM backend ("api" | "bedrock" | "vertex"); absent means the host decides. */
@@ -101,12 +108,18 @@ export interface SessionResponse {
   keeps_context?: boolean;
   /** Slash commands that reset the conversation for this agent. */
   clear_aliases?: string[];
+  /** Slash commands that compact the conversation for this agent. */
+  compact_aliases?: string[];
   /** The agent implements ACP `session/fork` (resume-only agents do not). */
   acp_can_fork?: boolean;
+  /** The agent binary was replaced after launch and a restart is safe to offer now. */
+  update_restart?: boolean;
+  /** `acp.structured_view = off` for this session: a terminal session cannot switch to structured. */
+  structured_view_off?: boolean;
   /** Claude's fullscreen renderer is on, so mobile skips copy-mode scrollback workarounds. */
   claude_fullscreen: boolean;
   workspace_repos: WorkspaceRepoSummary[];
-  /** Only on the create-session response. */
+  /** Non-fatal notes: on create, rename, trash and restore responses. */
   warnings?: string[];
   plan_summary?: PlanSummary;
   /** When the agent's pending `ScheduleWakeup` fires. */
@@ -300,16 +313,24 @@ export interface Workspace {
 
 export interface AgentInfo {
   name: string;
-  kind: "builtin" | "custom";
+  /** How copy names the agent; the registry id for custom agents. */
+  display_name: string;
+  kind: "builtin" | "custom" | "plugin";
   binary: string;
   host_only: boolean;
+  /** Always runs in Yolo mode in a terminal session, so the wizard locks the switch on. */
+  always_yolo?: boolean;
+  /** The same for a structured session, which can run a custom agent's own adapter instead. */
+  acp_always_yolo?: boolean;
   installed: boolean;
   install_hint: string;
   /** Has a one-shot mode for smart rename. Always false for custom agents. */
   oneshot_capable?: boolean;
   acp_capable: boolean;
-  /** The ACP adapter binary is resolvable on the host. */
+  /** The ACP adapter resolves on the host now; `on_create`/`on_launch` hooks don't count. Import and usage-limit alternatives need this. */
   acp_installed: boolean;
+  /** A non-sandboxed structured create in the served profile will accept this agent; its own hooks count. */
+  acp_create_ready?: boolean;
   /** Allowed by `[acp] allowed_agents`; `acp_capable` stays the intrinsic fact. Absent means permitted. */
   acp_allowed?: boolean;
   /** Built-in ACP launch command after `${aoe_data_dir}` substitution; absent for custom agents. */
@@ -352,7 +373,9 @@ export interface BrowseResponse {
 
 export interface GroupInfo {
   path: string;
+  /** Sessions directly in this group, not in its children. */
   session_count: number;
+  archived?: boolean;
 }
 
 export interface ProjectOverrides {
@@ -377,6 +400,15 @@ export interface ProjectInfo {
 export interface DockerStatusResponse {
   available: boolean;
   runtime: string | null;
+  /** The configured runtime's display name ("Apple Container"), also when it is down. */
+  runtime_name?: string | null;
+}
+
+export interface CreationTrustFingerprint {
+  project_path: string;
+  base_hooks_hash: string;
+  hooks_hash: string | null;
+  mcp_hash: string | null;
 }
 
 export interface TailoredHistoryEntry {
@@ -412,6 +444,8 @@ export interface CreateSessionRequest {
   extra_args?: string;
   sandbox_image?: string;
   extra_env?: string[];
+  /** Host-only env for `host_hooks.before_start`; sandbox only, never enters the container. */
+  hook_env?: string[];
   extra_repo_paths?: string[];
   /** Per-repo base (`repo` is a directory name or path); outranks `base_branch`. */
   repo_bases?: { repo: string; base_branch: string }[];
@@ -426,6 +460,8 @@ export interface CreateSessionRequest {
   scratch?: boolean;
   /** Approve repo lifecycle hooks, like CLI `--trust-hooks`. */
   trust_hooks?: boolean;
+  /** Fingerprint of the exact hook/MCP configuration reviewed before approval. */
+  trust_review?: CreationTrustFingerprint;
   /** Claude Code session id to import; `path` must be its original cwd. */
   import_acp_session_id?: string;
   /** Agent or ACP session id to fork from. */
@@ -437,11 +473,23 @@ export interface CreateSessionRequest {
   retry_origin?: string;
 }
 
+export type CreateStage = "preparing" | "starting_container" | "running_hooks" | "starting";
+
 export interface CreateProgress {
-  stage: "preparing" | "starting_container" | "running_hooks" | "starting";
+  stage: CreateStage;
   /** The `on_create` command currently running. */
   hook: string | null;
   output: string[];
+}
+
+/** A create the server refused, in the credential-free terms it sends to any client. */
+export interface CreateFailure {
+  code: string;
+  message: string;
+  /** Unknown for a refusal made before the create started. */
+  stage: CreateStage | null;
+  /** Finds the failure's line in the Daemon log; null when the server sent none. */
+  reference: string | null;
 }
 
 export interface ImportableSession {

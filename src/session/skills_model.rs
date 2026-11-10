@@ -505,7 +505,7 @@ struct PropagationMarker {
 
 /// What a sync did, or refused to do, to one skill under one root. A sync never
 /// aborts on the first conflict, so a caller gets one of these per skill.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncOutcome {
     pub root: String,
@@ -515,7 +515,7 @@ pub struct SyncOutcome {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SyncStatus {
     Created,
@@ -852,7 +852,11 @@ fn install(
             let _ = std::fs::remove_dir_all(&staging);
             if let Some(backup) = &backup {
                 // Put the user's directory back before surfacing the failure.
-                let _ = std::fs::rename(backup, dest);
+                if let Err(error) = std::fs::rename(backup, dest) {
+                    tracing::error!(target: "session.skills", dest = %dest.display(), backup = %backup.display(), %error,
+                        "failed to restore user skill dir from backup"
+                    );
+                }
             }
             Err(e.into())
         }
@@ -1300,6 +1304,35 @@ mod tests {
             "---\nname: foo\n---\n",
         ] {
             assert!(parse_skill_md(bad).is_err(), "{bad:?}");
+        }
+
+        for description in [
+            "colon: value",
+            "hash # value",
+            "quotes \"double\" and 'single'",
+            "Résumé 漢字",
+            "first line\nsecond line",
+        ] {
+            let content = scaffold("yaml-boundary", description).unwrap();
+            let parsed = parse_skill_md(&content).unwrap();
+            assert_eq!(parsed.name, "yaml-boundary");
+            assert_eq!(parsed.description, description);
+            assert_eq!(parsed.body, format!("\n# yaml-boundary\n\n{description}\n"));
+        }
+        let aliased = parse_skill_md("---\nname: &name yaml-boundary\ndescription: *name\nvendor: {ignored: [true, on, 001]}\n---\nbody\n").unwrap();
+        assert_eq!(aliased.description, "yaml-boundary");
+        assert_eq!(aliased.body, "body\n");
+        let block = parse_skill_md(
+            "---\nname: yaml-boundary\ndescription: |\n  first: line\n  second # line\n---\nbody",
+        )
+        .unwrap();
+        assert_eq!(block.description, "first: line\nsecond # line\n");
+        for invalid in [
+            "---\nname: foo\nname: duplicate\ndescription: d\n---\n",
+            "---\nname: foo\ndescription: d\ndescription: duplicate\n---\n",
+            "---\nname: [\ndescription: d\n---\n",
+        ] {
+            assert!(parse_skill_md(invalid).is_err(), "{invalid:?}");
         }
     }
 

@@ -24,9 +24,10 @@ fn event_commands(event: &ResolvedHookEvent, target: HookInstallTarget) -> Vec<S
         .identity_field
         .map(|field| hook_command_session_id(target, field, event.publisher));
     let usage = (event.usage && host).then(super::command::hook_command_usage_event);
-    let status = event
-        .status
-        .map(|status| status_command_for_event(status, &event.waiting_tools, target));
+    let status = event.status.map(|status| {
+        let bound = event.publisher == Some("claude");
+        status_command_for_event(status, &event.waiting_tools, target, bound)
+    });
     // The sandbox image has no `aoe` to parse the payload.
     let attention = (event.attention && host).then(|| hook_command_attention(event.publisher));
     identity

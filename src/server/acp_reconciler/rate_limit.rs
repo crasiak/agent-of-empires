@@ -79,8 +79,11 @@ const AGENT_TURN_CONTINUATION: &str = "continue";
 /// What the continuation producer decided for one session (#4092).
 #[must_use]
 pub(crate) enum ContinuationOutcome {
-    /// The interrupted prompt is the next turn, is already installed, or there
-    /// was nothing to replay. Only this outcome licenses the automatic
+    /// This call installed the interrupted prompt as the next turn. Licenses
+    /// the automatic `RateLimitAutoResumed`, like [`Self::Stands`].
+    Installed,
+    /// The continuation is already in place, a handoff owns the session, or
+    /// there was nothing to replay. Licenses the automatic
     /// `RateLimitAutoResumed`, which is the budget's arming step.
     Stands,
     /// A queued prompt owns the next turn, and any continuation an earlier
@@ -106,6 +109,15 @@ pub(crate) async fn install_rate_limit_continuation(
     id: &str,
     _submission: tokio::sync::OwnedMutexGuard<()>,
 ) -> ContinuationOutcome {
+    if state
+        .instances
+        .read()
+        .await
+        .iter()
+        .any(|row| row.id == id && row.terminal_handoff.is_some())
+    {
+        return ContinuationOutcome::Stands;
+    }
     let Some(interrupted) = query_store(
         &state.acp_event_store,
         id,
@@ -178,7 +190,7 @@ pub(crate) async fn install_rate_limit_continuation(
         .session_service
         .set_pending_initial_turn(id, text, attachments)
         .await;
-    ContinuationOutcome::Stands
+    ContinuationOutcome::Installed
 }
 
 /// Releases rate-limit parks whose window elapsed: install the interrupted
@@ -210,7 +222,7 @@ pub(super) async fn reap_rate_limit_resumes(
     let mut workerless = Vec::new();
     for candidate in candidates {
         if parked.contains(&candidate.0) {
-            tracing::debug!(target: "acp.supervisor", session = %candidate.0, "rate-limit auto-resume: skipped, session is crash-loop parked");
+            tracing::trace!(target: "acp.supervisor", session = %candidate.0, "rate-limit auto-resume: skipped, session is crash-loop parked");
         } else if !state.acp_supervisor.is_running(&candidate.0).await {
             workerless.push(candidate);
         }
@@ -226,7 +238,7 @@ pub(super) async fn reap_rate_limit_resumes(
     let now = Utc::now();
     for (id, profile, has_queued_prompts) in workerless {
         let skip = |reason: &str| {
-            tracing::debug!(target: "acp.supervisor", session = %id, "rate-limit auto-resume: skipped, {reason}");
+            tracing::trace!(target: "acp.supervisor", session = %id, "rate-limit auto-resume: skipped, {reason}");
         };
         if !enabled_by_profile.get(&profile).copied().unwrap_or(false) {
             skip("not enabled for this profile");
@@ -338,7 +350,7 @@ pub(super) async fn reap_rate_limit_resumes(
         };
         let outcome = install_rate_limit_continuation(state, &id, submission).await;
         match outcome {
-            ContinuationOutcome::Stands => {
+            ContinuationOutcome::Stands | ContinuationOutcome::Installed => {
                 state
                     .acp_supervisor
                     .publish_rate_limit_auto_resumed(&id, resume_at, false);
@@ -660,7 +672,10 @@ mod tests {
         enable_auto_resume(true);
         let long_ago = Utc::now() - chrono::Duration::hours(1);
         let events = [
-            Event::AgentMessageChunk { text: "x".into() },
+            Event::AgentMessageChunk {
+                text: "x".into(),
+                message_id: None,
+            },
             Event::RateLimit {
                 info: crate::acp::state::RateLimitInfo {
                     status: "limited".into(),

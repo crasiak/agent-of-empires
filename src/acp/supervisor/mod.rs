@@ -9,16 +9,18 @@ mod requests;
 mod sink;
 mod teardown;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::acp_client::{AcpClient, AcpError, SpawnConfig};
@@ -31,9 +33,10 @@ use super::runner_lifecycle::{
 use super::state::AcpSessionId;
 use crate::daemon::{AcpWorkerStart, AcpWorkerStartKind, AcpWorkerState};
 use crate::session::SandboxInfo;
+pub(crate) use teardown::{RetirementResources, RetirementTarget};
 
-pub(crate) use agents::apply_agent_command_override;
-pub(crate) use launch::host_spawn_environment;
+pub(crate) use agents::{apply_agent_command_override, command_override_for_spawn};
+pub(crate) use launch::{host_spawn_environment, with_durable_launch};
 pub use sink::{BroadcastSink, ChannelSink};
 
 /// Post-startup respawns allowed within `RESTART_WINDOW` before the session is parked.
@@ -57,8 +60,22 @@ pub(crate) type Launcher = Arc<
 
 type Workers = Arc<Mutex<HashMap<String, WorkerHandle>>>;
 /// Per-session seq counter; outlives workers so every publisher shares one sequence.
-type SeqMap = std::sync::Mutex<HashMap<String, u64>>;
+/// Each session's last allocated seq, under its own lock so sessions publish independently.
+type SeqMap = std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<u64>>>>;
 type SharedSet = Arc<std::sync::Mutex<HashSet<String>>>;
+type RestartRequests = Arc<std::sync::Mutex<HashMap<String, (u64, CancellationToken)>>>;
+type SpawnRequests = Arc<std::sync::Mutex<SpawnRequestState>>;
+
+#[derive(Default)]
+struct SpawnRequestState {
+    /// Requests that have not reached lifecycle admission yet. A stop cancels
+    /// these before it waits on any durable launch work.
+    pending: HashMap<String, HashMap<u64, CancellationToken>>,
+    /// A stop fence remains held while the request owns its submission and
+    /// instance guards, preventing a replacement from slipping through.
+    stop_fences: HashMap<String, (u64, usize)>,
+    switches: HashMap<String, usize>,
+}
 
 #[derive(Debug, Error)]
 pub enum SupervisorError {
@@ -77,6 +94,8 @@ pub enum SupervisorError {
     InvalidAgentCommand(String),
     #[error("session {0:?} already has a running structured view worker")]
     AlreadyRunning(String),
+    #[error("session {0:?} has a restart in progress")]
+    RestartInProgress(String),
     #[error("structured view worker capacity full ({current}/{limit}); raise [acp] max_concurrent_workers or delete an existing structured view session")]
     CapacityFull { current: usize, limit: u32 },
     /// A concurrent shutdown cancelled the resume; callers treat it as a soft success.
@@ -85,10 +104,15 @@ pub enum SupervisorError {
     /// The previous runner is not proven dead yet.
     #[error("session {0:?} is still stopping its previous structured view worker")]
     TeardownPending(String),
+    /// The worker a caller observed is no longer the running one.
+    #[error("session {0:?} worker changed before the stop claimed it")]
+    Superseded(String),
     #[error(transparent)]
     Blocked(crate::session::StartBlocked),
     #[error("session {0:?} no longer exists")]
     SessionGone(String),
+    #[error("native session authority unavailable")]
+    NativeStoreUnavailable,
 }
 
 /// What the caller does with prompt text after it was published.
@@ -98,6 +122,14 @@ pub enum PromptDisposition {
     /// A clear command the adapter cannot handle natively: drive
     /// [`Supervisor::reset_session_context`] instead of forwarding it.
     ResetContext,
+}
+
+/// A published user prompt: how to route its text, and the seq of its
+/// `UserPromptSent` event, which is `None` when that event was not persisted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublishedPrompt {
+    pub disposition: PromptDisposition,
+    pub seq: Option<u64>,
 }
 
 /// How this supervisor acquired the worker.
@@ -124,6 +156,7 @@ struct WorkerHandle {
     /// Respawn timestamps inside the restart window; the initial spawn is not counted.
     restart_history: Vec<Instant>,
     kind: WorkerKind,
+    launch_epoch: u64,
     lease: Lease,
     native_session_id: Option<String>,
 }
@@ -165,8 +198,15 @@ pub struct Supervisor<S: BroadcastSink> {
     next_seqs: Arc<SeqMap>,
     /// Owner of every runner epoch. Lock order: `workers` before `lifecycle`.
     lifecycle: Arc<std::sync::Mutex<LifecycleTable>>,
+    /// Explicit restart requests currently operating on each session.
+    restart_requests: RestartRequests,
+    next_restart_request_id: AtomicU64,
+    spawn_requests: SpawnRequests,
+    next_spawn_request_id: AtomicU64,
+    next_stop_request_id: AtomicU64,
     process_control: Arc<dyn ProcessControl>,
     launcher: Launcher,
+    native_admission_required: bool,
     /// Agents whose first spawn finished; until then spawns serialize on a
     /// per-agent lock so a lazy adapter install is not raced.
     warmed_up_agents: SharedSet,
@@ -190,23 +230,162 @@ pub struct Supervisor<S: BroadcastSink> {
     max_concurrent_workers: u32,
 }
 
-/// RAII guard over a `Starting` or `Respawning` epoch; dropping it before
-/// install abandons the epoch so a failed resume cannot pin the session.
+/// RAII guard over a `Starting` or `Respawning` epoch. A dropped attach
+/// abandons only its observation unless an explicit stop claimed the runner.
 pub(crate) struct ResumeReservation {
     lease: Lease,
+    pub(crate) expected_lifecycle_generation: Option<u64>,
+    attach_record: Option<Box<crate::process::worker_registry::WorkerRecord>>,
     lifecycle: Arc<std::sync::Mutex<LifecycleTable>>,
     notify: Arc<tokio::sync::Notify>,
+}
+
+/// Keeps concurrent explicit restart requests from restarting the same worker twice.
+pub(crate) struct RestartRequestGuard {
+    session_id: String,
+    request_id: u64,
+    cancellation: CancellationToken,
+    requests: RestartRequests,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestartClaimConflict {
+    Switch,
+    Restart,
+}
+
+/// Cancellation for a request that is still acquiring launch guards or
+/// waiting to be admitted into the Lease table.
+pub(crate) struct PendingSpawnGuard {
+    session_id: String,
+    request_id: u64,
+    cancellation: CancellationToken,
+    requests: SpawnRequests,
+}
+
+pub(crate) struct SwitchRequestGuard {
+    session_id: String,
+    requests: SpawnRequests,
+}
+
+impl Drop for SwitchRequestGuard {
+    fn drop(&mut self) {
+        let mut requests = lock_recover(&self.requests);
+        if let Some(count) = requests.switches.get_mut(&self.session_id) {
+            *count -= 1;
+            if *count == 0 {
+                requests.switches.remove(&self.session_id);
+            }
+        }
+    }
+}
+
+/// A stop fence that outlives the HTTP request and cancels pending spawns.
+pub(crate) struct StopRequestGuard {
+    session_id: String,
+    request_id: u64,
+    requests: SpawnRequests,
+    cancelled_pending: usize,
+    cancelled_launch: bool,
+}
+
+impl Drop for PendingSpawnGuard {
+    fn drop(&mut self) {
+        let mut requests = lock_recover(&self.requests);
+        if let Some(pending) = requests.pending.get_mut(&self.session_id) {
+            pending.remove(&self.request_id);
+            if pending.is_empty() {
+                requests.pending.remove(&self.session_id);
+            }
+        }
+    }
+}
+
+impl PendingSpawnGuard {
+    pub(crate) fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+}
+
+impl Drop for StopRequestGuard {
+    fn drop(&mut self) {
+        let mut requests = lock_recover(&self.requests);
+        if let Some((request_id, owners)) = requests.stop_fences.get_mut(&self.session_id) {
+            if *request_id == self.request_id {
+                *owners -= 1;
+                if *owners == 0 {
+                    requests.stop_fences.remove(&self.session_id);
+                }
+            }
+        }
+    }
+}
+
+impl StopRequestGuard {
+    pub(crate) fn cancelled_target(&self) -> bool {
+        self.cancelled_pending > 0 || self.cancelled_launch
+    }
+
+    pub(crate) fn cancelled_launch(&self) -> bool {
+        self.cancelled_launch
+    }
+}
+
+impl Drop for RestartRequestGuard {
+    fn drop(&mut self) {
+        let mut requests = lock_recover(&self.requests);
+        if requests
+            .get(&self.session_id)
+            .is_some_and(|(request_id, _)| *request_id == self.request_id)
+        {
+            requests.remove(&self.session_id);
+        }
+    }
+}
+
+impl RestartRequestGuard {
+    pub(crate) fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
 }
 
 impl ResumeReservation {
     pub(crate) fn lease(&self) -> &Lease {
         &self.lease
     }
+
+    pub(crate) fn cancellation(&self) -> &CancellationToken {
+        self.lease.cancellation()
+    }
 }
 
 impl Drop for ResumeReservation {
     fn drop(&mut self) {
-        if lock_recover(&self.lifecycle).abandon(&self.lease) {
+        let mut lifecycle = lock_recover(&self.lifecycle);
+        if !lifecycle.construction_is_pending(&self.lease) {
+            return;
+        }
+        self.lease.cancellation().cancel();
+        if self.lease.retirement_runners().next().is_none() && lifecycle.abandon(&self.lease) {
+            self.notify.notify_waiters();
+            return;
+        }
+        // abandon can refuse because a producer crossed the birth gate while
+        // we inspected it. Convert that same construction instead of losing it.
+        if lifecycle.convert_to_stopping(&self.lease) {
+            let identity = self.lease.retirement_runners().next();
+            lifecycle.settle(
+                &self.lease,
+                super::runner_lifecycle::Settlement::Unproven(identity),
+            );
             self.notify.notify_waiters();
         }
     }
@@ -230,6 +409,8 @@ pub enum SandboxContinuation {
 
 #[derive(Debug, Clone)]
 pub struct SpawnRequest {
+    pub(crate) launch_admission: Option<LaunchAdmission>,
+    pub(crate) expected_lifecycle_generation: u64,
     pub session_id: String,
     /// The ACP backend `pick_agent_for_tool` resolved.
     pub agent: String,
@@ -266,6 +447,21 @@ pub struct SpawnRequest {
     pub claude_store_pin: Option<crate::session::capture::ClaudeStorePin>,
 }
 
+#[derive(Clone)]
+pub(crate) struct LaunchAdmission {
+    pub store: Arc<dyn crate::session::SessionStore>,
+    pub generation: u64,
+    pub namespace: Option<Arc<tokio::sync::RwLock<()>>>,
+}
+
+impl std::fmt::Debug for LaunchAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaunchAdmission")
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<S: BroadcastSink> Supervisor<S> {
     /// Constructor with no concurrency cap.
     pub fn new(sink: Arc<S>) -> Self {
@@ -281,8 +477,14 @@ impl<S: BroadcastSink> Supervisor<S> {
             lifecycle: Arc::new(std::sync::Mutex::new(LifecycleTable::new(
                 chrono::Utc::now().timestamp_millis().max(1) as u64,
             ))),
+            restart_requests: Arc::default(),
+            next_restart_request_id: AtomicU64::new(1),
+            spawn_requests: Arc::default(),
+            next_spawn_request_id: AtomicU64::new(1),
+            next_stop_request_id: AtomicU64::new(1),
             process_control: Arc::new(SystemProcessControl::default()),
             launcher: Arc::new(|config, session_id| Box::pin(AcpClient::spawn(config, session_id))),
+            native_admission_required: false,
             warmed_up_agents: Arc::default(),
             agent_warmup_locks: Arc::default(),
             worker_notify: Arc::default(),
@@ -296,6 +498,14 @@ impl<S: BroadcastSink> Supervisor<S> {
             respawned_in_place: Arc::default(),
             max_concurrent_workers,
         }
+    }
+
+    pub(crate) fn with_native_admission(mut self) -> Self {
+        self.native_admission_required = true;
+        self
+    }
+    pub(crate) fn max_concurrent_workers(&self) -> u32 {
+        self.max_concurrent_workers
     }
 
     /// Flag a build-stale worker kept alive to finish its turn.
@@ -371,21 +581,45 @@ impl<S: BroadcastSink> Supervisor<S> {
         lock_recover(&self.lifecycle).phase(session_id).into()
     }
 
-    /// Drop per-session bookkeeping for a deleted session.
-    pub fn forget_session(&self, session_id: &str) {
+    /// Drop bookkeeping only after the matching runner retirement is proven.
+    pub fn forget_session(&self, session_id: &str) -> Result<(), SupervisorError> {
+        let mut lifecycle = lock_recover(&self.lifecycle);
+        if lifecycle.phase(session_id) == WorkerPhase::Resuming {
+            // Keep the lease until its cancelled producer has retired any runner
+            // and scope it created; the launch path will settle this stop debt.
+            let _ = lifecycle.begin_stop(session_id, "user_stopped", false);
+            drop(lifecycle);
+            self.worker_notify.notify_waiters();
+            return Err(SupervisorError::TeardownPending(session_id.into()));
+        }
+        if !lifecycle.forget(session_id) {
+            return Err(SupervisorError::TeardownPending(session_id.into()));
+        }
+        drop(lifecycle);
         if let Ok(mut guard) = self.next_seqs.lock() {
             guard.remove(session_id);
         }
-        lock_recover(&self.lifecycle).forget(session_id);
         lock_recover(&self.startup_failures).remove(session_id);
         lock_recover(&self.respawned_in_place).remove(session_id);
+        Ok(())
     }
 
     /// Seed seq counters from the event store's stored maxima.
     pub fn hydrate_seqs(&self, pairs: impl IntoIterator<Item = (String, u64)>) {
         if let Ok(mut guard) = self.next_seqs.lock() {
-            guard.extend(pairs);
+            guard.extend(
+                pairs
+                    .into_iter()
+                    .map(|(id, seq)| (id, Arc::new(std::sync::Mutex::new(seq)))),
+            );
         }
+    }
+
+    /// The running epoch, for a caller that must stop only that epoch.
+    pub(crate) fn running_lease(&self, session_id: &str) -> Option<Lease> {
+        lock_recover(&self.lifecycle)
+            .running(session_id)
+            .map(|(lease, _)| lease)
     }
 
     /// Whether this session has a worker up or coming up.
@@ -404,6 +638,15 @@ impl<S: BroadcastSink> Supervisor<S> {
             .await
             .get(session_id)
             .is_some_and(|worker| worker.lease.epoch() == generation)
+    }
+
+    /// Automatic respawns retain the originating launch; a new launch supersedes it.
+    pub(crate) async fn is_current_launch(&self, session_id: &str, launch_epoch: u64) -> bool {
+        self.workers
+            .lock()
+            .await
+            .get(session_id)
+            .is_some_and(|worker| worker.launch_epoch == launch_epoch)
     }
 
     /// Return the native store owned by the current worker only when it still
@@ -431,13 +674,214 @@ impl<S: BroadcastSink> Supervisor<S> {
     pub async fn count(&self) -> usize {
         self.workers.lock().await.len()
     }
+
+    /// Register an HTTP spawn before it acquires submission and instance
+    /// guards. The stop endpoint uses this token to wake that path promptly.
+    pub(crate) fn begin_spawn_request(
+        &self,
+        session_id: &str,
+    ) -> Result<PendingSpawnGuard, SupervisorError> {
+        let mut requests = lock_recover(&self.spawn_requests);
+        if requests.stop_fences.contains_key(session_id) {
+            return Err(SupervisorError::SpawnCancelled(session_id.to_string()));
+        }
+        if lock_recover(&self.restart_requests).contains_key(session_id) {
+            return Err(SupervisorError::RestartInProgress(session_id.to_string()));
+        }
+        let request_id = self.next_spawn_request_id.fetch_add(1, Ordering::Relaxed);
+        let cancellation = CancellationToken::new();
+        requests
+            .pending
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(request_id, cancellation.clone());
+        Ok(PendingSpawnGuard {
+            session_id: session_id.to_string(),
+            request_id,
+            cancellation,
+            requests: Arc::clone(&self.spawn_requests),
+        })
+    }
+
+    pub(crate) fn begin_switch_request(
+        &self,
+        session_id: &str,
+    ) -> Result<SwitchRequestGuard, SupervisorError> {
+        let mut requests = lock_recover(&self.spawn_requests);
+        if lock_recover(&self.restart_requests).contains_key(session_id) {
+            return Err(SupervisorError::RestartInProgress(session_id.to_string()));
+        }
+        *requests.switches.entry(session_id.to_string()).or_default() += 1;
+        Ok(SwitchRequestGuard {
+            session_id: session_id.to_string(),
+            requests: Arc::clone(&self.spawn_requests),
+        })
+    }
+
+    /// Fence replacement admission and cancel every spawn that has not yet
+    /// acquired a Lease. The lifecycle stop still owns any already-admitted
+    /// launch and its physical teardown.
+    pub(crate) async fn begin_stop_request(
+        &self,
+        session_id: &str,
+        reason: &str,
+        expected_lease: Option<&Lease>,
+        captured: bool,
+    ) -> StopRequestGuard {
+        self.begin_stop_request_with_pending_cancellation(
+            session_id,
+            reason,
+            expected_lease,
+            captured,
+            true,
+        )
+        .await
+    }
+
+    /// Resume already owns launch exclusion. Fence its captured retirement
+    /// without cancelling the pending request that is performing that resume.
+    pub(super) async fn begin_retirement_request(
+        &self,
+        session_id: &str,
+        expected_lease: Option<&Lease>,
+    ) -> StopRequestGuard {
+        self.begin_stop_request_with_pending_cancellation(
+            session_id,
+            "user_stopped",
+            expected_lease,
+            true,
+            false,
+        )
+        .await
+    }
+
+    async fn begin_stop_request_with_pending_cancellation(
+        &self,
+        session_id: &str,
+        reason: &str,
+        expected_lease: Option<&Lease>,
+        captured: bool,
+        cancel_pending: bool,
+    ) -> StopRequestGuard {
+        let (request_id, cancelled_pending) = {
+            let mut requests = lock_recover(&self.spawn_requests);
+            let request_id =
+                if let Some((request_id, owners)) = requests.stop_fences.get_mut(session_id) {
+                    *owners += 1;
+                    *request_id
+                } else {
+                    let request_id = self.next_stop_request_id.fetch_add(1, Ordering::Relaxed);
+                    requests
+                        .stop_fences
+                        .insert(session_id.to_string(), (request_id, 1));
+                    request_id
+                };
+            let pending = requests
+                .pending
+                .get(session_id)
+                .filter(|_| cancel_pending)
+                .map(|pending| pending.values().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let cancelled_pending = pending
+                .iter()
+                .filter(|cancellation| !cancellation.is_cancelled())
+                .count();
+            for cancellation in pending {
+                cancellation.cancel();
+            }
+            (request_id, cancelled_pending)
+        };
+        // Install the guard before the first await. If acquiring the worker
+        // gate is cancelled, Drop must release the fence owner that was just
+        // registered above.
+        let mut stop_request = StopRequestGuard {
+            session_id: session_id.to_string(),
+            request_id,
+            requests: Arc::clone(&self.spawn_requests),
+            cancelled_pending,
+            cancelled_launch: false,
+        };
+        let workers = self.workers.lock().await;
+        let cancelled_launch = {
+            let mut lifecycle = lock_recover(&self.lifecycle);
+            let matches_target = expected_lease.is_some_and(|expected| {
+                lifecycle.current_lease(session_id).as_ref() == Some(expected)
+            });
+            if !captured || matches_target {
+                let was_cancelled = lifecycle
+                    .current_lease(session_id)
+                    .is_some_and(|lease| lifecycle.cancel_requested(&lease).is_some());
+                lifecycle.request_stop(session_id, reason) && !was_cancelled
+            } else {
+                false
+            }
+        };
+        drop(workers);
+        if cancelled_launch {
+            self.worker_notify.notify_waiters();
+        }
+        stop_request.cancelled_launch = cancelled_launch;
+        stop_request
+    }
+
+    /// Claim the session's restart lane while holding the same gate used by
+    /// `begin_resume`, so an explicit launch cannot slip past the claim.
+    pub(crate) async fn try_begin_restart_with_reason(
+        &self,
+        session_id: &str,
+    ) -> Result<RestartRequestGuard, RestartClaimConflict> {
+        let _workers = self.workers.lock().await;
+        let spawn_requests = lock_recover(&self.spawn_requests);
+        if spawn_requests.switches.contains_key(session_id) {
+            return Err(RestartClaimConflict::Switch);
+        }
+        let mut requests = lock_recover(&self.restart_requests);
+        if requests.contains_key(session_id) {
+            return Err(RestartClaimConflict::Restart);
+        }
+        let request_id = self.next_restart_request_id.fetch_add(1, Ordering::Relaxed);
+        let cancellation = CancellationToken::new();
+        requests.insert(session_id.to_string(), (request_id, cancellation.clone()));
+        Ok(RestartRequestGuard {
+            session_id: session_id.to_string(),
+            request_id,
+            cancellation,
+            requests: Arc::clone(&self.restart_requests),
+        })
+    }
+
+    /// Serialize with resume admission, then cancel any restart that has not settled yet.
+    pub(crate) async fn cancel_restart_request(&self, session_id: &str) {
+        let _workers = self.workers.lock().await;
+        if let Some((_, cancellation)) = lock_recover(&self.restart_requests).get(session_id) {
+            cancellation.cancel();
+        }
+    }
 }
 
-fn next_seq(next_seqs: &SeqMap, session_id: &str) -> u64 {
-    let mut guard = next_seqs.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = guard.entry(session_id.to_string()).or_insert(0);
-    *entry = entry.saturating_add(1);
-    *entry
+fn session_seq(next_seqs: &SeqMap, session_id: &str) -> Arc<std::sync::Mutex<u64>> {
+    Arc::clone(
+        lock_recover(next_seqs)
+            .entry(session_id.to_string())
+            .or_default(),
+    )
+}
+
+/// Allocate the session's next seq and publish with it under that session's
+/// counter lock, so subscribers receive each session's events in seq order.
+/// `publish` must not allocate a seq for the same session.
+fn publish_with_next_seq<R>(
+    next_seqs: &SeqMap,
+    session_id: &str,
+    publish: impl FnOnce(u64) -> R,
+) -> R {
+    let counter = session_seq(next_seqs, session_id);
+    // A holder blocks on store I/O, so waiters and the holder both run off the async worker.
+    sink::blocking_io(|| {
+        let mut last = lock_recover(&counter);
+        *last = last.saturating_add(1);
+        publish(*last)
+    })
 }
 
 fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -454,6 +898,45 @@ fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use super::test_support::*;
     use super::*;
+
+    #[tokio::test]
+    async fn explicit_restart_guard_serializes_same_session_and_releases_on_drop() {
+        let sup = Supervisor::new(VecSink::new());
+        let first = sup
+            .try_begin_restart_with_reason("s-restart")
+            .await
+            .expect("first restart claims the session");
+
+        assert!(sup
+            .try_begin_restart_with_reason("s-restart")
+            .await
+            .is_err());
+        assert!(sup.try_begin_restart_with_reason("s-other").await.is_ok());
+
+        drop(first);
+        assert!(sup.try_begin_restart_with_reason("s-restart").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn restart_and_switch_claims_exclude_each_other() {
+        let sup = Supervisor::new(VecSink::new());
+        let switching = sup.begin_switch_request("s").unwrap();
+        assert!(sup.try_begin_restart_with_reason("s").await.is_err());
+        drop(switching);
+        let restart = sup.try_begin_restart_with_reason("s").await.unwrap();
+        assert!(matches!(
+            sup.begin_switch_request("s"),
+            Err(SupervisorError::RestartInProgress(_))
+        ));
+        assert!(matches!(
+            sup.begin_spawn_request("s"),
+            Err(SupervisorError::RestartInProgress(_))
+        ));
+        assert!(sup.begin_switch_request("other").is_ok());
+        drop(restart);
+        assert!(sup.begin_switch_request("s").is_ok());
+        assert!(sup.begin_spawn_request("s").is_ok());
+    }
 
     #[tokio::test]
     async fn respawned_worker_rejects_the_prior_generation() {
@@ -506,5 +989,76 @@ mod tests {
         ids.sort();
         assert_eq!(ids, vec!["s-1", "s-2"]);
         assert!(sup.take_respawn_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_request_drops_fence_before_fresh_admission() {
+        let sup = Arc::new(Supervisor::new(VecSink::new()));
+        let workers = sup.workers.lock().await;
+        let stopping = {
+            let sup = Arc::clone(&sup);
+            tokio::spawn(async move {
+                sup.begin_stop_request("s-fence-cancel", "user_stopped", None, false)
+                    .await
+            })
+        };
+
+        // The stop request must publish its fence before waiting for workers.
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !lock_recover(&sup.spawn_requests)
+                .stop_fences
+                .contains_key("s-fence-cancel")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stop fence is published");
+        assert!(lock_recover(&sup.spawn_requests)
+            .stop_fences
+            .contains_key("s-fence-cancel"));
+        assert!(matches!(
+            sup.begin_spawn_request("s-fence-cancel"),
+            Err(SupervisorError::SpawnCancelled(_))
+        ));
+
+        stopping.abort();
+        assert!(matches!(stopping.await, Err(join) if join.is_cancelled()));
+        drop(workers);
+        assert!(!lock_recover(&sup.spawn_requests)
+            .stop_fences
+            .contains_key("s-fence-cancel"));
+        let fresh = sup
+            .begin_spawn_request("s-fence-cancel")
+            .expect("cancelled stop must not strand admission");
+        drop(fresh);
+    }
+
+    #[tokio::test]
+    async fn stop_fence_cancellation_helper_cancels_pending_spawn_before_worker_wait() {
+        let sup = Arc::new(Supervisor::new(VecSink::new()));
+        let pending = sup.begin_spawn_request("s-fence-helper").unwrap();
+        let workers = sup.workers.lock().await;
+        let stopping = {
+            let sup = Arc::clone(&sup);
+            tokio::spawn(async move {
+                sup.begin_stop_request("s-fence-helper", "user_stopped", None, false)
+                    .await
+            })
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            pending.cancellation().cancelled(),
+        )
+        .await
+        .expect("pending spawn is cancelled");
+        assert!(pending.cancellation().is_cancelled());
+        stopping.abort();
+        assert!(matches!(stopping.await, Err(join) if join.is_cancelled()));
+        drop(workers);
+        drop(pending);
+        assert!(!lock_recover(&sup.spawn_requests)
+            .stop_fences
+            .contains_key("s-fence-helper"));
     }
 }

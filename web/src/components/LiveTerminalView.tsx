@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useIsCoarsePointer } from "../hooks/useIsCoarsePointer";
 import { useLiveTerminal } from "../hooks/useLiveTerminal";
@@ -19,13 +19,16 @@ import { reportError } from "../lib/toastBus";
 import {
   FOCUS_TERMINAL_EVENT,
   consumePendingTerminalFocus,
+  focusIntentMatches,
   setPendingTerminalFocus,
   type FocusTerminalDetail,
 } from "../lib/terminalFocus";
+import { safeGetItem, safeRemoveItem, safeSetItem } from "../lib/safeStorage";
 import { isSessionActive } from "../lib/session";
 import { StrokeIcon } from "./icons";
 
 interface Props {
+  readOnly: boolean;
   session: SessionResponse;
   active?: boolean;
   /** Which tmux surface this view renders. */
@@ -46,9 +49,11 @@ const SURFACES = {
 };
 
 /** Touch-device agent terminal: chrome around the capture-snapshot live pane (MobileLiveTerminal). */
-export function LiveTerminalView({ session, active = true, surface = "agent", terminalIndex = 0 }: Props) {
+export function LiveTerminalView({ session, readOnly, active = true, surface = "agent", terminalIndex = 0 }: Props) {
   const base = SURFACES[surface];
   const { focusTarget, dataTerm } = base;
+  // Two docks can each show a paired terminal, so paired focus intents name the one they mean.
+  const focusIndex = surface === "agent" ? undefined : terminalIndex;
   // Paired terminals carry their instance index as a query param so the
   // server attaches the right tmux session; the agent surface ignores it.
   const wsPath = surface === "agent" ? base.wsPath : `${base.wsPath}?index=${terminalIndex}`;
@@ -77,12 +82,43 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
     },
     [],
   );
-  const live = useLiveTerminal(ensureState === "ready" ? session.id : null, wsPath, receiveAgentClipboard);
+  // Each surface is its own pane, so a grid on one must not clear another's dismissal. Callers key this view by
+  // session, surface and index, so the key is fixed for its lifetime.
+  const pipeNoticeKey = `aoe-live-pipe-notice-dismissed:${session.id}:${surface}:${terminalIndex}`;
+  const [pipeNoticeDismissed, setPipeNoticeDismissed] = useState(() => safeGetItem(pipeNoticeKey) !== null);
+  const dismissPipeNotice = useCallback(() => {
+    safeSetItem(pipeNoticeKey, "1");
+    setPipeNoticeDismissed(true);
+  }, [pipeNoticeKey]);
+  const clearPipeNoticeDismissal = useCallback(() => {
+    // Another tab may have stored a dismissal this view never saw.
+    if (safeGetItem(pipeNoticeKey) !== null) safeRemoveItem(pipeNoticeKey);
+    if (pipeNoticeDismissed) setPipeNoticeDismissed(false);
+  }, [pipeNoticeDismissed, pipeNoticeKey]);
+  // Read-only live routes observe existing panes; their backend fences forbid creation, claims and resizing.
+  const live = useLiveTerminal(
+    readOnly || ensureState === "ready" ? session.id : null,
+    readOnly,
+    wsPath,
+    receiveAgentClipboard,
+    clearPipeNoticeDismissal,
+  );
   // The viewport hook supplies the iOS-regular-Safari bottom inset and the occlusion-based keyboardOpen used to
   // gate the pane's sizing latch (occlusion is what shrinks the container, whichever element is focused).
-  const { keyboardHeight, keyboardOpen } = useMobileKeyboard();
-  const [inputFocused, setInputFocused] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const { keyboardHeight, keyboardOpen } = useMobileKeyboard(inputRef);
+  const [inputFocused, setInputFocused] = useState(false);
+  const policyRef = useRef({ readOnly, sessionId: session.id, surface, terminalIndex });
+  useLayoutEffect(() => {
+    policyRef.current = { readOnly, sessionId: session.id, surface, terminalIndex };
+    if (readOnly) inputRef.current?.blur();
+  }, [readOnly, session.id, surface, terminalIndex]);
+  useLayoutEffect(
+    () => () => {
+      policyRef.current.readOnly = true;
+    },
+    [],
+  );
   const [ctrlActive, setCtrlActive] = useState(false);
   const ctrlActiveRef = useRef(false);
   const clearCtrl = useCallback(() => setCtrlActive(false), []);
@@ -99,12 +135,19 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
     if (now - lastUndeliveredToastRef.current < 2000) return;
     lastUndeliveredToastRef.current = now;
     reportError(
-      notOwner
-        ? "Not sent: this session is live on another device. Take over first."
-        : "Not sent: terminal not connected.",
+      readOnly
+        ? "Not sent: this server is read-only."
+        : notOwner
+          ? "Not sent: this session is live on another device. Take over first."
+          : "Not sent: terminal not connected.",
     );
-  }, [notOwner]);
-  const { sendData, sendPaste } = live;
+  }, [notOwner, readOnly]);
+  const { sendData, sendPaste, manualReconnect } = live;
+  // Automatic redials keep the dismissal; only a reconnect the user asked for brings the notice back.
+  const reconnect = useCallback(() => {
+    clearPipeNoticeDismissal();
+    manualReconnect();
+  }, [clearPipeNoticeDismissal, manualReconnect]);
   // Explicit sends (toolbar, paste, compose) report a drop; typed keys stay quiet.
   const sendDataOrReport = useCallback(
     (data: string) => {
@@ -141,7 +184,7 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
   const openCompose = useCallback(() => flushSync(() => setComposeOpen(true)), []);
   const closeCompose = useCallback((refocusTerminal: boolean) => {
     // Focus first, inside the tap, so iOS keeps the keyboard up for the terminal.
-    if (refocusTerminal) inputRef.current?.focus();
+    if (refocusTerminal && !policyRef.current.readOnly) inputRef.current?.focus();
     setComposeOpen(false);
   }, []);
 
@@ -154,10 +197,24 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
     setEnsureError(null);
   }
   const lastEnsuredSessionIdRef = useRef<string | null>(null);
+  const captureWriteAdmission = useCallback(() => {
+    const policy = policyRef.current;
+    return () =>
+      policyRef.current === policy &&
+      !policy.readOnly &&
+      policy.sessionId === session.id &&
+      policy.surface === surface &&
+      policy.terminalIndex === terminalIndex;
+  }, [session.id, surface, terminalIndex]);
 
-  const uploadPastedImage = useCallback((file: File) => pasteImage(session.id, file), [session.id]);
+  const uploadPastedImage = useCallback(
+    (file: File, canWrite: () => boolean) =>
+      canWrite() ? pasteImage(session.id, file, canWrite) : Promise.resolve(null),
+    [session.id],
+  );
 
   const focusSelf = useCallback(() => {
+    if (policyRef.current.readOnly) return false;
     const ta = inputRef.current;
     if (active && ta) {
       ta.focus();
@@ -166,61 +223,37 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
     return false;
   }, [active]);
 
-  // A refused ensure re-runs once the session is unarchived or restored.
-  const shelved = !!session.archived_at || !!session.trashed_at;
-  useEffect(() => {
-    if (lastEnsuredSessionIdRef.current === session.id) {
-      if (active && consumePendingTerminalFocus(focusTarget)) focusSelf();
+  const ensureRequestRef = useRef<AbortController | null>(null);
+  // Policy changes do not erase an already dispatched result. Identity changes and unmounts do.
+  useEffect(
+    () => () => {
+      ensureRequestRef.current?.abort();
+      ensureRequestRef.current = null;
+      lastEnsuredSessionIdRef.current = null;
+    },
+    [session.id, surface, terminalIndex],
+  );
+
+  const retryEnsure = useCallback(() => {
+    const policy = policyRef.current;
+    if (
+      policy.readOnly ||
+      policy.sessionId !== session.id ||
+      policy.surface !== surface ||
+      policy.terminalIndex !== terminalIndex ||
+      ensureRequestRef.current
+    )
       return;
-    }
     const controller = new AbortController();
+    ensureRequestRef.current = controller;
+    setEnsureError(null);
+    setEnsureState("pending");
     const ensure =
       surface === "agent"
         ? ensureSession(session.id, controller.signal)
         : ensureTerminal(session.id, terminalIndex, surface === "paired-container");
-    ensure.then((res) => {
-      if (controller.signal.aborted) return;
-      if (res.ok) {
-        lastEnsuredSessionIdRef.current = session.id;
-        setEnsureWarning(res.message ?? null);
-        setEnsureState("ready");
-      } else {
-        setEnsureState("error");
-        setEnsureError(res.message ?? "Could not start session.");
-        setEnsureRetryable(!isStartRefusal(res.error));
-      }
-    });
-    return () => controller.abort();
-  }, [session.id, shelved, focusSelf, surface, focusTarget, terminalIndex, active]);
-
-  // Drain a pending focus latch once the pane is mounted.
-  useEffect(() => {
-    // eslint-disable-next-line react-you-might-not-need-an-effect/no-event-handler
-    if (!active || ensureState !== "ready") return;
-    if (consumePendingTerminalFocus(focusTarget)) focusSelf();
-  }, [ensureState, focusSelf, focusTarget, active]);
-
-  // Cmd+` shortcut focuses this terminal when it is the dispatched target.
-  useEffect(() => {
-    const onFocusEvent = (e: Event) => {
-      const detail = (e as CustomEvent<FocusTerminalDetail>).detail;
-      if (!active || detail?.target !== focusTarget) return;
-      if (!focusSelf()) setPendingTerminalFocus(focusTarget);
-    };
-    window.addEventListener(FOCUS_TERMINAL_EVENT, onFocusEvent);
-    return () => window.removeEventListener(FOCUS_TERMINAL_EVENT, onFocusEvent);
-  }, [focusSelf, focusTarget, active]);
-
-  const retryEnsure = useCallback(() => {
-    setEnsureState((prev) => {
-      if (prev === "pending") return prev;
-      setEnsureError(null);
-      const controller = new AbortController();
-      const ensure =
-        surface === "agent"
-          ? ensureSession(session.id, controller.signal)
-          : ensureTerminal(session.id, terminalIndex, surface === "paired-container");
-      ensure.then((res) => {
+    ensure
+      .then((res) => {
         if (controller.signal.aborted) return;
         if (res.ok) {
           lastEnsuredSessionIdRef.current = session.id;
@@ -231,10 +264,43 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
           setEnsureError(res.message ?? "Could not start session.");
           setEnsureRetryable(!isStartRefusal(res.error));
         }
+      })
+      .finally(() => {
+        if (ensureRequestRef.current === controller) ensureRequestRef.current = null;
       });
-      return "pending";
-    });
   }, [session.id, surface, terminalIndex]);
+
+  // A refused ensure re-runs once the session is unarchived or restored.
+  const shelved = !!session.archived_at || !!session.trashed_at;
+  useEffect(() => {
+    const policy = policyRef.current;
+    if (policy.readOnly) return;
+    if (lastEnsuredSessionIdRef.current === policy.sessionId) {
+      // eslint-disable-next-line react-you-might-not-need-an-effect/no-event-handler
+      if (active && consumePendingTerminalFocus(focusTarget, focusIndex)) focusSelf();
+      return;
+    }
+    retryEnsure();
+  }, [session.id, shelved, readOnly, focusSelf, focusTarget, focusIndex, retryEnsure, active]);
+
+  // Drain a pending focus latch once the pane is mounted.
+  useEffect(() => {
+    // eslint-disable-next-line react-you-might-not-need-an-effect/no-event-handler
+    if (!active || readOnly || ensureState !== "ready") return;
+    if (consumePendingTerminalFocus(focusTarget, focusIndex)) focusSelf();
+  }, [ensureState, readOnly, focusSelf, focusTarget, focusIndex, active]);
+
+  // Cmd+` shortcut focuses this terminal when it is the dispatched target.
+  useEffect(() => {
+    const onFocusEvent = (e: Event) => {
+      const detail = (e as CustomEvent<FocusTerminalDetail>).detail;
+      if (!active || policyRef.current.readOnly || !focusIntentMatches(detail, focusTarget, focusIndex)) return;
+      // Latch the request's own index, so an indexless one stays open to any paired view.
+      if (!focusSelf()) setPendingTerminalFocus(focusTarget, detail.terminalIndex);
+    };
+    window.addEventListener(FOCUS_TERMINAL_EVENT, onFocusEvent);
+    return () => window.removeEventListener(FOCUS_TERMINAL_EVENT, onFocusEvent);
+  }, [focusSelf, focusTarget, focusIndex, active]);
 
   // Stop then Start leaves a dead pane's closed socket behind. Latch the Start edge until the 4001 close
   // arrives (either order), consume it once so a crash-looping agent cannot retrigger it, and drop it
@@ -248,7 +314,7 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
   useEffect(() => {
     const prev = prevStatusRef.current;
     prevStatusRef.current = { id: session.id, status: session.status };
-    if (prev.id !== session.id) startedRef.current = false;
+    if (readOnly || prev.id !== session.id) startedRef.current = false;
     else if (prev.status === "Stopped" && sessionActive) startedRef.current = true;
     if (connected && !wasConnectedRef.current) startedRef.current = false;
     wasConnectedRef.current = connected;
@@ -257,18 +323,19 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
       startedRef.current = false;
       retryEnsure();
     }
-  }, [session.id, session.status, sessionActive, paneDead, connected, surface, retryEnsure]);
+  }, [session.id, session.status, sessionActive, paneDead, connected, surface, retryEnsure, readOnly]);
 
   // Focus/blur MUST be first in the handler so iOS keeps the user-gesture
   // chain and actually shows the keyboard.
   const toggleKeyboard = useCallback(() => {
+    if (policyRef.current.readOnly) return;
     const ta = inputRef.current;
     if (!ta) return;
     if (inputFocused) ta.blur();
     else ta.focus();
   }, [inputFocused]);
 
-  if (ensureState === "pending") {
+  if (!readOnly && ensureState === "pending") {
     return (
       <div className="flex-1 flex items-center justify-center bg-surface-950 text-text-dim">
         <span className="text-xs">Starting session...</span>
@@ -276,7 +343,7 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
     );
   }
 
-  if (ensureState === "error") {
+  if (!readOnly && ensureState === "error") {
     return (
       <div className="flex-1 flex flex-col items-center justify-center bg-surface-950 gap-2 px-4 text-center">
         <span className="text-xs text-status-error max-w-md break-words">
@@ -321,9 +388,9 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
         retryCount={live.state.retryCount}
         retryCountdown={live.state.retryCountdown}
         maxRetries={live.maxRetries}
-        onRetry={live.manualReconnect}
+        onRetry={reconnect}
         paneDead={live.state.paneDead}
-        onRestart={retryEnsure}
+        onRestart={readOnly ? undefined : retryEnsure}
       />
 
       {ensureWarning && (
@@ -334,7 +401,7 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
         </div>
       )}
 
-      {live.state.connected && live.state.ownerKnown && !live.state.isOwner && (
+      {!readOnly && live.state.connected && live.state.ownerKnown && !live.state.isOwner && (
         <div className="absolute left-0 right-0 top-3 flex justify-center z-20 px-3">
           <button
             type="button"
@@ -350,6 +417,33 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
         </div>
       )}
 
+      {live.state.connected && live.state.transportReason === "pipe_owned" && !pipeNoticeDismissed && (
+        <div
+          data-live-pipe-notice
+          className={`absolute left-0 right-0 ${ensureWarning ? "top-24" : "top-14"} z-20 flex justify-center px-3 pointer-events-none`}
+        >
+          <div className="pointer-events-auto flex items-center gap-1 text-xs text-text-muted bg-surface-900/90 border border-surface-700/60 rounded-lg pl-3 pr-1 max-w-md">
+            <span className="py-1 break-words">Slower updates: another client is rendering this pane.</span>
+            <button
+              type="button"
+              onClick={reconnect}
+              aria-label="Retry faster updates"
+              className="h-8 shrink-0 px-2 rounded-md text-brand-500 hover:text-brand-400 cursor-pointer underline"
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              onClick={dismissPipeNotice}
+              aria-label="Dismiss slower updates notice"
+              className="h-8 w-8 shrink-0 rounded-md text-text-muted hover:text-text-primary cursor-pointer text-base leading-none"
+            >
+              &times;
+            </button>
+          </div>
+        </div>
+      )}
+
       <div
         className="flex-1 overflow-hidden bg-[var(--term-bg)] relative"
         // Click-to-type, like every terminal.
@@ -362,6 +456,7 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
       >
         <MobileLiveTerminal
           frame={live.state.frame}
+          readOnly={readOnly}
           liveStats={live.state.stats}
           transport={live.state.transport}
           armAgentClipboard={armAgentClipboard}
@@ -376,6 +471,7 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
           sendData={live.sendData}
           sendPaste={sendPasteOrReport}
           uploadPastedImage={uploadPastedImage}
+          captureWriteAdmission={captureWriteAdmission}
           forwardWheel={live.forwardWheel}
           forwardButton={live.forwardButton}
           ctrlActiveRef={ctrlActiveRef}
@@ -385,13 +481,18 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
           bottomAlign={surface === "agent"}
           keyboardOpen={keyboardOpen}
         />
-        {coarse && live.state.connected && <KeyboardFab keyboardOpen={inputFocused} onToggle={toggleKeyboard} />}
-        {coarse && live.state.connected && webSettings.showArrowJoystick && <ArrowJoystick onArrow={sendArrow} />}
+        {!readOnly && coarse && live.state.connected && (
+          <KeyboardFab keyboardOpen={inputFocused} onToggle={toggleKeyboard} />
+        )}
+        {!readOnly && coarse && live.state.connected && webSettings.showArrowJoystick && (
+          <ArrowJoystick onArrow={sendArrow} />
+        )}
       </div>
 
-      {coarse && live.state.connected && (
+      {!readOnly && coarse && live.state.connected && (
         <MobileTerminalToolbar
           keys={webSettings.mobileToolbarKeys}
+          captureWriteAdmission={captureWriteAdmission}
           sendData={sendDataOrReport}
           sendPaste={sendPasteOrReport}
           onCompose={openCompose}
@@ -408,6 +509,7 @@ export function LiveTerminalView({ session, active = true, surface = "agent", te
         <TerminalComposeSheet
           draftKey={`${session.id}:${surface}:${terminalIndex}`}
           bottomInset={keyboardHeight}
+          readOnly={readOnly}
           onSubmit={submitCompose}
           onClose={closeCompose}
         />

@@ -104,6 +104,50 @@ fn buttons_map_clicks_hover_and_yield_to_overlays() {
     );
 }
 
+#[test]
+#[serial]
+fn trash_footer_scroll_preserves_sidebar_selection() {
+    for strict in [false, true] {
+        let mut env = create_test_env_with_sessions(2);
+        let id = env.view.instance_at(0).id.clone();
+        env.view
+            .mutate_instance(&id, |inst| inst.trashed_at = Some(chrono::Utc::now()));
+        env.view.trashed_section_collapsed = false;
+        env.view.rebuild_flat_items();
+        env.view.select_session_by_id(&id);
+        env.view.strict_hotkeys = strict;
+        render_at(&mut env, 200, 30);
+        env.view.preview_text_view = super::super::PreviewTextView {
+            pane: ratatui::layout::Rect::new(30, 1, 80, 10),
+            first_line: 190,
+            total_lines: 200,
+        };
+        let cursor = env.view.cursor;
+        for code in [KeyCode::PageUp, KeyCode::PageDown] {
+            let (_, rect) = env
+                .view
+                .footer_buttons
+                .iter()
+                .find(|(key, _)| key.code == code)
+                .copied()
+                .unwrap();
+            let key = env.view.footer_button_at(rect.x, rect.y).unwrap();
+            assert_eq!(env.view.handle_key(key, None), None);
+            assert_eq!(env.view.cursor, cursor);
+            assert_eq!(env.view.selected_session.as_deref(), Some(id.as_str()));
+            assert!(!env.view.retained_reader_focused());
+            if code == KeyCode::PageUp {
+                assert!(
+                    env.view.retained_scroll_offset > 0,
+                    "Earlier must scroll retained content"
+                );
+            } else {
+                assert_eq!(env.view.retained_scroll_offset, 0);
+            }
+        }
+    }
+}
+
 /// Strict-hotkey mode shifts the chords: Diff becomes Ctrl+D and Delete
 /// becomes an uppercase 'D', and the buttons synthesize those exactly.
 /// Rendered wide enough that every hint fits beside the tips badge.
@@ -168,6 +212,8 @@ fn live_send_banner_names_space_chords_and_hides_buttons() {
 #[serial]
 fn running_web_status_survives_a_committed_search_on_a_narrow_footer() {
     let mut env = create_test_env_with_sessions(3);
+    // A healthy runtime, so the R entry carries the Web dashboard rather than a Daemon limit.
+    let _runtime = env.view.session_feed.terminal_driver_for_test();
     env.view.tips_unseen = 3;
     for c in ['/', 's', 'e', 's', 's'] {
         env.view.handle_key(key(KeyCode::Char(c)), None);
@@ -225,4 +271,62 @@ fn web_entry_and_new_survive_narrow_footers() {
         assert_eq!(shown(fav), fav_kept, "Fav: {case}");
     }
     crate::session::set_favorites_first(original);
+}
+
+/// R opens Connections rather than going straight to the Web dashboard; Enter on the Web
+/// dashboard row reaches today's flow. The footer no longer carries a separate runtime label.
+#[test]
+#[serial]
+fn r_opens_connections_and_enter_reaches_the_web_dashboard() {
+    let mut env = create_test_env_with_sessions(1);
+    // A healthy runtime, so the hub has just the Web dashboard row.
+    let _runtime = env.view.session_feed.terminal_driver_for_test();
+    let screen = render_home_to_string(&mut env.view, 160, 12);
+    for gone in ["Runtime ready", "Runtime read-only", "Connecting runtime"] {
+        assert!(!screen.contains(gone), "{gone}\n{screen}");
+    }
+
+    env.view
+        .handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT), None);
+    assert!(env.view.connections_view.is_some(), "R opens Connections");
+    assert!(
+        env.view.serve_view.is_none(),
+        "not the Web dashboard flow directly"
+    );
+    let screen = render_home_to_string(&mut env.view, 160, 40);
+    assert!(screen.contains("Connections"), "{screen}");
+    // The open hub follows the dashboard rather than its state when R was pressed.
+    env.view.serve_running = true;
+    let screen = render_home_to_string(&mut env.view, 160, 40);
+    assert!(!screen.contains("Off \u{00B7} use AoE"), "{screen}");
+
+    env.view.handle_key(key(KeyCode::Enter), None);
+    assert!(env.view.connections_view.is_none());
+    assert!(
+        env.view.serve_view.is_some(),
+        "Enter opens the Web dashboard flow"
+    );
+}
+
+/// With the Daemon offline, the home screen is the Connections hub in its offline state:
+/// what still works, why, and today's r to reconnect.
+#[test]
+#[serial]
+fn an_offline_daemon_takes_over_the_home_screen_as_connections() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.set_sidebar_source(
+        crate::tui::session_feed::SidebarSource::Disconnected,
+        Some("connect ECONNREFUSED"),
+    );
+    let screen = render_home_to_string(&mut env.view, 120, 30);
+    for shown in [
+        "Connections",
+        "Not responding",
+        "keep running in tmux",
+        "connect ECONNREFUSED",
+        "[ r Reconnect ]",
+    ] {
+        assert!(screen.contains(shown), "{shown:?}\n{screen}");
+    }
+    assert!(!screen.contains("Runtime unavailable"), "{screen}");
 }

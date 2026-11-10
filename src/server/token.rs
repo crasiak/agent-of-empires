@@ -160,27 +160,32 @@ pub(super) fn test_token_grace_override() -> Option<Duration> {
     None
 }
 
-/// Write a file with owner-only permissions (0600) to protect secrets.
-#[cfg(unix)]
+/// Write a file with owner-only permissions (0600) to protect secrets. A failed
+/// write is logged here so every caller's secret file stays best-effort.
 pub(super) async fn write_secret_file(path: &std::path::Path, contents: &str) {
+    if let Err(error) = try_write_secret_file(path, contents).await {
+        tracing::error!(target: "auth.token", path = %path.display(), %error, "failed to write secret file");
+    }
+}
+
+#[cfg(unix)]
+async fn try_write_secret_file(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
-    let opts = tokio::fs::OpenOptions::new()
+    let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(path)
-        .await;
-    if let Ok(mut file) = opts {
-        let _ = file.write_all(contents.as_bytes()).await;
-        // write_all can return while the blocking write is still queued.
-        let _ = file.flush().await;
-    }
+        .await?;
+    file.write_all(contents.as_bytes()).await?;
+    // write_all can return while the blocking write is still queued.
+    file.flush().await
 }
 
 #[cfg(not(unix))]
-pub(super) async fn write_secret_file(path: &std::path::Path, contents: &str) {
-    let _ = tokio::fs::write(path, contents).await;
+async fn try_write_secret_file(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    tokio::fs::write(path, contents).await
 }
 
 /// Generate a cryptographically random 64-character hex token (256 bits of entropy).
@@ -200,12 +205,14 @@ pub(super) fn is_valid_token_format(token: &str) -> bool {
             .all(|c| c.is_ascii_hexdigit() || c.is_ascii_lowercase())
 }
 
-/// Load an existing auth token from disk if it was last used less than 24 hours ago,
-/// otherwise generate a fresh one and persist it.
+/// How long an idle `serve.token` is reused across restarts.
+pub(crate) const TOKEN_REUSE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Load an existing auth token from disk if it was last used less than `TOKEN_REUSE_MAX_AGE`
+/// ago, otherwise generate a fresh one and persist it.
 pub(super) async fn load_or_generate_token() -> anyhow::Result<String> {
     let app_dir = crate::session::get_app_dir()?;
-    let max_age = std::time::Duration::from_secs(24 * 60 * 60);
-    Ok(load_or_generate_token_at(&app_dir.join("serve.token"), max_age).await)
+    Ok(load_or_generate_token_at(&app_dir.join("serve.token"), TOKEN_REUSE_MAX_AGE).await)
 }
 
 pub(super) async fn load_or_generate_token_at(

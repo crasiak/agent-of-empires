@@ -9,6 +9,83 @@ use anyhow::{bail, Result};
 use crate::cli::serve::{daemon_status, try_lock_serve, DaemonStatus};
 use crate::migrations::progress::{fit_width, ConsoleProgress, Event, Reporter};
 
+/// Run startup migrations. When a managed daemon blocks them and a person is
+/// at the terminal, offer `aoe serve --restart`, which also migrates.
+pub async fn run_offering_restart(reporter: Option<Reporter>, interactive: bool) -> Result<()> {
+    let outcome = crate::migrations::run_migrations_with(reporter.clone());
+    resolve_blocked_migration(outcome, interactive, &LocalDaemon, || {
+        crate::migrations::run_migrations_with(reporter)
+    })
+    .await
+}
+
+/// The daemon-side effects of the restart offer, injectable for tests.
+pub(crate) trait RestartPrompt {
+    fn managed(&self) -> bool;
+    fn confirm(&self) -> Result<bool>;
+    async fn restart(&self) -> Result<()>;
+}
+
+pub(crate) struct LocalDaemon;
+
+impl RestartPrompt for LocalDaemon {
+    fn managed(&self) -> bool {
+        crate::cli::serve::daemon_pid().is_some_and(crate::cli::serve::serve_launch_matches)
+    }
+
+    fn confirm(&self) -> Result<bool> {
+        eprint!("Restart the daemon now? [y/N] ");
+        std::io::stderr().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
+    }
+
+    async fn restart(&self) -> Result<()> {
+        eprintln!("Restarting the daemon...");
+        crate::cli::serve::restart_daemon_with_receipt(None, false)
+            .await
+            .map(|_| ())
+    }
+}
+
+/// Settle a startup migration `outcome`. A blocking daemon is restarted when
+/// the user agrees, then `retry` runs; any other outcome, or a declined offer,
+/// is returned unchanged.
+pub(crate) async fn resolve_blocked_migration(
+    outcome: Result<()>,
+    interactive: bool,
+    daemon: &impl RestartPrompt,
+    retry: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let Err(error) = outcome else {
+        return Ok(());
+    };
+    if !error.is::<crate::migrations::DaemonBlocksMigration>()
+        || !offer_allowed(interactive, daemon.managed())
+        || !daemon.confirm()?
+    {
+        return Err(error);
+    }
+    daemon.restart().await?;
+    retry()
+}
+
+fn offer_allowed(interactive: bool, managed: bool) -> bool {
+    let autostart_disabled = crate::acp::client::daemon_manager::autostart_disabled();
+    let remote = crate::acp::client::discovery::discover_env().is_some();
+    should_offer_restart(interactive, autostart_disabled, remote, managed)
+}
+
+fn should_offer_restart(
+    interactive: bool,
+    autostart_disabled: bool,
+    remote: bool,
+    managed: bool,
+) -> bool {
+    interactive && !autostart_disabled && !remote && managed
+}
+
 const QUIET_FOR: Duration = Duration::from_millis(1500);
 
 const FALLBACK_WIDTH: usize = 80;
@@ -106,40 +183,222 @@ fn stderr_reporter_with_size(tty: bool, size: fn() -> Option<(u16, u16)>) -> Rep
     })
 }
 
-fn refuse_while_daemon_runs(status: DaemonStatus) -> Result<()> {
-    if let DaemonStatus::Verified(pid) = status {
-        bail!(
-            "aoe serve daemon is running (PID {pid}); migrations must not run alongside it.\n\n  \
-             Stop it with `aoe serve --stop`, then run `aoe migrate` again."
-        );
-    }
-    Ok(())
+#[derive(Debug, Default, clap::Args)]
+#[command(group(clap::ArgGroup::new("recovery_source").args(["restore_purge_journal", "restore_tool_journal"]).multiple(false)))]
+pub struct MigrateArgs {
+    /// Restore a complete original purge journal from a consistent application backup.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with = "restore_tool_journal",
+        requires = "confirm_complete_original_authority"
+    )]
+    pub restore_purge_journal: Option<std::path::PathBuf>,
+    /// Restore complete original tool retirement receipts from a consistent application backup.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with = "restore_purge_journal",
+        requires = "confirm_complete_original_authority"
+    )]
+    pub restore_tool_journal: Option<std::path::PathBuf>,
+    /// Attest that FILE contains all original authority, not a stale or partial copy.
+    #[arg(long, requires = "recovery_source")]
+    pub confirm_complete_original_authority: bool,
 }
 
-pub fn run() -> Result<()> {
+fn refuse_while_daemon_runs(status: DaemonStatus) -> Result<()> {
+    match status {
+        DaemonStatus::Absent => Ok(()),
+        DaemonStatus::Verified(pid) => bail!("aoe serve daemon is running (PID {pid}); stop it with `aoe serve --stop` before running aoe migrate"),
+        DaemonStatus::Unverified => bail!("Cannot verify the existing daemon; migration and recovery refused"),
+    }
+}
+
+pub async fn run(args: &MigrateArgs) -> Result<()> {
     refuse_while_daemon_runs(daemon_status())?;
-    // The status check can go stale; the lock keeps a daemon from starting mid-migration.
-    let Some(_serve_lock) = try_lock_serve()? else {
-        bail!("an aoe serve daemon is starting; retry `aoe migrate` once it is up and stopped");
+    let transaction = crate::daemon::lifecycle::Transaction::acquire().await?;
+    let Some(serve_lock) = try_lock_serve()? else {
+        bail!("an aoe serve daemon is starting; retry `aoe migrate` once it is stopped");
     };
+    crate::migrations::ensure_schema_supported()?;
+    if let Some(source) = &args.restore_purge_journal {
+        anyhow::ensure!(
+            args.confirm_complete_original_authority,
+            "Explicit complete original authority confirmation is required"
+        );
+        crate::cli::serve::with_inactive_serve_state(&transaction, Some(&serve_lock), |serve| {
+            crate::session::purge_owners::restore_from_complete_backup(source, &transaction, serve)
+        })?;
+        eprintln!(
+            "{PREFIX}restored complete original purge authority; no cleanup effects were run"
+        );
+        return Ok(());
+    }
+    if let Some(source) = &args.restore_tool_journal {
+        anyhow::ensure!(
+            args.confirm_complete_original_authority,
+            "Explicit complete original authority confirmation is required"
+        );
+        crate::cli::serve::with_inactive_serve_state(&transaction, Some(&serve_lock), |serve| {
+            crate::tmux::tool_retirement::restore_from_complete_backup(source, &transaction, serve)
+        })?;
+        eprintln!("{PREFIX}restored complete original tool retirement authority; no process effects were run");
+        return Ok(());
+    }
     if !crate::migrations::has_pending_migrations() {
         eprintln!("{PREFIX}data schema is current; retrying any deferred migration work");
     }
-    crate::migrations::run_migrations_announced(Some(stderr_reporter()))?;
+    crate::migrations::run_migrations_under_exclusion(
+        Some(stderr_reporter()),
+        true,
+        &transaction,
+        &serve_lock,
+    )?;
     if std::io::stderr().is_terminal() {
         eprint!("\r\x1b[2K");
     }
     match crate::migrations::v027_isolate_sandbox_stores::sessions_on_shared_store()? {
         0 => eprintln!("{PREFIX}migrations complete"),
-        left => eprintln!(
-            "{PREFIX}migrations complete, except {left} sandboxed session(s) still on a shared agent store"
-        ),
+        left => eprintln!("{PREFIX}migrations complete, except {left} sandboxed session(s) still on a shared agent store"),
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::RestartPrompt;
+    use crate::migrations::DaemonBlocksMigration;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    struct FakeDaemon {
+        confirmed: bool,
+        restarts: Cell<u32>,
+    }
+
+    impl FakeDaemon {
+        fn new(confirmed: bool) -> Self {
+            Self {
+                confirmed,
+                restarts: Cell::new(0),
+            }
+        }
+    }
+
+    impl RestartPrompt for FakeDaemon {
+        fn managed(&self) -> bool {
+            true
+        }
+        fn confirm(&self) -> anyhow::Result<bool> {
+            Ok(self.confirmed)
+        }
+        async fn restart(&self) -> anyhow::Result<()> {
+            self.restarts.set(self.restarts.get() + 1);
+            Ok(())
+        }
+    }
+
+    fn blocked() -> anyhow::Result<()> {
+        Err(DaemonBlocksMigration("blocked").into())
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn blocked_migration_restarts_then_retries_only_when_offered_and_confirmed() {
+        // SAFETY: serialized; no other thread reads this variable meanwhile.
+        unsafe { std::env::remove_var("AOE_DAEMON_URL") };
+        // (outcome, interactive, confirmed, restarts, retries, succeeds)
+        let cases: [(anyhow::Result<()>, bool, bool, u32, u32, bool); 5] = [
+            (blocked(), true, true, 1, 1, true),
+            (blocked(), true, false, 0, 0, false),
+            (blocked(), false, true, 0, 0, false),
+            (Err(anyhow::anyhow!("boom")), true, true, 0, 0, false),
+            (Ok(()), true, true, 0, 0, true),
+        ];
+        for (outcome, interactive, confirmed, restarts, retries, succeeds) in cases {
+            let daemon = FakeDaemon::new(confirmed);
+            let retried = Cell::new(0);
+            let result = super::resolve_blocked_migration(outcome, interactive, &daemon, || {
+                retried.set(retried.get() + 1);
+                Ok(())
+            })
+            .await;
+            assert_eq!(result.is_ok(), succeeds);
+            assert_eq!((daemon.restarts.get(), retried.get()), (restarts, retries));
+        }
+    }
+
+    /// Drives the plain-TUI startup path with a migration the daemon blocks until restarted.
+    async fn tui_startup(daemon: &FakeDaemon) -> (anyhow::Result<()>, u32) {
+        let runs = std::sync::Arc::new(AtomicU32::new(0));
+        let counted = runs.clone();
+        let result = crate::tui::migrate_for_startup(
+            move |_| {
+                if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                    blocked()
+                } else {
+                    Ok(())
+                }
+            },
+            true,
+            daemon,
+        )
+        .await;
+        (result, runs.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn plain_tui_startup_restarts_and_retries_for_a_local_daemon() {
+        // SAFETY: serialized; no other thread reads this variable meanwhile.
+        unsafe { std::env::remove_var("AOE_DAEMON_URL") };
+        let daemon = FakeDaemon::new(true);
+        let (result, runs) = tui_startup(&daemon).await;
+        assert!(result.is_ok());
+        assert_eq!((daemon.restarts.get(), runs), (1, 2));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_explicit_remote_target_never_restarts_the_local_daemon() {
+        // Both forms of the target: the env var and the `--daemon-url` flag adapter.
+        for flag in [false, true] {
+            // SAFETY: serialized; no other thread reads this variable meanwhile.
+            unsafe {
+                std::env::remove_var("AOE_DAEMON_URL");
+                if flag {
+                    crate::acp::client::discovery::export_daemon_url("https://remote.example");
+                } else {
+                    std::env::set_var("AOE_DAEMON_URL", "https://remote.example");
+                }
+            }
+            let daemon = FakeDaemon::new(true);
+            let (result, runs) = tui_startup(&daemon).await;
+            unsafe { std::env::remove_var("AOE_DAEMON_URL") };
+            assert!(result.unwrap_err().is::<DaemonBlocksMigration>());
+            assert_eq!((daemon.restarts.get(), runs), (0, 1), "flag={flag}");
+        }
+    }
+
+    #[test]
+    fn restart_is_offered_only_to_a_person_with_a_local_managed_daemon() {
+        use super::should_offer_restart;
+        for (interactive, autostart_disabled, remote, managed, offered) in [
+            (true, false, false, true, true),
+            (false, false, false, true, false),
+            (true, true, false, true, false),
+            (true, false, true, true, false),
+            (true, false, false, false, false),
+        ] {
+            assert_eq!(
+                should_offer_restart(interactive, autostart_disabled, remote, managed),
+                offered,
+                "{interactive} {autostart_disabled} {remote} {managed}"
+            );
+        }
+    }
+
     use super::*;
 
     fn started() -> Event {
@@ -152,12 +411,13 @@ mod tests {
     }
 
     #[test]
-    fn only_a_verified_daemon_blocks_migrate() {
+    fn live_and_ambiguous_daemon_identities_block_migrate() {
         assert!(refuse_while_daemon_runs(DaemonStatus::Absent).is_ok());
-        assert!(refuse_while_daemon_runs(DaemonStatus::Unverified).is_ok());
-        let err = refuse_while_daemon_runs(DaemonStatus::Verified(4242)).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("PID 4242") && msg.contains("aoe serve --stop"));
+        assert!(refuse_while_daemon_runs(DaemonStatus::Unverified).is_err());
+        let error = refuse_while_daemon_runs(DaemonStatus::Verified(4242))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("PID 4242") && error.contains("aoe serve --stop"));
     }
 
     #[test]

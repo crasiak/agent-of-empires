@@ -15,8 +15,14 @@ fn run_in(root: &Path) -> Result<()> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
-        let mut rows: Vec<Value> = serde_json::from_slice(&content)
-            .with_context(|| format!("reading {} for work arc migration", path.display()))?;
+        // A damaged registry has no rows to migrate; keep its bytes for recovery.
+        let mut rows: Vec<Value> = match serde_json::from_slice(&content) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "Skipping unreadable registry for work arc migration");
+                continue;
+            }
+        };
         let mut changed = false;
         for row in &mut rows {
             let state = match row.get("work_arc") {

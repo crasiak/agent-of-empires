@@ -134,7 +134,7 @@ fn fold_turns(events: &[(u64, Event)], before_seq: Option<u64>) -> Folded {
                 }));
                 ended_non_success = false;
             }
-            Event::AgentMessageChunk { text } => current
+            Event::AgentMessageChunk { text, .. } => current
                 .get_or_insert_with(Turn::default)
                 .assistant_text
                 .push_str(text),
@@ -529,6 +529,7 @@ mod tests {
                 destructive: false,
                 options: Vec::new(),
                 choice: false,
+                plan: None,
                 requested_at: Utc::now(),
                 resolved: None,
             },
@@ -536,6 +537,10 @@ mod tests {
         let p = primer(vec![
             user("build a CLI to do X"),
             Event::ThinkingStarted,
+            Event::AgentThoughtChunk {
+                text: "PRIVATE-THOUGHT".into(),
+                message_id: None,
+            },
             assistant("Here is a Rust skeleton..."),
             Event::ThinkingEnded,
             approval,
@@ -550,7 +555,11 @@ mod tests {
         ] {
             assert!(p.text.contains(want), "missing {want:?}");
         }
-        assert!(!p.text.contains("Thinking") && !p.text.contains("Approval"));
+        assert!(
+            !p.text.contains("Thinking")
+                && !p.text.contains("PRIVATE-THOUGHT")
+                && !p.text.contains("Approval")
+        );
         assert_eq!(
             (p.included_turn_count, p.included_event_count, p.truncated),
             (1, 3, false)

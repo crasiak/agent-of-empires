@@ -1,6 +1,7 @@
 //! History visibility is UI state, never a Session lifecycle mutation.
 
 use super::*;
+use crate::server::api::find_instance;
 use crate::session::tailored::history;
 
 #[derive(Serialize)]
@@ -38,7 +39,7 @@ pub async fn list_tailored_sessions(
         .filter_map(|instance| {
             history::entry(instance, &hidden).map(|entry| HistorySession {
                 entry,
-                session: Some(SessionResponse::from_instance(instance, fullscreen)),
+                session: Some(super::session_response_from_instance(instance, fullscreen)),
                 research: None,
                 workshop: None,
             })
@@ -192,10 +193,13 @@ mod tests {
             if !tailored {
                 instance.command = "pi".into();
             }
-            let mut state =
-                crate::server::test_support::build_test_app_state(vec![instance.clone()]);
-            Arc::get_mut(&mut state).unwrap().read_only = readonly;
-            Arc::get_mut(&mut state).unwrap().cityhall_mode = cityhall;
+            let state = crate::server::test_support::build_test_app_state_configured(
+                vec![instance.clone()],
+                |state| {
+                    state.read_only = readonly;
+                    state.cityhall_mode = cityhall;
+                },
+            );
             let response = update_tailored_visibility(
                 State(state.clone()),
                 Path(instance.id.clone()),

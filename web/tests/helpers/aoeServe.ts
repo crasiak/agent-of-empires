@@ -244,6 +244,8 @@ function processSnapshot(env: NodeJS.ProcessEnv): ProcessSnapshot[] {
   const result = spawnSync("ps", ["-ww", "-axo", "pid=,ppid=,pgid=,stat=,args="], {
     env: { ...env, LC_ALL: "C" },
     encoding: "utf8",
+    // Full command lines can exceed Node's default 1 MiB on busy hosts.
+    maxBuffer: Infinity,
     timeout: 2000,
   });
   if (result.status !== 0) throw new Error(`cannot inspect fixture processes: ${result.error ?? result.stderr}`);
@@ -305,7 +307,7 @@ async function stopOrphanRunners(appDir: string, binary: string, env: NodeJS.Pro
     if (
       runner.group !== pid ||
       !runner.command.startsWith(prefix) ||
-      !runner.command.split(" -- ")[0].endsWith(` --generation ${generation}`)
+      runner.command.split(" -- ")[0].match(/ --generation ([0-9]+)(?= |$)/)?.[1] !== generation
     ) {
       throw new Error(`runner ${pid} no longer matches ${name}; retaining ${appDir}`);
     }
@@ -467,6 +469,13 @@ function writeFakeClaudeShim(binDir: string): void {
   for (const name of ["claude", "codex", "gemini", "opencode"]) {
     const path = join(binDir, name);
     writeFileSync(path, script);
+    chmodSync(path, 0o755);
+  }
+  // A structured create refuses an adapter it can't find. These exit at once, so the
+  // create passes and its spawn fails fast with nothing left running.
+  for (const name of ["claude-agent-acp", "codex-acp"]) {
+    const path = join(binDir, name);
+    writeFileSync(path, "#!/bin/sh\nexit 1\n");
     chmodSync(path, 0o755);
   }
 }
@@ -676,6 +685,16 @@ export async function spawnAoeServe(opts: SpawnOptions): Promise<ServeHandle> {
   let proc: ChildProcess | null = null;
   let port = 0;
   let baseUrl = "";
+  let seedDaemonOwned = opts.seedFn !== undefined;
+
+  function stopSeedDaemon(): void {
+    const stop = spawnSync(aoeBinary, ["serve", "--stop"], { env: seedEnv, encoding: "utf8" });
+    if (stop.error) throw stop.error;
+    if (stop.status !== 0 && !stop.stderr.includes("No running daemon found")) {
+      throw new Error(`aoe serve --stop failed: ${stop.stderr}`);
+    }
+    seedDaemonOwned = false;
+  }
 
   async function killProc(child: ChildProcess): Promise<void> {
     if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) {
@@ -697,6 +716,13 @@ export async function spawnAoeServe(opts: SpawnOptions): Promise<ServeHandle> {
 
   async function cleanup(): Promise<void> {
     const errors: unknown[] = [];
+    if (seedDaemonOwned) {
+      try {
+        stopSeedDaemon();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
     // Stop the daemon before its runners, so reconciliation cannot respawn them.
     for (const child of pendingChildren) {
       try {
@@ -723,6 +749,7 @@ export async function spawnAoeServe(opts: SpawnOptions): Promise<ServeHandle> {
 
   try {
     if (opts.seedFn) await opts.seedFn({ home, shimBin, xdg, tmp, tmuxTmp, env: seedEnv });
+    if (seedDaemonOwned) stopSeedDaemon();
     for (let attempt = 0; attempt < 5; attempt++) {
       port = portFor(opts.workerIndex, opts.parallelIndex, attempt);
       baseUrl = `http://127.0.0.1:${port}`;

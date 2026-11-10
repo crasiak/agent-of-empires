@@ -1,14 +1,23 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { CreateProgress, CreateSessionRequest, ProjectOverrides, SessionResponse } from "../../lib/types";
+import type {
+  CreateFailure,
+  CreateProgress,
+  CreateSessionRequest,
+  SessionResponse,
+  CreationTrustFingerprint,
+  GroupInfo,
+} from "../../lib/types";
+import { setAgentNames } from "../../lib/agentDisplayName";
 import {
-  fetchAgents,
+  fetchProfileAgents,
   fetchGroups,
   fetchDockerStatus,
   fetchProfiles,
-  fetchProjectRegistry,
+  fetchProjects,
   fetchSettings,
   createSession,
+  reviewCreationTrust,
   fetchCreateBootId,
   fetchCreateProgress,
   fetchVolumeIgnoresPreview,
@@ -36,17 +45,21 @@ import {
   type PendingCreate,
 } from "../../lib/pendingCreates";
 import { hasFinePointer } from "../../lib/platform";
+import { useServerDown } from "../../lib/connectionState";
 import { ProjectStep } from "./steps/ProjectStep";
 import { ExtraReposPicker } from "./steps/ExtraReposPicker";
 import { AgentPanel } from "./steps/AgentPanel";
 import { WorktreePanel } from "./steps/WorktreePanel";
 import { SandboxPanel } from "./steps/SandboxPanel";
 import { ProfilePresetPicker } from "./steps/ProfilePresetPicker";
+import { GroupCombobox } from "./steps/GroupCombobox";
+import { CreateFailureBox } from "./CreateFailureBox";
+import { failureView, type FailureAction } from "./createFailureView";
 import { CreateProgressView } from "./CreateProgressView";
-import { FieldRow, NavRow, PanelHeader, ROW_INPUT, RowGroup, SwitchRow } from "./WizardRows";
+import { FieldRow, NavRow, PanelHeader, ROW_INPUT, RowGroup, SegmentedRow, SwitchRow } from "./WizardRows";
 import { LaunchFooter } from "./LaunchFooter";
-import { initialData, reducer, type WizardData } from "./wizardReducer";
-import { buildCreateRequest } from "./createRequest";
+import { agentsView, initialData, reducer, type WizardData } from "./wizardReducer";
+import { buildCreateRequest, launchEligible } from "./createRequest";
 import { commandMapsFromSettings, EMPTY_COMMAND_MAPS, type CommandMaps } from "./commandMaps";
 import { profileDefaults, type ProfileDefaults } from "./profileDefaults";
 
@@ -120,6 +133,10 @@ const NETWORK_RETRIES = 3;
 const MAX_RETRY_DELAY_MS = 30_000;
 const UNKNOWN_OUTCOME_ERROR =
   "Lost connection while creating. The session may still be created; Launch retries the same request.";
+const AGENTS_UNAVAILABLE_ERROR = "Couldn't load the agent list, so Yolo mode can't be shown yet. Retrying…";
+const profileMissingError = (profile: string) =>
+  `The profile "${profile}" no longer exists. Choose another profile to launch.`;
+
 const REGISTRY_UNRESOLVED_ERROR =
   "Could not load this project's settings, so its sandbox and worktree defaults are unknown. Select the project again to retry.";
 
@@ -155,44 +172,82 @@ function worktreeSummary(data: WizardData): string {
 
 const basename = (path: string) => path.replace(/\/+$/, "").split("/").pop() || path;
 
+/** A refused create and the form that sent it, to reopen the wizard on its failure box. */
+export interface WizardRestore {
+  data: WizardData;
+  failure: CreateFailure;
+}
+
 interface Props {
   onClose: () => void;
   onCreated: (session?: SessionResponse) => void;
   /** A create the user sent to the background finished; the wizard is already closed. */
   onCreatedInBackground?: (session?: SessionResponse) => void;
+  /** Reopens the wizard on a background create's failure, from its toast. */
+  onReopenFailure?: (restore: WizardRestore) => void;
+  /** Opens on this failure and form instead of the prefill and profile defaults. */
+  restore?: WizardRestore;
   prefill?: WizardPrefill;
+  /** Authority for implicit reads; the machine default is not the served profile. */
+  servedProfile?: string;
+  onRetryServedProfile?: () => Promise<void>;
   /** CityHall client mode: only a title is asked; the server derives the rest. */
   nameOnly?: boolean;
 }
 
-export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefill, nameOnly = false }: Props) {
+const NO_GROUPS: GroupInfo[] = [];
+
+export function SessionWizard({
+  onClose,
+  onCreated,
+  onCreatedInBackground,
+  onReopenFailure,
+  restore,
+  prefill,
+  servedProfile,
+  onRetryServedProfile,
+  nameOnly = false,
+}: Props) {
   const [state, dispatch] = useReducer(reducer, {
-    data: initialWizardData(prefill, nameOnly),
+    data: restore?.data ?? initialWizardData(prefill, nameOnly),
     isSubmitting: false,
     error: null,
+    failure: restore?.failure ?? null,
     agents: [],
+    agentsStatus: "loading",
+    agentsFor: null,
     groups: [],
+    groupsFor: null,
     profiles: [],
     dockerAvailable: false,
+    dockerRuntimeName: null,
     dockerChecked: false,
   });
 
   // No project yet is the TUI's focused Path field: open straight on the picker.
   const [panel, setPanel] = useState<Panel | null>(() =>
-    !nameOnly && (prefill?.initialTab || (!state.data.path && !state.data.scratch)) ? "project" : null,
+    !restore && !nameOnly && (prefill?.initialTab || (!state.data.path && !state.data.scratch)) ? "project" : null,
   );
+  // A Retry found the Container runtime still down after a sandbox_unavailable failure.
+  const [runtimeDown, setRuntimeDown] = useState(false);
+  const [rechecking, setRechecking] = useState(false);
+  const offline = useServerDown();
   const [progress, setProgress] = useState<CreateProgress | null>(null);
   const [progressKey, setProgressKey] = useState<string | null>(null);
   const [showProgress, setShowProgress] = useState(false);
   // A create whose response never arrived; Launch and reconnects retry it under its key.
   // Seeded from a create an earlier wizard left unresolved, so Launch retries it under its key.
-  const [unknownOutcome, setUnknownOutcome] = useState<PendingCreate | null>(peekPendingCreate);
+  // A wizard reopened from a failure resends its own form, never another create.
+  const [unknownOutcome, setUnknownOutcome] = useState<PendingCreate | null>(() =>
+    restore ? null : peekPendingCreate(),
+  );
   const unknownOutcomeRef = useRef(unknownOutcome);
   useEffect(() => {
     unknownOutcomeRef.current = unknownOutcome;
   }, [unknownOutcome]);
   // Set once the user leaves a create running, so its outcome is reported, not navigated to.
   const backgroundRef = useRef(false);
+  const unmountedRef = useRef(false);
   const { keyboardHeight } = useMobileKeyboard();
 
   // Launch-command preview maps, derived from the settings already fetched.
@@ -201,52 +256,132 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
   const [globConfirm, setGlobConfirm] = useState<{
     globs: VolumeIgnoresGlobPreview[];
     body: CreateSessionRequest;
+    sent: WizardData;
   } | null>(null);
   const [hooksTrust, setHooksTrust] = useState<{
     info: HooksNeedTrust;
     body: CreateSessionRequest;
     tool: string;
+    fingerprint: CreationTrustFingerprint;
+    mcpSummaries: string[];
+    sent?: WizardData;
   } | null>(null);
-  // A remembered path satisfies the submit gate at mount, so Launch waits for
-  // the defaults below rather than sending initialData's sandbox/worktree/yolo.
-  // Set on every outcome, so a failed fetch still leaves the form usable.
-  const [defaultsReady, setDefaultsReady] = useState(false);
-  // Counts profile switches so a late response for a superseded one is ignored.
+  const [defaultsProfile, setDefaultsProfile] = useState<string | null>(null);
+  const defaultsReady = defaultsProfile !== null && defaultsProfile === (state.data.profile || servedProfile);
+  const defaultsGeneration = useRef(0);
+  const selectedProfile = useRef<string | null>(null);
+  const resetImplicitDefaults = useRef(false);
   const profileSwitchRef = useRef(0);
   const [profileSwitching, setProfileSwitching] = useState(false);
-  // The selected project's overrides could not be loaded, so Launch would guess its sandbox and worktree defaults.
   const [registryUnresolved, setRegistryUnresolved] = useState(false);
-  // Bumped whenever a project or profile selection resolves its own overrides, so a slower earlier
-  // lookup that fails afterwards cannot mark the newer, known resolution as unresolved.
   const resolutionRef = useRef(0);
-  // The project whose overrides were last read successfully for the committed profile. A failed
-  // lookup only preserves a resolution that actually exists, and only for that same project.
   const knownResolutionRef = useRef<string | null>(null);
-  // The latest form data, for an async profile switch that commits after the user kept editing.
+  // Runtime checks can answer out of order; only the newest one sets the Sandbox row.
+  const dockerSeq = useRef(0);
   const dataRef = useRef(state.data);
   useEffect(() => {
     dataRef.current = state.data;
   }, [state.data]);
-  // Set where a switch commits, not on render, so a response arriving in the same tick already sees it.
-  const committedProfileRef = useRef(state.data.profile);
+  const [resolvingServedProfile, setResolvingServedProfile] = useState(
+    !servedProfile && !prefill?.profile && Boolean(onRetryServedProfile),
+  );
+  const retryServedProfile = useCallback(async () => {
+    if (!onRetryServedProfile) return;
+    setResolvingServedProfile(true);
+    try {
+      await onRetryServedProfile();
+    } finally {
+      setResolvingServedProfile(false);
+    }
+  }, [onRetryServedProfile]);
+  useEffect(() => {
+    if (servedProfile || prefill?.profile || !onRetryServedProfile) return;
+    let active = true;
+    void onRetryServedProfile().finally(() => {
+      if (active) setResolvingServedProfile(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [servedProfile, prefill?.profile, onRetryServedProfile]);
+
+  // Groups are per profile, so the list follows the selected one, or the served one, which can
+  // change while the Daemon runs. A list is shown only for the profile it was fetched for.
+  const groupsKey = state.data.profile || `served:${servedProfile ?? ""}`;
+  useEffect(() => {
+    let alive = true;
+    void fetchGroups({ profile: state.data.profile || undefined }).then((groups) => {
+      if (alive) dispatch({ type: "SET_GROUPS", groups, groupsFor: groupsKey });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [state.data.profile, groupsKey]);
+
+  // A custom agent's base comes from the profile the session is created in. Like Groups, a list
+  // is read only for the profile it was fetched for, so a switch never shows the last one as ready.
+  const agentsProfile = state.data.profile || servedProfile;
+  const agentsKey = agentsProfile ?? "";
+  const { agents, agentsStatus } = useMemo(() => agentsView(state, agentsKey), [state, agentsKey]);
+  useEffect(() => {
+    let alive = true;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const load = (attempt: number) =>
+      void fetchProfileAgents(agentsProfile || undefined).then((list) => {
+        if (!alive) return;
+        if (Array.isArray(list)) {
+          // The app-wide names describe the served profile, not the one being created in.
+          if (agentsProfile === servedProfile) setAgentNames(list);
+          return dispatch({ type: "SET_AGENTS", agents: list, agentsFor: agentsKey });
+        }
+        const missing = list === "profile_not_found";
+        dispatch({ type: "AGENTS_FAILED", agentsFor: agentsKey, missing });
+        if (!missing) retry = setTimeout(() => load(attempt + 1), Math.min(1000 * 2 ** attempt, 15000));
+      });
+    load(0);
+    return () => {
+      alive = false;
+      clearTimeout(retry);
+    };
+  }, [agentsProfile, agentsKey, servedProfile]);
 
   useEffect(() => {
-    fetchAgents().then((a) => dispatch({ type: "SET_AGENTS", agents: a }));
-    fetchGroups().then((g) => dispatch({ type: "SET_GROUPS", groups: g }));
-    // A sandboxed launch waits on this; see the defaultsReady prop on LaunchFooter.
-    fetchDockerStatus()
-      .then((d) => dispatch({ type: "SET_DOCKER", available: d.available }))
-      .catch(() => dispatch({ type: "SET_DOCKER", available: false }));
-    // A remembered or prefilled path is never selected in ProjectStep, so seed its override here.
+    const generations = defaultsGeneration;
+    const switches = profileSwitchRef;
+    const seq = ++dockerSeq.current;
+    fetchDockerStatus().then((d) => {
+      if (seq !== dockerSeq.current) return;
+      dispatch({ type: "SET_DOCKER", available: d.available, runtimeName: d.runtime_name ?? null });
+    });
+    fetchProfiles()
+      .then((profiles) => dispatch({ type: "SET_PROFILES", profiles }))
+      .catch(() => {});
+    return () => {
+      generations.current++;
+      switches.current++;
+    };
+  }, []);
+
+  useEffect(() => {
+    const generations = defaultsGeneration;
+    if (selectedProfile.current !== null) return;
+    const effectiveProfile = state.data.profile || servedProfile;
+    if (!effectiveProfile) return;
+    const generation = ++generations.current;
     const initialPath = state.data.path;
-    const initialProfile = state.data.profile;
     const initialResolution = resolutionRef.current;
-    const projectSeed = initialPath
-      ? fetchProjectRegistry(undefined, initialProfile || undefined)
-          .then((projects) => {
-            // The profile only changes when a switch commits, and a committed one owns the overrides now.
-            // A failed or pending switch leaves this profile current, so its answer still applies.
-            if (committedProfileRef.current !== initialProfile) return;
+    const resetDefaults = resetImplicitDefaults.current;
+    const projectSeed =
+      initialPath && !restore && !state.data.scratch && !state.data.importAcpSessionId
+        ? fetchProjects({ profile: effectiveProfile }).then((projects) => {
+            if (generation !== generations.current) return;
+            const current = dataRef.current;
+            if (
+              current.importAcpSessionId ||
+              current.scratch ||
+              normalizeProjectPathKey(current.path) !== normalizeProjectPathKey(initialPath)
+            )
+              return;
             if (!projects) {
               if (resolutionRef.current === initialResolution) setRegistryUnresolved(true);
               return;
@@ -255,45 +390,39 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
             if (overrides?.worktree_enabled !== undefined || overrides?.sandbox_enabled !== undefined) {
               dispatch({ type: "SEED_PROJECT_OVERRIDES", overrides, path: initialPath });
             }
-            // Still the selected project: its settings are known now, even if a picker lookup failed meanwhile.
-            if (normalizeProjectPathKey(dataRef.current.path) === normalizeProjectPathKey(initialPath)) {
-              knownResolutionRef.current = normalizeProjectPathKey(initialPath);
-              setRegistryUnresolved(false);
-            }
+            knownResolutionRef.current = normalizeProjectPathKey(initialPath);
+            setRegistryUnresolved(false);
           })
-          .catch(() => {})
-      : Promise.resolve();
-    // Seed resolved profile defaults: the profile picker is hidden for single-profile users.
-    const settingsSeed = fetchProfiles()
-      // A failed profiles fetch must not skip settings: an explicit prefill
-      // profile, or the unresolved global config, still applies.
-      .catch(() => [] as Awaited<ReturnType<typeof fetchProfiles>>)
-      .then((p) => {
-        dispatch({ type: "SET_PROFILES", profiles: p });
-        const effectiveProfile = prefill?.profile || p.find((x) => x.is_default)?.name || "";
-        return fetchSettings(effectiveProfile || undefined);
-      })
-      .then((s) => {
-        // A committed switch owns the settings now; applying these late would overwrite its defaults.
-        if (!s || committedProfileRef.current !== initialProfile) return;
-        setCommandMaps(commandMapsFromSettings(s));
-        const img = typeof s.sandbox?.default_image === "string" ? s.sandbox.default_image : "";
-        if (img) dispatch({ type: "SET_FIELD", field: "sandboxImage", value: img });
-        const defaults = profileDefaults(s, prefill?.tool ?? "", state.data.tool);
+        : Promise.resolve();
+    void Promise.all([fetchSettings(effectiveProfile), projectSeed])
+      .then(([settings]) => {
+        if (generation !== generations.current || !settings) return;
+        setCommandMaps(commandMapsFromSettings(settings));
+        // A restored form already holds what was sent.
+        if (restore) return;
+        const image = settings.sandbox?.default_image;
+        if (typeof image === "string" && image) dispatch({ type: "SET_FIELD", field: "sandboxImage", value: image });
+        const defaults = profileDefaults(settings, prefill?.tool ?? "", dataRef.current.tool);
         dispatch({
           type: "APPLY_PROFILE_DEFAULTS",
           ...defaults,
-          // Explicit prefill values win over the profile.
-          yoloMode: prefill?.yoloMode ?? defaults.yoloMode,
-          sandboxEnabled: prefill?.sandboxEnabled ?? defaults.sandboxEnabled,
-          skipIfDirty: true,
+          yoloMode: resetDefaults ? defaults.yoloMode : (prefill?.yoloMode ?? defaults.yoloMode),
+          sandboxEnabled: resetDefaults
+            ? defaults.sandboxEnabled
+            : (prefill?.sandboxEnabled ?? defaults.sandboxEnabled),
+          skipIfDirty: !resetDefaults,
         });
+        resetImplicitDefaults.current = false;
       })
-      .catch(() => {});
-    void Promise.all([settingsSeed, projectSeed]).then(() => setDefaultsReady(true));
-    // Seed once; a re-render with a new prefill object must not stomp user edits.
+      .catch(() => {})
+      .finally(() => {
+        if (generation === generations.current) setDefaultsProfile(effectiveProfile);
+      });
+    return () => {
+      if (generation === generations.current) generations.current++;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [servedProfile]);
 
   // Only a definitive probe answer applies; a failed probe (null) keeps the optimistic default.
   const probePath = state.data.scratch ? "" : state.data.path;
@@ -310,7 +439,9 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
     };
   }, [probePath]);
 
+  const directEdits = useRef({ sandboxEnabled: 0, useWorktree: 0 });
   const handleChange = useCallback((field: string, value: unknown) => {
+    if (field === "sandboxEnabled" || field === "useWorktree") directEdits.current[field]++;
     dispatch({ type: "SET_FIELD", field, value });
   }, []);
 
@@ -334,146 +465,233 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
       clearTimeout(delay);
       clearInterval(poll);
       setShowProgress(false);
-      setProgress(null);
     };
   }, [progressKey]);
 
   const handleProfileChange = async (profileName: string) => {
     const d = state.data;
-    // A hand-set view is not in `profileDirty`, but the profile's view default would replace it.
-    if ((d.profileDirty || d.structuredViewDirty) && profileName) {
-      const ok = window.confirm("Selecting a profile will reset your settings to that profile's defaults. Continue?");
-      if (!ok) return;
+    if (d.profileDirty || d.structuredViewDirty) {
+      if (!window.confirm("Selecting a profile will reset your settings to that profile's defaults. Continue?")) return;
     }
     setPanel(null);
-    if (profileName) dispatch({ type: "RESET_STRUCTURED_VIEW_DIRTY" });
+    const editsAtSelection = { ...directEdits.current };
+    dispatch({ type: "RESET_STRUCTURED_VIEW_DIRTY" });
     // Launch waits for this switch, and a response for a superseded profile is dropped.
     const switchId = ++profileSwitchRef.current;
     const isCurrent = () => profileSwitchRef.current === switchId;
+    const effectiveProfile = profileName || servedProfile;
+    if (!effectiveProfile) {
+      selectedProfile.current = null;
+      resetImplicitDefaults.current = true;
+      handleChange("profile", "");
+      setDefaultsProfile(null);
+      await retryServedProfile();
+      return;
+    }
     setProfileSwitching(true);
     try {
-      // The profile, its defaults and the selected project's per-profile overrides commit together once all
-      // of them are known, so a failed or superseded switch leaves the last complete state untouched. The
-      // whole registry is read, because the project can change while this is pending.
       const [projects, settings] = await Promise.all([
-        fetchProjectRegistry(undefined, profileName || undefined),
-        profileName ? fetchSettings(profileName).catch(() => null) : Promise.resolve(null),
+        fetchProjects({ profile: effectiveProfile }),
+        fetchSettings(effectiveProfile).catch(() => null),
       ]);
       if (!isCurrent()) return;
       const latest = dataRef.current;
-      let seed: { overrides: ProjectOverrides | undefined; path: string } | null = null;
-      if (latest.path && !latest.scratch) {
-        if (!projects) {
-          dispatch({
-            type: "SUBMIT_ERROR",
-            error: `Could not load project settings for profile ${profileName || "default"}. The profile was not changed.`,
-          });
-          return;
-        }
-        seed = { overrides: overridesForPath(projects, latest.path), path: latest.path };
+      const needsProject = latest.path && !latest.scratch && !latest.importAcpSessionId;
+      if (needsProject && !projects) {
+        dispatch({
+          type: "SUBMIT_ERROR",
+          error: "Could not load project settings for profile " + effectiveProfile + ". The profile was not changed.",
+        });
+        return;
       }
-      committedProfileRef.current = profileName;
+      defaultsGeneration.current++;
+      selectedProfile.current = profileName || null;
+      resetImplicitDefaults.current = false;
       handleChange("profile", profileName);
-      knownResolutionRef.current = seed ? normalizeProjectPathKey(seed.path) : null;
-      if (seed) {
-        resolutionRef.current += 1;
-        dispatch({ type: "SEED_PROJECT_OVERRIDES", ...seed });
-        setRegistryUnresolved(false);
-      }
+      knownResolutionRef.current = needsProject ? normalizeProjectPathKey(latest.path) : null;
+      resolutionRef.current++;
+      if (needsProject && projects)
+        dispatch({
+          type: "SEED_PROJECT_OVERRIDES",
+          overrides: overridesForPath(projects, latest.path),
+          path: latest.path,
+        });
+      setRegistryUnresolved(false);
       if (settings) {
         handleApplyProfileDefaults({
           ...profileDefaults(settings, "", latest.tool),
           commandMaps: commandMapsFromSettings(settings),
         });
+        // The confirmation resets earlier edits, not choices made while this read was pending.
+        for (const field of ["sandboxEnabled", "useWorktree"] as const) {
+          if (directEdits.current[field] !== editsAtSelection[field]) {
+            dispatch({ type: "SET_FIELD", field, value: latest[field] });
+          }
+        }
       }
+      setDefaultsProfile(effectiveProfile);
     } finally {
       if (isCurrent()) setProfileSwitching(false);
     }
   };
 
+  /** Reviews the repository's hooks for a create, showing the trust dialog when it asks
+   *  for one, and returns the body to send when the review asks for no trust at all. */
+  const openHooksTrust = async (
+    body: CreateSessionRequest,
+    tool: string,
+    sent?: WizardData,
+  ): Promise<CreateSessionRequest | null> => {
+    const review = await reviewCreationTrust({
+      path: body.path,
+      profile: body.profile,
+      scratch: body.scratch,
+    });
+    if (!review.ok) {
+      dispatch({ type: "SUBMIT_ERROR", error: review.error });
+      return null;
+    }
+    if (!review.review.hooks_need_trust && !review.review.mcp_need_trust) {
+      return { ...body, trust_hooks: undefined, trust_review: undefined };
+    }
+    setHooksTrust({
+      info: {
+        onCreate: review.review.merged_hooks.on_create ?? [],
+        onLaunch: review.review.merged_hooks.on_launch ?? [],
+        onDestroy: review.review.merged_hooks.on_destroy ?? [],
+        needsMcpTrust: review.review.mcp_need_trust,
+      },
+      body,
+      tool,
+      fingerprint: review.review.fingerprint,
+      mcpSummaries: review.review.mcp_summaries,
+      sent,
+    });
+    return null;
+  };
+
   // `resume` continues a create whose first send already went out: every send is then
   // a retry naming the daemon run that took the first one.
-  const runCreate = async (body: CreateSessionRequest, tool: string, resume?: PendingCreate) => {
-    setUnknownOutcome(null);
-    setProgressKey(body.idempotency_key ?? null);
-    const key = body.idempotency_key;
-    const since = resume?.since ?? Date.now();
-    // Checked before every send, the first included, since a resumed request can be old
-    // and the waits below are unbounded: past the replay window, stop without sending.
-    const expired = () => !!key && isPendingCreateExpired(since);
-    const giveUp = () => {
-      if (key) resolvePendingCreate(key);
-      setProgressKey(null);
-      if (backgroundRef.current) {
-        toastBus.handler?.error(PENDING_CREATE_EXPIRED_MESSAGE);
-      } else {
-        dispatch({ type: "SUBMIT_ERROR", error: PENDING_CREATE_EXPIRED_MESSAGE });
-      }
-    };
-    if (expired()) return giveUp();
-    const origin = resume ? resume.origin : key ? await fetchCreateBootId() : null;
-    const pending: PendingCreate | null = key ? { body: { ...body, idempotency_key: key }, tool, since, origin } : null;
-    // Recorded before the request goes out, so a reload mid-flight still has the key.
-    if (pending) registerPendingCreate(pending, { claimed: true });
-    const send = (retry: boolean) => createSession(pending && retry ? retryBody(pending) : body);
-    let result = await send(!!resume);
-    for (let attempt = 0; result.network && pending && attempt < NETWORK_RETRIES; attempt++) {
-      await waitUntilOnline();
-      await waitUntilVisible();
-      await new Promise((r) => setTimeout(r, Math.min(1000 * (attempt + 1), MAX_RETRY_DELAY_MS)));
+  /** `sent` is the form `body` came from; an adopted create has none, so it can't be reopened. */
+  const runCreate = async (body: CreateSessionRequest, tool: string, resume?: PendingCreate, sent?: WizardData) => {
+    // The last snapshot outlives the request: a failed hook's output tail comes from it.
+    setProgress(null);
+    // A create can be sent twice: once, then again after a review that asks for no trust.
+    for (let resend = 0; ; resend++) {
+      setUnknownOutcome(null);
+      setProgressKey(body.idempotency_key ?? null);
+      const key = body.idempotency_key;
+      const since = resume?.since ?? Date.now();
+      // Checked before every send, the first included, since a resumed request can be old
+      // and the waits below are unbounded: past the replay window, stop without sending.
+      const expired = () => !!key && isPendingCreateExpired(since);
+      const giveUp = () => {
+        if (key) resolvePendingCreate(key);
+        setProgressKey(null);
+        if (backgroundRef.current) {
+          toastBus.handler?.error(PENDING_CREATE_EXPIRED_MESSAGE);
+        } else {
+          dispatch({ type: "SUBMIT_ERROR", error: PENDING_CREATE_EXPIRED_MESSAGE });
+        }
+      };
       if (expired()) return giveUp();
-      result = await send(true);
-    }
-    setProgressKey(null);
-    const background = backgroundRef.current;
-    // No answer is not a refusal: the detached server create may still finish, so
-    // keep the key and reconcile under it rather than report a failure.
-    if (result.network && pending) {
-      if (background) {
-        // The wizard is gone, so the app-level owner keeps retrying under this key.
-        releasePendingCreate(pending.body.idempotency_key);
+      const origin = resume ? resume.origin : key ? await fetchCreateBootId() : null;
+      const pending: PendingCreate | null = key
+        ? { body: { ...body, idempotency_key: key }, tool, since, origin }
+        : null;
+      // Recorded before the request goes out, so a reload mid-flight still has the key.
+      if (pending) registerPendingCreate(pending, { claimed: true });
+      const send = (retry: boolean) => createSession(pending && retry ? retryBody(pending) : body);
+      let result = await send(!!resume);
+      for (let attempt = 0; result.network && pending && attempt < NETWORK_RETRIES; attempt++) {
+        await waitUntilOnline();
+        await waitUntilVisible();
+        await new Promise((r) => setTimeout(r, Math.min(1000 * (attempt + 1), MAX_RETRY_DELAY_MS)));
+        if (expired()) return giveUp();
+        result = await send(true);
+      }
+      setProgressKey(null);
+      const background = backgroundRef.current;
+      // No answer is not a refusal: the detached server create may still finish, so
+      // keep the key and reconcile under it rather than report a failure.
+      if (result.network && pending) {
+        if (background) {
+          // The wizard is gone, so the app-level owner keeps retrying under this key.
+          releasePendingCreate(pending.body.idempotency_key);
+        } else {
+          setUnknownOutcome(pending);
+          dispatch({ type: "SUBMIT_ERROR", error: UNKNOWN_OUTCOME_ERROR });
+        }
+        return;
+      }
+      if (key) resolvePendingCreate(key);
+      if (result.outcomeUnknown) {
+        // The server restarted and cannot say whether the first attempt ran; retrying could
+        // run it twice, so this is where it stops.
+        if (background) toastBus.handler?.error(result.error ?? "Unknown outcome");
+        else dispatch({ type: "SUBMIT_ERROR", error: result.error ?? "Unknown outcome" });
+        return;
+      }
+      if (result.ok) {
+        dispatch({ type: "SUBMIT_SUCCESS" });
+        if (ACP_CAPABLE_TOOLS.has(tool)) safeSetItem(LAST_USED_TOOL_KEY, tool);
+        safeSetItem(LAST_USED_INSTRUCTION_KEY, body.custom_instruction ?? "");
+        if (body.path.startsWith("/")) safeSetItem(LAST_USED_PROJECT_KEY, body.path);
+        for (const w of result.session?.warnings ?? []) toastBus.handler?.error(w);
+        if (background) onCreatedInBackground?.(result.session);
+        else onCreated(result.session);
+      } else if (background) {
+        const failure = result.failure;
+        if (failure && onReopenFailure && sent) {
+          const restored = { data: sent, failure };
+          const { title } = failureView(failure, { sandboxEnabled: restored.data.sandboxEnabled, runtimeDown: false });
+          const reference = failure.reference ? ` Reference ${failure.reference.slice(0, 8)}… · in debug.log` : "";
+          toastBus.handler?.action(`Session was not created: ${title}.${reference}`, "Reopen", () =>
+            onReopenFailure(restored),
+          );
+        } else {
+          toastBus.handler?.error(`Session was not created: ${result.error || "Unknown error"}`);
+        }
+      } else if (result.trustChanged || (result.hooksNeedTrust && !body.trust_hooks)) {
+        // A changed hook set is reviewed again from scratch, so the answer to send is dropped.
+        const reviewed = await openHooksTrust(
+          result.trustChanged ? { ...body, trust_hooks: undefined, trust_review: undefined } : body,
+          tool,
+          sent,
+        );
+        if (!reviewed) return;
+        if (resend > 0) {
+          dispatch({ type: "SUBMIT_ERROR", error: result.error || "Unknown error" });
+          return;
+        }
+        body = reviewed;
+        continue;
+      } else if (result.failure) {
+        dispatch({ type: "SUBMIT_FAILED", failure: result.failure });
       } else {
-        setUnknownOutcome(pending);
-        dispatch({ type: "SUBMIT_ERROR", error: UNKNOWN_OUTCOME_ERROR });
+        dispatch({ type: "SUBMIT_ERROR", error: result.error || "Unknown error" });
       }
       return;
-    }
-    if (key) resolvePendingCreate(key);
-    if (result.outcomeUnknown) {
-      // The server restarted and cannot say whether the first attempt ran; retrying could
-      // run it twice, so this is where it stops.
-      if (background) toastBus.handler?.error(result.error ?? "Unknown outcome");
-      else dispatch({ type: "SUBMIT_ERROR", error: result.error ?? "Unknown outcome" });
-      return;
-    }
-    if (result.ok) {
-      dispatch({ type: "SUBMIT_SUCCESS" });
-      if (ACP_CAPABLE_TOOLS.has(tool)) safeSetItem(LAST_USED_TOOL_KEY, tool);
-      safeSetItem(LAST_USED_INSTRUCTION_KEY, body.custom_instruction ?? "");
-      if (body.path.startsWith("/")) safeSetItem(LAST_USED_PROJECT_KEY, body.path);
-      for (const w of result.session?.warnings ?? []) toastBus.handler?.error(w);
-      if (background) onCreatedInBackground?.(result.session);
-      else onCreated(result.session);
-    } else if (background) {
-      toastBus.handler?.error(`Session was not created: ${result.error || "Unknown error"}`);
-    } else if (result.hooksNeedTrust && !body.trust_hooks) {
-      // The trust_hooks guard stops a loop if the server refuses again after opting in.
-      setHooksTrust({ info: result.hooksNeedTrust, body, tool });
-    } else {
-      dispatch({ type: "SUBMIT_ERROR", error: result.error || "Unknown error" });
     }
   };
 
-  const handleSubmit = async () => {
+  // `overrides` and `runtimeUp` were dispatched in the same event, which `state` doesn't hold yet.
+  const handleSubmit = async (overrides: Partial<WizardData> = {}, runtimeUp = false) => {
     dispatch({ type: "SUBMIT_START" });
+    setRuntimeDown(false);
     if (unknownOutcome) {
       await runCreate(unknownOutcome.body, unknownOutcome.tool, unknownOutcome);
       return;
     }
-    const d = state.data;
+    const d = { ...state.data, ...overrides };
     // A seeded default can leave the sandbox on while it is unavailable; the server would reject it.
-    if (d.sandboxEnabled && sandboxBlocked) {
-      dispatch({ type: "SUBMIT_ERROR", error: `Sandbox unavailable: ${sandboxBlocked}. Turn it off to launch.` });
+    const blocked = runtimeUp ? (isHostOnly ? hostOnlyReason : null) : sandboxBlocked;
+    if (d.sandboxEnabled && blocked) {
+      dispatch({ type: "SUBMIT_ERROR", error: `Sandbox unavailable: ${blocked}. Turn it off to launch.` });
+      return;
+    }
+    if (d.useWorktree && worktreeBlocked) {
+      dispatch({ type: "SUBMIT_ERROR", error: `Worktree unavailable: ${worktreeBlocked}. Turn it off to launch.` });
       return;
     }
     const body = {
@@ -481,7 +699,7 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
         d,
         isAcpEligible(
           d.tool,
-          state.agents.find((a) => a.name === d.tool),
+          agents.find((a) => a.name === d.tool),
         ),
       ),
       idempotency_key: newIdempotencyKey(),
@@ -490,11 +708,11 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
     if (d.sandboxEnabled && !d.scratch && d.path) {
       const preview = await fetchVolumeIgnoresPreview(d.path, d.profile || undefined);
       if (preview && !preview.acknowledged && preview.globs.length > 0) {
-        setGlobConfirm({ globs: preview.globs, body });
+        setGlobConfirm({ globs: preview.globs, body, sent: d });
         return;
       }
     }
-    await runCreate(body, d.tool);
+    await runCreate(body, d.tool, undefined, d);
   };
 
   // Own the adopted create while open; on close, hand an unresolved create back to the
@@ -503,10 +721,12 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
   useEffect(() => {
     // Setup restores foreground ownership: StrictMode runs setup, cleanup, setup on one mount.
     backgroundRef.current = false;
+    unmountedRef.current = false;
     const adopted = unknownOutcomeRef.current;
     if (adopted) claimPendingCreate(adopted.body.idempotency_key);
     return () => {
       backgroundRef.current = true;
+      unmountedRef.current = true;
       if (unknownOutcomeRef.current) releasePendingCreate(unknownOutcomeRef.current.body.idempotency_key);
     };
   }, []);
@@ -535,14 +755,54 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
     if (!pending) return;
     if (dontShowAgain) await markVolumeIgnoresGlobsAcknowledged();
     setGlobConfirm(null);
-    await runCreate(pending.body, state.data.tool);
+    await runCreate(pending.body, state.data.tool, undefined, pending.sent);
   };
 
   const handleHooksTrustConfirm = async () => {
     const pending = hooksTrust;
     if (!pending) return;
     setHooksTrust(null);
-    await runCreate({ ...pending.body, trust_hooks: true }, pending.tool);
+    await runCreate(
+      { ...pending.body, trust_hooks: true, trust_review: pending.fingerprint },
+      pending.tool,
+      undefined,
+      pending.sent,
+    );
+  };
+
+  const handleFailureAction = async (action: FailureAction) => {
+    switch (action) {
+      case "retry_runtime": {
+        // The wizard's runtime check is from when it opened; ask again before resending.
+        setRechecking(true);
+        const seq = ++dockerSeq.current;
+        const status = await fetchDockerStatus();
+        // Closed during the check: the user dismissed this create, so don't send it.
+        if (unmountedRef.current) return;
+        setRechecking(false);
+        if (seq !== dockerSeq.current) return;
+        dispatch({ type: "SET_DOCKER", available: status.available, runtimeName: status.runtime_name ?? null });
+        setRuntimeDown(!status.available);
+        if (!status.available) return;
+        // Launch may be blocked now, or an edit made this closure's form stale; Retry stays offered.
+        if (!canResendRef.current || dataRef.current !== state.data) return;
+        await handleSubmit({}, true);
+        return;
+      }
+      case "launch_without_sandbox":
+        handleChange("sandboxEnabled", false);
+        // A relaunch, not a retry: handleSubmit sends it under a new key.
+        await handleSubmit({ sandboxEnabled: false });
+        return;
+      case "change_image":
+        setPanel("sandbox");
+        return;
+      case "choose_project":
+        setPanel("project");
+        return;
+      case "try_again":
+        await handleSubmit();
+    }
   };
 
   const handleBackground = () => {
@@ -551,9 +811,22 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
   };
 
   const d = state.data;
+  const failed = state.failure && failureView(state.failure, { sandboxEnabled: d.sandboxEnabled, runtimeDown });
   // A scratch session has no project whose overrides could be unknown.
-  const projectUnresolved = registryUnresolved && !d.scratch;
-  const selectedAgent = state.agents.find((a) => a.name === d.tool);
+  const projectUnresolved = registryUnresolved && !d.scratch && !d.importAcpSessionId;
+  // Only the Yolo row needs the agent list, and a name-only form has none.
+  const formReady = defaultsReady && (nameOnly || agentsStatus === "ready") && !profileSwitching && !projectUnresolved;
+  const canResend = launchEligible(d, { ready: formReady, offline, nameOnly });
+  const canResendRef = useRef(canResend);
+  useEffect(() => {
+    canResendRef.current = canResend;
+  }, [canResend]);
+  const resendBlocked = (action: FailureAction) => {
+    if (action === "change_image" || action === "choose_project") return false;
+    // Retry checks the runtime itself, and Launch without Sandbox doesn't need it.
+    return !canResend || (action === "try_again" && d.sandboxEnabled && !state.dockerChecked);
+  };
+  const selectedAgent = agents.find((a) => a.name === d.tool);
   const acpCapable = isAcpEligible(d.tool, selectedAgent);
   const isHostOnly = selectedAgent?.host_only ?? false;
   const hostOnlyReason = `${d.tool} runs on the host only`;
@@ -564,9 +837,17 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
       : isHostOnly
         ? hostOnlyReason
         : null;
-  const sandboxBlocked = isHostOnly ? hostOnlyReason : !state.dockerAvailable ? "Docker is not running" : null;
+  const sandboxBlocked = isHostOnly
+    ? hostOnlyReason
+    : !state.dockerAvailable
+      ? `${state.dockerRuntimeName ?? "Container runtime"} is not running`
+      : null;
+  // Locked on without touching the stored value, so another agent gets it back.
+  const alwaysYolo =
+    (acpCapable && d.useStructuredView ? selectedAgent?.acp_always_yolo : selectedAgent?.always_yolo) === true;
   const agentCustomized = !!(d.extraArgs || d.commandOverride || d.customInstruction);
   const openPanel = (next: Panel) => () => setPanel(next);
+  const effectiveProfile = d.profile || servedProfile;
 
   const renderPanel = (p: Panel) => {
     switch (p) {
@@ -574,9 +855,10 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
         return (
           <ProjectStep
             data={d}
+            profile={effectiveProfile}
             onChange={handleChange}
             initialTab={prefill?.initialTab}
-            agents={state.agents}
+            agents={agents}
             onSelectSavedProject={(overrides, path) => {
               const key = normalizeProjectPathKey(path);
               if (overrides === null) {
@@ -600,6 +882,7 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
       case "repos":
         return (
           <ExtraReposPicker
+            profile={effectiveProfile}
             primaryPath={d.path}
             selectedPaths={d.extraRepoPaths}
             onChange={(paths) => handleChange("extraRepoPaths", paths)}
@@ -618,7 +901,7 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
           />
         );
       case "agent":
-        return <AgentPanel data={d} onChange={handleChange} agents={state.agents} commandMaps={commandMaps} />;
+        return <AgentPanel data={d} onChange={handleChange} agents={agents} commandMaps={commandMaps} />;
       case "worktree":
         return <WorktreePanel data={d} onChange={handleChange} />;
       case "sandbox":
@@ -646,7 +929,8 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
   ) : (
     <div className="space-y-4">
       <RowGroup>
-        {state.profiles.length > 1 && (
+        {/* A deleted Profile needs a way out even when only one other is left. */}
+        {(state.profiles.length > 1 || agentsStatus === "missing") && (
           <NavRow
             label="Profile"
             value={`${d.profile || "Server default"}${d.profile && d.profileDirty ? " (custom)" : ""}`}
@@ -662,13 +946,14 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
             ) : d.path ? (
               <>
                 {basename(d.path)} <span className="text-text-dim">{d.path}</span>
+                {failed?.row === "project" && <span className="text-status-error"> · {failed.cue}</span>}
               </>
             ) : (
               ""
             )
           }
           placeholder="Choose a project"
-          highlight={!d.scratch && !d.path}
+          highlight={failed?.row === "project" ? "error" : !d.scratch && !d.path}
           onOpen={openPanel("project")}
         />
         {d.path && !d.scratch && (
@@ -689,30 +974,45 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
       </RowGroup>
 
       <RowGroup>
+        {d.structuredViewOffered && (
+          <SegmentedRow
+            label="View"
+            testId="wizard-view-row"
+            value={acpCapable && d.useStructuredView ? "structured" : "terminal"}
+            onChange={(v) => handleChange("useStructuredView", v === "structured")}
+            options={[
+              { value: "structured", label: "Structured", name: "Structured view", disabled: !acpCapable },
+              { value: "terminal", label: "Terminal", name: "Terminal view" },
+            ]}
+            summary={
+              !acpCapable
+                ? selectedAgent?.acp_allowed === false
+                  ? "not on the allowed agents list"
+                  : selectedAgent?.kind === "custom"
+                    ? "needs agent_acp_cmd"
+                    : "no ACP adapter, terminal only"
+                : d.useStructuredView
+                  ? "plan, tool calls and diffs as cards"
+                  : "the Agent's own terminal UI"
+            }
+          />
+        )}
         <SwitchRow
-          label="Structured"
-          switchLabel="Use structured view"
-          checked={acpCapable && d.useStructuredView}
-          onChange={(v) => handleChange("useStructuredView", v)}
-          disabled={!acpCapable}
-          summary={
-            !acpCapable
-              ? selectedAgent?.acp_allowed === false
-                ? "not on the allowed agents list"
-                : selectedAgent?.kind === "custom"
-                  ? "needs agent_acp_cmd"
-                  : "no ACP adapter, terminal only"
-              : d.useStructuredView
-                ? "plan, tool calls and diffs"
-                : "raw terminal"
-          }
-        />
-        <SwitchRow
-          label="Auto-approve"
-          switchLabel="Auto-approve actions"
-          checked={d.yoloMode}
+          label="Yolo mode"
+          switchLabel="Yolo mode"
+          testId="wizard-yolo-row"
+          checked={alwaysYolo || d.yoloMode}
           onChange={(v) => handleChange("yoloMode", v)}
-          summary="skip permission prompts"
+          disabled={alwaysYolo}
+          summary={
+            agentsStatus !== "ready"
+              ? "checking the agent…"
+              : alwaysYolo
+                ? `always on for ${d.tool}`
+                : d.yoloMode
+                  ? "skips permission prompts"
+                  : "asks before running commands"
+          }
         />
         <SwitchRow
           label="Worktree"
@@ -732,24 +1032,22 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
           checked={d.sandboxEnabled}
           onChange={(v) => handleChange("sandboxEnabled", v)}
           disabled={!!sandboxBlocked && !d.sandboxEnabled}
-          summary={sandboxBlocked ?? (d.sandboxEnabled ? d.sandboxImage || "default image" : "run on the host")}
+          highlight={failed?.row === "sandbox" ? "error" : undefined}
+          summary={
+            <>
+              {failed?.row === "sandbox" && <span className="text-status-error">{failed.cue} · </span>}
+              {sandboxBlocked ?? (d.sandboxEnabled ? d.sandboxImage || "default image" : "run on the host")}
+            </>
+          }
           onConfigure={!sandboxBlocked && d.sandboxEnabled ? openPanel("sandbox") : undefined}
         />
         <FieldRow label="Group" htmlFor="wizard-group">
-          <input
+          <GroupCombobox
             id="wizard-group"
-            type="text"
             value={d.group}
-            onChange={(e) => handleChange("group", e.target.value)}
-            placeholder="Optional"
-            list="wizard-groups"
-            className={ROW_INPUT}
+            onChange={(v) => handleChange("group", v)}
+            groups={state.groupsFor === groupsKey ? state.groups : NO_GROUPS}
           />
-          <datalist id="wizard-groups">
-            {state.groups.map((g) => (
-              <option key={g.path} value={g.path} />
-            ))}
-          </datalist>
         </FieldRow>
       </RowGroup>
     </div>
@@ -779,7 +1077,23 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
             &times;
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-4 md:px-5 py-4">
+        <div data-wizard-scroll className="flex-1 overflow-y-auto px-4 md:px-5 py-4">
+          {!nameOnly && !state.data.profile && !servedProfile && (
+            <div
+              role="alert"
+              className="mb-4 rounded-md border border-status-warning/40 px-3 py-2 text-sm text-text-secondary"
+            >
+              The server profile could not be loaded. Session defaults cannot be resolved yet.
+              <button
+                type="button"
+                disabled={resolvingServedProfile || !onRetryServedProfile}
+                onClick={() => void retryServedProfile()}
+                className="ml-2 text-brand-400 hover:underline cursor-pointer disabled:opacity-50"
+              >
+                Retry server profile
+              </button>
+            </div>
+          )}
           {creating ? (
             <CreateProgressView progress={progress} />
           ) : panel ? (
@@ -799,16 +1113,32 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
             <LaunchFooter
               data={d}
               isSubmitting={state.isSubmitting}
+              held={rechecking}
+              failure={
+                state.failure &&
+                failed && (
+                  <CreateFailureBox
+                    key={state.failure.reference ?? ""}
+                    failure={state.failure}
+                    view={failed}
+                    output={progress?.output ?? []}
+                    onAction={(action) => void handleFailureAction(action)}
+                    busy={rechecking}
+                    blocked={resendBlocked}
+                  />
+                )
+              }
               error={
                 state.error ??
+                // A deleted Profile also fails the project lookup, which reselecting can't fix.
+                (!nameOnly && agentsStatus === "missing" ? profileMissingError(agentsKey) : null) ??
                 (projectUnresolved ? REGISTRY_UNRESOLVED_ERROR : null) ??
+                (!nameOnly && agentsStatus === "failed" ? AGENTS_UNAVAILABLE_ERROR : null) ??
                 (unknownOutcome ? UNKNOWN_OUTCOME_ERROR : null)
               }
-              onSubmit={handleSubmit}
+              onSubmit={() => void handleSubmit()}
               nameOnly={nameOnly}
-              defaultsReady={
-                defaultsReady && !profileSwitching && !projectUnresolved && !(d.sandboxEnabled && !state.dockerChecked)
-              }
+              defaultsReady={formReady && !(d.sandboxEnabled && !state.dockerChecked)}
               onBackground={creating && onCreatedInBackground ? handleBackground : undefined}
             />
           </div>
@@ -836,6 +1166,7 @@ export function SessionWizard({ onClose, onCreated, onCreatedInBackground, prefi
           onLaunch={hooksTrust.info.onLaunch}
           onDestroy={hooksTrust.info.onDestroy}
           needsMcpTrust={hooksTrust.info.needsMcpTrust}
+          mcpSummaries={hooksTrust.mcpSummaries}
           onConfirm={handleHooksTrustConfirm}
           onCancel={cancelPending}
         />

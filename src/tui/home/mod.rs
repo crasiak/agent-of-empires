@@ -7,6 +7,7 @@ mod dialogs;
 #[cfg(test)]
 mod file_watch_tests;
 mod highlight_ops;
+pub(crate) use icons::get_indent;
 mod icons;
 mod input;
 mod last_prompt;
@@ -16,7 +17,7 @@ mod live_send;
 mod live_send_prep;
 mod operations;
 mod overlays;
-mod panes;
+pub(in crate::tui) mod panes;
 mod persistence;
 mod pollers;
 mod preview;
@@ -38,7 +39,7 @@ mod user_action;
 mod watchers;
 mod work_arc;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use ratatui::prelude::Rect;
 use tui_input::Input;
@@ -47,12 +48,10 @@ use crate::session::{
     append_archived_section, append_archived_section_by_project, append_trash_section,
     config::{load_config, update_app_state, update_config, GroupByMode, SortOrder},
     flatten_sessions_by_attention, flatten_tree, flatten_tree_all_profiles, resolve_config_or_warn,
-    DefaultTerminalMode, EnsureReadyOutcome, Group, GroupTree, Instance, Item, Storage,
+    DefaultTerminalMode, Group, GroupTree, Instance, Item, Storage,
 };
 use crate::tmux::AvailableTools;
 
-use super::creation_poller::{CreatedWorktreeInfo, CreationPoller, CreationRequest};
-use super::deletion_poller::DeletionPoller;
 use super::dialogs::ServeView;
 use super::dialogs::{
     AttachProjectDialog, ChangelogDialog, CommandPaletteDialog, ConfirmDialog, ContextMenuDialog,
@@ -63,12 +62,8 @@ use super::dialogs::{
     WorktreeNameDialog,
 };
 use super::diff::DiffView;
-use super::restart_poller::RestartPoller;
 use super::settings::SettingsView;
-use super::status_poller::{StatusPoller, StatusUpdate};
-use super::stop_poller::StopPoller;
 
-use self::creation::SessionMutationGuards;
 use self::icons::{
     ICON_ARCHIVED_SECTION, ICON_COLLAPSED, ICON_DELETING, ICON_DORMANT, ICON_ERROR, ICON_EXPANDED,
     ICON_FAVORITE, ICON_IDLE, ICON_PINNED, ICON_STOPPED, ICON_TERMINAL, ICON_TRASH_SECTION,
@@ -85,16 +80,9 @@ use self::watchers::{RELOAD_FAILED_TITLE, WATCHER_WARNING_TITLE};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DragKind {
     ListDivider,
+    StackedListDivider,
     PreviewSelect,
     SettingsScrollbar,
-}
-
-/// A deletion's force level and the trash lifecycle it ran in.
-#[derive(Clone)]
-pub(super) struct DeleteAttempt {
-    pub(super) forced: bool,
-    pub(super) trashed_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) trash_lifecycle_id: Option<String>,
 }
 
 pub(super) struct GroupRenameContext {
@@ -102,9 +90,28 @@ pub(super) struct GroupRenameContext {
     pub(super) old_profile: String,
 }
 
+pub(super) struct SessionDialogTarget {
+    session_id: String,
+    source_profile: String,
+    lifecycle_generation: u64,
+}
+
+pub(super) struct SessionDeleteDialog {
+    dialog: UnifiedDeleteDialog,
+    target: SessionDialogTarget,
+    request: crate::daemon::DeleteSessionBody,
+}
+
 pub(super) enum PermissionResponseTarget {
     Terminal(String),
-    Structured { session_id: String, nonce: String },
+    Structured {
+        session_id: String,
+        nonce: String,
+    },
+    Integration {
+        session_id: String,
+        snapshot: aoe_plugin_api::agent_integration::AgentIntegrationSnapshot,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -127,6 +134,76 @@ pub(super) struct CreatingHookProgress {
     pub(super) current_hook: Option<String>,
 }
 
+/// Cursor placement owed to the snapshot that reflects an archive toggle: the
+/// view submits the change, and only the canonical stamp moves the row.
+pub(super) struct PendingArchiveCursor {
+    pub(super) id: String,
+    pub(super) archived: bool,
+    /// Where the cursor lands when the row sinks (non-Attention sorts).
+    pub(super) successor: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Native metadata for profile '{profile}', session '{id}' is not yet available")]
+pub(super) struct CanonicalMetadataLag {
+    profile: String,
+    id: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(super) struct CanonicalMetadataConflict(String);
+
+pub(super) struct CanonicalMetadataLagState {
+    epoch: String,
+    profile: String,
+    id: String,
+    first_seen: std::time::Instant,
+}
+pub(super) enum NamespaceIntent {
+    Reveal {
+        epoch: String,
+        profile: String,
+        id: String,
+        generation: u64,
+        created_at: String,
+        group: String,
+        attach: bool,
+    },
+    Plain,
+    ProfileCreated(String),
+    ProfileDeleted(String),
+    ReorderSession {
+        id: String,
+        profile: String,
+        source_group: String,
+        delta: isize,
+        crossing: bool,
+        continuation_destination: Option<String>,
+    },
+    ReorderGroup,
+}
+
+pub(super) enum CreationConfirmation {
+    Receipt(crate::daemon::MutationReceipt<crate::daemon::SessionResponse>),
+    Canonical(crate::daemon::SessionResponse),
+}
+
+/// A display-only creation placeholder and its retained completion proof.
+pub(super) struct PendingCreation {
+    /// The daemon's session id, known once a reservation or progress entry
+    /// names this creation.
+    pub(super) daemon_id: Option<String>,
+    /// Stable caller identity; never match another session by title/profile.
+    pub(super) request_key: String,
+    pub(super) origin_epoch: String,
+    pub(super) cancel_requested: bool,
+    pub(super) cancel_sent: bool,
+    pub(super) outcome_unknown: bool,
+    pub(super) confirmation: Option<CreationConfirmation>,
+    pub(super) reload_retry_at: Option<std::time::Instant>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PassiveSynced {
     pub(super) cols: u16,
@@ -135,21 +212,28 @@ pub(super) struct PassiveSynced {
     pub(super) adopted_at: std::time::Instant,
 }
 
-struct RecoveryUpdate {
-    instance_id: String,
-    title: String,
-    instance: Box<crate::session::Instance>,
-    result: Result<crate::session::StartOutcome, String>,
+pub(in crate::tui) struct ReadyNativeAttachment {
+    pub id: String,
+    pub tmux_name: String,
+    pub lease: crate::tui::session_feed::NativeLease,
+    /// What the caller asked to do with this pane once it was ready.
+    pub intent: crate::tui::home::panes::PaneIntent,
 }
 
 pub struct HomeView {
     pub(super) storages: HashMap<String, Storage>,
     pub(super) active_profile: Option<String>,
     instances: indexmap::IndexMap<String, Instance>,
-    pending_deletions: HashMap<String, HashSet<String>>,
-    pending_group_deletions: HashMap<String, HashSet<String>>,
-    /// Ids added since the last save; TUI rows missing from both disk and this set are peer-deleted.
-    pending_added: HashMap<String, HashSet<String>>,
+    /// The persisted manual workspace order as this view last observed it.
+    /// The runtime publishes a merged view of it (unknown workspaces
+    /// appended), so this is what detects a peer's reorder.
+    observed_workspace_ordering: Vec<String>,
+    session_feed_reload_retry_at: Option<std::time::Instant>,
+    session_feed_failed_cursor: Option<crate::daemon::RuntimeCursor>,
+    canonical_metadata_lag: Option<CanonicalMetadataLagState>,
+    pending_created_attach: Option<(String, String, String, u64, String)>,
+    retained_reveal: Option<NamespaceIntent>,
+    runtime_diagnostics: Vec<crate::daemon::OwnerLoadDiagnostic>,
     pub(super) group_trees: HashMap<String, GroupTree>,
     pub(super) legacy_duplicate_reports: Vec<crate::session::DuplicateIdReport>,
     pub(super) flat_items: Vec<Item>,
@@ -176,6 +260,8 @@ pub struct HomeView {
     /// session context menu. Cached from `session.show_session_colors`.
     pub(super) show_session_colors: bool,
     pub(super) show_activity_age: bool,
+    /// Forward captured OSC 52 writes unless `[tmux] clipboard` is disabled.
+    /// Tmux's own clipboard options cannot govern this in-process path.
     pub(super) agent_clipboard_forward: bool,
     pub(super) hyperlink_cells: crate::tui::hyperlink::SharedHyperlinks,
     pub(super) vt_live_enabled: bool,
@@ -194,7 +280,7 @@ pub struct HomeView {
     pub(super) retained_tailored_windows: Vec<tailored::TailoredWindow>,
     pub(super) tailored_account: crate::session::tailored::CaptureAccount,
     pub(super) confirm_dialog: Option<ConfirmDialog>,
-    pub(super) unified_delete_dialog: Option<UnifiedDeleteDialog>,
+    pub(super) unified_delete_dialog: Option<SessionDeleteDialog>,
     pub(super) group_delete_options_dialog: Option<GroupDeleteOptionsDialog>,
     pub(super) rename_dialog: Option<RenameDialog>,
     pub(super) worktree_name_dialog: Option<WorktreeNameDialog>,
@@ -204,8 +290,12 @@ pub struct HomeView {
     pub(super) highlight_filter_dialog: Option<crate::tui::highlight::HighlightFilterDialog>,
     pub(super) repo_appearances: crate::session::repo_appearance::RepoAppearances,
     pub(super) group_rename_context: Option<GroupRenameContext>,
+    pub(super) session_dialog_target: Option<SessionDialogTarget>,
     pub(super) repo_trust_dialog: Option<RepoTrustDialog>,
     pub(super) pending_repo_trust_data: Option<NewSessionData>,
+    /// Canonical daemon-reviewed configuration fingerprint for the pending
+    /// approval. Approval is never persisted locally before daemon validation.
+    pub(super) pending_repo_trust_fingerprint: Option<crate::daemon::CreationTrustFingerprint>,
     pub(super) hooks_install_dialog: Option<HooksInstallDialog>,
     pub(super) pending_hooks_install_data: Option<NewSessionData>,
     pub(super) volume_ignores_glob_dialog: Option<ConfirmDialog>,
@@ -218,6 +308,13 @@ pub struct HomeView {
     pub(super) afk_dialog: Option<super::dialogs::afk::AfkDialog>,
     pub(super) afk_overview_dialog: Option<super::dialogs::afk_overview::AfkOverviewDialog>,
     pub(super) afk_batch_dialog: Option<super::dialogs::afk_batch::AfkBatchDialog>,
+    /// Unknown mutation selected for explicit, operator-confirmed resolution.
+    pub(super) pending_indeterminate_resolution: Option<String>,
+    /// Every unknown-outcome id awaiting resolution, as `(id, message)`.
+    /// The head is the one `pending_indeterminate_resolution` is showing; a
+    /// batch of failures must unlock every quarantined row, not just the
+    /// first, so the rest wait here instead of being dropped.
+    pub(super) pending_indeterminate_queue: Vec<(String, String)>,
     pub(super) snooze_duration_dialog: Option<SnoozeDurationDialog>,
     pub(super) pending_snooze_session: Option<String>,
     pub(super) profile_picker_dialog: Option<ProfilePickerDialog>,
@@ -231,6 +328,9 @@ pub struct HomeView {
     pub(super) command_palette: Option<CommandPaletteDialog>,
     pub(super) session_search: Option<super::dialogs::SessionSearchDialog>,
     pub(super) serve_view: Option<ServeView>,
+    pub(super) connections_view: Option<super::dialogs::ConnectionsView>,
+    pub(super) pending_dashboard_launch: Option<super::dialogs::ServeLaunchRequest>,
+    pub(super) dashboard_launch: Option<super::dialogs::DashboardLaunch>,
     pub(super) update_confirm_dialog: Option<UpdateConfirmDialog>,
     pub(super) telemetry_consent_dialog: Option<super::dialogs::TelemetryConsentDialog>,
     pub(super) tips_dialog: Option<super::dialogs::TipsDialog>,
@@ -240,10 +340,12 @@ pub struct HomeView {
     pub(super) tips_badge_hovered: bool,
     pub(super) send_message_dialog: Option<super::dialogs::SendMessageDialog>,
     pub(super) permission_response_dialog: Option<super::dialogs::PermissionResponseDialog>,
+    pub(super) agent_question_dialog: Option<super::dialogs::AgentQuestionDialog>,
     pub(super) pending_permission_response: Option<PermissionResponseTarget>,
     pub(super) pending_send_session: Option<String>,
     pub(super) pending_send_target: live_send::LiveSendTarget,
     pub(super) pending_live_send_target: live_send::LiveSendTarget,
+    pending_native_attachment: Option<panes::PendingNativeAttachment>,
     pub(super) live_send: Option<live_send::LiveSendState>,
     pub(super) live_send_worker: Option<live_send::LiveSendWorker>,
     pub(super) preview_capture_worker: Option<live_send::LiveCaptureWorker>,
@@ -269,21 +371,27 @@ pub struct HomeView {
     pub(super) pending_paste_for_structured_view: HashMap<String, String>,
     pub(super) pending_attach_after_warning: Option<String>,
     pub(super) pending_stop_session: Option<String>,
-    pub(super) pending_stop_terminal: Option<(String, TerminalMode)>,
-    pub(super) pending_stop_tool: Option<(String, String)>,
+    /// Target captured when the auxiliary stop confirmation opens.
+    pub(super) pending_stop_auxiliary: Option<(String, crate::daemon::StopAuxiliaryBody)>,
+    pending_legacy_tool_preparation: Option<panes::PendingLegacyToolPreparation>,
     pub(super) pending_image_pull: Option<String>,
     /// Checkbox keys the last submitted confirm dialog had checked.
     pub(super) confirm_checked: Vec<&'static str>,
     pub(super) pending_switch_view_session: Option<String>,
-    pub(super) pending_daemon_start_session: Option<String>,
+
     pub(in crate::tui) structured_preview:
         Option<crate::tui::structured_view::embedded::EmbeddedView>,
     pub(in crate::tui) structured_preview_pending: bool,
+    pub(in crate::tui) retained_preview:
+        Option<crate::tui::structured_view::embedded::RetainedView>,
+    pub(in crate::tui) retained_focus: Option<(String, u64)>,
+    pub(in crate::tui) retained_scroll_offset: usize,
     /// The last frame painted the mounted structured transcript into the preview, so
     /// `preview_text_view` maps transcript rows rather than the tmux capture.
     pub(super) structured_transcript_painted: bool,
-    pub(super) pending_force_remove_session: Option<String>,
-    pub(super) pending_trash_session: Option<String>,
+    /// Exact canonical purge owner captured when Force Remove confirmation opens.
+    pub(super) pending_force_remove_session: Option<(String, std::num::NonZeroU64)>,
+    pub(super) pending_trash_session: Option<SessionDialogTarget>,
     /// Sessions and the color a confirmed bulk highlight change sets on them.
     pub(super) pending_highlight_bulk: Option<(Vec<String>, Option<&'static str>)>,
     pub(super) pending_dialog_click_action: Option<crate::tui::app::Action>,
@@ -294,9 +402,7 @@ pub struct HomeView {
 
     pub(super) available_tools: AvailableTools,
 
-    pub(super) status_poller: StatusPoller,
-    pub(super) pending_status_refresh: bool,
-
+    pub(super) plugin_ui: crate::tui::plugin_ui_poller::PluginUiState,
     pub(super) show_diagnostics: bool,
     pub(super) show_shortcut_bar: bool,
     pub(super) preview_link_prefixes: Vec<String>,
@@ -324,49 +430,33 @@ pub struct HomeView {
     pub(super) system_health_tip_earned: bool,
     pub(super) system_health_discovered: bool,
 
-    pub(super) session_feed: super::session_feed::SessionFeed,
-    pub(super) pending_session_feed: bool,
-    pub(super) daemon_sidebar: bool,
+    // Canonical subscription and native command lane.
     pub(super) sidebar_source: super::session_feed::SidebarSource,
+    /// Why the Daemon couldn't be reached, shown on the offline takeover.
+    runtime_failure_reason: Option<String>,
+    pub(super) session_feed: super::session_feed::SessionFeed,
+    pending_namespace_intent: Option<NamespaceIntent>,
+    namespace_unknown_message: Option<String>,
+    runtime_outcome_messages: Vec<String>,
+    /// Independent project-registry policy remembers runtime attachment, not row-write authority.
+    project_registry_authoritative: bool,
     pub(super) structured_pending_approvals: HashMap<String, Vec<crate::daemon::PendingApproval>>,
     pub(super) structured_approval_poller: super::approval_poller::StructuredApprovalPoller,
 
-    pub(super) deletion_poller: DeletionPoller,
-    pub(super) deletes_in_flight: HashMap<String, DeleteAttempt>,
-    /// Each session's last failed deletion, so Empty Trash can escalate: a failed delete
-    /// is offered a forced retry, a failed forced delete removal from aoe without cleanup.
-    pub(super) failed_deletes: HashMap<String, DeleteAttempt>,
-
-    pub(super) stop_poller: StopPoller,
-
-    pub(super) trash_poller: crate::tui::trash_poller::TrashPoller,
-    pub(super) drop_poller:
-        crate::tui::worker::TrackedWorker<operations::DropRequest, operations::DropResult>,
-    pub(super) reconcile_poller: crate::tui::reconcile_poller::ReconcilePoller,
-    pub(super) startup_recovery_gate: Option<std::time::Instant>,
-    pub(super) pending_reconcile_reload: bool,
-    pub(super) reconcile_reload_retry_at: Option<std::time::Instant>,
-
-    pub(super) restart_poller: RestartPoller,
+    // Daemon start reservations: the daemon runs the start and its canonical
+    // snapshot drives the row; see `apply_restart_results`.
+    /// Sessions awaiting a daemon start snapshot (see `apply_restart_results`).
     pub(super) restart_in_flight: std::collections::HashSet<String>,
-    pub(super) attach_after_restart: std::collections::HashSet<String>,
-    pub(super) restarted_attaches: Vec<String>,
 
-    store_move_poller: crate::tui::store_move_poller::StoreMovePoller,
-    store_move_in_flight: Option<store_move::StoreMoveInFlight>,
-    store_move_bypass: Option<String>,
-
-    pub(super) attach_project_poller: crate::tui::attach_project_poller::AttachProjectPoller,
-    pub(super) attach_project_in_flight: std::collections::HashSet<String>,
-
-    pub(super) creation_poller: CreationPoller,
-    /// Cancels the request behind `creating_stub_id`.
-    pub(super) creation_cancel: Option<tokio_util::sync::CancellationToken>,
-    pub(super) on_launch_hooks_ran: HashSet<String>,
+    /// The creation this view submitted to the daemon and still displays. The
+    /// daemon owns provisioning, hooks, and the committed row.
+    pub(super) pending_creation: Option<PendingCreation>,
 
     pub(super) creating_hook_progress: HashMap<String, CreatingHookProgress>,
     pub(super) creating_stub_id: Option<String>,
-    creating_provisional_group_paths: HashSet<String>,
+
+    /// Cursor placement owed to the applied snapshot after an archive toggle.
+    pub(super) pending_archive_cursor: Option<PendingArchiveCursor>,
 
     pub(super) preview_cache: PreviewCache,
     pub(super) terminal_preview_cache: PreviewCache,
@@ -375,6 +465,7 @@ pub struct HomeView {
 
     pub(super) preview_timings: PreviewTimings,
     pub(super) preview_scroll_offset: u16,
+    pub(super) preview_explicit_tail: bool,
     pub(super) preview_area: Rect,
     /// Output sub-rect of `preview_area` (minus the info header); tmux panes are sized to it.
     pub(super) preview_pane_area: Rect,
@@ -402,8 +493,6 @@ pub struct HomeView {
     pub(super) default_terminal_mode: TerminalMode,
 
     pub(super) sound_config: crate::sound::SoundConfig,
-    pub(super) status_hook_config: crate::status_hooks::StatusHookConfig,
-    pub(super) status_hook_configs: HashMap<String, crate::status_hooks::StatusHookConfig>,
 
     pub(super) idle_decay_window: std::time::Duration,
 
@@ -424,9 +513,12 @@ pub struct HomeView {
     pub(super) diff_view: Option<DiffView>,
 
     pub(super) list_width: u16,
+    pub(super) list_height: Option<u16>,
 
     pub(super) divider_col: Option<u16>,
+    pub(super) divider_row: Option<u16>,
     pub(super) main_area_width: u16,
+    pub(super) main_area_height: u16,
     pub(super) drag_state: Option<DragKind>,
 
     pub(super) mouse_forward_btn: Option<u16>,
@@ -438,6 +530,7 @@ pub struct HomeView {
     pub(super) preview_autoscroll_at: Option<std::time::Instant>,
 
     pub(super) preview_selection: Option<PreviewSelection>,
+    pub(super) preview_click_seed: Option<u16>,
 
     /// Copy text is read from the next frame's buffer; after `draw` returns the buffers are swapped.
     pub(super) preview_copy_pending: bool,
@@ -448,11 +541,13 @@ pub struct HomeView {
 
     /// Preview the agent above its paired terminal; `view_mode` picks the focused half.
     pub(super) split_terminal: bool,
+    pub(super) split_terminal_height_percent: u16,
+    pub(super) split_terminal_min_width: u16,
+    pub(super) split_terminal_min_height: u16,
     /// Captures whichever split half is not focused; the focused half uses
     /// `preview_capture_worker` like a single preview.
     pub(super) split_capture_worker: Option<live_send::LiveCaptureWorker>,
     pub(super) split_capture_target: Option<String>,
-
     pub(super) archived_section_collapsed: bool,
 
     /// Stopped sessions inside groups are left out of the sidebar, for this run only.
@@ -464,14 +559,8 @@ pub struct HomeView {
 
     pub(super) trashed_section_collapsed: bool,
 
-    recovery_rx: Option<std::sync::mpsc::Receiver<RecoveryUpdate>>,
-    /// Non-web links handed to the system opener, until each exit status arrives.
+    /// Non-web links handed to the system opener until their exit status arrives.
     pub(super) opener_exits: Vec<(String, std::sync::mpsc::Receiver<std::process::ExitStatus>)>,
-    /// Held while recovery workers run so a later daemon cannot duplicate cascades.
-    recovery_lock: Option<crate::session::recovery::RecoveryLock>,
-
-    recovery_in_flight: std::collections::HashSet<String>,
-
     pub(super) restart_cooldown_at: std::collections::HashMap<String, std::time::Instant>,
 
     pub(super) tool_configs: HashMap<String, crate::session::config::ToolSessionConfig>,

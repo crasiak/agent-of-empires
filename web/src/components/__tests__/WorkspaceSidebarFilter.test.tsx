@@ -15,6 +15,7 @@ import type { SidebarAxis } from "../../lib/sidebarAxis";
 import type { PluginUiEntry } from "../../lib/api";
 import { SessionColorsContext } from "../../lib/sessionColors";
 import { HideEmptyGroupsContext } from "../../lib/hideEmptyGroups";
+import { SessionActionProvider } from "../sidebar/SessionActionProvider";
 
 const pluginEntries = vi.hoisted(() => ({ current: [] as PluginUiEntry[] }));
 vi.mock("../../lib/pluginUiContext", () => ({
@@ -71,55 +72,65 @@ function Sidebar({
   return (
     <HideEmptyGroupsContext.Provider value={hideEmptyGroups}>
       <SessionColorsContext.Provider value={colorsEnabled}>
-        <WorkspaceSidebar
-          groups={
-            axis === "group"
-              ? buildSessionGroups(
-                  repoGroups.flatMap((r) => r.workspaces),
-                  opts,
-                )
-              : groups
-          }
-          repoGroups={repoGroups}
-          nestedGroups={buildNestedSidebarGroups(repoGroups, { ...opts, isSubgroupCollapsed: () => collapsed })}
-          orgGroups={buildOrgGroups(repoGroups, {
-            isOrgCollapsed: () => collapsed,
-            isRepoCollapsed: () => collapsed,
-          })}
-          savedProjects={savedProjects}
-          activeId={null}
-          mainPanelFocused={false}
-          open
-          readOnly={readOnly}
-          onToggle={noop}
-          onSelect={noop}
-          onToggleGroup={noop}
-          onToggleSubgroup={noop}
-          onToggleOrg={noop}
-          onToggleOrgRepo={noop}
-          onReorderWorkspaces={noop}
-          onReorderGroups={noop}
-          onUpdateRepoAppearance={noop}
-          onNew={noop}
-          onCreateSession={noop}
-          onAddProject={noop}
-          onEditProject={noop}
-          onRemoveProject={noop}
-          onSettings={noop}
-          sortMode="manual"
-          onSortModeChange={noop}
-          pluginSortRef={null}
-          onPluginSortChange={noop}
-          axis={axis}
-          onAxisChange={noop}
-        />
+        <SessionActionProvider
+          sessions={repoGroups.flatMap((r) => r.workspaces.flatMap((w) => w.sessions))}
+          runtimeEpoch="boot"
+          observedById={{}}
+          onSessionMutation={noop}
+        >
+          <WorkspaceSidebar
+            groups={
+              axis === "group"
+                ? buildSessionGroups(
+                    repoGroups.flatMap((r) => r.workspaces),
+                    opts,
+                  )
+                : groups
+            }
+            repoGroups={repoGroups}
+            nestedGroups={buildNestedSidebarGroups(repoGroups, { ...opts, isSubgroupCollapsed: () => collapsed })}
+            orgGroups={buildOrgGroups(repoGroups, {
+              isOrgCollapsed: () => collapsed,
+              isRepoCollapsed: () => collapsed,
+            })}
+            savedProjects={savedProjects}
+            activeId={null}
+            mainPanelFocused={false}
+            open
+            readOnly={readOnly}
+            onToggle={noop}
+            onSelect={noop}
+            onToggleGroup={noop}
+            onToggleSubgroup={noop}
+            onToggleOrg={noop}
+            onToggleOrgRepo={noop}
+            onReorderWorkspaces={noop}
+            onReorderGroups={noop}
+            onUpdateRepoAppearance={noop}
+            onNew={noop}
+            onCreateSession={noop}
+            onAddProject={noop}
+            onEditProject={noop}
+            onRemoveProject={noop}
+            onSettings={noop}
+            sortMode="manual"
+            onSortModeChange={noop}
+            pluginSortRef={null}
+            onPluginSortChange={noop}
+            axis={axis}
+            onAxisChange={noop}
+          />
+        </SessionActionProvider>
       </SessionColorsContext.Provider>
     </HideEmptyGroupsContext.Provider>
   );
 }
 
 const click = (name: string | RegExp) => fireEvent.click(screen.getByRole("button", { name }));
-const rows = () => screen.queryAllByTestId("sidebar-session-row").map((r) => r.getAttribute("title"));
+const rows = () =>
+  screen
+    .queryAllByTestId("sidebar-session-row")
+    .map((r) => r.querySelector("span.truncate[title]")?.getAttribute("title") ?? null);
 const query = (value: string) => fireEvent.change(screen.getByTestId("sidebar-filter-input"), { target: { value } });
 const openFilter = () => click("Filter sessions");
 

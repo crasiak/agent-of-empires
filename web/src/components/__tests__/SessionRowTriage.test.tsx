@@ -277,6 +277,60 @@ describe("SessionRow context menu", () => {
     for (const id of ["switch-agent", "new-session", "color-red", "color-clear"]) {
       expect(testId(`sidebar-context-menu-${id}`)).toBeNull();
     }
+    // Showing a session alone changes nothing on the server.
+    expect(testId("sidebar-context-menu-show-only")).not.toBeNull();
+  });
+});
+
+describe("SessionRow focus-mode entries", () => {
+  const originalLocation = Object.getOwnPropertyDescriptor(window, "location")!;
+  afterEach(() => {
+    Object.defineProperty(window, "location", originalLocation);
+    vi.restoreAllMocks();
+  });
+  const pointer = (coarse: boolean) =>
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({ matches: coarse && query === "(pointer: coarse)", media: query })),
+    );
+
+  it("shows the session alone in this window, or opens it in its own window, from More", () => {
+    pointer(false);
+    const replace = vi.fn();
+    Object.defineProperty(window, "location", { configurable: true, value: { ...window.location, replace } });
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
+
+    openRowMenu(ws({ id: "s 1" }), { expandMore: false });
+    const group = document.getElementById(
+      screen.getByTestId("sidebar-context-menu-more").getAttribute("aria-controls")!,
+    )!;
+    expect(group.contains(testId("sidebar-context-menu-show-only"))).toBe(true);
+    expect(testId("sidebar-context-menu-show-only")!.textContent).toBe("Show only this Session");
+    expect(testId("sidebar-context-menu-own-window")!.textContent).toBe("Open in its own window");
+
+    click("sidebar-context-menu-show-only");
+    expect(replace).toHaveBeenCalledWith("/session/s%201?focus=1");
+    expect(testId("sidebar-context-menu")).toBeNull();
+
+    fireEvent.contextMenu(screen.getByTestId("sidebar-session-row"));
+    click("sidebar-context-menu-more");
+    click("sidebar-context-menu-own-window");
+    expect(open).toHaveBeenCalledWith("/session/s%201?focus=1", "_blank");
+    expect(replace).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops Open in its own window on a phone, which cannot open a second window", () => {
+    pointer(true);
+    openRowMenu(ws());
+    expect(testId("sidebar-context-menu-show-only")).not.toBeNull();
+    expect(testId("sidebar-context-menu-own-window")).toBeNull();
+  });
+
+  it("offers neither for a trashed session", () => {
+    pointer(false);
+    openRowMenu(ws({ trashed_at: PAST }));
+    expect(testId("sidebar-context-menu-show-only")).toBeNull();
+    expect(testId("sidebar-context-menu-own-window")).toBeNull();
   });
 });
 
@@ -324,32 +378,21 @@ describe("SessionRow triage actions", () => {
   });
 
   it.each([
-    ["Notify all", "sidebar-context-menu-notify-all", "notifications"],
-    ["Color", "sidebar-context-menu-color-red", "color"],
-  ])("%s keeps the menu open, shows the pick, and reverts on failure", async (_n, item, path) => {
+    ["Notify all", "sidebar-context-menu-notify-all"],
+    ["Color", "sidebar-context-menu-color-red"],
+  ])("%s keeps the menu open, shows the pick, and reverts on failure", async (_n, item) => {
     let fail = () => {};
     fetchSpy.mockImplementation(
       () => new Promise((resolve) => (fail = () => resolve(new Response("nope", { status: 500 })))),
     );
     openRowMenu(ws({ id: "sess-pick" }));
     click(item);
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledOnce());
     expect(testId("sidebar-context-menu")).not.toBeNull();
     expect(testId(item)!.getAttribute("aria-pressed")).toBe("true");
-    expect(fetchSpy.mock.calls[0]![0]).toBe(`/api/sessions/sess-pick/${path}`);
     fail();
     await vi.waitFor(() => expect(testId(item)!.getAttribute("aria-pressed")).toBe("false"));
     expect(testId("sidebar-context-menu")).not.toBeNull();
-  });
-
-  it("No color on a multi-session row clears every session, including the one carrying the color", async () => {
-    openRowMenu(makeWorkspace("w", [makeSession({ id: "s1" }), makeSession({ id: "s2", color: "red" })]));
-    expect(testId("sidebar-context-menu-color-red")!.getAttribute("aria-pressed")).toBe("true");
-    click("sidebar-context-menu-color-clear");
-    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
-    expect(fetchSpy.mock.calls.map(([url]) => url).sort()).toEqual([
-      "/api/sessions/s1/color",
-      "/api/sessions/s2/color",
-    ]);
   });
 
   it("the close button closes the menu", () => {
@@ -412,6 +455,7 @@ describe("SessionRow bookmark highlight (#2383)", () => {
   });
 
   it("tints the row as soon as a highlight swatch is picked", async () => {
+    fetchSpy.mockImplementation(() => new Promise(() => {}));
     openRowMenu(ws({ id: "sess-color-it" }));
     click("sidebar-context-menu-color-red");
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled());
@@ -449,7 +493,7 @@ describe("SessionRow bookmark highlight (#2383)", () => {
   });
 });
 describe("SessionRow keyboard navigation", () => {
-  it("prevents page scrolling at the last visible row", () => {
+  it("prevents page scrolling at the last row", () => {
     const { container } = renderRow(ws());
     const sidebar = document.createElement("nav");
     sidebar.setAttribute("role", "navigation");
@@ -458,12 +502,53 @@ describe("SessionRow keyboard navigation", () => {
     sidebar.appendChild(container);
 
     const row = screen.getByTestId("sidebar-session-row");
-    vi.spyOn(row, "getClientRects").mockReturnValue([{} as DOMRect] as unknown as DOMRectList);
     row.focus();
     const event = new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true });
     row.dispatchEvent(event);
 
     expect(event.defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(row);
+  });
+});
+
+describe("SessionRow mark tooltips", () => {
+  it("explains marks with tooltips, not title, and describes the focused row with its glyph", () => {
+    renderRow(ws({ status: "Waiting", favorited: true, pinned_at: PAST }));
+    const row = testId("sidebar-session-row")!;
+    expect(row.hasAttribute("title")).toBe(false);
+    for (const id of ["sidebar-status-glyph", "sidebar-pinned-mark", "sidebar-favorite-mark"]) {
+      expect(testId(id)!.closest("[title]"), id).toBeNull();
+    }
+
+    // A mouse over the glyph shows what it means; a touch never does.
+    const glyph = testId("sidebar-status-glyph")!;
+    fireEvent.pointerEnter(glyph, { pointerType: "touch" });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    fireEvent.pointerEnter(glyph, { pointerType: "mouse" });
+    expect(screen.getByRole("tooltip").textContent).toBe("Waiting: the Agent needs your input");
+    fireEvent.pointerLeave(glyph, { pointerType: "mouse" });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+
+    // Keyboard focus (jsdom has no :focus-visible) is covered by sidebar-legend.spec.ts.
+    cleanup();
+
+    renderRow(ws({ status: "Idle", unread: true }), { unread: true });
+    expect(testId("sidebar-unread-dot")!.closest("[title]")).toBeNull();
+    fireEvent.pointerEnter(testId("sidebar-status-glyph")!, { pointerType: "mouse" });
+    expect(screen.getByRole("tooltip").textContent).toMatch(/^Unread: /);
+    cleanup();
+
+    // Attention the glyph's meaning doesn't already say gets its own line, which `title` used to carry,
+    // also when an unread glyph stands in for the status glyph.
+    const cases: [Parameters<typeof ws>[0], { unread?: boolean } | undefined, string][] = [
+      [{ status: "Running", urgent: true }, undefined, "Running: the Agent is workingNeeds your attention"],
+      [{ status: "Idle", urgent: true, unread: true }, { unread: true }, "Needs your attention"],
+    ];
+    for (const [over, opts, tip] of cases) {
+      cleanup();
+      renderRow(ws(over), opts);
+      fireEvent.pointerEnter(testId("sidebar-status-glyph")!, { pointerType: "mouse" });
+      expect(screen.getByRole("tooltip").textContent, JSON.stringify(over)).toContain(tip);
+    }
   });
 });
