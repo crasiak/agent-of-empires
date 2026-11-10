@@ -432,3 +432,113 @@ fn resolve_host_creation(
     body.cli = Some(options);
     Ok((body, warnings))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::config::profile_config::{self, ProfileConfig};
+
+    #[test]
+    #[serial_test::serial]
+    fn explicit_builtin_selectors_validate_the_profile_command_before_native_detection() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let availability = crate::tmux::AgentAvailabilityGuard::capture();
+        let bin = tempfile::Builder::new()
+            .prefix("agent wrappers ")
+            .tempdir()
+            .unwrap();
+        crate::session::test_support::write_stub_adapter(bin.path(), "codex-wrapper");
+        let wrapper = format!(
+            "{} --profile work",
+            shell_words::quote(bin.path().join("codex-wrapper").to_str().unwrap())
+        );
+        let missing_binary = bin.path().join("missing-codex-wrapper");
+        let missing = shell_words::quote(missing_binary.to_str().unwrap()).into_owned();
+
+        for configured in [Some(wrapper.as_str()), Some(missing.as_str()), None] {
+            let profile: ProfileConfig = serde_json::from_value(match configured {
+                Some(command) => serde_json::json!({
+                    "session": {"agent_command_override": {"codex": command}},
+                }),
+                None => serde_json::json!({}),
+            })
+            .unwrap();
+            profile_config::save_profile_config("test", &profile).unwrap();
+            let session = profile_config::resolve_config("test").unwrap().session;
+            for native_available in [false, true] {
+                for legacy in [false, true] {
+                    availability.seed("codex", native_available);
+                    let body: CreateSessionBody = serde_json::from_value(serde_json::json!({
+                        "path": "", "scratch": true, "profile": "test",
+                        "tool": if legacy { "" } else { "codex" },
+                    }))
+                    .unwrap();
+                    let options = serde_json::from_value(serde_json::json!({
+                        "command": legacy.then_some("codex"),
+                    }))
+                    .unwrap();
+                    let result = resolve_host_creation(body, options, None, "test");
+                    let context = format!(
+                        "configured={configured:?}, native={native_available}, legacy={legacy}"
+                    );
+                    if configured == Some(missing.as_str()) {
+                        assert_eq!(
+                            result.err().expect(&context).to_string(),
+                            format!(
+                                "Configured agent binary is unavailable on the Daemon host: {}",
+                                missing_binary.display()
+                            ),
+                            "{context}"
+                        );
+                    } else if configured.is_none() && !native_available {
+                        assert!(
+                            result
+                                .err()
+                                .expect(&context)
+                                .to_string()
+                                .contains("Agent 'codex' is not installed on the Daemon host"),
+                            "{context}"
+                        );
+                    } else {
+                        let (body, _) = result.unwrap_or_else(|error| panic!("{context}: {error}"));
+                        assert_eq!(body.tool, "codex", "{context}");
+                        if let Some(command) = configured {
+                            let mut instance = Instance::new("wrapper", "/fixture");
+                            instance.tool = body.tool;
+                            crate::session::builder::apply_agent_launch_config(
+                                &mut instance,
+                                &session,
+                                &body.extra_args,
+                                &body.command_override,
+                                None,
+                            );
+                            assert_eq!(instance.command, command, "{context}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn explicit_custom_agents_keep_shell_command_validation_unchanged() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let availability = crate::tmux::AgentAvailabilityGuard::capture();
+        for tool in ["remote-codex", "codex"] {
+            availability.seed("codex", false);
+            let profile: ProfileConfig = serde_json::from_value(serde_json::json!({
+                "session": {"custom_agents": {(tool): "AOE_ACCOUNT=work remote-codex"}},
+            }))
+            .unwrap();
+            profile_config::save_profile_config("test", &profile).unwrap();
+            let body = serde_json::from_value(serde_json::json!({
+                "path": "", "scratch": true, "profile": "test", "tool": tool,
+            }))
+            .unwrap();
+            let options = serde_json::from_value(serde_json::json!({})).unwrap();
+            let (body, _) = resolve_host_creation(body, options, None, "test").unwrap();
+            assert_eq!(body.tool, tool);
+        }
+    }
+}
