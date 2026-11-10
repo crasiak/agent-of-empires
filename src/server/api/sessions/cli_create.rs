@@ -319,7 +319,9 @@ fn resolve_host_creation(
                 .is_some_and(|command| !command.trim().is_empty())
         });
         let configured = config.session.resolve_tool_command(&body.tool);
-        if !configured.is_empty() && (options.command.is_some() || agent.is_some()) {
+        if !configured.is_empty()
+            && (options.command.is_some() || (agent.is_some() && body.command_override.is_empty()))
+        {
             let binary = shell_words::split(&configured)?
                 .into_iter()
                 .next()
@@ -467,11 +469,14 @@ mod tests {
             profile_config::save_profile_config("test", &profile).unwrap();
             let session = profile_config::resolve_config("test").unwrap().session;
             for native_available in [false, true] {
-                for legacy in [false, true] {
+                for (legacy, command_override) in
+                    [(false, ""), (true, ""), (false, wrapper.as_str())]
+                {
                     availability.seed("codex", native_available);
                     let body: CreateSessionBody = serde_json::from_value(serde_json::json!({
                         "path": "", "scratch": true, "profile": "test",
                         "tool": if legacy { "" } else { "codex" },
+                        "command_override": command_override,
                     }))
                     .unwrap();
                     let options = serde_json::from_value(serde_json::json!({
@@ -480,9 +485,10 @@ mod tests {
                     .unwrap();
                     let result = resolve_host_creation(body, options, None, "test");
                     let context = format!(
-                        "configured={configured:?}, native={native_available}, legacy={legacy}"
+                        "configured={configured:?}, native={native_available}, legacy={legacy}, override={command_override:?}"
                     );
-                    if configured == Some(missing.as_str()) {
+                    let uses_profile = command_override.is_empty() && configured.is_some();
+                    if uses_profile && configured == Some(missing.as_str()) {
                         assert_eq!(
                             result.err().expect(&context).to_string(),
                             format!(
@@ -491,7 +497,7 @@ mod tests {
                             ),
                             "{context}"
                         );
-                    } else if configured.is_none() && !native_available {
+                    } else if !uses_profile && !native_available {
                         assert!(
                             result
                                 .err()
@@ -503,7 +509,12 @@ mod tests {
                     } else {
                         let (body, _) = result.unwrap_or_else(|error| panic!("{context}: {error}"));
                         assert_eq!(body.tool, "codex", "{context}");
-                        if let Some(command) = configured {
+                        let expected_command = if command_override.is_empty() {
+                            configured
+                        } else {
+                            Some(command_override)
+                        };
+                        if let Some(command) = expected_command {
                             let mut instance = Instance::new("wrapper", "/fixture");
                             instance.tool = body.tool;
                             crate::session::builder::apply_agent_launch_config(
