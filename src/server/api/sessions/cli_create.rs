@@ -311,8 +311,15 @@ fn resolve_host_creation(
         }
     }
     if explicit_tool {
+        let agent = crate::agents::get_agent(&body.tool).filter(|_| {
+            !config
+                .session
+                .custom_agents
+                .get(&body.tool)
+                .is_some_and(|command| !command.trim().is_empty())
+        });
         let configured = config.session.resolve_tool_command(&body.tool);
-        if options.command.is_some() && !configured.is_empty() {
+        if !configured.is_empty() && (options.command.is_some() || agent.is_some()) {
             let binary = shell_words::split(&configured)?
                 .into_iter()
                 .next()
@@ -321,13 +328,7 @@ fn resolve_host_creation(
                 crate::tmux::is_binary_on_path(&binary),
                 "Configured agent binary is unavailable on the Daemon host: {binary}"
             );
-        } else if let Some(agent) = crate::agents::get_agent(&body.tool).filter(|_| {
-            !config
-                .session
-                .custom_agents
-                .get(&body.tool)
-                .is_some_and(|command| !command.trim().is_empty())
-        }) {
+        } else if let Some(agent) = agent {
             anyhow::ensure!(
                 crate::tmux::is_agent_available(agent),
                 "Agent '{}' is not installed on the Daemon host. Install with: {}",
