@@ -206,6 +206,11 @@ pub struct AppState {
     /// cache. Scoped to one `AppState` rather than the process so a
     /// concurrent test cannot leak counts into an assertion.
     pub list_sessions_resolver_misses: std::sync::atomic::AtomicUsize,
+    /// Resolved `(profile, project_path)` configs shared across publications,
+    /// revalidated by file stamps on every hit. Without it each 500 ms
+    /// publication re-reads every pair from disk (TOML parse plus a libgit2
+    /// open), which at ~100 sessions costs seconds and starves mutations.
+    pub session_cfg_cache: crate::session::config::repo_config::ResolvedConfigCache,
     /// Session ids with an in-flight smart-rename one-shot, so a burst of rapid
     /// first prompts cannot spawn concurrent title generators for the same
     /// session. Synchronous mutex: critical sections are tiny and never span an

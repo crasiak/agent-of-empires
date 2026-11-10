@@ -1,8 +1,10 @@
 //! Repository-level configuration (`.agent-of-empires/config.toml`): sanitized overrides, trust, hooks.
 
+mod cache;
 mod hooks;
 mod trust;
 
+pub use cache::*;
 pub use hooks::*;
 pub use trust::*;
 
@@ -308,9 +310,14 @@ pub fn resolve_config_with_repo(profile: &str, project_path: &Path) -> Result<Co
 /// Like [`resolve_config_with_repo`], degrading a bad repo config to the
 /// profile config and a bad profile config to defaults.
 pub fn resolve_config_with_repo_or_warn(profile: &str, project_path: &Path) -> Config {
+    resolve_config_with_repo_source_or_warn(profile, &repo_config_source_path(project_path))
+}
+
+/// [`resolve_config_with_repo_or_warn`] with the repo config source already
+/// located (see [`repo_config_source_path`]), for callers that cache it.
+pub(crate) fn resolve_config_with_repo_source_or_warn(profile: &str, config_path: &Path) -> Config {
     let base = profile_config::resolve_config_or_warn(profile);
-    let config_path = repo_config_source_path(project_path);
-    let mut merged = match load_repo_config(&config_path) {
+    let mut merged = match load_repo_config(config_path) {
         Ok(Some(repo_config)) => merge_repo_config(base, &repo_config),
         Ok(None) => base,
         Err(e) => {
