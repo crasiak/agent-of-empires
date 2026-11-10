@@ -684,8 +684,7 @@ fn digit_keys_ignore_a_trashed_session() {
     v.update_selected();
     v.handle_key(key(KeyCode::Char('2')), None);
     assert_eq!(stored_color(&inst.id), None);
-    assert_eq!(
-        v.status_flash_text(),
-        Some("Nothing to highlight: select a session")
-    );
+    // A trashed selection is read-only (upstream #5143): the dispatcher drops
+    // the action before the highlight code can flash, so nothing is shown.
+    assert_eq!(v.status_flash_text(), None);
 }
