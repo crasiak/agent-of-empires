@@ -88,6 +88,7 @@ impl HomeView {
             pending_created_attach: None,
             retained_reveal: None,
             runtime_diagnostics: Vec::new(),
+            badge_identities: HashMap::new(),
             group_trees,
             legacy_duplicate_reports,
             flat_items: Vec::new(),

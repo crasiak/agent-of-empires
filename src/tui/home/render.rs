@@ -647,11 +647,13 @@ impl RowTag {
 
 /// The per-row tag for an instance and mode, or `None` when this context renders none.
 /// `Auto` only renders in all-profiles view; other modes render whenever their content
-/// exists (`Branch` yields `None` without branch metadata).
+/// exists (`Branch` yields `None` without branch metadata). `identity` is the launch
+/// identity the `Agent` badge shows (see `HomeView::badge_identity`).
 pub(crate) fn compute_row_tag(
     inst: &crate::session::Instance,
     mode: RowTagMode,
     in_all_profiles_view: bool,
+    identity: Option<&crate::session::launch_identity::LaunchIdentity>,
 ) -> Option<RowTag> {
     match mode {
         RowTagMode::None => None,
@@ -690,14 +692,16 @@ pub(crate) fn compute_row_tag(
                 None
             }
         }
-        RowTagMode::Agent => agent_row_tag(inst),
+        RowTagMode::Agent => agent_row_tag(inst, identity),
         RowTagMode::Branch => branch_row_tag(inst),
     }
 }
 
-fn agent_row_tag(inst: &crate::session::Instance) -> Option<RowTag> {
-    let agent = inst
-        .current_launch_identity()
+fn agent_row_tag(
+    inst: &crate::session::Instance,
+    identity: Option<&crate::session::launch_identity::LaunchIdentity>,
+) -> Option<RowTag> {
+    let agent = identity
         .map(|identity| identity.agent.as_str())
         .or(inst
             .agent_name
@@ -713,12 +717,10 @@ fn agent_row_tag(inst: &crate::session::Instance) -> Option<RowTag> {
         return None;
     }
     let content = if matches!(code.as_str(), "cc" | "cx" | "pi") {
-        let (account, launcher) = inst
-            .current_launch_identity()
+        let (account, launcher) = identity
             .map(|identity| identity.codes())
             .unwrap_or(("?", "?"));
-        let suffix = inst
-            .current_launch_identity()
+        let suffix = identity
             .map(|identity| identity.profile_suffix())
             .unwrap_or("");
         format!("{code}:{account}:{launcher}{suffix}")
@@ -2218,7 +2220,12 @@ impl HomeView {
         }
         let row_tag = if let Item::Session { id, .. } = item {
             self.get_instance(id).and_then(|inst| {
-                compute_row_tag(inst, self.row_tag_mode, self.active_profile.is_none())
+                compute_row_tag(
+                    inst,
+                    self.row_tag_mode,
+                    self.active_profile.is_none(),
+                    self.badge_identity(inst),
+                )
             })
         } else {
             None
@@ -5783,12 +5790,19 @@ mod tests {
         use crate::session::launch_identity::{LaunchAccount, LaunchIdentity, Launcher};
         let mut instance = crate::session::Instance::new("test", "/tmp");
         instance.command = "codex-ledger-work-isolated".into();
-        assert_eq!(agent_row_tag(&instance).unwrap().rendered(), "[cc:?:?]");
+        assert_eq!(
+            agent_row_tag(&instance, instance.current_launch_identity())
+                .unwrap()
+                .rendered(),
+            "[cc:?:?]"
+        );
         for (agent, code) in [("claude", "cc"), ("codex", "cx"), ("pi", "pi")] {
             instance.tool = agent.into();
             instance.launch_identity = None;
             assert_eq!(
-                agent_row_tag(&instance).unwrap().rendered(),
+                agent_row_tag(&instance, instance.current_launch_identity())
+                    .unwrap()
+                    .rendered(),
                 format!("[{code}:?:?]")
             );
             for (account, account_code) in
@@ -5807,11 +5821,13 @@ mod tests {
                         profile: "alias".into(),
                     });
                     assert_eq!(
-                        agent_row_tag(&instance).unwrap().rendered(),
+                        agent_row_tag(&instance, instance.current_launch_identity())
+                            .unwrap()
+                            .rendered(),
                         format!("[{code}:{account_code}:{launcher_code}]")
                     );
-                    assert!(compute_row_tag(&instance, RowTagMode::None, false).is_none());
-                    assert!(compute_row_tag(&instance, RowTagMode::Auto, false).is_none());
+                    assert!(compute_row_tag(&instance, RowTagMode::None, false, None).is_none());
+                    assert!(compute_row_tag(&instance, RowTagMode::Auto, false, None).is_none());
                 }
             }
         }
@@ -5822,7 +5838,12 @@ mod tests {
         use crate::session::launch_identity::{LaunchAccount, LaunchIdentity, Launcher};
         let mut instance = crate::session::Instance::new("test", "/tmp");
         instance.tool = "pi".into();
-        assert_eq!(agent_row_tag(&instance).unwrap().rendered(), "[pi:?:?]");
+        assert_eq!(
+            agent_row_tag(&instance, instance.current_launch_identity())
+                .unwrap()
+                .rendered(),
+            "[pi:?:?]"
+        );
         for (profile, expected) in [
             ("oss", "[pi:p:lh:oss]"),
             ("personal-oss", "[pi:p:lh:oss]"),
@@ -5835,7 +5856,12 @@ mod tests {
                 launcher: Launcher::LedgerHeadroom,
                 profile: profile.into(),
             });
-            assert_eq!(agent_row_tag(&instance).unwrap().rendered(), expected);
+            assert_eq!(
+                agent_row_tag(&instance, instance.current_launch_identity())
+                    .unwrap()
+                    .rendered(),
+                expected
+            );
         }
     }
 

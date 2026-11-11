@@ -3680,3 +3680,100 @@ fn launch_identity_status_updates_reject_stale_launches() {
         );
     }
 }
+
+fn pi_ledger_identity() -> crate::session::launch_identity::LaunchIdentity {
+    use crate::session::launch_identity::{LaunchAccount, LaunchIdentity, Launcher};
+    LaunchIdentity {
+        agent: "pi".into(),
+        account: LaunchAccount::Work,
+        launcher: Launcher::LedgerHeadroom,
+        profile: "work".into(),
+    }
+}
+
+/// A running terminal `pi` row with no launch identity yet.
+fn running_pi_row(env: &mut TestEnv) -> String {
+    let mut inst = Instance::new("badge-row", "/tmp/repo");
+    inst.source_profile = "test".to_string();
+    inst.tool = "pi".into();
+    inst.status = Status::Running;
+    let id = inst.id.clone();
+    env.view.add_instance(inst);
+    id
+}
+
+fn agent_row_text(view: &mut HomeView, id: &str) -> String {
+    view.row_tag_mode = crate::session::config::RowTagMode::Agent;
+    view.flat_items = view.build_flat_items();
+    let item = view
+        .flat_items
+        .iter()
+        .find(|item| matches!(item, Item::Session { id: row, .. } if row == id))
+        .expect("session row listed")
+        .clone();
+    rendered_row_text(view, &item)
+}
+
+fn identity_update(
+    view: &HomeView,
+    id: &str,
+    identity: Option<crate::session::launch_identity::LaunchIdentity>,
+) -> crate::daemon::SessionResponse {
+    let mut row = update(view, id, Status::Running);
+    row.launch_identity = identity;
+    row
+}
+
+#[test]
+#[serial]
+fn sidebar_badge_keeps_a_known_identity_across_a_same_generation_gap() {
+    let mut env = create_test_env_empty();
+    let id = running_pi_row(&mut env);
+
+    let seen = identity_update(&env.view, &id, Some(pi_ledger_identity()));
+    env.view.apply_daemon_status_update(&seen);
+    let text = agent_row_text(&mut env.view, &id);
+    assert!(text.contains("[pi:w:lh] badge-row"), "{text:?}");
+
+    // The daemon drops the identity for the same launch: the badge must not flicker.
+    let gap = identity_update(&env.view, &id, None);
+    env.view.apply_daemon_status_update(&gap);
+    assert!(env
+        .view
+        .get_instance(&id)
+        .unwrap()
+        .launch_identity
+        .is_none());
+    let text = agent_row_text(&mut env.view, &id);
+    assert!(
+        text.contains("[pi:w:lh] badge-row"),
+        "a gap at the same generation must render the cached identity: {text:?}"
+    );
+
+    // A new launch must not inherit the old launch's identity.
+    env.view
+        .mutate_instance(&id, |instance| instance.lifecycle_generation += 1);
+    let relaunch = identity_update(&env.view, &id, None);
+    env.view.apply_daemon_status_update(&relaunch);
+    let text = agent_row_text(&mut env.view, &id);
+    assert!(
+        text.contains("[pi:?:?] badge-row"),
+        "a generation bump must drop the cached identity: {text:?}"
+    );
+    assert!(!env.view.badge_identities.contains_key(&id));
+}
+
+#[test]
+#[serial]
+fn sidebar_badge_cache_does_not_label_stopped_rows() {
+    let mut env = create_test_env_empty();
+    let id = running_pi_row(&mut env);
+    let seen = identity_update(&env.view, &id, Some(pi_ledger_identity()));
+    env.view.apply_daemon_status_update(&seen);
+
+    let mut stopped = identity_update(&env.view, &id, None);
+    stopped.status = "Stopped".into();
+    env.view.apply_daemon_status_update(&stopped);
+    let text = agent_row_text(&mut env.view, &id);
+    assert!(text.contains("[pi:?:?] badge-row"), "{text:?}");
+}
