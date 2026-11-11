@@ -3777,3 +3777,51 @@ fn sidebar_badge_cache_does_not_label_stopped_rows() {
     let text = agent_row_text(&mut env.view, &id);
     assert!(text.contains("[pi:?:?] badge-row"), "{text:?}");
 }
+
+#[test]
+#[serial]
+fn launch_identity_gaps_are_counted_once_per_same_generation_loss() {
+    let mut env = create_test_env_empty();
+    let id = running_pi_row(&mut env);
+    assert_eq!(env.view.launch_identity_gaps, 0);
+
+    let seen = identity_update(&env.view, &id, Some(pi_ledger_identity()));
+    env.view.apply_daemon_status_update(&seen);
+    let gap = identity_update(&env.view, &id, None);
+    env.view.apply_daemon_status_update(&gap);
+    assert_eq!(env.view.launch_identity_gaps, 1, "Some -> None counts");
+
+    env.view.apply_daemon_status_update(&gap);
+    assert_eq!(
+        env.view.launch_identity_gaps, 1,
+        "a repeated None is the same gap"
+    );
+
+    env.view.apply_daemon_status_update(&seen);
+    env.view.apply_daemon_status_update(&gap);
+    assert_eq!(
+        env.view.launch_identity_gaps, 2,
+        "a second loss counts again"
+    );
+
+    env.view.apply_daemon_status_update(&seen);
+    let mut stopped = identity_update(&env.view, &id, None);
+    stopped.status = "Stopped".into();
+    env.view.apply_daemon_status_update(&stopped);
+    assert_eq!(
+        env.view.launch_identity_gaps, 2,
+        "a stop legitimately drops it"
+    );
+    env.view
+        .apply_daemon_status_update(&update(&env.view, &id, Status::Running));
+
+    env.view.apply_daemon_status_update(&seen);
+    env.view
+        .mutate_instance(&id, |instance| instance.lifecycle_generation += 1);
+    let relaunch = identity_update(&env.view, &id, None);
+    env.view.apply_daemon_status_update(&relaunch);
+    assert_eq!(
+        env.view.launch_identity_gaps, 2,
+        "a new generation without an identity is not a gap"
+    );
+}

@@ -239,6 +239,9 @@ pub struct HomeView {
     /// briefly republishes a known launch without its identity.
     pub(super) badge_identities:
         HashMap<String, (u64, crate::session::launch_identity::LaunchIdentity)>,
+    /// Times the daemon dropped a known identity from a live launch at the same
+    /// lifecycle generation; each one is also logged on the `tui.badge` target.
+    pub(super) launch_identity_gaps: u64,
     pub(super) group_trees: HashMap<String, GroupTree>,
     pub(super) legacy_duplicate_reports: Vec<crate::session::DuplicateIdReport>,
     pub(super) flat_items: Vec<Item>,

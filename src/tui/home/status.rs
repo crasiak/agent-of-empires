@@ -999,14 +999,7 @@ impl HomeView {
         instance: &'a Instance,
     ) -> Option<&'a crate::session::launch_identity::LaunchIdentity> {
         instance.current_launch_identity().or_else(|| {
-            if instance.is_structured()
-                || instance.is_archived()
-                || instance.is_trashed()
-                || matches!(
-                    instance.status,
-                    Status::Stopped | Status::Deleting | Status::Creating
-                )
-            {
+            if !launch_may_carry_identity(instance) {
                 return None;
             }
             self.badge_identities
@@ -1035,6 +1028,28 @@ impl HomeView {
         instance.status = status;
         instance.last_error.clone_from(&row.last_error);
         instance.pane_dead_observed = row.pane_dead_observed;
+        // A live launch whose known identity vanishes at the same generation is a
+        // publication gap, not a relaunch; count it so the owner can see it happen.
+        if row.lifecycle_generation == instance.lifecycle_generation
+            && row.launch_identity.is_none()
+            && instance.launch_identity.is_some()
+            && launch_may_carry_identity(instance)
+            && self
+                .badge_identities
+                .get(&row.id)
+                .is_some_and(|(generation, _)| *generation == instance.lifecycle_generation)
+        {
+            self.launch_identity_gaps += 1;
+            tracing::warn!(
+                target: "tui.badge",
+                id = %row.id,
+                status = %row.status,
+                pane_dead_observed = row.pane_dead_observed,
+                lifecycle_generation = row.lifecycle_generation,
+                gaps = self.launch_identity_gaps,
+                "daemon dropped a known launch identity"
+            );
+        }
         // An identity observed for an older launch must not label the current one.
         if row.lifecycle_generation == instance.lifecycle_generation
             && instance.launch_identity != row.launch_identity
@@ -1471,4 +1486,16 @@ impl HomeView {
         };
         self.open_indeterminate_dialog(&id, &message);
     }
+}
+
+/// Whether a row's launch can have an identity at all; rows that are not live never
+/// borrow a remembered one and losing it there is not a publication gap.
+fn launch_may_carry_identity(instance: &Instance) -> bool {
+    !(instance.is_structured()
+        || instance.is_archived()
+        || instance.is_trashed()
+        || matches!(
+            instance.status,
+            Status::Stopped | Status::Deleting | Status::Creating
+        ))
 }
