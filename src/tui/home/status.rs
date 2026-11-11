@@ -999,7 +999,8 @@ impl HomeView {
         instance: &'a Instance,
     ) -> Option<&'a crate::session::launch_identity::LaunchIdentity> {
         instance.current_launch_identity().or_else(|| {
-            if !launch_may_carry_identity(instance) {
+            // A dead pane hides its identity, as `current_launch_identity` does.
+            if instance.pane_dead_observed || !launch_may_carry_identity(instance) {
                 return None;
             }
             self.badge_identities

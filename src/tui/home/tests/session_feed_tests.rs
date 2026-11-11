@@ -3780,6 +3780,25 @@ fn sidebar_badge_cache_does_not_label_stopped_rows() {
 
 #[test]
 #[serial]
+fn sidebar_badge_cache_does_not_label_dead_panes() {
+    let mut env = create_test_env_empty();
+    let id = running_pi_row(&mut env);
+    let seen = identity_update(&env.view, &id, Some(pi_ledger_identity()));
+    env.view.apply_daemon_status_update(&seen);
+
+    // Same generation, still Running, but the pane is gone: live shows no identity.
+    let mut dead = identity_update(&env.view, &id, None);
+    dead.pane_dead_observed = true;
+    env.view.apply_daemon_status_update(&dead);
+    let text = agent_row_text(&mut env.view, &id);
+    assert!(
+        text.contains("[pi:?:?] badge-row"),
+        "a dead pane must not borrow the remembered identity: {text:?}"
+    );
+}
+
+#[test]
+#[serial]
 fn launch_identity_gaps_are_counted_once_per_same_generation_loss() {
     let mut env = create_test_env_empty();
     let id = running_pi_row(&mut env);
