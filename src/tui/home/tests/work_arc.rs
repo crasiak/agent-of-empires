@@ -308,9 +308,12 @@ async fn slice1_session_arc_preview_two_sessions_handoff_pause_restart_and_histo
     select(&mut env.view, &first_id);
     let screen = render_home_to_string(&mut env.view, 160, 46);
     assert!(
-        screen.contains("paused") && screen.contains("Alpha stable goal"),
+        screen.contains("paused") && screen.contains("menu: expand"),
         "{screen}"
     );
+    // Field rows are reserved only while the arc is enabled, so a paused arc
+    // keeps its record but leaves the fields to the expand view.
+    assert!(!screen.contains("Alpha stable goal"), "{screen}");
     assert_eq!(
         env.view
             .get_instance(&first_id)
