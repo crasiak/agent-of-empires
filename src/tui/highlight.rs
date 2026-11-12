@@ -17,6 +17,8 @@ impl HighlightFilters {
     }
     /// The color a new session takes so it stays visible under this filter:
     /// the first color, unless uncolored rows are admitted (or no color is chosen).
+    /// Project filters are ignored, so a row whose repo color is excluded by the
+    /// project filter stays hidden even when it is colored.
     pub fn creation_color(&self) -> Option<&str> {
         if self.sessions.contains(&None) {
             return None;
