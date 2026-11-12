@@ -88,6 +88,8 @@ impl HomeView {
             pending_created_attach: None,
             retained_reveal: None,
             runtime_diagnostics: Vec::new(),
+            badge_identities: HashMap::new(),
+            launch_identity_gaps: 0,
             group_trees,
             legacy_duplicate_reports,
             flat_items: Vec::new(),
@@ -570,6 +572,8 @@ impl HomeView {
             next.shift_remove(id);
         }
         self.instances = next;
+        self.badge_identities
+            .retain(|id, _| self.instances.contains_key(id));
         self.group_trees = trees;
         self.storages.extend(opened);
         self.storages.retain(|profile, _| scope.contains(profile));

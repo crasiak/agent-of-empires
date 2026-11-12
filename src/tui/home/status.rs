@@ -917,6 +917,8 @@ impl HomeView {
                                     self.instances.keys().map(String::as_str).collect();
                                 self.structured_pending_approvals
                                     .retain(|id, _| ids.contains(id.as_str()));
+                                self.badge_identities
+                                    .retain(|id, _| ids.contains(id.as_str()));
                                 self.refresh_projection_presentation();
                                 self.session_feed_reload_retry_at = None;
                                 self.session_feed_failed_cursor = None;
@@ -989,6 +991,25 @@ impl HomeView {
             || pending_before != pending_after
     }
 
+    /// The launch identity the sidebar badge shows: the live one, or, while the daemon
+    /// republishes a still-running launch without it, the last one seen for the same
+    /// lifecycle generation. Rows whose launch is not live get none, as live does.
+    pub(super) fn badge_identity<'a>(
+        &'a self,
+        instance: &'a Instance,
+    ) -> Option<&'a crate::session::launch_identity::LaunchIdentity> {
+        instance.current_launch_identity().or_else(|| {
+            // A dead pane hides its identity, as `current_launch_identity` does.
+            if instance.pane_dead_observed || !launch_may_carry_identity(instance) {
+                return None;
+            }
+            self.badge_identities
+                .get(&instance.id)
+                .filter(|(generation, _)| *generation == instance.lifecycle_generation)
+                .map(|(_, identity)| identity)
+        })
+    }
+
     pub(in crate::tui) fn apply_daemon_status_update(
         &mut self,
         row: &crate::daemon::SessionResponse,
@@ -1008,12 +1029,54 @@ impl HomeView {
         instance.status = status;
         instance.last_error.clone_from(&row.last_error);
         instance.pane_dead_observed = row.pane_dead_observed;
+        // A live launch whose known identity vanishes at the same generation is a
+        // publication gap, not a relaunch; count it so the owner can see it happen.
+        if row.lifecycle_generation == instance.lifecycle_generation
+            && row.launch_identity.is_none()
+            && instance.launch_identity.is_some()
+            && !row.pane_dead_observed
+            && launch_may_carry_identity(instance)
+            && self
+                .badge_identities
+                .get(&row.id)
+                .is_some_and(|(generation, _)| *generation == instance.lifecycle_generation)
+        {
+            self.launch_identity_gaps += 1;
+            tracing::warn!(
+                target: "tui.badge",
+                id = %row.id,
+                status = %row.status,
+                pane_dead_observed = row.pane_dead_observed,
+                lifecycle_generation = row.lifecycle_generation,
+                gaps = self.launch_identity_gaps,
+                "daemon dropped a known launch identity"
+            );
+        }
         // An identity observed for an older launch must not label the current one.
         if row.lifecycle_generation == instance.lifecycle_generation
             && instance.launch_identity != row.launch_identity
         {
             instance.launch_identity.clone_from(&row.launch_identity);
             changed = true;
+        }
+        // Remember the identity for the sidebar badge; a new launch forgets the old one.
+        match (&row.launch_identity, self.badge_identities.get(&row.id)) {
+            (Some(identity), cached)
+                if row.lifecycle_generation == instance.lifecycle_generation
+                    && cached.is_none_or(|(generation, known)| {
+                        *generation != instance.lifecycle_generation || known != identity
+                    }) =>
+            {
+                self.badge_identities.insert(
+                    row.id.clone(),
+                    (instance.lifecycle_generation, identity.clone()),
+                );
+            }
+            (_, Some((generation, _))) if *generation != instance.lifecycle_generation => {
+                self.badge_identities.remove(&row.id);
+                changed = true;
+            }
+            _ => {}
         }
         if row.view != crate::session::View::Structured
             || row.archived_at.is_some()
@@ -1425,4 +1488,17 @@ impl HomeView {
         };
         self.open_indeterminate_dialog(&id, &message);
     }
+}
+
+/// Whether a row's launch can have an identity at all; rows that are not live never
+/// borrow a remembered one and losing it there is not a publication gap. An Error
+/// row (for example a missing tmux session) has had its identity cleared on purpose.
+fn launch_may_carry_identity(instance: &Instance) -> bool {
+    !(instance.is_structured()
+        || instance.is_archived()
+        || instance.is_trashed()
+        || matches!(
+            instance.status,
+            Status::Stopped | Status::Deleting | Status::Creating | Status::Error
+        ))
 }

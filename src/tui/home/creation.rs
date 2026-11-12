@@ -73,6 +73,7 @@ impl HomeView {
         stub.group_path = data.group.clone();
         stub.status = crate::session::Status::Creating;
         stub.yolo_mode = data.yolo_mode;
+        stub.color = self.highlight_filters.creation_color().map(str::to_owned);
         stub.source_profile = data.profile.clone();
         // Set stub worktree_info so project-mode grouping works during creation.
         // The committed row replaces it once the daemon publishes the session.
@@ -427,6 +428,28 @@ impl HomeView {
                     row.warnings.join("\n\n")
                 ),
             ));
+        }
+        if let Some(color) = self
+            .highlight_filters
+            .creation_color()
+            .map(str::to_owned)
+            .filter(|_| row.color.is_none())
+        {
+            let applied = self.apply_user_action(&row.id, |inst| {
+                if let Err(err) = inst.set_color(Some(color.clone())) {
+                    tracing::error!("set_color failed: {}", err);
+                }
+            });
+            match applied {
+                Ok(()) => {
+                    self.rebuild_flat_items();
+                    self.flash_status(format!("Highlighted {color} to match the active filter"));
+                }
+                Err(e) => {
+                    tracing::error!("failed to color the new session: {}", e);
+                    self.flash_status(format!("Could not highlight the new session: {e}"));
+                }
+            }
         }
         match self.reveal_session(&row.id, true) {
             Ok(_) => self.take_created_attach(),

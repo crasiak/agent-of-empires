@@ -16,6 +16,10 @@ impl Instance {
         self.pane_dead_observed = prior.pane_dead_observed;
         self.agent_pane = std::mem::take(&mut prior.agent_pane);
         self.auxiliary = std::mem::take(&mut prior.auxiliary);
+        // Serde-skipped, so disk rows never carry it; a newer generation is a relaunch.
+        if self.lifecycle_generation <= prior.lifecycle_generation {
+            self.launch_identity = prior.launch_identity.take();
+        }
         self.inherit_process_runtime(prior);
     }
 

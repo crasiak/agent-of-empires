@@ -3389,6 +3389,70 @@ mod tests {
         );
     }
 
+    fn fork_identity() -> crate::session::launch_identity::LaunchIdentity {
+        crate::session::launch_identity::LaunchIdentity {
+            agent: "pi".into(),
+            account: crate::session::launch_identity::LaunchAccount::Work,
+            launcher: crate::session::launch_identity::Launcher::LedgerHeadroom,
+            profile: "work".into(),
+        }
+    }
+
+    /// Fork: `launch_identity` is `#[serde(skip)]`, so a disk-only reload (any storage write,
+    /// such as live-send's `adopt_agent_observation`) loads a row without it. The merge must
+    /// carry the prior row's identity, or every TUI shows `[pi:?:?]` and drops the `Launch:`
+    /// line until the next tmux poll re-observes the pane option.
+    #[test]
+    fn a_disk_reload_keeps_the_launch_identity_of_the_same_generation() {
+        let mut prior = Instance::new("identified", "/tmp/identified");
+        prior.tool = "pi".to_string();
+        prior.launch_identity = Some(fork_identity());
+        let mut fresh = Instance::new("identified", "/tmp/identified");
+        fresh.id = prior.id.clone();
+        fresh.tool = "pi".to_string();
+        assert!(
+            fresh.launch_identity.is_none(),
+            "fixture: a disk row has no identity"
+        );
+
+        let mut canonical = vec![prior];
+        merge_loaded_rows(
+            &mut canonical,
+            vec![fresh],
+            StatusSource::DiskOnly,
+            &Default::default(),
+        );
+
+        assert_eq!(
+            canonical[0].launch_identity,
+            Some(fork_identity()),
+            "a disk-only reload keeps the identity the pane reported"
+        );
+    }
+
+    /// A newer lifecycle generation is a different launch; the old pane's identity must not
+    /// label it (mirrors `merge_runtime_from_reload`).
+    #[test]
+    fn a_disk_reload_drops_the_launch_identity_of_an_older_generation() {
+        let mut prior = Instance::new("relaunched", "/tmp/relaunched");
+        prior.tool = "pi".to_string();
+        prior.launch_identity = Some(fork_identity());
+        let mut fresh = Instance::new("relaunched", "/tmp/relaunched");
+        fresh.id = prior.id.clone();
+        fresh.tool = "pi".to_string();
+        fresh.lifecycle_generation = prior.lifecycle_generation + 1;
+
+        let mut canonical = vec![prior];
+        merge_loaded_rows(
+            &mut canonical,
+            vec![fresh],
+            StatusSource::DiskOnly,
+            &Default::default(),
+        );
+
+        assert_eq!(canonical[0].launch_identity, None);
+    }
+
     /// The window a row armed is about the agent and the execution it armed it for. A row that has
     /// nothing to poll holds neither, and keeps its window; a row another agent took over does not
     /// inherit one paced for the previous agent.
