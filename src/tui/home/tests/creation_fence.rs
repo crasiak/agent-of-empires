@@ -593,3 +593,94 @@ async fn unknown_creation_uses_current_canonical_authority_after_reconnection_no
     assert!(view.apply_creation_results().is_none());
     assert!(view.get_instance(&key).is_none());
 }
+
+/// Drive a full receipt-confirmed creation under `sessions` and return the committed id.
+fn commit_creation_under_filter(
+    sessions: Vec<Option<String>>,
+) -> (String, Option<String>, bool, Option<String>, Option<String>) {
+    let CreationTestEnv {
+        mut view,
+        project_dir,
+        _guard,
+        _temp,
+    } = setup_creation_test_env();
+    let mut receipt_driver = view.session_feed.creation_receipt_driver_for_test();
+    view.session_feed
+        .publish_for_test(creation_snapshot(vec![], "test", 1));
+    view.apply_session_feed();
+    view.highlight_filters.sessions = sessions;
+    view.request_creation(creation_data(&project_dir, "Filtered", "group"), None, None);
+    let key = view.creating_stub_id.clone().unwrap();
+    let stub_color = view.get_instance(&key).unwrap().color.clone();
+    let mut committed = Instance::new("Filtered", project_dir.to_str().unwrap());
+    committed.source_profile = "default".into();
+    committed.idempotency_key = Some(key.clone());
+    committed.status = Status::Idle;
+    let row = crate::server::api::sessions::session_response_from_instance(&committed, false);
+    Storage::new_unwatched("default")
+        .unwrap()
+        .update(|rows, _| {
+            rows.push(committed.clone());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        receipt_driver(crate::daemon::MutationReceipt {
+            cursor: crate::daemon::RuntimeCursor {
+                epoch: "test".into(),
+                revision: 2
+            },
+            outcome: row.clone(),
+        }),
+        key
+    );
+    view.session_feed
+        .publish_for_test(creation_snapshot(vec![row], "test", 2));
+    view.apply_session_feed();
+    assert_eq!(view.apply_creation_results(), Some(committed.id.clone()));
+    let visible = view.flat_items.iter().any(
+        |item| matches!(item, crate::tui::home::Item::Session { id, .. } if id == &committed.id),
+    );
+    let color = view.get_instance(&committed.id).unwrap().color.clone();
+    let persisted = Storage::new_unwatched("default")
+        .unwrap()
+        .load()
+        .unwrap()
+        .into_iter()
+        .find(|inst| inst.id == committed.id)
+        .unwrap()
+        .color;
+    assert_eq!(
+        view.selected_session.as_deref() == Some(committed.id.as_str()),
+        visible,
+        "selected exactly when the row is visible"
+    );
+    (committed.id, color, visible, persisted, stub_color)
+}
+
+#[test]
+#[serial]
+fn a_creation_under_a_color_filter_takes_that_color_and_is_revealed() {
+    let (_, color, visible, persisted, stub_color) =
+        commit_creation_under_filter(vec![Some("amber".into())]);
+    assert_eq!(
+        stub_color.as_deref(),
+        Some("amber"),
+        "the stub shows under the filter"
+    );
+    assert_eq!(color.as_deref(), Some("amber"));
+    assert_eq!(persisted.as_deref(), Some("amber"));
+    assert!(visible);
+}
+
+#[test]
+#[serial]
+fn a_creation_stays_uncolored_when_the_filter_admits_uncolored_rows_or_is_off() {
+    for sessions in [vec![None, Some("amber".into())], vec![]] {
+        let (_, color, visible, persisted, stub_color) = commit_creation_under_filter(sessions);
+        assert_eq!(stub_color, None);
+        assert_eq!(color, None);
+        assert_eq!(persisted, None);
+        assert!(visible);
+    }
+}
