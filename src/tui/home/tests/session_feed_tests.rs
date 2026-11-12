@@ -3826,6 +3826,33 @@ fn sidebar_badge_cache_does_not_label_error_rows() {
 
 #[test]
 #[serial]
+fn storage_reload_prunes_badge_identities_of_removed_sessions() {
+    let mut env = create_test_env_with_sessions(2);
+    let kept = env
+        .view
+        .instances
+        .keys()
+        .next()
+        .cloned()
+        .expect("a session");
+    for id in [kept.as_str(), "gone-session"] {
+        env.view
+            .badge_identities
+            .insert(id.to_string(), (0, pi_ledger_identity()));
+    }
+
+    env.view.load_storage_projection().unwrap();
+
+    assert!(env.view.instances.contains_key(&kept), "fixture row kept");
+    assert!(env.view.badge_identities.contains_key(&kept));
+    assert!(
+        !env.view.badge_identities.contains_key("gone-session"),
+        "a reload must forget identities of sessions that left the model"
+    );
+}
+
+#[test]
+#[serial]
 fn launch_identity_gaps_are_counted_once_per_same_generation_loss() {
     let mut env = create_test_env_empty();
     let id = running_pi_row(&mut env);

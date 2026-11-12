@@ -572,6 +572,8 @@ impl HomeView {
             next.shift_remove(id);
         }
         self.instances = next;
+        self.badge_identities
+            .retain(|id, _| self.instances.contains_key(id));
         self.group_trees = trees;
         self.storages.extend(opened);
         self.storages.retain(|profile, _| scope.contains(profile));
