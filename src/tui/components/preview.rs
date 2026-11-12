@@ -36,24 +36,17 @@ impl<'a> CachedPreview<'a> {
 }
 
 /// Metadata rows before resources. `PreviewLayout` adds the shared info chrome.
+///
+/// The height is deliberately independent of the instance's data: launch
+/// identity, worktree, sandbox and tool all reserve their rows (drawn as dim
+/// placeholders when absent). Otherwise moving between sessions, or a runtime
+/// field appearing, would shift the output banner and resize the previewed
+/// tmux window. The only variation is the user's work-arc toggle.
 pub fn agent_info_height(instance: &Instance) -> u16 {
-    let arc_rows = if crate::session::work_arc::supported(instance) {
-        1 + 4 * u16::from(
-            instance.work_arc_enabled
-                || crate::session::work_arc::visible_record(instance).is_some(),
-        )
-    } else {
-        0
-    };
-    let base: u16 = 3 + u16::from(instance.current_launch_identity().is_some()) + arc_rows;
-    let sandbox_lines: u16 = if instance.is_sandboxed() { 1 } else { 0 };
-    if let Some(wt) = instance.worktree_info.as_ref() {
-        // blank + header + branch + main (+ optional base)
-        let base_branch_line: u16 = if wt.base_branch.is_some() { 1 } else { 0 };
-        base + sandbox_lines + 4 + base_branch_line
-    } else {
-        base + sandbox_lines
-    }
+    // Tool/Path/Status + Launch + Sandbox + Arc, then the Worktree block:
+    // blank, header, Branch, Main, Base.
+    const FIXED: u16 = 3 + 1 + 1 + 1 + 5;
+    FIXED + 4 * u16::from(instance.work_arc_enabled)
 }
 
 /// Metadata rows for Terminal and Tool views, before resources.
@@ -361,12 +354,13 @@ impl Preview {
             Style::default().fg(theme.accent),
         ));
         info_lines.push(Line::from(profile_tool_spans));
-        if let Some(identity) = instance.current_launch_identity() {
-            info_lines.push(Line::from(vec![
+        info_lines.push(match instance.current_launch_identity() {
+            Some(identity) => Line::from(vec![
                 Span::styled("Launch:  ", Style::default().fg(theme.dimmed)),
                 Span::styled(identity.description(), Style::default().fg(theme.text)),
-            ]));
-        }
+            ]),
+            None => Line::styled("Launch:  unknown", Style::default().fg(theme.dimmed)),
+        });
 
         info_lines.extend([
             Line::from(vec![
@@ -407,24 +401,25 @@ impl Preview {
             ]),
         ]);
 
-        // Add sandbox information if present
-        if let Some(sandbox) = &instance.sandbox_info {
-            if sandbox.enabled {
-                info_lines.push(Line::from(vec![
-                    Span::styled("Sandbox: ", Style::default().fg(theme.dimmed)),
-                    Span::styled(&sandbox.container_name, Style::default().fg(theme.sandbox)),
-                ]));
-            }
+        // Sandbox and worktree rows are always reserved; see `agent_info_height`.
+        match instance.sandbox_info.as_ref().filter(|s| s.enabled) {
+            Some(sandbox) => info_lines.push(Line::from(vec![
+                Span::styled("Sandbox: ", Style::default().fg(theme.dimmed)),
+                Span::styled(&sandbox.container_name, Style::default().fg(theme.sandbox)),
+            ])),
+            None => info_lines.push(Line::styled(
+                "Sandbox: host",
+                Style::default().fg(theme.dimmed),
+            )),
         }
 
-        // Add worktree information if present
+        info_lines.push(Line::from(""));
+        info_lines.push(Line::from(vec![
+            Span::styled("─", Style::default().fg(theme.border)),
+            Span::styled(" Worktree ", Style::default().fg(theme.dimmed)),
+            Span::styled("─", Style::default().fg(theme.border)),
+        ]));
         if let Some(wt_info) = &instance.worktree_info {
-            info_lines.push(Line::from(""));
-            info_lines.push(Line::from(vec![
-                Span::styled("─", Style::default().fg(theme.border)),
-                Span::styled(" Worktree ", Style::default().fg(theme.dimmed)),
-                Span::styled("─", Style::default().fg(theme.border)),
-            ]));
             info_lines.push(Line::from(vec![
                 Span::styled("Branch:  ", Style::default().fg(theme.dimmed)),
                 Span::styled(&wt_info.branch, Style::default().fg(theme.branch)),
@@ -436,12 +431,20 @@ impl Preview {
                     Style::default().fg(theme.text),
                 ),
             ]));
-            if let Some(base) = wt_info.base_branch.as_deref() {
-                info_lines.push(Line::from(vec![
+            info_lines.push(match wt_info.base_branch.as_deref() {
+                Some(base) => Line::from(vec![
                     Span::styled("Base:    ", Style::default().fg(theme.dimmed)),
                     Span::styled(base, Style::default().fg(theme.branch)),
-                ]));
-            }
+                ]),
+                None => Line::from(""),
+            });
+        } else {
+            info_lines.push(Line::styled(
+                "Branch:  none",
+                Style::default().fg(theme.dimmed),
+            ));
+            info_lines.push(Line::from(""));
+            info_lines.push(Line::from(""));
         }
 
         if crate::session::work_arc::supported(instance) {
@@ -473,7 +476,7 @@ impl Preview {
                 format!("Arc: {}{prior}{covered}{expand}", status.label()),
                 Style::default().fg(theme.dimmed),
             ));
-            if instance.work_arc_enabled || record.is_some() {
+            if instance.work_arc_enabled {
                 for (label, value) in [
                     ("Goal: ", record.map(|r| r.arc.goal.as_str())),
                     ("Now: ", record.map(|r| r.arc.now.as_str())),
@@ -496,6 +499,10 @@ impl Preview {
                     ]));
                 }
             }
+        } else {
+            // Tools without work arcs keep the row so the panel height is the
+            // same for every tool.
+            info_lines.push(Line::styled("Arc: off", Style::default().fg(theme.dimmed)));
         }
         let paragraph = Paragraph::new(info_lines);
         frame.render_widget(paragraph, area);
@@ -918,7 +925,7 @@ mod tests {
                 assert!(text.contains(field), "{text}");
             }
             if status == ArcStatus::Stale {
-                assert!(rows[4].contains('…'), "clipped Goal has a cue: {text}");
+                assert!(rows[11].contains('…'), "clipped Goal has a cue: {text}");
                 assert!(text.contains("menu: expand"), "{text}");
                 let covered = session
                     .work_arc
@@ -943,7 +950,10 @@ mod tests {
                     assert!(text.contains("carried forward"), "{text}");
                 }
             }
-            assert!(rows[8].trim().is_empty(), "arc cannot spill into resources");
+            assert!(
+                rows[15].trim().is_empty(),
+                "arc cannot spill into resources"
+            );
         }
     }
 
@@ -955,7 +965,7 @@ mod tests {
         for (width, height) in [(140, 40), (55, 30), (30, 8)] {
             let area = Rect::new(0, 0, width, height);
             let metadata = agent_info_height(&session);
-            assert_eq!(metadata, 8);
+            assert_eq!(metadata, 15);
             let layout = PreviewLayout::compute(area, false, true, metadata);
             if height == 8 {
                 assert_eq!(layout.output, area);
@@ -976,6 +986,30 @@ mod tests {
                 area
             );
         }
+    }
+
+    #[test]
+    fn output_banner_row_is_identical_across_info_variants() {
+        use crate::session::WorktreeInfo;
+        let mut rows = Vec::new();
+        for tool in ["claude", "pi"] {
+            for worktree in [None, Some(None), Some(Some("main".to_string()))] {
+                let mut s = Instance::new("synthetic", "/tmp/synthetic");
+                s.tool = tool.into();
+                s.worktree_info = worktree.map(|base_branch| WorktreeInfo {
+                    branch: "feature/x".into(),
+                    main_repo_path: "/repo".into(),
+                    managed_by_aoe: true,
+                    created_at: chrono::Utc::now(),
+                    base_branch,
+                });
+                let area = Rect::new(0, 0, 100, 40);
+                let layout = PreviewLayout::compute(area, false, true, agent_info_height(&s));
+                rows.push((layout.banner.map(|b| b.y), layout.output));
+            }
+        }
+        assert!(rows[0].0.is_some());
+        assert!(rows.iter().all(|r| *r == rows[0]), "{rows:?}");
     }
 
     // `agent_info_height` drives both the preview layout split and the live-send
@@ -1011,48 +1045,46 @@ mod tests {
             }
         }
 
-        #[test]
-        fn plain_session_is_three_rows() {
-            let inst = Instance::new("plain", "/tmp/plain");
-            assert_eq!(agent_info_height(&inst), 3);
+        /// Title/Path/Status + Launch + Arc + Worktree block (blank, header,
+        /// Branch, Main, Base) + Sandbox.
+        const FIXED: u16 = 3 + 1 + 1 + 5 + 1;
+
+        fn variants() -> Vec<(&'static str, Instance)> {
+            let mut out = Vec::new();
+            for tool in ["claude", "pi", "codex"] {
+                for sandboxed in [false, true] {
+                    for wt in [None, Some(None), Some(Some("main"))] {
+                        let mut inst = Instance::new("v", "/tmp/v");
+                        inst.tool = tool.into();
+                        if sandboxed {
+                            inst.sandbox_info = Some(enabled_sandbox());
+                        }
+                        inst.worktree_info = wt.map(worktree);
+                        out.push((tool, inst));
+                    }
+                }
+            }
+            let mut disabled = Instance::new("d", "/tmp/d");
+            let mut sb = enabled_sandbox();
+            sb.enabled = false;
+            disabled.sandbox_info = Some(sb);
+            out.push(("disabled-sandbox", disabled));
+            out
         }
 
         #[test]
-        fn sandboxed_adds_one_row() {
-            let mut inst = Instance::new("sandboxed", "/tmp/sandboxed");
-            inst.sandbox_info = Some(enabled_sandbox());
-            assert_eq!(agent_info_height(&inst), 4);
+        fn height_is_fixed_across_tool_sandbox_and_worktree() {
+            for (name, inst) in variants() {
+                assert_eq!(agent_info_height(&inst), FIXED, "{name}");
+            }
         }
 
         #[test]
-        fn worktree_without_base_branch_adds_four_rows() {
-            let mut inst = Instance::new("wt", "/tmp/wt");
-            inst.worktree_info = Some(worktree(None));
-            assert_eq!(agent_info_height(&inst), 3 + 4);
-        }
-
-        #[test]
-        fn worktree_with_base_branch_adds_five_rows() {
-            let mut inst = Instance::new("wt-base", "/tmp/wt-base");
-            inst.worktree_info = Some(worktree(Some("main")));
-            assert_eq!(agent_info_height(&inst), 3 + 4 + 1);
-        }
-
-        #[test]
-        fn sandboxed_plus_worktree_with_base_branch_is_max() {
-            let mut inst = Instance::new("both", "/tmp/both");
-            inst.sandbox_info = Some(enabled_sandbox());
-            inst.worktree_info = Some(worktree(Some("main")));
-            assert_eq!(agent_info_height(&inst), 3 + 1 + 4 + 1);
-        }
-
-        #[test]
-        fn disabled_sandbox_does_not_count() {
-            let mut inst = Instance::new("disabled", "/tmp/disabled");
-            let mut sandbox = enabled_sandbox();
-            sandbox.enabled = false;
-            inst.sandbox_info = Some(sandbox);
-            assert_eq!(agent_info_height(&inst), 3);
+        fn arc_enabled_adds_only_the_four_field_rows() {
+            for (name, mut inst) in variants() {
+                inst.work_arc_enabled = true;
+                assert_eq!(agent_info_height(&inst), FIXED + 4, "{name}");
+            }
         }
     }
 
