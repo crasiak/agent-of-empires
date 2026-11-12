@@ -502,7 +502,7 @@ impl Preview {
         } else {
             // Tools without work arcs keep the row so the panel height is the
             // same for every tool.
-            info_lines.push(Line::styled("Arc: off", Style::default().fg(theme.dimmed)));
+            info_lines.push(Line::styled("Arc: n/a", Style::default().fg(theme.dimmed)));
         }
         let paragraph = Paragraph::new(info_lines);
         frame.render_widget(paragraph, area);
@@ -861,6 +861,28 @@ mod tests {
             format_scroll_indicator(100, 20, 500),
             Some(" [80/80] ".to_string())
         );
+    }
+
+    #[test]
+    fn info_panel_marks_arc_not_applicable_for_tools_without_work_arcs() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let theme = crate::tui::styles::load_theme("empire");
+        let mut session = Instance::new("plain", "/tmp/plain");
+        session.tool = "claude".into();
+        assert!(!crate::session::work_arc::supported(&session));
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                Preview::render_info(frame, frame.area(), &session, &theme, Duration::ZERO)
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = (0..buffer.area.height)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Arc: n/a"), "{text}");
+        assert!(!text.contains("Arc: off"), "{text}");
     }
 
     #[test]
