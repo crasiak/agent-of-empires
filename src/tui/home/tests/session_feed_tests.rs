@@ -3795,6 +3795,33 @@ fn sidebar_badge_cache_does_not_label_dead_panes() {
         text.contains("[pi:?:?] badge-row"),
         "a dead pane must not borrow the remembered identity: {text:?}"
     );
+    assert_eq!(
+        env.view.launch_identity_gaps, 0,
+        "a dead pane legitimately loses its identity"
+    );
+}
+
+#[test]
+#[serial]
+fn sidebar_badge_cache_does_not_label_error_rows() {
+    let mut env = create_test_env_empty();
+    let id = running_pi_row(&mut env);
+    let seen = identity_update(&env.view, &id, Some(pi_ledger_identity()));
+    env.view.apply_daemon_status_update(&seen);
+
+    // A missing tmux session latches Error and the daemon clears the identity.
+    let mut errored = identity_update(&env.view, &id, None);
+    errored.status = "Error".into();
+    env.view.apply_daemon_status_update(&errored);
+    assert_eq!(
+        env.view.launch_identity_gaps, 0,
+        "an Error row legitimately loses its identity"
+    );
+    let text = agent_row_text(&mut env.view, &id);
+    assert!(
+        text.contains("[pi:?:?] badge-row"),
+        "an Error row must not borrow the remembered identity: {text:?}"
+    );
 }
 
 #[test]

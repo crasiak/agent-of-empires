@@ -1034,6 +1034,7 @@ impl HomeView {
         if row.lifecycle_generation == instance.lifecycle_generation
             && row.launch_identity.is_none()
             && instance.launch_identity.is_some()
+            && !row.pane_dead_observed
             && launch_may_carry_identity(instance)
             && self
                 .badge_identities
@@ -1490,13 +1491,14 @@ impl HomeView {
 }
 
 /// Whether a row's launch can have an identity at all; rows that are not live never
-/// borrow a remembered one and losing it there is not a publication gap.
+/// borrow a remembered one and losing it there is not a publication gap. An Error
+/// row (for example a missing tmux session) has had its identity cleared on purpose.
 fn launch_may_carry_identity(instance: &Instance) -> bool {
     !(instance.is_structured()
         || instance.is_archived()
         || instance.is_trashed()
         || matches!(
             instance.status,
-            Status::Stopped | Status::Deleting | Status::Creating
+            Status::Stopped | Status::Deleting | Status::Creating | Status::Error
         ))
 }
