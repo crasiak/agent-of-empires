@@ -445,7 +445,10 @@ impl HomeView {
                     self.rebuild_flat_items();
                     self.flash_status(format!("Highlighted {color} to match the active filter"));
                 }
-                Err(e) => tracing::error!("failed to color the new session: {}", e),
+                Err(e) => {
+                    tracing::error!("failed to color the new session: {}", e);
+                    self.flash_status(format!("Could not highlight the new session: {e}"));
+                }
             }
         }
         match self.reveal_session(&row.id, true) {
