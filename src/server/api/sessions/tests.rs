@@ -2351,59 +2351,77 @@ async fn restart_delivers_requested_wake_message_to_new_pane() -> anyhow::Result
     if !crate::tmux::is_tmux_available() {
         return Ok(());
     }
-    let _home = crate::session::test_support::isolate_app_dir();
-    crate::session::config::update_app_state(|state| {
-        state.has_acknowledged_agent_hooks = true;
-    })?;
-    let project = tempfile::tempdir()?;
-    let marker = project.path().join("wake-received");
-    let mut row = Instance::new("wake-on-restart", project.path().to_str().unwrap());
-    row.source_profile = "wake-profile".into();
-    row.status = Status::Running;
-    row.command = format!(
-        r#"sh -c 'read message; printf "%s" "$message" > {}; sleep 60'"#,
-        marker.display(),
-    );
-    let id = row.id.clone();
-    let name = crate::tmux::Session::generate_name(&id, &row.title);
-    let _pane = crate::tmux::test_helpers::TmuxTestSession::from_name(name.clone());
-    row.tmux_session()?.create(
-        project.path().to_str().unwrap(),
-        Some("sleep 60"),
-        "wake-profile",
-    )?;
-    let state = crate::server::test_support::build_test_app_state(vec![row.clone()]);
-    let storage = Storage::new("wake-profile", state.file_watch.clone())?;
-    storage.update(|rows, _| {
-        rows.push(row);
-        Ok(())
-    })?;
-    *state.canonical_metadata.write().await =
-        crate::server::reload::load_all_profiles(&state.file_watch)?.metadata;
-
-    let response = restart_session(
-        State(state.clone()),
-        Path(id),
-        Ok(Some(Json(crate::daemon::RestartSessionBody {
-            wake_message: Some("wake-message-verified".into()),
-            ..Default::default()
-        }))),
-    )
-    .await
-    .into_response();
-    assert_eq!(response.status(), StatusCode::OK);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if std::fs::read_to_string(&marker).ok().as_deref() == Some("wake-message-verified") {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "restart wake did not reach the new pane; marker={:?}; pane={:?}",
-            std::fs::read_to_string(&marker),
-            crate::tmux::Session::from_name(&name).capture_pane(30),
+    for native in [false, true] {
+        let home = tempfile::tempdir()?;
+        let _home = crate::session::test_support::isolate_app_dir_at(home.path());
+        crate::session::config::update_app_state(|state| {
+            state.has_acknowledged_agent_hooks = true;
+        })?;
+        let project = tempfile::tempdir()?;
+        let marker = project.path().join("wake-received");
+        let receiver = format!(
+            "read message; printf '%s' \"$message\" > {}; exec sleep 60",
+            shell_words::quote(marker.to_str().unwrap()),
         );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let _agent = native.then(|| {
+            crate::session::test_support::install_login_shell_path_command(
+                home.path(),
+                "claude",
+                &format!(
+                    "#!/bin/sh\nif [ \"$1\" = --help ]; then printf '%s\\n' '--resume --session-id'; exit 0; fi\n{receiver}\n"
+                ),
+            )
+        });
+        crate::agents::forget_agent_help_for_test();
+        let mut row = Instance::new("wake-on-restart", project.path().to_str().unwrap());
+        row.source_profile = "wake-profile".into();
+        row.status = Status::Running;
+        row.tool = "claude".into();
+        if !native {
+            row.command = format!("sh -c {}", shell_words::quote(&receiver));
+        }
+        let id = row.id.clone();
+        let name = crate::tmux::Session::generate_name(&id, &row.title);
+        let _pane = crate::tmux::test_helpers::TmuxTestSession::from_name(name.clone());
+        row.tmux_session()?.create(
+            project.path().to_str().unwrap(),
+            Some("sleep 60"),
+            "wake-profile",
+        )?;
+        let state = crate::server::test_support::build_test_app_state(vec![row.clone()]);
+        let storage = Storage::new("wake-profile", state.file_watch.clone())?;
+        storage.update(|rows, _| {
+            rows.push(row);
+            Ok(())
+        })?;
+        *state.canonical_metadata.write().await =
+            crate::server::reload::load_all_profiles(&state.file_watch)?.metadata;
+
+        let response = restart_session(
+            State(state.clone()),
+            Path(id),
+            Ok(Some(Json(crate::daemon::RestartSessionBody {
+                wake_message: Some("wake-message-verified".into()),
+                ..Default::default()
+            }))),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(storage.load()?[0].active_execution.is_some(), native);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if std::fs::read_to_string(&marker).ok().as_deref() == Some("wake-message-verified") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native={native}: wake did not reach the new pane; marker={:?}; pane={:?}",
+                std::fs::read_to_string(&marker),
+                crate::tmux::Session::from_name(&name).capture_pane(30),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
     Ok(())
 }
