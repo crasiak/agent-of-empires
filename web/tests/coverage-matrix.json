@@ -4714,7 +4714,7 @@
         "web/src/components/sidebar/HighlightFilter.tsx",
         "web/src/components/sidebar/SidebarToolbar.tsx"
       ],
-      "notes": "Text and highlight filters compose; desktop keyboard selection, Escape, grouping changes, compact mode, and mobile touch targets are exercised."
+      "notes": "Text and highlight filters compose; desktop keyboard selection, Escape, grouping changes, compact mode, and mobile touch targets are exercised. Explicit menu selections cover repo, organization, group, combined and status axes."
     },
     {
       "id": "sidebar.highlight-filter-semantics",

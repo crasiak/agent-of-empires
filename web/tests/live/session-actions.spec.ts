@@ -109,11 +109,8 @@ test.describe("group edit (#1726)", () => {
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.goto(`${serve.baseUrl}/`);
     const toggle = page.getByTestId("sidebar-axis-toggle");
-    for (let i = 0; i < 3 && (await toggle.getAttribute("data-axis")) !== "group"; i++) {
-      const previous = await toggle.getAttribute("data-axis");
-      await toggle.click();
-      await expect(toggle).not.toHaveAttribute("data-axis", previous!);
-    }
+    await toggle.click();
+    await page.getByTestId("sidebar-axis-option-group").click();
     await expect(toggle).toHaveAttribute("data-axis", "group");
     const headers = page.getByTestId("sidebar-group-header");
     await expect(headers).toHaveCount(2);
