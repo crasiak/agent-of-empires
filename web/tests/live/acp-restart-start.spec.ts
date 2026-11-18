@@ -76,8 +76,11 @@ test("Restart on the startup line replaces a start stuck in session/new, again i
   await expect(line).toBeVisible();
   await expect(page.getByText("Structured view worker stopped")).toHaveCount(0);
   await expect(restart).toHaveCount(0);
+  await expect(line.getByTestId("startup-wait-elapsed")).toHaveText("0:00");
+  await page.clock.runFor(1_000);
+  await expect(line.getByTestId("startup-wait-elapsed")).toHaveText("0:01");
   await page.clock.fastForward(31_000);
-  // The restart's stop unmounted the line before the restart answered; the stopped message is still named.
+  // The replacement's timer is ticking; its restart still names the stopped message.
   await expect(line.getByTestId("startup-wait-restart-cost")).toHaveText(
     "The message you sent was stopped. Send it again once Claude Code is ready.",
   );
