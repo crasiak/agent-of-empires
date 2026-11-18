@@ -68,9 +68,10 @@ function SwitchAccountDialog({
   // Confirm is disabled until the names load, so focus Cancel meanwhile and move on once it can take it.
   const ready = !!selected && !failoverTo;
   useEffect(() => {
+    if (submitting) return;
     const frame = requestAnimationFrame(() => (ready ? confirmRef : cancelRef).current?.focus());
     return () => cancelAnimationFrame(frame);
-  }, [ready]);
+  }, [ready, submitting]);
 
   // Tab and Shift+Tab wrap instead of reaching the page behind the dialog.
   const trapTab = (e: ReactKeyboardEvent) => {
@@ -103,7 +104,6 @@ function SwitchAccountDialog({
     if (result.ok) onClose();
     else {
       setError(result.message ?? "Switching account failed.");
-      requestAnimationFrame(() => confirmRef.current?.focus());
     }
   };
 

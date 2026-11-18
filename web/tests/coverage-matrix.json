@@ -3904,6 +3904,7 @@
     },
     {
       "id": "acp.switch-account",
+      "notes": "Focus stays in the pending dialog and returns to Confirm after refusal re-enables it, including an early animation frame.",
       "kind": "mocked-playwright",
       "risk": "medium",
       "specs": [

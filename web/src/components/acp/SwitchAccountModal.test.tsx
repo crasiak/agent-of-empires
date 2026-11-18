@@ -44,7 +44,10 @@ beforeEach(() => {
   mockTargets.mockResolvedValue(["claude-b", "claude-c"]);
   mockSwitch.mockResolvedValue({ ok: true });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 describe("SwitchAccountModal", () => {
   it("lists the names, states the carry and cache cost, and shows only label and plan", async () => {
@@ -115,6 +118,26 @@ describe("SwitchAccountModal", () => {
     await waitFor(() => expect(document.activeElement).toBe(cancel));
     resolve(["claude-b"]);
     await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("switch-account-confirm")));
+  });
+
+  it("restores focus only after a refused restart has re-enabled Confirm", async () => {
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    let respond!: (result: { ok: boolean; message: string }) => void;
+    mockSwitch.mockReturnValue(new Promise((resolve) => (respond = resolve)));
+    renderModal({ targets: ["claude-b"] });
+    const confirm = screen.getByTestId("switch-account-confirm") as HTMLButtonElement;
+    expect(document.activeElement).toBe(confirm);
+    fireEvent.click(confirm);
+    expect(confirm.disabled).toBe(true);
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
+    respond({ ok: false, message: "Nothing changed." });
+    await screen.findByText("Nothing changed.");
+    expect(confirm.disabled).toBe(false);
+    expect(document.activeElement).toBe(confirm);
   });
 
   it("wraps Tab and Shift+Tab inside the dialog", async () => {
