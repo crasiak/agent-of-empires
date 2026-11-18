@@ -32,9 +32,11 @@
             installShellFiles
           ];
 
-          buildInputs = with pkgs; [
-            zlib # required by vendored libgit2
-          ];
+          zlibWithGzwriteFix = pkgs.zlib.overrideAttrs (old: {
+            patches = (old.patches or [ ]) ++ [ ./nix/patches/zlib-CVE-2026-85091.patch ];
+          });
+
+          buildInputs = [ zlibWithGzwriteFix ];
 
           installIntegration = ''
             ${pkgs.python3}/bin/python3 -P ${./scripts/export-pi-integration.py} \
