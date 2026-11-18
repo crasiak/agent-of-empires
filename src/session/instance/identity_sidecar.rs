@@ -144,7 +144,7 @@ impl Instance {
                     &self.resolved_host_environment_from(config.environment.clone()),
                 )
                 || (crate::session::tailored::document::account(self).is_none()
-                    && crate::session::ledger_pi::profile(&self.tool, self.get_tool_command())
+                    && crate::session::ledger_pi::profile(&self.tool, &self.get_tool_command())
                         .is_none()
                     && !crate::agents::pi_supports_extension_flag())
             {

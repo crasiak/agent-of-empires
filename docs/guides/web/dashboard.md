@@ -47,9 +47,9 @@ Individual settings appear under `Settings`: a writable toggle flips inline with
 
 ## First-run onboarding
 
-The first time you open the dashboard in a browser, a **Choose your theme** card appears before anything else. Picking a theme applies it live and saves it to your default profile; you can switch freely, then click **Continue**. Change it later in Settings > Appearance. The card is skipped in read-only mode and for anyone who already finished the tutorial.
+Opening `/` on a writable dashboard sends you to the setup wizard at `/setup` until you finish it or click **Go to dashboard**. Its steps edit the regular settings, so a step shows as done once one of its settings differs from the default, wherever it was changed (the TUI, Settings or a hand-edited `config.toml`), or once you keep its defaults with **Next**. Only the Agents step is required. Skips, finishing, leaving early and dismissing the dashboard's **Finish setting up** banner are stored as the `setup_*` keys in `state.toml` (see [Configuration Reference](../configuration.md#statetoml)). Open `/setup` again at any time. Read-only and CityHall dashboards never show it.
 
-After the theme card, an interactive walkthrough highlights the major regions (command bar, sidebar, starting a session, settings, and inside a session the diff panel and composer). Two of its steps open Settings for you: the Worktree tab, explaining the per-session path templates, and the Plugins tab, explaining how to find, install, and trust plugins. Each step lists its keyboard shortcuts and has a **Skip** button.
+Once setup is out of the way, an interactive walkthrough highlights the major regions (command bar, sidebar, starting a session, settings, and inside a session the diff panel and composer). Two of its steps open Settings for you: the Worktree tab, explaining the per-session path templates, and the Plugins tab, explaining how to find, install, and trust plugins. Each step lists its keyboard shortcuts and has a **Skip** button.
 
 Completing or skipping the tour records `app_state.has_seen_web_tour` on the server, so it does not relaunch on reload or on another device pointed at the same server. That flag persists in the server's `state.toml` (a sibling of `config.toml`, see [Configuration Reference](../configuration.md#statetoml)); the `GET /api/settings` JSON key is unchanged, still `app_state.has_seen_web_tour`. To replay it, open the overflow menu and choose **Show tutorial**; re-triggering adapts to where you are (dashboard regions, or composer / mode picker / send controls inside a session). It does not auto-launch on touch devices, where it is menu-only.
 
@@ -67,14 +67,17 @@ A sort picker next to the filter button offers three modes:
 
 Drag-to-reorder is disabled in the computed modes. The picker's state is per-browser (localStorage), not synced and not tied to your profile. The Multi-repo and Scratch groups default to the bottom; in manual mode you can drag them anywhere, in computed modes they stay at the bottom.
 
-## Sidebar grouping: by repo, organization, group, or repo and group
+## Sidebar grouping: repo, organization, group, both, or status
 
-A grouping toggle (layers icon) next to the sort toggle cycles the axis. Each click advances **By repo** to **By organization** to **By group** to **By repo and group** and back:
+A grouping picker (layers icon) next to the sort picker opens a menu of axes, so any of them is one pick away:
+
+![The sidebar grouped by session status, with the grouping picker open](../../assets/web/sidebar-grouping.png)
 
 - **By repo** (default): groups by git repository.
-- **By organization**: groups repositories by the owner in their git remote (any hosted remote, not only GitHub), with each repository's header inside its owner.
-- **By group**: groups by the user-defined group set in the TUI by right-clicking a session and choosing **Move to group**, with `aoe group move`, or via **Move to another group** below. Ungrouped sessions fall into an **Ungrouped** bucket pinned to the bottom.
+- **By organization**: groups repositories by the owner in their git remote (any hosted remote, not only GitHub), with each repository's header inside its owner. Repos with no resolvable owner fall into a **No organization** bucket pinned to the bottom.
+- **By group** (**Group** in the picker): groups by the user-defined group set in the TUI by right-clicking a session and choosing **Move to group**, with `aoe group move`, or via **Move to another group** below. Ungrouped sessions fall into an **Ungrouped** bucket pinned to the bottom.
 - **By repo and group**: repository headers with user groups nested inside each. A session split across groups appears once per subgroup.
+- **By status**: groups by each session's actual execution status, in the same attention order the Attention sort and the Board's cards use: Waiting, Error, Idle, Unknown, Running, Stopped, then the transient Creating, Deleting and Starting. A workspace whose sessions differ in status appears once per status. This mirrors the TUI's Status grouping (`g` then Status).
 
 The choice is per-browser (localStorage). Collapse state is tracked separately per axis. You can move a session between groups from the web context menu, but group rename, color, and drag-reorder live on the repo axis only.
 
@@ -157,6 +160,6 @@ Lifecycle hooks are shown **read-only** here, each labeled with its source (prof
 
 ## On mobile
 
-Below the `md` breakpoint the dashboard shows a single full-viewport pane instead of the desktop split. The right-panel button opens a picker for **Agent terminal**, **Paired terminal**, and whichever panes the session allows: **Sub agents** in structured-view sessions, **Diff** and **Files** outside CityHall mode, and plugin panes. A back chip returns to the agent terminal. The agent terminal and paired shell stay alive in the background when you switch away, preserving scrollback and focus.
+Below the `md` breakpoint the dashboard shows a single full-viewport pane instead of the desktop split. The right-panel button opens a picker for **Agent terminal**, **Paired terminal**, and whichever panes the session allows: **Background** in structured-view sessions, **Diff** and **Files** outside CityHall mode, and plugin panes. A back chip returns to the agent terminal. The agent terminal and paired shell stay alive in the background when you switch away, preserving scrollback and focus.
 
 In a structured-view conversation, the top bar and the message composer can each be folded away to give the transcript their height back. A small tab sits at the top right, below the bar and any banners under it, and another at the bottom right, just above the composer; tap one to collapse that region and tap it again to bring it back. The two are independent, so you can hide either or both, and both tabs stay on screen while collapsed so you are never stranded. Leaving the conversation for the dashboard, settings, or the diff pane shows the top bar again, since it is the only navigation those views have.

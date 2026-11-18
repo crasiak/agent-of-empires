@@ -138,17 +138,12 @@ pub struct App {
     /// External focus requests (Switchboard Jump); absent inside tmux.
     focus_control: Option<std::sync::Arc<focus_requests::Control>>,
     focus_rx: Option<tokio::sync::mpsc::UnboundedReceiver<focus_requests::Incoming>>,
-    dashboard_stop_requested: bool,
+    daemon_restart: Option<DaemonRestart>,
+    dashboard_stop_request: Option<DashboardStopRequest>,
     dashboard_stop: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
     dashboard_launch: Option<
         tokio::sync::oneshot::Receiver<
-            Result<
-                (
-                    crate::daemon::RuntimeConnection,
-                    crate::daemon::DaemonClient,
-                ),
-                String,
-            >,
+            Result<crate::cli::serve::TuiDashboardLaunch, crate::tui::dialogs::ServeLaunchFailure>,
         >,
     >,
     /// Debounce for structured preview-on-select, so fast navigation doesn't
@@ -374,7 +369,8 @@ impl App {
             focus_control: None,
             focus_rx: None,
             dashboard_launch: None,
-            dashboard_stop_requested: false,
+            daemon_restart: None,
+            dashboard_stop_request: None,
             dashboard_stop: None,
             pending_install_version: None,
             last_installed_version_in_session: None,
@@ -750,7 +746,8 @@ impl App {
 
             tokio::select! {
                 event = self.event_stream.as_mut().expect("event_stream missing").next() => {
-                    self.home.apply_session_feed();
+                    // Keys reach the view before the next draw, so no dialog is promoted here.
+                    self.home.apply_session_feed_before_input();
                     self.home.enforce_trash_read_only();
                     if self.home.selected_is_trashed() {
                         self.close_embedded_structured();
@@ -1390,6 +1387,7 @@ impl App {
             needs_full_refresh |= self.home.apply_session_feed();
             needs_full_refresh |= self.poll_dashboard_launch();
             needs_full_refresh |= self.poll_dashboard_stop();
+            needs_full_refresh |= self.poll_daemon_restart();
             let had_native_error = self.home.info_dialog.is_some();
             if let Some(ready) = self.home.take_native_attachment() {
                 use crate::tui::home::panes::PaneIntent;
@@ -1443,6 +1441,9 @@ impl App {
             }
 
             needs_full_refresh |= self.home.tick_dialog();
+            if self.home.pending_dashboard_launch.is_some() {
+                self.start_dashboard_launch();
+            }
             needs_full_refresh |= self.home.tick_settings_status();
             needs_full_refresh |= self.home.tick_opener();
             if self
@@ -1467,13 +1468,8 @@ impl App {
             }
 
             let heartbeat_due = last_disk_refresh.elapsed() >= DISK_REFRESH_INTERVAL;
-            let dirty = self
-                .home
-                .disk_watch
-                .dirty
-                .swap(false, std::sync::atomic::Ordering::Acquire);
             let refresh_plan =
-                plan_disk_refresh(live_idle, heartbeat_due, dirty, full_heartbeat_deferred);
+                self.plan_tick_disk_refresh(live_idle, heartbeat_due, full_heartbeat_deferred);
             full_heartbeat_deferred = refresh_plan.full_heartbeat_deferred;
 
             match refresh_plan.decision {
@@ -1595,6 +1591,8 @@ impl App {
             }
         }
 
+        self.home.serve_view = None;
+        self.home.serve_jobs.shutdown();
         self.tool_detection = None;
         self.home.apply_restart_results();
         self.home.cleanup_pending_creation().await;
@@ -1957,7 +1955,7 @@ impl App {
                 if !crate::update::install::parent_is_writable(binary_path)
         );
 
-        if matches!(method, InstallMethod::Homebrew) || needs_sudo {
+        if matches!(method, InstallMethod::Homebrew { .. }) || needs_sudo {
             self.set_status(format!("updating to v{version}…"));
             let method_clone = method.clone();
             let version_clone = version.clone();
@@ -2178,6 +2176,25 @@ enum QuitIntent {
     ConfirmDuringCreation,
     Confirm,
     Quit,
+}
+
+struct DaemonRestart {
+    result: tokio::sync::oneshot::Receiver<Result<(), String>>,
+    stage: tokio::sync::watch::Receiver<String>,
+}
+
+fn restart_stage_line(event: crate::migrations::progress::Event) -> Option<String> {
+    use crate::migrations::progress::Event;
+    match event {
+        Event::Started {
+            name,
+            position,
+            total,
+            ..
+        } => Some(format!("Migrating data ({position}/{total}): {name}")),
+        Event::Step(line) | Event::Progress(line) => Some(line),
+        Event::Notice(_) | Event::Finished { .. } => None,
+    }
 }
 
 fn quit_intent(
@@ -2663,7 +2680,7 @@ impl App {
         let Some(request) = self.home.pending_dashboard_launch.take() else {
             return;
         };
-        if self.dashboard_stop_requested || self.dashboard_stop.is_some() {
+        if self.dashboard_stop_request.is_some() || self.dashboard_stop.is_some() {
             if let Some(serve) = &mut self.home.serve_view {
                 serve.begin_stop();
             }
@@ -2705,39 +2722,52 @@ impl App {
         let result = match receiver.try_recv() {
             Ok(result) => result,
             Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return false,
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Err("Dashboard startup was interrupted; no reconnect or mutation was replayed. Use aoe serve --status, then reconnect explicitly.".to_owned()),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => Err(crate::tui::dialogs::ServeLaunchFailure {
+                message: "Dashboard startup was interrupted; no reconnect or mutation was replayed. Use aoe serve --status, then reconnect explicitly.".to_owned(),
+                log_tail: Default::default(),
+                target: None,
+            }),
         };
         self.dashboard_launch = None;
         let launch = self.home.dashboard_launch.take();
+        if self.dashboard_stop_request.is_some() {
+            if let (
+                Some(crate::tui::dialogs::DashboardLaunch::Running { started_at, .. }),
+                Some(serve),
+            ) = (&launch, &mut self.home.serve_view)
+            {
+                serve.resume_owned_stop(*started_at);
+            }
+        }
         match result {
-            Ok(prepared) if self.dashboard_stop_requested => {
-                drop(prepared);
+            Ok(prepared) if self.dashboard_stop_request.is_some() => {
+                self.bind_owned_dashboard_stop(Some(prepared.target), launch);
+                drop(prepared.runtime);
             }
             Ok(prepared) => {
                 if let Some(serve) = &mut self.home.serve_view {
-                    serve.finish_launch(Ok(()));
+                    serve.finish_launch(Ok(prepared.target), None);
                 }
                 self.home.session_feed.connect_prepared(
                     self.home.active_profile.clone().unwrap_or_default(),
-                    Some(prepared),
+                    Some(prepared.runtime),
                 );
             }
-            Err(_) if self.dashboard_stop_requested => {}
-            Err(message) => {
+            Err(failure) if self.dashboard_stop_request.is_some() => {
+                self.bind_owned_dashboard_stop(failure.target, launch);
+            }
+            Err(failure) => {
+                let message = failure.message.clone();
                 if let Some(serve) = &mut self.home.serve_view {
-                    serve.finish_launch(Err(message.clone()));
+                    let observed_target = launch.and_then(|launch| launch.observed_target());
+                    serve.finish_launch(Err(failure), observed_target);
                 } else if let Some(crate::tui::dialogs::DashboardLaunch::Running {
                     target, ..
                 }) = launch
                 {
-                    // Hidden with Esc: the offline takeover's "Didn't start" row reports it. The log
-                    // tail is read now, so a view opened later shows this failure's lines.
+                    // Retain the owner's failure until its first presentation.
                     self.home.dashboard_launch =
-                        Some(crate::tui::dialogs::DashboardLaunch::Failed {
-                            target,
-                            message: message.clone(),
-                            log_tail: crate::acp::client::autostart::initial_log_tail(),
-                        });
+                        Some(crate::tui::dialogs::DashboardLaunch::Failed { target, failure });
                 }
                 self.home.set_sidebar_source(
                     crate::tui::session_feed::SidebarSource::Disconnected,
@@ -2752,18 +2782,25 @@ impl App {
     /// Keys while the runtime isn't the Daemon and no Web dashboard view is open: the offline
     /// takeover or the "Connecting" screen. Returns true to quit.
     fn handle_runtime_gate_key(&mut self, key: KeyEvent) -> bool {
+        use crate::tui::dialogs::DaemonAttention;
         use crate::tui::session_feed::SidebarSource;
         match (key.code, key.modifiers) {
+            // Quitting now could leave the old Daemon stopped and no successor started.
+            (KeyCode::Char('q'), KeyModifiers::NONE) if self.daemon_restart.is_some() => {}
             (KeyCode::Char('q'), KeyModifiers::NONE)
             | (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
             (KeyCode::Char('r'), KeyModifiers::NONE)
                 if self.home.sidebar_source == SidebarSource::Disconnected =>
             {
-                self.home.connect_runtime();
+                match self.home.offline_attention {
+                    DaemonAttention::Outdated(daemon) => self.start_daemon_restart(daemon),
+                    DaemonAttention::Restarting => {}
+                    _ => self.home.connect_runtime(),
+                }
             }
-            // A dashboard start hidden with Esc keeps the runtime off the Daemon, so this screen is
-            // the only way back to it: still starting, or why it didn't.
-            (KeyCode::Enter, KeyModifiers::NONE) if self.home.dashboard_launch.is_some() => {
+            (KeyCode::Enter, KeyModifiers::NONE)
+                if self.home.dashboard_launch.is_some() || self.home.dashboard_stop.is_some() =>
+            {
                 self.home.open_serve();
             }
             _ => {}
@@ -2771,11 +2808,100 @@ impl App {
         false
     }
 
+    /// A restart's migrations hold the profile flocks these synchronous reloads
+    /// wait on, so the dirty latch and overdue heartbeat are kept for afterwards.
+    fn plan_tick_disk_refresh(
+        &self,
+        live_idle: bool,
+        heartbeat_due: bool,
+        full_heartbeat_deferred: bool,
+    ) -> DiskRefreshPlan {
+        if self.daemon_restart.is_some() {
+            return DiskRefreshPlan {
+                decision: DiskRefreshDecision::None,
+                full_heartbeat_deferred,
+            };
+        }
+        let dirty = self
+            .home
+            .disk_watch
+            .dirty
+            .swap(false, std::sync::atomic::Ordering::Acquire);
+        plan_disk_refresh(live_idle, heartbeat_due, dirty, full_heartbeat_deferred)
+    }
+
+    fn start_daemon_restart(&mut self, daemon: crate::daemon::DaemonIncarnation) {
+        let (stage_sender, stage) = tokio::sync::watch::channel("Starting restart".to_owned());
+        let (done, result) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let progress: crate::migrations::progress::Reporter =
+                std::sync::Arc::new(move |event| {
+                    if let Some(line) = restart_stage_line(event) {
+                        stage_sender.send_replace(line);
+                    }
+                });
+            let restarted = crate::cli::serve::restart_daemon_for_tui(daemon, progress)
+                .await
+                .map(|outcome| {
+                    tracing::info!(target: "tui.home", ?outcome, "daemon restart settled");
+                })
+                .map_err(|error| {
+                    tracing::warn!(target: "tui.home", %error, "daemon restart failed");
+                    format!("{error:#}")
+                });
+            let _ = done.send(restarted);
+        });
+        self.home.set_offline_attention(
+            crate::tui::dialogs::DaemonAttention::Restarting,
+            Some("Starting restart"),
+        );
+        self.daemon_restart = Some(DaemonRestart { result, stage });
+    }
+
+    fn poll_daemon_restart(&mut self) -> bool {
+        use crate::tui::dialogs::DaemonAttention;
+        use tokio::sync::oneshot::error::TryRecvError;
+        let Some(restart) = &mut self.daemon_restart else {
+            return false;
+        };
+        let result = match restart.result.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => {
+                if !restart.stage.has_changed().unwrap_or(false) {
+                    return false;
+                }
+                let stage = restart.stage.borrow_and_update().clone();
+                return self
+                    .home
+                    .set_offline_attention(DaemonAttention::Restarting, Some(&stage));
+            }
+            Err(TryRecvError::Closed) => Err("The restart was interrupted.".to_owned()),
+        };
+        self.daemon_restart = None;
+        match result {
+            Ok(()) => self.home.connect_runtime(),
+            Err(message) => {
+                self.home
+                    .set_offline_attention(DaemonAttention::RestartFailed, Some(&message));
+            }
+        }
+        true
+    }
+
     fn request_dashboard_stop(&mut self) {
-        if self.dashboard_stop_requested || self.dashboard_stop.is_some() {
+        let Some(request) = self.home.pending_dashboard_stop.take() else {
+            return;
+        };
+        if self.dashboard_stop_request.is_some() || self.dashboard_stop.is_some() {
             return;
         }
-        self.dashboard_stop_requested = true;
+        if matches!(request, DashboardStopRequest::OwnedLaunch) && self.dashboard_launch.is_none() {
+            if let Some(serve) = &mut self.home.serve_view {
+                serve.refuse_stop();
+            }
+            return;
+        }
+        self.dashboard_stop_request = Some(request);
         if let Some(serve) = &mut self.home.serve_view {
             serve.begin_stop();
         }
@@ -2786,16 +2912,19 @@ impl App {
     }
 
     fn start_dashboard_stop_if_ready(&mut self) {
-        if !self.dashboard_stop_requested
-            || self.dashboard_launch.is_some()
-            || self.dashboard_stop.is_some()
-        {
+        if self.dashboard_launch.is_some() || self.dashboard_stop.is_some() {
             return;
         }
+        let Some(DashboardStopRequest::Operation(request)) = self.dashboard_stop_request.take()
+        else {
+            return;
+        };
+        self.home.dashboard_stop = Some(request.presentation());
         let (result, receiver) = tokio::sync::oneshot::channel();
         self.dashboard_stop = Some(receiver);
+        let stop = request.run(&mut self.home.serve_jobs);
         tokio::spawn(async move {
-            let stopped = crate::cli::serve::stop_daemon().await.map_err(|error| {
+            let stopped = stop.await.map_err(|error| {
                 tracing::warn!(target: "tui.home", %error, "dashboard stop failed");
                 "Stop did not complete. Inspect `aoe serve --status` before reconnecting or retrying.".to_owned()
             });
@@ -2803,6 +2932,29 @@ impl App {
         });
     }
 
+    fn bind_owned_dashboard_stop(
+        &mut self,
+        target: Option<crate::cli::serve::TuiControlTarget>,
+        launch: Option<crate::tui::dialogs::DashboardLaunch>,
+    ) {
+        if !matches!(
+            self.dashboard_stop_request,
+            Some(DashboardStopRequest::OwnedLaunch)
+        ) {
+            return;
+        }
+        if let (Some(target), Some(launch)) = (target, launch) {
+            if let Some(serve) = &mut self.home.serve_view {
+                serve.bind_stop_target(&target);
+            }
+            self.dashboard_stop_request =
+                Some(DashboardStopRequest::Operation(launch.stop_request(target)));
+        } else {
+            self.finish_dashboard_stop(Err(
+                "The owned dashboard launch settled without a verified stop context; Stop was not performed. Inspect `aoe serve --status` before retrying.".to_owned(),
+            ));
+        }
+    }
     fn poll_dashboard_stop(&mut self) -> bool {
         let Some(receiver) = &mut self.dashboard_stop else {
             return false;
@@ -2815,8 +2967,14 @@ impl App {
                     .to_owned(),
             ),
         };
+        self.finish_dashboard_stop(result);
+        true
+    }
+
+    fn finish_dashboard_stop(&mut self, result: Result<(), String>) {
         self.dashboard_stop = None;
-        self.dashboard_stop_requested = false;
+        self.dashboard_stop_request = None;
+        self.home.dashboard_stop = None;
         if let Some(serve) = &mut self.home.serve_view {
             serve.finish_stop(result.clone());
         }
@@ -2827,7 +2985,6 @@ impl App {
             crate::tui::session_feed::SidebarSource::Disconnected,
             Some(&message),
         );
-        true
     }
     fn execute_action(
         &mut self,
@@ -2851,7 +3008,6 @@ impl App {
             return Ok(());
         }
         match action {
-            Action::StartDashboard => self.start_dashboard_launch(),
             Action::StopDashboard => self.request_dashboard_stop(),
             Action::Quit => self.should_quit = true,
             Action::RecheckAgents => self.spawn_tool_detection(true),
@@ -3198,7 +3354,7 @@ impl App {
 
         self.needs_redraw = true;
         crate::tmux::refresh_session_cache();
-        self.home.apply_session_feed();
+        self.home.apply_session_feed_before_input();
         let result = self.home.reload();
         self.home.reload_failure_state.record_storage(&result);
         self.home.try_present_reload_failure_dialog();
@@ -3277,7 +3433,7 @@ impl App {
             }),
         )?;
         self.needs_redraw = true;
-        self.home.apply_session_feed();
+        self.home.apply_session_feed_before_input();
         self.select_after_attach(&ready.id);
         if let Err(error) = attach_result {
             tracing::warn!(target: "tui.input", %error, "Native tmux attach failed");
@@ -3448,9 +3604,13 @@ fn wait_for_background_tool(session_id: &str, tool_name: &str, mut child: std::p
     });
 }
 
+pub(super) enum DashboardStopRequest {
+    OwnedLaunch,
+    Operation(crate::tui::dialogs::ServeStopRequest),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    StartDashboard,
     StopDashboard,
     Quit,
     RecheckAgents,
@@ -4060,6 +4220,12 @@ mod tests {
         assert!(app.should_quit);
         app.should_quit = false;
         app.home.pending_creation = Some(crate::tui::home::PendingCreation {
+            request: crate::tui::home::CreationRequest {
+                data: Default::default(),
+                trust_hooks: None,
+                trust_review: None,
+                skip_on_create: false,
+            },
             daemon_id: None,
             request_key: "other-creation".into(),
             origin_epoch: "test".into(),
@@ -5028,6 +5194,163 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    async fn disk_reloads_wait_for_a_daemon_restart_without_losing_their_trigger() {
+        use std::sync::atomic::Ordering;
+        let _home = crate::session::test_support::isolate_app_dir();
+        crate::session::get_profile_dir("test").unwrap();
+        let mut app = App::new(
+            "test",
+            AvailableTools::with_tools(&[]),
+            true,
+            false,
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .unwrap();
+        let (_done, result) = tokio::sync::oneshot::channel();
+        let (_stage_sender, stage) = tokio::sync::watch::channel(String::new());
+        app.daemon_restart = Some(DaemonRestart { result, stage });
+        app.home.disk_watch.dirty.store(true, Ordering::Release);
+
+        for (heartbeat_due, deferred) in [(false, false), (true, false), (true, true)] {
+            let plan = app.plan_tick_disk_refresh(true, heartbeat_due, deferred);
+            assert_eq!(plan.decision, DiskRefreshDecision::None);
+            assert_eq!(plan.full_heartbeat_deferred, deferred);
+            assert!(app.home.disk_watch.dirty.load(Ordering::Acquire));
+        }
+
+        app.daemon_restart = None;
+        let plan = app.plan_tick_disk_refresh(true, false, false);
+        assert_eq!(plan.decision, DiskRefreshDecision::StorageOnly);
+        assert!(!app.home.disk_watch.dirty.load(Ordering::Acquire));
+        assert_eq!(
+            app.plan_tick_disk_refresh(true, true, false).decision,
+            DiskRefreshDecision::FullHeartbeat
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn r_restarts_only_a_restartable_daemon_and_reports_the_outcome() {
+        use crate::migrations::progress::Event;
+        use crate::tui::dialogs::{test_render, DaemonAttention as A};
+        use crate::tui::session_feed::{SessionFeed, SessionFeedResult, SidebarSource};
+        let _home = crate::session::test_support::isolate_app_dir();
+        crate::session::get_profile_dir("test").unwrap();
+        let mut app = App::new(
+            "test",
+            AvailableTools::with_tools(&[]),
+            true,
+            false,
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .unwrap();
+        let r = KeyEvent::from(KeyCode::Char('r'));
+        let q = KeyEvent::from(KeyCode::Char('q'));
+        let takeover = |app: &mut App| {
+            test_render::text(&test_render::draw(110, 40, |frame, theme| {
+                app.home
+                    .render(frame, frame.area(), theme, None, None, None)
+            }))
+        };
+        let mismatched = |app: &mut App, attention| {
+            app.home
+                .session_feed
+                .publish_for_test(SessionFeedResult::Mismatched {
+                    attention,
+                    summary: "Daemon protocol 3, this aoe 4".into(),
+                });
+            app.home.apply_session_feed();
+        };
+        // Drops the reconnect before it can run, so no test autostarts a Daemon.
+        let reconnecting = |app: &mut App| {
+            assert_eq!(app.home.sidebar_source, SidebarSource::Connecting);
+            app.home.session_feed = SessionFeed::new();
+        };
+
+        let outdated = A::Outdated(crate::daemon::DaemonIncarnation::sample("old"));
+        // A feed mismatch reaches the takeover, and r runs the real restart path. This isolated
+        // home has no Daemon, so the one classified is gone and r reconnects instead of failing.
+        mismatched(&mut app, outdated);
+        let screen = takeover(&mut app);
+        assert!(screen.contains("[ r Restart Daemon ]"), "{screen}");
+        assert!(!screen.contains("Not responding"), "{screen}");
+        assert!(!app.handle_runtime_gate_key(r));
+        assert!(app.daemon_restart.is_some());
+        assert_eq!(app.home.offline_attention, A::Restarting);
+        assert!(takeover(&mut app).contains("Starting restart"));
+        // While it runs, neither r nor q interrupts it.
+        assert!(!app.handle_runtime_gate_key(r));
+        assert!(!app.handle_runtime_gate_key(q));
+        assert!(app.daemon_restart.is_some());
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while app.daemon_restart.is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "restart never settled"
+            );
+            app.poll_daemon_restart();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        reconnecting(&mut app);
+
+        // A failed restart shows why, and offers a re-check.
+        let (done, result) = tokio::sync::oneshot::channel();
+        let (_stage_sender, stage) = tokio::sync::watch::channel(String::new());
+        app.home.set_offline_attention(A::Restarting, None);
+        app.daemon_restart = Some(DaemonRestart { result, stage });
+        assert!(done.send(Err("bind failed".to_owned())).is_ok());
+        assert!(app.poll_daemon_restart());
+        assert_eq!(app.home.offline_attention, A::RestartFailed);
+        let screen = takeover(&mut app);
+        assert!(screen.contains("bind failed"), "{screen}");
+        assert!(screen.contains("[ r Reconnect ]"), "{screen}");
+        // A failed restart may have stopped the Daemon, so r re-checks rather than restarts.
+        assert!(!app.handle_runtime_gate_key(r));
+        assert!(app.daemon_restart.is_none());
+        reconnecting(&mut app);
+
+        // Progress is shown as it arrives; success reconnects without another key.
+        let (stage_sender, stage) = tokio::sync::watch::channel(String::new());
+        let (done, result) = tokio::sync::oneshot::channel();
+        app.home.set_offline_attention(A::Restarting, None);
+        app.daemon_restart = Some(DaemonRestart { result, stage });
+        stage_sender.send_replace(
+            restart_stage_line(Event::Started {
+                version: 33,
+                name: "isolate",
+                position: 1,
+                total: 2,
+            })
+            .unwrap(),
+        );
+        assert!(app.poll_daemon_restart());
+        assert!(takeover(&mut app).contains("Migrating data (1/2): isolate"));
+        assert!(!app.poll_daemon_restart(), "no new stage, no redraw");
+        assert!(done.send(Ok(())).is_ok());
+        assert!(app.poll_daemon_restart());
+        assert!(app.daemon_restart.is_none());
+        reconnecting(&mut app);
+
+        // Anything this aoe may not restart gets a re-check, never a restart.
+        for attention in [A::OutdatedCommand, A::OutdatedManual, A::DaemonNewer] {
+            mismatched(&mut app, attention);
+            assert!(!app.handle_runtime_gate_key(r));
+            assert!(app.daemon_restart.is_none(), "{attention:?}");
+            reconnecting(&mut app);
+        }
+
+        // A later connectivity failure replaces the mismatch instead of inheriting its action.
+        mismatched(&mut app, outdated);
+        app.home
+            .session_feed
+            .publish_for_test(SessionFeedResult::Unavailable("connection refused".into()));
+        app.home.apply_session_feed();
+        assert_eq!(app.home.offline_attention, A::Offline);
+        assert!(takeover(&mut app).contains("[ r Reconnect ]"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     async fn a_launch_hidden_with_esc_stays_visible_and_its_failure_is_shown_once() {
         use crate::tui::dialogs::{test_render, DashboardLaunch};
         let _home = crate::session::test_support::isolate_app_dir();
@@ -5070,8 +5393,12 @@ mod tests {
             // Reopened mid-launch through the gate, it counts from the launch and leaves the bound
             // to the App.
             assert!(!app.handle_runtime_gate_key(enter));
+            app.home
+                .serve_view
+                .as_mut()
+                .expect("owned launch view")
+                .tick();
             assert!(elapsed.is_match(&screen(&app)), "{}", screen(&app));
-            assert!(app.home.serve_view.as_mut().is_some_and(|v| !v.tick()));
             if !view_open {
                 app.home.handle_key(KeyEvent::from(KeyCode::Esc), None);
                 assert!(app.home.serve_view.is_none());
@@ -5081,7 +5408,11 @@ mod tests {
             std::fs::create_dir_all(log.parent().unwrap()).unwrap();
             std::fs::write(&log, "[AOE_START_MARKER]\nbind failed on port 8081\n").unwrap();
             let reason = "Dashboard start failed. Check `aoe logs`.";
-            assert!(settle.send(Err(reason.into())).is_ok());
+            assert!(settle
+                .send(Err(crate::tui::dialogs::ServeLaunchFailure::capture(
+                    reason.into()
+                )))
+                .is_ok());
             assert!(app.poll_dashboard_launch());
             if !view_open {
                 // Later Daemon activity mustn't stand in for this failure's log lines.
@@ -5102,7 +5433,10 @@ mod tests {
                 assert!(!app.handle_runtime_gate_key(enter));
             }
             let shown = screen(&app);
-            assert!(shown.contains("Dashboard start failed."), "{view_open}");
+            assert!(
+                shown.contains("Dashboard start failed."),
+                "{view_open}: {shown}"
+            );
             assert!(
                 shown.contains("bind failed on port 8081")
                     && !shown.contains("later daemon activity"),
@@ -5126,15 +5460,23 @@ mod tests {
             crate::file_watch::FileWatchService::noop(),
         )
         .unwrap();
-        app.home.serve_view = Some(crate::tui::dialogs::ServeView::settled());
         app.home.pending_paste = Some("retained stop draft".into());
         let transaction = crate::daemon::lifecycle::Transaction::acquire()
             .await
             .unwrap();
         let (settle_launch, owned_launch) = tokio::sync::oneshot::channel();
         app.dashboard_launch = Some(owned_launch);
+        app.home.dashboard_launch = Some(crate::tui::dialogs::DashboardLaunch::tunnel_for_test(
+            std::time::Instant::now(),
+        ));
+        app.home.open_serve();
+        assert_eq!(
+            app.home
+                .handle_key(KeyEvent::from(KeyCode::Char('S')), None),
+            Some(Action::StopDashboard),
+        );
         app.request_dashboard_stop();
-        assert!(app.dashboard_stop_requested);
+        assert!(app.dashboard_stop_request.is_some());
         assert!(
             app.dashboard_stop.is_none(),
             "Stop cannot acquire lifecycle while owned launch remains unsettled"
@@ -5152,11 +5494,28 @@ mod tests {
             app.home.serve_view.is_none(),
             "input remains usable during deferred Stop"
         );
-        app.home.serve_view = Some(crate::tui::dialogs::ServeView::settled());
-        assert!(matches!(
-            app.home.handle_key(KeyEvent::from(KeyCode::Enter), None),
-            Some(Action::StartDashboard)
+        // Reopen under free lifecycle exclusion while the launch remains unsettled.
+        drop(transaction);
+        app.home.serve_view = Some(crate::tui::dialogs::ServeView::settled(
+            &mut app.home.serve_jobs,
         ));
+        let transaction = crate::daemon::lifecycle::Transaction::acquire()
+            .await
+            .unwrap();
+        assert!(app.dashboard_stop.is_none());
+        assert!(app
+            .home
+            .handle_key(KeyEvent::from(KeyCode::Enter), None)
+            .is_none());
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.home.pending_dashboard_launch.is_none() {
+            app.home.tick_dialog();
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "launch preparation did not finish"
+            );
+            tokio::task::yield_now().await;
+        }
         app.start_dashboard_launch();
         assert!(
             app.dashboard_launch.is_some(),
@@ -5173,23 +5532,396 @@ mod tests {
             .is_none());
         drop(transaction);
         assert!(settle_launch
-            .send(Err("controlled failed startup".into()))
+            .send(Err(crate::tui::dialogs::ServeLaunchFailure::capture(
+                "controlled failed startup".into()
+            )))
             .is_ok());
         assert!(app.poll_dashboard_launch());
-        assert!(app.dashboard_stop.is_some());
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while app.dashboard_stop.is_some() {
-                app.poll_dashboard_stop();
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("asynchronous stop settles after launch release");
-        assert!(!app.dashboard_stop_requested);
+        assert!(
+            app.dashboard_stop.is_none(),
+            "missing receipt refuses without another stop"
+        );
+        assert!(app.dashboard_stop_request.is_none());
         assert!(!app.home.session_feed.mutations_available());
         assert_eq!(
             app.home.pending_paste.as_deref(),
             Some("retained stop draft")
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn dashboard_stop_preserves_the_observed_incarnation() {
+        use std::os::unix::process::CommandExt;
+
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if matches!(self.0.try_wait(), Ok(None)) {
+                    let _ = self.0.kill();
+                }
+                let _ = self.0.wait();
+            }
+        }
+
+        let _home = crate::session::test_support::isolate_app_dir();
+        crate::session::get_profile_dir("test").unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        nix::unistd::mkfifo(
+            &fixture.path().join("serve"),
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        let spawn = || {
+            ChildGuard(
+                std::process::Command::new("cat")
+                    .arg0("aoe")
+                    .arg("serve")
+                    .current_dir(fixture.path())
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            )
+        };
+        for state in [
+            "retry",
+            "retry-unchanged",
+            "active",
+            "starting",
+            "error",
+            "owned-failed",
+            "owned-unverified",
+            "owned-closed",
+            "active-unchanged",
+            "owned-failed-unchanged",
+            "owned-unverified-unchanged",
+        ] {
+            let mut original = spawn();
+            let pid = crate::session::get_app_dir().unwrap().join("serve.pid");
+            std::fs::write(&pid, original.0.id().to_string()).unwrap();
+            let observed = crate::cli::serve::wait_for_test_daemon(&mut original.0);
+            let mut app = App::new(
+                "test",
+                AvailableTools::with_tools(&[]),
+                true,
+                false,
+                crate::file_watch::FileWatchService::noop(),
+            )
+            .unwrap();
+            use crate::tui::dialogs::{DashboardLaunch, ServeLaunchFailure, ServeView};
+            let DashboardLaunch::Running { target, .. } =
+                DashboardLaunch::tunnel_for_test(std::time::Instant::now())
+            else {
+                unreachable!();
+            };
+            let app_dir = crate::session::get_app_dir().unwrap();
+            std::fs::write(app_dir.join("serve.mode"), "local").unwrap();
+            let _ = std::fs::remove_file(app_dir.join("serve.url"));
+            let owned = state.starts_with("owned-");
+            let mut view = if owned {
+                app.home.dashboard_launch =
+                    Some(DashboardLaunch::tunnel_for_test(std::time::Instant::now()));
+                app.home.open_serve();
+                app.home.serve_view.take().unwrap()
+            } else if state.starts_with("retry") || state == "error" {
+                ServeView::for_launch(
+                    DashboardLaunch::Failed {
+                        target,
+                        failure: ServeLaunchFailure {
+                            message: "tailscale funnel failed".to_owned(),
+                            log_tail: Default::default(),
+                            target: None,
+                        },
+                    },
+                    &mut app.home.serve_jobs,
+                )
+            } else {
+                if state.starts_with("active") {
+                    std::fs::write(app_dir.join("serve.url"), "http://127.0.0.1:8081").unwrap();
+                }
+                ServeView::settled(&mut app.home.serve_jobs)
+            };
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            if state.starts_with("retry") || state == "error" {
+                while !view.tick() {
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::yield_now();
+                }
+            }
+            app.home.serve_view = Some(view);
+            let settle_launch = owned.then(|| {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                app.dashboard_launch = Some(receiver);
+                sender
+            });
+            let transaction = crate::daemon::lifecycle::Transaction::acquire()
+                .await
+                .unwrap();
+            if state.starts_with("retry") {
+                assert!(app
+                    .home
+                    .handle_key(KeyEvent::from(KeyCode::Char('P')), None)
+                    .is_none());
+            }
+            let action = app
+                .home
+                .handle_key(KeyEvent::from(KeyCode::Char('S')), None)
+                .expect("S returns the App-owned stop");
+            assert_eq!(action, Action::StopDashboard);
+            app.request_dashboard_stop();
+            app.home.handle_key(KeyEvent::from(KeyCode::Esc), None);
+            assert!(app.home.serve_view.is_none());
+            app.handle_runtime_gate_key(KeyEvent::from(KeyCode::Enter));
+            assert!(
+                app.home.serve_view.is_some(),
+                "an owned Stop cannot be reopened"
+            );
+            let replaced = !state.ends_with("-unchanged");
+            let mut successor = if replaced {
+                original.0.kill().unwrap();
+                original.0.wait().unwrap();
+                let mut successor = spawn();
+                std::fs::write(&pid, successor.0.id().to_string()).unwrap();
+                crate::cli::serve::wait_for_test_daemon(&mut successor.0);
+                Some(successor)
+            } else {
+                None
+            };
+            if let Some(settle) = settle_launch {
+                assert!(app.dashboard_stop.is_none());
+                if state == "owned-closed" {
+                    drop(settle);
+                } else {
+                    assert!(settle
+                        .send(Err(ServeLaunchFailure {
+                            message: "Client reconnect failed".to_owned(),
+                            log_tail: Default::default(),
+                            target: state.starts_with("owned-failed").then_some(observed),
+                        }))
+                        .is_ok());
+                }
+                assert!(app.poll_dashboard_launch());
+            }
+            drop(transaction);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while app.dashboard_stop.is_some() {
+                    app.poll_dashboard_stop();
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("App stop did not settle");
+            let should_stop = !replaced && !state.contains("unverified");
+            if should_stop {
+                assert!(
+                    original.0.try_wait().unwrap().is_some(),
+                    "S from {state} must still stop its verified owner"
+                );
+                assert!(!pid.exists());
+            } else {
+                let survivor = successor.as_mut().unwrap_or(&mut original);
+                assert!(
+                    survivor.0.try_wait().unwrap().is_none(),
+                    "S from {state} must not redirect authority to an unowned Daemon"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&pid).unwrap(),
+                    survivor.0.id().to_string()
+                );
+            }
+            let view = app.home.serve_view.as_mut().unwrap();
+            let buffer = crate::tui::dialogs::test_render::draw(110, 40, |frame, theme| {
+                view.render(frame, frame.area(), theme)
+            });
+            let contents: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+            assert!(
+                !contents.contains("Elapsed:"),
+                "S from {state} left a reopened view waiting for a settled launch"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn unowned_stop_refusal_preserves_connected_feed() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        crate::session::get_profile_dir("test").unwrap();
+        for (context, stale_owner) in [
+            ("pending", false),
+            ("closed", false),
+            ("preparation", false),
+            ("pending", true),
+            ("closed", true),
+            ("preparation", true),
+        ] {
+            let mut app = App::new(
+                "test",
+                AvailableTools::with_tools(&[]),
+                true,
+                false,
+                crate::file_watch::FileWatchService::noop(),
+            )
+            .unwrap();
+            let _commands = app.home.session_feed.request_driver_for_test();
+            app.home
+                .set_sidebar_source(crate::tui::session_feed::SidebarSource::Daemon, None);
+            app.home.pending_paste = Some("connected draft".to_owned());
+            let crate::tui::dialogs::DashboardLaunch::Running { target, .. } =
+                crate::tui::dialogs::DashboardLaunch::tunnel_for_test(std::time::Instant::now())
+            else {
+                unreachable!();
+            };
+            let transaction = if context == "preparation" {
+                None
+            } else {
+                Some(
+                    crate::daemon::lifecycle::Transaction::acquire()
+                        .await
+                        .unwrap(),
+                )
+            };
+            let mut view = if context == "preparation" {
+                let mut view = crate::tui::dialogs::ServeView::settled(&mut app.home.serve_jobs);
+                view.handle_key(KeyEvent::from(KeyCode::Left));
+                view.handle_key(KeyEvent::from(KeyCode::Enter));
+                view
+            } else {
+                crate::tui::dialogs::ServeView::for_launch(
+                    crate::tui::dialogs::DashboardLaunch::Failed {
+                        target,
+                        failure: crate::tui::dialogs::ServeLaunchFailure::capture(
+                            "tailscale funnel failed".to_owned(),
+                        ),
+                    },
+                    &mut app.home.serve_jobs,
+                )
+            };
+            if context == "closed" {
+                app.home.serve_jobs.shutdown();
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !view.tick() {
+                    assert!(std::time::Instant::now() < deadline);
+                    tokio::task::yield_now().await;
+                }
+            }
+            app.home.serve_view = Some(view);
+            if stale_owner {
+                app.home.dashboard_launch = Some(
+                    crate::tui::dialogs::DashboardLaunch::tunnel_for_test(std::time::Instant::now()),
+                );
+            }
+            assert!(app.dashboard_launch.is_none());
+            assert_eq!(app.home.dashboard_launch.is_some(), stale_owner);
+            assert!(app.home.session_feed.mutations_available());
+            assert!(app.home.session_feed.native_interaction_available());
+            if let Some(Action::StopDashboard) = app
+                .home
+                .handle_key(KeyEvent::from(KeyCode::Char('S')), None)
+            {
+                app.request_dashboard_stop();
+            }
+            assert!(
+                app.home.session_feed.mutations_available(),
+                "a locally refused S revoked the connected feed"
+            );
+            assert!(app.home.session_feed.native_interaction_available());
+            assert_eq!(
+                app.home.sidebar_source,
+                crate::tui::session_feed::SidebarSource::Daemon
+            );
+            assert_eq!(app.home.pending_paste.as_deref(), Some("connected draft"));
+            assert!(app.dashboard_stop.is_none());
+            assert!(app.dashboard_stop_request.is_none());
+            app.request_dashboard_stop();
+            assert!(
+                app.home.session_feed.mutations_available(),
+                "empty handoff replayed Stop"
+            );
+            app.home.handle_key(KeyEvent::from(KeyCode::Enter), None);
+            assert!(
+                app.home.serve_view.is_none(),
+                "refusal left a preparation permanently pending"
+            );
+            app.home.tick_dialog();
+            assert!(app.home.pending_dashboard_launch.is_none());
+            drop(transaction);
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn launch_control_stops_a_settled_launch_while_final_observation_is_held() {
+        use crate::tui::dialogs::{DashboardLaunch, ServeView};
+        use std::os::unix::process::CommandExt;
+
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let _home = crate::session::test_support::isolate_app_dir();
+        let fixture = tempfile::tempdir().unwrap();
+        nix::unistd::mkfifo(
+            &fixture.path().join("serve"),
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        let mut daemon = ChildGuard(
+            std::process::Command::new("cat")
+                .arg0("aoe")
+                .arg("serve")
+                .current_dir(fixture.path())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let pid = crate::session::get_app_dir().unwrap().join("serve.pid");
+        std::fs::write(&pid, daemon.0.id().to_string()).unwrap();
+        let receipt = crate::cli::serve::wait_for_test_daemon(&mut daemon.0);
+        let mut app = App::new(
+            "test",
+            AvailableTools::with_tools(&[]),
+            true,
+            false,
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .unwrap();
+        let transaction = crate::daemon::lifecycle::Transaction::acquire()
+            .await
+            .unwrap();
+        let mut view = ServeView::for_launch(
+            DashboardLaunch::tunnel_for_test(std::time::Instant::now()),
+            &mut app.home.serve_jobs,
+        );
+        view.finish_launch(Ok(receipt), None);
+        app.home.serve_view = Some(view);
+        assert!(app.home.dashboard_launch.is_none());
+        let action = app
+            .home
+            .handle_key(KeyEvent::from(KeyCode::Char('S')), None);
+        assert!(matches!(action, Some(Action::StopDashboard)));
+        app.request_dashboard_stop();
+        assert!(app.dashboard_stop.is_some());
+        app.home.handle_key(KeyEvent::from(KeyCode::Esc), None);
+        assert!(app.home.serve_view.is_none());
+        assert!(daemon.0.try_wait().unwrap().is_none());
+        drop(transaction);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !app.poll_dashboard_stop() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "settled launch Stop never completed"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(daemon.0.try_wait().unwrap().is_some());
+        assert!(!pid.exists());
+        assert!(app.home.dashboard_stop.is_none());
     }
 }

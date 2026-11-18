@@ -473,15 +473,47 @@ fn json_to_list(current: &Value) -> Vec<String> {
 
 /// Render from the last availability snapshot without waiting for background probes.
 fn installed_oneshot_agents() -> Vec<String> {
-    let defs: Vec<&crate::agents::AgentDef> = crate::agents::oneshot_capable_names()
+    let defs: Vec<&crate::agents::AgentDef<'_>> = crate::agents::oneshot_capable_names()
         .into_iter()
         .filter_map(crate::agents::get_agent)
         .collect();
     let available = crate::tmux::agent_availability_snapshot(&defs);
-    defs.iter()
+    let mut names: Vec<String> = defs
+        .iter()
         .filter(|d| available.contains(d.name))
         .map(|d| d.name.to_string())
-        .collect()
+        .collect();
+    let config = crate::session::Config::load_or_warn();
+    let registry = crate::plugin::registry();
+    for plugin in crate::plugin::agent_integration::catalog(
+        &registry,
+        crate::agents::AGENTS.iter().map(|agent| agent.name),
+        config
+            .session
+            .custom_agents
+            .iter()
+            .filter(|(_, command)| !command.trim().is_empty())
+            .map(|(name, _)| name.as_str()),
+    ) {
+        let has_oneshot = registry.get(plugin.plugin).is_some_and(|owner| {
+            owner.manifest.agent_integrations.iter().any(|entry| {
+                entry.tool == plugin.tool
+                    && entry
+                        .launch
+                        .as_ref()
+                        .is_some_and(|launch| launch.oneshot_flag.is_some())
+                    && entry
+                        .command
+                        .as_deref()
+                        .and_then(aoe_plugin_api::agent_integration::direct_launch_words)
+                        .is_some()
+            })
+        });
+        if has_oneshot && crate::tmux::plugin_command_on_path(plugin.command) {
+            names.push(plugin.tool.to_owned());
+        }
+    }
+    names
 }
 
 /// Build a `FieldValue` for a `custom:*` widget from its current JSON.
@@ -914,7 +946,7 @@ fn build_host_environment_row(ctx: &BuildCtx) -> SettingField {
              (passthrough from host), KEY=$$literal (escape a leading $), or bare KEY \
              (passthrough). All forms resolve to a literal `KEY=value` arg in the spawned \
              process, visible in `ps`; for secrets you want hidden from argv, configure \
-             Sandbox > Sandbox Environment instead. Profile value replaces the global list."
+             Sandbox > Environment variables instead. Profile value replaces the global list."
             .to_string(),
         value,
         category: SettingsCategory::Session,

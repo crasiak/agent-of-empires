@@ -20,6 +20,9 @@ use crate::session::Instance;
 
 pub(crate) use rate_limit::install_rate_limit_continuation;
 pub(crate) use rate_limit::ContinuationOutcome;
+#[cfg(test)]
+pub(crate) use rate_limit::{failover_in_flight, reap_rate_limit_resumes};
+pub(crate) use rate_limit::{failover_target, FailoverSettings};
 pub(crate) use resume::{trigger_resume_background, ResumeTrigger};
 
 use resume::{resume_one, ResumeTarget};
@@ -126,6 +129,33 @@ fn is_untriaged_structured(i: &Instance) -> bool {
 /// Eligible for a reconciler-driven worker.
 fn is_resumable(i: &Instance) -> bool {
     is_untriaged_structured(i) && !i.is_idle_dormant() && i.launch_is_finalized()
+}
+
+/// `(user-prompt turn, agent-initiated turn)` open in the log; `None` when unreadable.
+/// Only the first goes to attach: a runner replays the completion of its last user
+/// prompt on every attach, which would close an agent-initiated turn mid-flight.
+fn open_turn_kinds(store: &EventStore, id: &str) -> Option<(bool, bool)> {
+    Some((
+        store.try_in_flight_turn(id)?,
+        store.has_open_agent_turn(id)?,
+    ))
+}
+
+/// `query_store` after the writer has stored every queued worker event: a probe that
+/// gates a stop or replacement must not miss work still in the write queue.
+async fn query_flushed<T: Send + 'static>(
+    supervisor: &Arc<crate::acp::supervisor::Supervisor<crate::acp::supervisor::ChannelSink>>,
+    store: &Arc<EventStore>,
+    id: &str,
+    what: &str,
+    f: impl FnOnce(&EventStore, &str) -> T + Send + 'static,
+) -> Option<T> {
+    let supervisor = Arc::clone(supervisor);
+    query_store(store, id, what, move |s, id| {
+        supervisor.flush_events();
+        f(s, id)
+    })
+    .await
 }
 
 /// Runs a blocking event-store query for `id` off the runtime; `None` (logged) if the task panicked.
@@ -327,6 +357,35 @@ pub async fn reconcile_acp_workers(
                 continue;
             }
         }
+        // Probed before the respawn budget is charged: a failure retries on the next pass,
+        // unpinned and uncharged. Replacing a dead runner
+        // without closing its orphaned turn would leave the session Running.
+        let Some((in_flight, agent_turn)) = query_flushed(
+            &state.acp_supervisor,
+            &state.acp_event_store,
+            &id,
+            "open turn",
+            open_turn_kinds,
+        )
+        .await
+        .flatten() else {
+            continue;
+        };
+        target.in_flight_turn = in_flight;
+        target.agent_turn_open = agent_turn;
+        // A failed probe counts as busy so a stale runner is not replaced under live work.
+        target.holds_live_work = in_flight
+            || agent_turn
+            || query_flushed(
+                &state.acp_supervisor,
+                &state.acp_event_store,
+                &id,
+                "live work",
+                |s, id| s.holds_live_work(id),
+            )
+            .await
+            .flatten()
+            .unwrap_or(true);
         if record_and_check_respawn_budget(respawn_history, &id, Instant::now()) {
             tracing::warn!(
                 target: "acp.supervisor",
@@ -348,12 +407,6 @@ pub async fn reconcile_acp_workers(
             attempted.insert(id);
             continue;
         }
-        target.in_flight_turn =
-            query_store(&state.acp_event_store, &id, "in-flight turn", |s, id| {
-                s.has_in_flight_turn(id)
-            })
-            .await
-            .unwrap_or(false);
         attempted.insert(id);
         tasks.push(target);
     }
@@ -361,18 +414,9 @@ pub async fn reconcile_acp_workers(
         return;
     }
 
-    // Live served-profile config bounds cold resumes; the supervisor owns the total cap.
-    let namespace = state.profile_namespace.read().await;
-    let served = state.served_profile().to_string();
-    let live_max_workers = tokio::task::spawn_blocking(move || {
-        crate::session::config::profile_config::resolve_config_or_warn(&served)
-            .acp
-            .max_concurrent_workers
-    })
-    .await
-    .unwrap_or_else(|_| state.acp_supervisor.max_concurrent_workers());
-    drop(namespace);
-    let resume_limit = MAX_CONCURRENT_RESUMES.min(live_max_workers).max(1);
+    let resume_limit = MAX_CONCURRENT_RESUMES
+        .min(state.acp_supervisor.max_concurrent_workers())
+        .max(1);
     let semaphore = Arc::new(Semaphore::new(resume_limit as usize));
     let mut set: JoinSet<(String, ResumeOutcome)> = JoinSet::new();
     for target in tasks {
@@ -773,6 +817,71 @@ mod tests {
         }
     }
 
+    /// An unreadable event log neither spawns nor pins the session: it stays
+    /// eligible, uncharged, and resumes on the first pass after the log recovers.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_failed_open_turn_probe_retries_after_recovery() {
+        let id = "s-probe-fails";
+        let (_home, state, _project) = test_state(id);
+        let mut tick = Tick::default();
+
+        state.acp_event_store.test_set_unavailable(true);
+        tick.run(&state).await;
+        assert!(
+            !tick.attempted.contains(id),
+            "a failed probe is not an attempt"
+        );
+        assert!(
+            !tick.respawn_history.contains_key(id),
+            "and charges no budget"
+        );
+
+        state.acp_event_store.test_set_unavailable(false);
+        tick.run(&state).await;
+        assert!(tick.attempted.contains(id), "the next pass resumes it");
+    }
+
+    /// A runner retains the completion of its last user prompt and replays it on attach. An
+    /// agent-initiated turn after that prompt must not be classified as a prompt in flight
+    /// (which would let the replay close it), and only its own terminal releases the hold.
+    #[test]
+    fn an_agent_turn_after_a_completed_prompt_is_not_a_prompt_in_flight() {
+        use crate::acp::Event;
+        let (_home, state, _project) = test_state("s-reattach");
+        let id = "s-reattach";
+        let store = &state.acp_event_store;
+        let events = [
+            Event::UserPromptSent {
+                text: "go".into(),
+                attachments: Vec::new(),
+                prompt_id: None,
+                merged_prompt_ids: Vec::new(),
+                synthesized: false,
+                origin_plugin: None,
+            },
+            Event::Stopped {
+                reason: "prompt_complete".into(),
+            },
+            Event::AgentMessageChunk {
+                text: "woken".into(),
+                message_id: None,
+            },
+        ];
+        for (i, event) in events.iter().enumerate() {
+            store.record(id, i as u64 + 1, event).unwrap();
+        }
+        assert_eq!(open_turn_kinds(store, id), Some((false, true)));
+        assert_eq!(store.holds_live_work(id), Some(true));
+
+        let stop = Event::Stopped {
+            reason: "agent_idle".into(),
+        };
+        store.record(id, 4, &stop).unwrap();
+        assert_eq!(open_turn_kinds(store, id), Some((false, false)));
+        assert_eq!(store.holds_live_work(id), Some(false));
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn a_startup_failure_rearms_the_pinned_session_under_budget() {
@@ -928,6 +1037,57 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn explicit_start_rearms_a_stopped_session_without_a_queue() {
+        use crate::session::Status;
+        use axum::{
+            extract::{Path, State},
+            response::IntoResponse,
+        };
+
+        let id = "sess-explicit-start";
+        let (_home, state, _project) = test_fixtures::test_state(id);
+        let stopped = {
+            let mut instances = state.instances.write().await;
+            instances[0].status = Status::Stopped;
+            instances[0].clone()
+        };
+        crate::server::test_support::seed_instances_on_disk_for_test(
+            &stopped.source_profile,
+            vec![stopped.clone()],
+        );
+        crate::server::test_support::refresh_canonical_metadata_for_test(&state).await;
+        let mut tick = test_fixtures::Tick::default();
+        tick.run(&state).await;
+        assert!(
+            tick.attempted.contains(id),
+            "stopped admission was attempted"
+        );
+        assert_eq!(test_fixtures::startup_errors(&state, id), 0);
+
+        let response = crate::server::api::sessions::start_session(
+            State(Arc::clone(&state)),
+            Path(id.to_string()),
+            Ok(None),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        tick.run(&state).await;
+        assert_eq!(
+            test_fixtures::startup_errors(&state, id),
+            1,
+            "explicit start must retry the fake agent without a queued prompt"
+        );
+        tick.run(&state).await;
+        assert_eq!(
+            test_fixtures::startup_errors(&state, id),
+            1,
+            "one explicit start must not create a retry loop"
+        );
     }
 
     /// A launch-prep race (here: memory and disk disagree on the row) must not

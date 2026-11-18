@@ -34,6 +34,24 @@ pub(crate) fn validate_recovery_file(file: &std::fs::File) -> anyhow::Result<()>
     }
 }
 
+/// Leaves `file` open as descriptor `target` in `command`'s child, rewound for its reader.
+pub(crate) fn inherit_file_at_fd(
+    command: &mut std::process::Command,
+    file: std::fs::File,
+    target: i32,
+) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        unix::inherit_file_at_fd(command, file, target);
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (command, file, target);
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+}
+
 #[cfg(target_os = "linux")]
 use linux as platform;
 #[cfg(target_os = "macos")]
@@ -1362,6 +1380,20 @@ pub(crate) fn peer_identity(stream: &std::os::unix::net::UnixStream) -> Option<(
     platform::peer_identity(stream)
 }
 
+/// False once `pid` has exited, including while it waits unreaped as a zombie, which
+/// `kill(pid, 0)` still reports as present.
+pub(crate) fn process_executing(pid: u32) -> anyhow::Result<bool> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        platform::process_executing(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        anyhow::bail!("process state unsupported on this platform")
+    }
+}
+
 pub(crate) fn process_birth_identity(pid: u32) -> anyhow::Result<Option<ProcessBirthIdentity>> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -2204,6 +2236,33 @@ mod tests {
             !prefix_hit,
             "a prefix of the env value must not match (anchored entry, not substring)"
         );
+    }
+
+    /// The ACP runner holds the descriptor and starts docker with a plain spawn.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn inherited_file_is_rewound_and_survives_a_plain_spawn() {
+        use std::io::{Seek as _, Write as _};
+        use std::os::fd::AsRawFd as _;
+
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"payload").unwrap();
+        file.seek(std::io::SeekFrom::End(0)).unwrap();
+        let mut reader = Command::new("cat");
+        reader.arg("/dev/fd/9");
+        inherit_file_at_fd(&mut reader, file.try_clone().unwrap(), 9).unwrap();
+        assert_eq!(reader.output().unwrap().stdout, b"payload");
+
+        // High enough that no concurrent test's descriptor is overwritten.
+        const HELD: i32 = 243;
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), HELD) }, HELD);
+        let output = Command::new("cat")
+            .arg(format!("/dev/fd/{HELD}"))
+            .output()
+            .unwrap();
+        assert_eq!(unsafe { libc::close(HELD) }, 0);
+        assert_eq!(output.stdout, b"payload");
     }
 
     /// Restores the pre-test SIGINT/SIGQUIT disposition on drop. `#[serial]`

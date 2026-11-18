@@ -21,6 +21,29 @@ pub(crate) enum SessionFeedResult {
     Snapshot(Arc<RuntimeSnapshot>),
     /// No daemon answered. The reason is for the transition log only.
     Unavailable(String),
+    /// A local Daemon answered in another protocol, which reconnecting can't fix.
+    Mismatched {
+        attention: crate::tui::dialogs::DaemonAttention,
+        summary: String,
+    },
+}
+
+fn classify_connect_failure(error: &anyhow::Error) -> SessionFeedResult {
+    use crate::daemon::OutdatedDaemonRemedy as Remedy;
+    use crate::tui::dialogs::DaemonAttention;
+    let Some(skew) = error.downcast_ref::<crate::daemon::PinnedProtocolSkew>() else {
+        return SessionFeedResult::Unavailable(error.to_string());
+    };
+    let attention = match skew.remedy {
+        None => DaemonAttention::DaemonNewer,
+        Some(Remedy::Restart(daemon)) => DaemonAttention::Outdated(daemon),
+        Some(Remedy::Command) => DaemonAttention::OutdatedCommand,
+        Some(Remedy::External) => DaemonAttention::OutdatedManual,
+    };
+    SessionFeedResult::Mismatched {
+        attention,
+        summary: skew.summary.clone(),
+    }
 }
 
 /// Where the sidebar's daemon-owned state currently comes from.
@@ -37,7 +60,10 @@ const COMMAND_CAPACITY: usize = 32;
 
 pub(crate) enum SessionRequest {
     Mutation(SessionMutation),
-    Trash(crate::daemon::TrashSessionBody),
+    Trash {
+        body: crate::daemon::TrashSessionBody,
+        expected_epoch: String,
+    },
     Purge(crate::daemon::DeleteSessionBody),
     Restore,
     Rename(crate::daemon::RenameSessionBody),
@@ -110,6 +136,9 @@ impl CommandReply {
 #[derive(Debug, Clone)]
 pub(crate) enum CommandFailure {
     Rejected(String),
+    /// A refused creation whose `on_create` hook failed, with the daemon's text. Retrying, or
+    /// creating without setup, can succeed where an ordinary refusal can't.
+    CreateHookFailed(String),
     Unknown(String),
 }
 
@@ -118,7 +147,21 @@ impl CommandFailure {
     /// client construction and definitive non-timeout 4xx responses prove a
     /// refusal; every transport/server/2xx-decoding failure is indeterminate.
     fn creation(error: crate::daemon::DaemonClientError) -> Self {
-        Self::classify(error, false)
+        let hook_text = match &error {
+            crate::daemon::DaemonClientError::Status {
+                code: Some(crate::daemon::ApiErrorCode::CreateHookFailed),
+                body,
+                ..
+            } => Some(body.clone()),
+            _ => None,
+        };
+        match (Self::classify(error, false), hook_text) {
+            // A local owner gets the daemon's own text; otherwise the summary is all there is.
+            (Self::Rejected(message), Some(body)) => {
+                Self::CreateHookFailed(if body.is_empty() { message } else { body })
+            }
+            (failure, _) => failure,
+        }
     }
 
     /// Classify an already-submitted mutation. A definitive 4xx (except 408)
@@ -161,7 +204,9 @@ impl CommandFailure {
 
     fn message(self) -> String {
         match self {
-            Self::Rejected(message) | Self::Unknown(message) => message,
+            Self::Rejected(message) | Self::CreateHookFailed(message) | Self::Unknown(message) => {
+                message
+            }
         }
     }
 }
@@ -209,6 +254,33 @@ struct SessionCommand {
     lease: u64,
     native: Option<NativeLease>,
     result: tokio::sync::oneshot::Sender<Result<CommandReply, CommandFailure>>,
+}
+
+#[cfg(test)]
+pub(crate) struct CapturedRequest {
+    pub id: String,
+    pub request: SessionRequest,
+    reply: tokio::sync::oneshot::Sender<Result<CommandReply, CommandFailure>>,
+}
+#[cfg(test)]
+impl CapturedRequest {
+    pub fn finish(self, result: Result<SessionCommandOutcome, String>) {
+        let reply = result
+            .map(|outcome| match outcome {
+                SessionCommandOutcome::Trashed(receipt) => CommandReply::Trash(receipt),
+                SessionCommandOutcome::Purged(receipt) => CommandReply::Purge(receipt),
+                SessionCommandOutcome::Restored(receipt) => CommandReply::Restore(receipt),
+                SessionCommandOutcome::Renamed(receipt) => CommandReply::Rename(receipt),
+                SessionCommandOutcome::WorktreeEdited(receipt) => {
+                    CommandReply::WorktreeName(receipt)
+                }
+                SessionCommandOutcome::ProjectAttached(receipt) => {
+                    CommandReply::AttachProject(receipt)
+                }
+            })
+            .map_err(CommandFailure::Rejected);
+        assert!(self.reply.send(reply).is_ok());
+    }
 }
 
 struct PendingNamespace {
@@ -482,8 +554,11 @@ async fn run_queued_command(
                             })
                         })
                 }
-                SessionRequest::Trash(body) => client
-                    .trash_session(&id, &body, epoch)
+                SessionRequest::Trash {
+                    body,
+                    expected_epoch,
+                } => client
+                    .trash_session(&id, &body, &expected_epoch)
                     .await
                     .map(CommandReply::Trash),
                 SessionRequest::Purge(body) => client
@@ -592,6 +667,7 @@ async fn run_queued_command(
                             };
                             match &mut failure {
                                 CommandFailure::Rejected(message)
+                                | CommandFailure::CreateHookFailed(message)
                                 | CommandFailure::Unknown(message) => {
                                     message.insert_str(
                                         0,
@@ -835,7 +911,7 @@ impl SessionFeed {
             quit_control.send_replace(None);
             sandbox_progress.send_replace(Vec::new());
             if let Err(error) = result {
-                sender.send_replace(Some(SessionFeedResult::Unavailable(error.to_string())));
+                sender.send_replace(Some(classify_connect_failure(&error)));
             }
         }));
     }
@@ -2080,20 +2156,29 @@ impl SessionFeed {
 
     #[cfg(test)]
     pub(crate) fn creation_rejection_driver_for_test(&mut self) -> impl FnMut() -> String {
+        let mut fail = self.creation_failure_driver_for_test();
+        move || {
+            fail(CommandFailure::Rejected("denied".into()))
+                .idempotency_key
+                .expect("creation idempotency identity")
+        }
+    }
+
+    /// Answers the queued creation with `failure` and returns the body it was sent with.
+    #[cfg(test)]
+    pub(crate) fn creation_failure_driver_for_test(
+        &mut self,
+    ) -> impl FnMut(CommandFailure) -> CreateSessionBody {
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<SessionCommand>(COMMAND_CAPACITY);
         self.commands = Some(sender);
         set_grant(&self.grant, true);
-        move || {
+        move |failure| {
             let command = receiver.try_recv().expect("creation queued");
             let CommandRequest::Create(body) = command.request else {
                 panic!("expected creation");
             };
-            let key = body.idempotency_key.expect("creation idempotency identity");
-            assert!(command
-                .result
-                .send(Err(CommandFailure::Rejected("denied".into())))
-                .is_ok());
-            key
+            assert!(command.result.send(Err(failure)).is_ok());
+            *body
         }
     }
 
@@ -2127,6 +2212,27 @@ impl SessionFeed {
                 panic!("expected session mutation");
             };
             Some((id, mutation))
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_request_driver_for_test(
+        &mut self,
+    ) -> impl FnMut() -> Option<CapturedRequest> {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<SessionCommand>(COMMAND_CAPACITY);
+        self.commands = Some(sender);
+        set_grant(&self.grant, true);
+        set_grant(&self.native_grant, true);
+        move || {
+            let command = receiver.try_recv().ok()?;
+            let CommandRequest::Session { id, request } = command.request else {
+                panic!("expected a row command");
+            };
+            Some(CapturedRequest {
+                id,
+                request,
+                reply: command.result,
+            })
         }
     }
 
@@ -2275,6 +2381,35 @@ mod tests {
                 truncated: false,
             }),
             CommandFailure::Rejected(_),
+        ));
+    }
+
+    #[test]
+    fn only_a_creation_refused_by_its_hook_is_told_apart() {
+        use crate::daemon::{ApiErrorCode, DaemonClientError};
+        let status = |code, body: &str| DaemonClientError::Status {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            code,
+            body: body.into(),
+            truncated: false,
+        };
+        let hook = Some(ApiErrorCode::CreateHookFailed);
+        assert!(matches!(
+            CommandFailure::creation(status(hook, "on_create hook failed: exit 3")),
+            CommandFailure::CreateHookFailed(text) if text == "on_create hook failed: exit 3"
+        ));
+        // Without the body the summary still names the refusal.
+        assert!(matches!(
+            CommandFailure::creation(status(hook, "")),
+            CommandFailure::CreateHookFailed(text) if !text.is_empty()
+        ));
+        assert!(matches!(
+            CommandFailure::creation(status(None, "on_create hook failed: exit 3")),
+            CommandFailure::Rejected(_)
+        ));
+        assert!(matches!(
+            CommandFailure::submitted(status(hook, "x")),
+            CommandFailure::Rejected(_)
         ));
     }
 
@@ -4062,6 +4197,45 @@ mod tests {
             writer.await.unwrap();
             server.abort();
             let _ = server.await;
+        }
+    }
+
+    #[test]
+    fn connect_failures_classify_by_what_can_fix_them() {
+        use crate::daemon::{
+            DaemonIncarnation, LocalRuntimeError as E, OutdatedDaemonRemedy as R,
+            PinnedProtocolSkew, RuntimeConnectionError,
+        };
+        use crate::tui::dialogs::DaemonAttention as A;
+        let daemon = DaemonIncarnation::sample("old");
+        let skew = |remedy| -> anyhow::Error {
+            PinnedProtocolSkew {
+                message: "full message".into(),
+                summary: "Daemon protocol 3, this aoe 4".into(),
+                remedy,
+            }
+            .into()
+        };
+        let cases: Vec<(anyhow::Error, Option<A>)> = vec![
+            (skew(Some(R::Restart(daemon))), Some(A::Outdated(daemon))),
+            (skew(Some(R::Command)), Some(A::OutdatedCommand)),
+            (skew(Some(R::External)), Some(A::OutdatedManual)),
+            // Restarting a newer Daemon with this binary would be a downgrade.
+            (skew(None), Some(A::DaemonNewer)),
+            (E::Identity.into(), None),
+            (RuntimeConnectionError::Protocol.into(), None),
+            (anyhow::anyhow!("connection refused"), None),
+        ];
+        for (error, expected) in cases {
+            let label = error.to_string();
+            match (classify_connect_failure(&error), expected) {
+                (SessionFeedResult::Mismatched { attention, summary }, Some(want)) => {
+                    assert_eq!(attention, want, "{label}");
+                    assert_eq!(summary, "Daemon protocol 3, this aoe 4", "{label}");
+                }
+                (SessionFeedResult::Unavailable(reason), None) => assert_eq!(reason, label),
+                (other, expected) => panic!("{label}: {other:?}, expected {expected:?}"),
+            }
         }
     }
 

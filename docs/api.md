@@ -57,13 +57,24 @@ without a token. To connect an agent, see
 | --- | --- | --- |
 | `list_sessions` | `state` (`live`, default, or `all`), `group` (exact path and descendants), `children_of` (direct parent id) | The `{sessions, workspace_ordering}` envelope from the published canonical snapshot. |
 | `whoami` | none | `null`; no session credential is currently available. |
+| `create_session` | `path`, `tool`, and optionally `title`, `view` (`terminal`, default, or `structured`), `agent_name`, `agent_model`, `agent_effort`, `group`, `worktree_enabled`, `worktree_branch`, `create_new_branch`, `base_branch`, `sandbox`, `sandbox_image`, `yolo_mode`, `profile`, `prompt`, `parent_session_id`, `idempotency_key` | `{session, fresh, prompt_sent, prompt_delivery, prompt_error?}`. `fresh` is false when `idempotency_key` matched an earlier create, whose session it returns. `prompt_delivery` is one of: `none` (no `prompt`); `pending_initial_turn` (a structured session stored it as its first turn); `sent` (typed into a terminal session once its agent's status rules show an empty or live input box); `blocked_waiting` (the terminal agent is waiting on a dialog, such as Claude's folder-trust question, so nothing was typed: a person answers it in the terminal, then `send` the prompt); `not_ready` (the terminal agent did not reach its input prompt within 30 s, so nothing was typed; an agent without a status manifest has no input-prompt rule to read, so it gets `not_ready` at once. `send` can deliver the prompt, but it has no dialog check for such an agent either, so check the pane first (`read_output`)); `not_running` (the terminal session did not start); `replayed` (a retry of an earlier create with the same key; the prompt is not delivered again, and the first create's outcome is not reported, so read it with `read_output`); `failed` (typing it failed). `prompt_error` explains `failed`, `blocked_waiting` and `not_ready`. A `prompt` that strips to nothing is refused with `invalid_request`. |
+| `send` | `session_id`, `message` | `{disposition, reason?, queued_id?, seq?}`. A structured session reports `sent`, `steered` or `queued` and the prompt's event `seq`; a terminal session reports `sent` with no seq. A message that strips to nothing is refused with `invalid_request` in either view. A terminal session is refused with `waiting`, and nothing is typed, when its agent's status rules detect a dialog or question waiting on a person (such as Claude's folder-trust question), or, for an agent with a status manifest, when its pane can't be captured. This check is only as good as those rules: a dialog they don't recognise, or any pane of an agent without a status manifest, is typed into, so `send` is not a way to keep an agent's questions or approvals for a person; explicit approval tools are #4635. HTTP `POST /send` still types into such a pane. A stopped terminal session is refused with `not_running`; `send` doesn't start it. A structured prompt that was recorded before its agent stopped is refused with `send_failed`; `read_output` shows it, so don't resend it. |
+| `read_output` | `session_id`, `since` and `raw` (structured), `lines` (terminal, 1 to 2000, default 200) | A structured session's transcript after `since` as text, or its raw events, with `next_since` and `has_more`; a terminal session's pane capture. A text page holds whole events up to 48 KB, so following `next_since` reads every event once; one event that alone renders past 48 KB comes back whole as the only event on its page. |
 
-Both tools declare an `outputSchema` and return `structuredContent`.
+Every tool declares an `outputSchema` and returns `structuredContent`. A refusal is a
+tool error (`isError`) whose `structuredContent` carries a `code`, such as
+`read_only`, `not_found`, `not_running`, `busy` (retryable), `invalid_request`,
+`waiting` (a terminal pane shows a dialog), `send_failed`, `internal`, `parent_not_found`, `parent_is_sub_session` or
+`hooks_need_trust`, and a `message`.
+`create_session` takes no hook-trust, callback, command-override, environment or
+fork fields, so repository hooks that need approval are refused with
+`hooks_need_trust` until someone trusts them in the dashboard.
 Listing does not persist workspace ordering or rebuild rows from mutable state.
-Read-only mode permits these reads. CityHall rejects `POST /mcp` with `403`,
+Read-only mode permits `list_sessions`, `whoami` and `read_output`, and refuses
+`create_session` and `send` with `read_only`. CityHall rejects `POST /mcp` with `403`,
 as it does other non-allowlisted POST routes, including over the owner socket.
 MCP POST requests remain tracked runtime work: shutdown interrupts them, and a
-long-running request can delay draining. No mutation or automatic replay is added.
+long-running request can delay draining. No request is replayed automatically.
 
 ## Skills
 
@@ -483,6 +494,20 @@ running engine, when no effective `on_create` hooks need a container. Container
 creation hooks and later launch still require the engine. Non-CLI creation
 retains its existing readiness checks.
 
+`pull_latest_image: true` force-pulls the session's Sandbox image before its
+container starts and its `on_create` hooks run, so it requires a running engine.
+It applies the dashboard's pull gate. An unsandboxed request is refused with
+`400 validation_failed`. A request that can't pull (`sandbox.allow_image_pull`
+off) gets `403 pull_disabled`, and one in read-only or CityHall mode gets that
+mode's refusal. Only a configured image may be pulled: the global or a
+profile's `sandbox.default_image`. Any other `sandbox_image` is refused with
+`400 unknown_image`, and an omitted one pulls the profile's default.
+These refusals come before anything is provisioned. While the pull runs, the
+create-progress `stage` is `pulling_image`. A failed pull ends the creation with
+`400 sandbox_image_update_failed`, and the session and its resources are rolled
+back. Only the local owner sees the runtime's output in its message; a replay
+of the cached failure does not include it. CityHall creations ignore the field.
+
 With CLI intent, `extra_args` uses shell-style word grouping and each decoded
 argument is quoted for literal delivery. Only the authenticated owner on the
 Daemon's Unix socket may use shell metacharacters in decoded arguments or
@@ -505,6 +530,13 @@ skips untrusted hooks and MCP. Skipping retains global/profile hooks and any
 already-trusted repository surfaces without granting or revoking approval.
 Plugin creation always refuses unapproved repository hooks.
 
+`skip_on_create: true` creates the session without running any `on_create`
+hook, and the response row carries `created_without_setup: true` when there was
+one to skip. The `trust_hooks` decision and the other hook types still apply.
+A failed creation is cached under its key, so resend with a new
+`idempotency_key` to retry or to skip. Plugin and CityHall creations ignore
+`skip_on_create`.
+
 `POST /api/sessions/creation-trust` reviews `{path, profile?, scratch?}` without
 granting trust or provisioning a session. It returns merged and repository-only
 hooks, MCP summaries with environment/header names but not their values,
@@ -525,11 +557,12 @@ resources are provisioned. Review again rather than approving unseen changes.
 Discarding a review requires no cancellation or cleanup.
 
 `POST /api/sessions/{id}/creation/cancel` requests deferred cancellation while
-provisioning or creation/launch hooks are pending. `202 Accepted` carries the
-runtime epoch and revision headers like every other mutation, so a native caller
-can fence the acknowledgement against the snapshot it was applied at. It is not
-a canonical commit receipt: the current phase finishes before the daemon rolls
-back its owned resources. The original creation request then returns `409`
+provisioning, a `pull_latest_image` pull or creation/launch hooks are pending.
+`202 Accepted` carries the runtime epoch and revision headers like every other
+mutation, so a native caller can fence the acknowledgement against the snapshot
+it was applied at. It is not a canonical commit receipt: the current phase
+finishes before the daemon rolls back its owned resources, except that an image
+pull is stopped. The original creation request then returns `409`
 with `aoe-error-code: creation_cancelled`. Cleanup failures retain resources.
 Repeated requests remain accepted until finalization; after the hook boundary
 or completion, the route returns `409` with `creation_not_pending`. Cancelling
@@ -574,6 +607,12 @@ and `import_acp_session_id`. A missing row returns `404`, an active lifecycle
 reservation returns `409`, and a missing conversation or incompatible provider
 returns `400`. CityHall mode refuses canonical forks with `403`. An idempotent
 replay still succeeds when the parent row has since been removed.
+
+At creation admission, an `import_acp_session_id` found already owned is refused
+with `400 create_failed` and the safe message “Import source is already owned by
+an AoE session”. Frozen cleanup ownership covers all tools' current and parked
+ACP IDs, even after an ordinary purge removes the visible row. Unrelated failures
+remain sanitized rather than exposing their internal causes.
 
 **Worktree fields**
 
@@ -722,6 +761,26 @@ curl -sS \
   "http://localhost:7777/api/sessions/abc123/output?lines=80&format=text"
 ```
 
+## GET /api/sessions/{id}/acp/replay?view=retained
+
+Read durable ACP history without starting a worker or preparing a pane. Missing
+events remain missing; this endpoint does not import native agent histories.
+
+Retained responses include an opaque `history_identity` for that session's stored
+content. The identity changes on inserts, replacements, deletion, and backfill,
+even when sequence bounds stay unchanged. Unrelated sessions do not change it.
+
+For a consistent multi-page read, pass the first page's `history_identity` on
+subsequent requests, alongside the usual `since`, `before`, and `limit` parameters.
+Each page binds its events, coverage, and identity to one database snapshot.
+A mismatched identity returns `409`: discard the staged pages and restart the
+read. Keep the previous complete transcript visible if the replacement read fails.
+
+Raw retained pages preserve the scanned rows and cursor; backward pages need not
+start at a turn boundary. Keep reducer state across forward retained pages.
+Ordinary backward replay, including `view=rows`, still trims a leading partial
+turn when older rows remain.
+
 ## Native session freshness and disconnection
 
 The Daemon owns native session status. The experimental TUI consumes its
@@ -841,6 +900,7 @@ Move a session to Trash. Optional JSON fields:
 | --- | --- | --- |
 | `kill_pane` | `true` | Stop the session's terminal panes during the transition. |
 | `expected_generation` | omitted | Require the selected session's `lifecycle_generation`; a mismatch returns `409 lifecycle_superseded` without mutation. |
+| `expected_profile` | omitted | Require the selected profile as well as the generation; a mismatch returns `409 lifecycle_superseded` without mutation. |
 
 Repeating a completed request for an already-trashed session succeeds without
 repeating teardown or relocation. A fresh lifecycle reservation returns
@@ -856,6 +916,13 @@ preventing explicit Restore or Purge. A retry also settles the transition when
 all known worktree paths are proven absent. Unverified existing paths, unknown
 original locations, and filesystem lookup errors keep the transition protected.
 
+Unfinished Trash exposes Retry and read-only inspection, not record-only removal.
+Retry retains existing lifecycle, native ownership, and filesystem checks. An
+unverified checkout stays visible in Trash until those checks can settle it.
+UI requests capture their original profile, generation, and runtime epoch;
+replacement state requires fresh consent.
+
+
 ## Explicit structured worker stop
 
 `DELETE /api/sessions/:id/acp` is a durable user stop, not a daemon detach. It commits the native stopped/dormant generation before retiring the captured original worker and returns `204` only after retirement is proven. Generic `POST /api/sessions/:id/stop` uses the same structured-worker stop boundary.
@@ -863,6 +930,10 @@ original locations, and filesystem lookup errors keep the transition protected.
 Admitted stop work survives HTTP cancellation; its committed native fence survives daemon reconstruction. Automatic reconciliation does not resume a committed stop. A later explicit spawn, start, restart, backend/provider switch or accepted prompt proves original retirement before consuming only its observed stop generation and token; a newer stop wins. A `no_revive` prompt cannot clear the stop.
 
 If a write commits but canonical publication fails, the stop remains durable and the response reports an unconfirmed outcome. Unproven retirement remains pending rather than reporting success. Daemon detach, idle shutdown and internal provider teardown do not independently create user-stop intent. Reversible stop preserves native transcript history.
+
+## POST /api/sessions/{id}/acp/subagents/{child_id}/cancel
+
+Stops one Claude subagent session without ending the root turn. `202` when `session/cancel` was sent to the child, `409` when the child is unknown or did not announce the `cancel` capability (`SubagentRecord.cancel_capable`). `POST /api/sessions/{id}/acp/cancel` still cancels the whole turn.
 
 ## DELETE /api/workspaces
 

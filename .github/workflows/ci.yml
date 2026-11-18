@@ -17,6 +17,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Killswitch: repo variable RUNS_ON_DISABLED=true sends RunsOn jobs to
+  # GitHub-hosted runners and keeps kache off AWS (e.g. during an AWS outage).
+  RUNS_ON_DISABLED: ${{ vars.RUNS_ON_DISABLED }}
+  # .cargo/config.toml caps jobs at 4 for shared dev machines; CI runners are
+  # single-tenant, so use every vCPU.
+  CARGO_BUILD_JOBS: default
 
 permissions:
   contents: read
@@ -24,6 +30,7 @@ permissions:
 jobs:
   fmt:
     name: Format
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,7 +51,8 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ${{ (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires') && 'ubuntu-latest' || format('runs-on={0}-clippy-{1}/runner=8cpu-linux-x64/family=m8a/image=ubuntu26-full-x64/volume=80gb/extras=s3-cache', github.run_id, github.run_attempt) }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
+    runs-on: ${{ (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires' || vars.RUNS_ON_DISABLED == 'true') && 'ubuntu-latest' || format('runs-on={0}-clippy-{1}/runner=8cpu-linux-x64/family=m8a+c8i+m8i/image=ubuntu26-full-x64/volume=80gb/extras=s3-cache', github.run_id, github.run_attempt) }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -98,7 +106,8 @@ jobs:
 
   msrv:
     name: MSRV
-    runs-on: ${{ (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires') && 'ubuntu-latest' || format('runs-on={0}-msrv-{1}/runner=8cpu-linux-x64/family=m8a/image=ubuntu26-full-x64/volume=80gb/extras=s3-cache', github.run_id, github.run_attempt) }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
+    runs-on: ${{ (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires' || vars.RUNS_ON_DISABLED == 'true') && 'ubuntu-latest' || format('runs-on={0}-msrv-{1}/runner=8cpu-linux-x64/family=m8a+c8i+m8i/image=ubuntu26-full-x64/volume=80gb/extras=s3-cache', github.run_id, github.run_attempt) }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -133,6 +142,7 @@ jobs:
 
   web-lint:
     name: Lint (web)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -158,6 +168,7 @@ jobs:
 
   deny:
     name: Supply Chain
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -171,7 +182,8 @@ jobs:
   docs:
     # Also the skill check: both build xtask.
     name: Docs
-    runs-on: ${{ (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires') && 'ubuntu-latest' || format('runs-on={0}-docs-{1}/runner=8cpu-linux-x64/family=m8a/image=ubuntu26-full-x64/volume=80gb/extras=s3-cache', github.run_id, github.run_attempt) }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
+    runs-on: ${{ (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires' || vars.RUNS_ON_DISABLED == 'true') && 'ubuntu-latest' || format('runs-on={0}-docs-{1}/runner=8cpu-linux-x64/family=m8a+c8i+m8i/image=ubuntu26-full-x64/volume=80gb/extras=s3-cache', github.run_id, github.run_attempt) }}
     timeout-minutes: 25
     permissions:
       contents: read
@@ -184,6 +196,10 @@ jobs:
       - uses: ./.github/actions/kache
         with:
           manifest-key: docs
+      - name: Build xtask and workspace member tests
+        run: |
+          cargo build -p xtask
+          cargo test -p xtask -p aoe-plugin-api --no-run
       - name: Check skill file references valid CLI commands
         run: cargo xtask check-skill
       # The workspace declares no `default-members`, so every other `cargo
@@ -216,9 +232,10 @@ jobs:
   script-selftests:
     # Toolchain-free self-tests for the scripts other workflows rely on:
     # verify-shared-target.sh (kache verify), select-internal-pr.py
-    # (nix-npm-hash.yml), check-dependabot-pr.py (dependabot-auto-merge.yml)
-    # and classify-cachix-failure.py (cachix-push.yml).
+    # (nix-npm-hash.yml), check-dependabot-pr.py (dependabot-auto-merge.yml),
+    # classify-cachix-failure.py (cachix-push.yml) and release-pr-fresh.sh.
     name: Script Self-Tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -230,6 +247,7 @@ jobs:
       - run: python3 .github/scripts/check-dependabot-pr.py --self-test
       - run: python3 .github/scripts/classify-cachix-failure.py --self-test
       - run: python3 scripts/test-export-pi-integration.py -v
+      - run: .github/scripts/release-pr-fresh.sh --self-test
       - run: python3 scripts/check-no-claude-in-core.py --self-test
       # Disabled until C25 to C29 remove Claude from core on
       # integration/claude-removal; enable there by dropping the `if`.
@@ -239,6 +257,7 @@ jobs:
 
   nix:
     name: Nix Eval
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -304,7 +323,8 @@ jobs:
 
   nix-build:
     name: Nix Build
-    runs-on: ${{ (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires') && 'ubuntu-latest' || format('runs-on={0}-nix-build-{1}/runner=8cpu-linux-x64/family=m8a/image=ubuntu26-full-x64/volume=80gb/extras=s3-cache', github.run_id, github.run_attempt) }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
+    runs-on: ${{ (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires' || vars.RUNS_ON_DISABLED == 'true') && 'ubuntu-latest' || format('runs-on={0}-nix-build-{1}/runner=8cpu-linux-x64/family=m8a+c8i+m8i/image=ubuntu26-full-x64/volume=80gb/extras=s3-cache', github.run_id, github.run_attempt) }}
     timeout-minutes: 45
     # Builds the default (aoe) crate through crane. Nix Eval only evaluates
     # derivations, so a flake recipe that compiles nowhere (a bad source filter,
@@ -374,7 +394,8 @@ jobs:
 
   nix-build-web:
     name: Nix Build Web
-    runs-on: ${{ (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires') && 'ubuntu-latest' || format('runs-on={0}-nix-build-web-{1}/runner=8cpu-linux-x64/family=m8a/image=ubuntu26-full-x64/volume=80gb/extras=s3-cache', github.run_id, github.run_attempt) }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
+    runs-on: ${{ (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires' || vars.RUNS_ON_DISABLED == 'true') && 'ubuntu-latest' || format('runs-on={0}-nix-build-web-{1}/runner=8cpu-linux-x64/family=m8a+c8i+m8i/image=ubuntu26-full-x64/volume=80gb/extras=s3-cache', github.run_id, github.run_attempt) }}
     timeout-minutes: 30
     # Catches npmDepsHash desync at PR time even if the nix-npm-hash bot
     # is offline. Path-gated so Rust-only PRs keep fast feedback.
@@ -431,8 +452,29 @@ jobs:
           set -euo pipefail
           nix build --no-link .#packages.x86_64-linux.aoe-web-frontend
 
+  release-pr-fresh:
+    # Fails a stale release PR in the merge queue; see release-pr-fresh.sh.
+    # Passes on other events so it can be a required check.
+    name: Release PR Up To Date
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'merge_group'
+        with:
+          persist-credentials: false
+      - if: github.event_name == 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          GROUP_HEAD: ${{ github.event.merge_group.head_sha }}
+        run: .github/scripts/release-pr-fresh.sh
+
   website:
     name: Website Build
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -441,6 +483,9 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: website/package-lock.json
-      - name: Install and build
+      - name: Install dependencies
         working-directory: website
-        run: npm install && npm run build
+        run: npm install
+      - name: Build
+        working-directory: website
+        run: npm run build

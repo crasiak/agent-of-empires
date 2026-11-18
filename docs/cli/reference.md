@@ -146,6 +146,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe acp`↴](#aoe-acp)
 * [`aoe acp doctor`↴](#aoe-acp-doctor)
 * [`aoe acp agents`↴](#aoe-acp-agents)
+* [`aoe acp lint-stream`↴](#aoe-acp-lint-stream)
 * [`aoe acp stop`↴](#aoe-acp-stop)
 * [`aoe acp recover`↴](#aoe-acp-recover)
 * [`aoe acp kill`↴](#aoe-acp-kill)
@@ -254,11 +255,14 @@ Add a new session
 * `-r`, `--repo <EXTRA_REPOS>` — Additional repositories for multi-repo workspace (use with --worktree)
 * `--project <PROJECTS>` — Names of registered projects to include as extra repos (use with --worktree). Resolves against the union of global + profile project registries
 * `--no-submodules` — Skip `git submodule update --init --recursive` after creating the worktree, overriding the `worktree.init_submodules` config (default true). Useful for repos with large or deeply nested submodule trees that you don't need inside the agent session
+* `--workspace` — Create the worktree inside a workspace directory (from `worktree.workspace_path_template`) even with no `--repo`/`--project`, so more projects can be attached later without moving the session (use with --worktree). Overrides `worktree.workspace_by_default`
+* `--no-workspace` — Create a plain worktree even when `worktree.workspace_by_default` is on. Ignored when `--repo`/`--project` make a multi-repo workspace
 * `-s`, `--sandbox` — Run session in a container sandbox
 * `--sandbox-image <SANDBOX_IMAGE>` — Custom container image for sandbox (implies --sandbox)
 * `--hook-env <KEY[=VALUE]>` — Env var for the host `before_start` hook only, never the container (`KEY=VALUE` or `KEY`; repeatable; requires --sandbox)
 * `-y`, `--yolo` — Enable YOLO mode (skip permission prompts)
 * `--trust-hooks` — Automatically trust this repository's hooks and project-local MCP servers without prompting
+* `--skip-on-create` — Create the session without running its on_create hooks, so a failing setup script does not roll the session back. on_launch hooks still run
 * `--extra-args <EXTRA_ARGS>` — Extra arguments to append after the agent binary
 * `--cmd-override <CMD_OVERRIDE>` — Override the agent binary command
 * `--structured-view` — Render this session in the structured view (ACP-based native rendering) instead of the default terminal view. `aoe add` defaults to the terminal (raw tmux/PTY) so the CLI matches the TUI; pass this (or `--agent`) to opt into the structured rendering. Ignored for tools with no ACP adapter
@@ -2144,7 +2148,7 @@ Start the aoe daemon: REST/WebSocket API, plus the web dashboard in builds that 
 ###### **Options:**
 
 * `--core-only` — Serve the private local API without opening TCP or a dashboard
-* `--port <PORT>` — Port to listen on (default: 8080; debug builds default to 8081 so a `cargo run` instance does not collide with an installed release `aoe`)
+* `--port <PORT>` — Port to listen on. Falls back to the `AOE_SERVE_PORT` environment variable, then `[serve] port` in config.toml, then 8080 (debug builds default to 8081 so a `cargo run` instance does not collide with an installed release `aoe`)
 * `--host <HOST>` — Host/IP to bind to (use 0.0.0.0 for LAN/VPN access)
 
   Default value: `127.0.0.1`
@@ -2245,6 +2249,7 @@ Manage the ACP structured-view workers (doctor, ps, logs, prompt, approve, ...)
 
 * `doctor` — Verify the structured view can start: Node runtime, configured agents, provider auth (claude auth login)
 * `agents` — List configured agents (claude-code, aoe-agent, etc.)
+* `lint-stream` — Check a recorded agent-to-client NDJSON stream (one JSON-RPC frame per line) against the `_meta.aoe` primitive contract. Exits 1 on any finding, so a plugin can run it in CI
 * `stop` — Stop an agent worker and settle its owned native processes. Unlike `aoe serve --stop`, this ends the worker rather than detaching
 * `recover` — Retire unprovable worker ownership after external shutdown confirmation
 * `kill` — SIGKILL the runner, then settle its native workers
@@ -2287,6 +2292,23 @@ Verify the structured view can start: Node runtime, configured agents, provider 
 List configured agents (claude-code, aoe-agent, etc.)
 
 **Usage:** `aoe acp agents`
+
+
+
+## `aoe acp lint-stream`
+
+Check a recorded agent-to-client NDJSON stream (one JSON-RPC frame per line) against the `_meta.aoe` primitive contract. Exits 1 on any finding, so a plugin can run it in CI
+
+**Usage:** `aoe acp lint-stream [OPTIONS] <PATH>`
+
+###### **Arguments:**
+
+* `<PATH>` — NDJSON file, or `-` for stdin
+
+###### **Options:**
+
+* `--json` — Emit findings as JSON instead of a human report
+* `--require-hello` — Fail a stream with no `_meta.aoe.proxy` hello
 
 
 

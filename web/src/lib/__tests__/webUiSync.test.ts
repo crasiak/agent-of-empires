@@ -8,8 +8,9 @@ vi.mock("../api", () => ({
   patchWebUiState: (...args: unknown[]) => patchWebUiState(...args),
 }));
 
-import { hydrateWebUiStateFromServer, isSyncedKey } from "../webUiSync";
+import { hydrateWebUiStateFromServer, initWebUiSync, isSyncedKey } from "../webUiSync";
 import { configureStorageSync, safeRemoveItem, safeSetItem } from "../safeStorage";
+import { STATUS_COLLAPSE_PREFIX } from "../../hooks/useStatusGroups";
 
 beforeEach(() => {
   localStorage.clear();
@@ -27,7 +28,6 @@ afterEach(() => {
 describe("isSyncedKey", () => {
   it("syncs preference keys but not device-local layout, caches, or per-session keys", () => {
     for (const k of [
-      "aoe-welcome-seen",
       "aoe.acp.toolDensity.v1",
       "aoe-sidebar-sort-mode",
       "aoe-sidebar-axis",
@@ -39,6 +39,7 @@ describe("isSyncedKey", () => {
       "aoe-repo-collapsed-/home/me/repo",
       "aoe-group-collapsed-feature",
       "aoe-nested-group-collapsed-x",
+      "aoe-status-collapsed-Waiting",
       "aoe-settings-intro-worktree", // folded Settings tab intro
     ]) {
       expect(isSyncedKey(k), k).toBe(true);
@@ -61,6 +62,13 @@ describe("isSyncedKey", () => {
   });
 });
 
+describe("status collapse keys", () => {
+  it("syncs the prefix the status axis writes collapse state under", () => {
+    expect(STATUS_COLLAPSE_PREFIX).toBe("aoe-status-collapsed-");
+    expect(isSyncedKey(`${STATUS_COLLAPSE_PREFIX}status:Waiting`)).toBe(true);
+  });
+});
+
 describe("safeStorage sync chokepoint", () => {
   it("invokes the handler only for matched keys, with null on removal", () => {
     const handler = vi.fn();
@@ -73,25 +81,25 @@ describe("safeStorage sync chokepoint", () => {
     safeSetItem("aoe-sidebar-width", "300"); // device-local, not synced
     expect(handler).not.toHaveBeenCalled();
 
-    safeRemoveItem("aoe-welcome-seen");
-    expect(handler).toHaveBeenCalledWith("aoe-welcome-seen", null);
+    safeRemoveItem("aoe-acp-last-tool");
+    expect(handler).toHaveBeenCalledWith("aoe-acp-last-tool", null);
   });
 });
 
 describe("hydrateWebUiStateFromServer", () => {
   it("backfills local keys only when the server blob is empty (first-ever sync)", async () => {
-    localStorage.setItem("aoe-welcome-seen", "1");
+    localStorage.setItem("aoe-acp-last-tool", "claude");
     getWebUiState.mockResolvedValue({});
 
     await hydrateWebUiStateFromServer();
 
     expect(patchWebUiState).toHaveBeenCalledTimes(1);
-    expect(patchWebUiState).toHaveBeenCalledWith({ "aoe-welcome-seen": "1" });
+    expect(patchWebUiState).toHaveBeenCalledWith({ "aoe-acp-last-tool": "claude" });
   });
 
   it("server values win and local-only keys are not resurrected once the server is non-empty", async () => {
     localStorage.setItem("aoe-sidebar-axis", "repo");
-    localStorage.setItem("aoe-welcome-seen", "1");
+    localStorage.setItem("aoe-acp-last-tool", "claude");
     getWebUiState.mockResolvedValue({ "aoe-sidebar-axis": "group" });
 
     await hydrateWebUiStateFromServer();
@@ -108,5 +116,27 @@ describe("hydrateWebUiStateFromServer", () => {
 
     expect(localStorage.getItem("aoe-sidebar-axis")).toBe("repo");
     expect(patchWebUiState).not.toHaveBeenCalled();
+  });
+});
+
+// Last in the file: `initWebUiSync` is one-shot per module, so this is the only case that arms it.
+describe("status collapse sync write", () => {
+  it("sends a status-collapse write to the server after the debounce", () => {
+    vi.useFakeTimers();
+    try {
+      initWebUiSync();
+      safeSetItem(`${STATUS_COLLAPSE_PREFIX}status:Waiting`, "1");
+      expect(patchWebUiState).not.toHaveBeenCalled();
+      safeSetItem(`${STATUS_COLLAPSE_PREFIX}status:Idle`, "1");
+      expect(patchWebUiState).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(400);
+      expect(patchWebUiState).toHaveBeenCalledTimes(1);
+      expect(patchWebUiState).toHaveBeenCalledWith({
+        "aoe-status-collapsed-status:Waiting": "1",
+        "aoe-status-collapsed-status:Idle": "1",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

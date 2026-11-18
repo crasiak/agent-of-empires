@@ -80,6 +80,8 @@ mod v065_sound_volume_split;
 mod v066_structured_view;
 mod v067_runtime_filter_acp_target;
 mod v068_runtime_filter_reset;
+mod v069_retained_history_identity;
+mod v070_global_max_concurrent_workers;
 
 /// Fixtures shared by migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -122,7 +124,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 68;
+const CURRENT_VERSION: u32 = 70;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -341,6 +343,16 @@ const MIGRATIONS: &[Migration] = &[
         v067_runtime_filter_acp_target::run,
     ),
     (68, "runtime_filter_reset", v068_runtime_filter_reset::run),
+    (
+        69,
+        "retained_history_identity",
+        v069_retained_history_identity::run,
+    ),
+    (
+        70,
+        "global_max_concurrent_workers",
+        v070_global_max_concurrent_workers::run,
+    ),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -438,6 +450,13 @@ pub(crate) fn reconcile_serve_launch_under_transaction(
     transaction: &crate::daemon::lifecycle::Transaction,
 ) -> Result<()> {
     v059_reconcile_serve_passphrase_policy::run_with_transaction(transaction)
+}
+
+/// Whether reconciliation accepts this `serve.launch` schema and shape.
+pub(crate) fn validate_serve_launch_schema(
+    record: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    v059_reconcile_serve_passphrase_policy::validate_record_schema(record)
 }
 
 pub(crate) fn run_migrations_under_exclusion(

@@ -4,8 +4,9 @@ import { StructuredSessionStack } from "./StructuredSessionStack";
 import { TerminalSessionStack } from "./TerminalSessionStack";
 import { SessionInfo } from "./SessionInfo";
 import { PairedShellPane, type ShellMode } from "./PairedTerminal";
-import { BackgroundAgentsPanel } from "./acp/BackgroundAgentsPanel";
+import { BackgroundAgentsPanel, type AgentFocus } from "./acp/BackgroundAgentsPanel";
 import { hasStartedBefore } from "./acp/startupWait";
+import { recreateContainerTitle } from "./sidebar/sessionActionTargets";
 import { FilesPane } from "./FilesPane";
 import { DiffFileList } from "./diff/DiffFileList";
 import { DiffFileViewer } from "./diff/DiffFileViewer";
@@ -31,7 +32,8 @@ interface Props {
   view: RightPanelView;
   pluginPanes: PluginPane[];
   onBackToAgent: () => void;
-  onOpenAgentsPane: () => void;
+  onOpenAgentsPane: (agentId?: string) => void;
+  agentFocus: AgentFocus | null;
   /** Opens the switch-view confirmation for that Session; omitted where it can't switch. */
   onSwitchToTerminal?: (sessionId: string) => void;
   /** Shows that Session's paired shell in `mode`; omitted where the terminal can't be used. */
@@ -89,6 +91,7 @@ export function MobileMainPane({
   pluginPanes,
   onBackToAgent,
   onOpenAgentsPane,
+  agentFocus,
   onSwitchToTerminal,
   onOpenTerminal,
   canRestartAgent,
@@ -131,7 +134,7 @@ export function MobileMainPane({
         : view === "paired"
           ? "Paired terminal"
           : view === "agents"
-            ? "Sub agents"
+            ? "Background"
             : (activePluginPane?.title ?? "Plugin");
 
   return (
@@ -166,6 +169,7 @@ export function MobileMainPane({
                     sessionId={session.id}
                     acpWorkerState={session.acp_worker_state ?? "absent"}
                     rateLimitAutoResume={session.rate_limit_auto_resume}
+                    rateLimitFailoverTo={session.rate_limit_failover_to}
                     settingsHref={autoResumeSettingsHref(session.profile, serverAbout)}
                     tool={session.tool}
                     acpAgent={session.acp_agent ?? null}
@@ -180,7 +184,9 @@ export function MobileMainPane({
                     onOpenFileRef={onOpenFileRef}
                     fileRefSession={session}
                     onOpenAgentsPane={onOpenAgentsPane}
+                    serverReadOnly={readOnly}
                     isSandboxed={session.is_sandboxed}
+                    recreateContainerTitle={recreateContainerTitle(session)}
                     onSwitchToTerminal={onSwitchToTerminal ? () => onSwitchToTerminal(session.id) : undefined}
                     onOpenTerminal={onOpenTerminal ? (mode) => onOpenTerminal(session.id, mode) : undefined}
                     canRestartAgent={canRestartAgent}
@@ -273,7 +279,12 @@ export function MobileMainPane({
             className="absolute inset-0 z-10 flex flex-col min-h-0 overflow-hidden bg-surface-900"
             style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
           >
-            <BackgroundAgentsPanel sessionId={activeSessionId} />
+            <BackgroundAgentsPanel
+              sessionId={activeSessionId}
+              readOnly={readOnly || !!activeSession?.trashed_at || !!activeSession?.archived_at}
+              focus={agentFocus}
+              onShowThread={onBackToAgent}
+            />
           </div>
         )}
 

@@ -113,6 +113,7 @@ impl HomeView {
             self.rebuild_flat_items_keeping_cursor();
         }
         self.show_activity_age = config.session.show_activity_age;
+        self.show_structured_badge = config.session.show_structured_badge;
         self.set_sidebar_position(config.session.sidebar_position);
         self.split_terminal_height_percent = config.session.split_terminal_height_percent;
         self.split_terminal_min_width = config.session.split_terminal_min_width;
@@ -127,9 +128,7 @@ impl HomeView {
             config.tmux.clipboard != crate::session::config::TmuxSettingMode::Disabled;
         self.vt_live_enabled = config.tmux.vt_live;
         if let Some(worker) = self.preview_capture_worker.as_ref() {
-            worker.set_vt_enabled(
-                self.vt_live_enabled && !matches!(self.view_mode, ViewMode::Terminal),
-            );
+            worker.set_vt_enabled(self.preview_vt_enabled(self.preview_capture_target.as_deref()));
             worker.set_clipboard_capture_enabled(self.agent_clipboard_forward);
         }
         self.profile_default_attach_mode = config.session.default_attach_mode;

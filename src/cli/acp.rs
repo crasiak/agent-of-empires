@@ -1,6 +1,6 @@
 //! ACP structured-view CLI subcommands.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Subcommand;
 
 use crate::acp::agent_registry::AgentRegistry;
@@ -38,6 +38,19 @@ pub enum AcpCommands {
     },
     /// List configured agents (claude-code, aoe-agent, etc.).
     Agents,
+    /// Check a recorded agent-to-client NDJSON stream (one JSON-RPC frame per
+    /// line) against the `_meta.aoe` primitive contract. Exits 1 on any
+    /// finding, so a plugin can run it in CI.
+    LintStream {
+        /// NDJSON file, or `-` for stdin.
+        path: String,
+        /// Emit findings as JSON instead of a human report.
+        #[arg(long)]
+        json: bool,
+        /// Fail a stream with no `_meta.aoe.proxy` hello.
+        #[arg(long)]
+        require_hello: bool,
+    },
     /// Internal: trap for `aoe acp ps`, removed in favour of the unified
     /// `aoe ps --acp`. Redirects rather than 404ing on an unknown subcommand.
     /// Hidden from help.
@@ -236,6 +249,11 @@ pub async fn run(command: AcpCommands) -> Result<()> {
             all_adapters,
         } => doctor(json, fix, adapter, all_adapters).await,
         AcpCommands::Agents => agents(),
+        AcpCommands::LintStream {
+            path,
+            json,
+            require_hello,
+        } => lint_stream(&path, json, require_hello),
         AcpCommands::Ps { .. } => ps_trap(),
         AcpCommands::Stop {
             session,
@@ -791,6 +809,28 @@ fn agents() -> Result<()> {
     Ok(())
 }
 
+fn lint_stream(path: &str, json: bool, require_hello: bool) -> Result<()> {
+    use crate::acp::aoe_meta::lint::{lint, LintOptions};
+    let opts = LintOptions { require_hello };
+    let findings = if path == "-" {
+        lint(std::io::stdin().lock(), opts)
+    } else {
+        let file = std::fs::File::open(path).with_context(|| format!("open {path}"))?;
+        lint(std::io::BufReader::new(file), opts)
+    };
+    if json {
+        crate::cli::output::print_json(&findings)?;
+    } else {
+        for f in &findings {
+            println!("line {}: {}: {}", f.line, f.code, f.message);
+        }
+    }
+    if !findings.is_empty() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 pub(crate) fn ps_trap() -> Result<()> {
     anyhow::bail!(
         "`aoe acp ps` has been removed. Use the unified runtime view:\n  \
@@ -835,21 +875,44 @@ pub(crate) async fn stop_all_workers(timeout_secs: u64) -> Result<usize> {
     Ok(targets.len())
 }
 
+/// Stops a structured session's runner from outside the daemon, then retires the scope its
+/// record names, then the record itself, so a failed scope retirement can be retried. The
+/// scope is left alone when the stop fails, so a runner the supervisor still owns is not
+/// cut off. A record that cannot be parsed fails the call instead of counting as no runner.
+pub(crate) async fn stop_runner(session_id: &str) -> Result<()> {
+    use crate::process::worker_registry;
+    if let Some(record) = worker_registry::load_strict(session_id)? {
+        settle_worker(&record, 5).await?;
+        crate::process::systemd::retire_scopes(session_id, std::slice::from_ref(&record.scope))?;
+        worker_registry::retire_selected(&record)?;
+    }
+    Ok(())
+}
+
+/// The stop intent goes first so the supervisor reads a user stop, not a crash to respawn.
+async fn settle_worker(
+    record: &crate::process::worker_registry::WorkerRecord,
+    timeout_secs: u64,
+) -> Result<()> {
+    crate::process::worker_registry::request_stop(record)?;
+    signal_and_wait(record, timeout_secs).await
+}
+
+async fn stop_worker_record(
+    record: &crate::process::worker_registry::WorkerRecord,
+    timeout_secs: u64,
+) -> Result<()> {
+    settle_worker(record, timeout_secs).await?;
+    crate::process::worker_registry::retire_selected(record)
+}
+
 async fn stop_worker_records(
     targets: &[crate::process::worker_registry::WorkerRecord],
     timeout_secs: u64,
 ) -> Result<()> {
-    use crate::process::worker_registry;
     let mut failures = Vec::new();
     for record in targets {
-        let result = async {
-            worker_registry::request_stop(record)?;
-            signal_and_wait(record, timeout_secs).await?;
-            worker_registry::retire_selected(record)?;
-            Ok::<_, anyhow::Error>(())
-        }
-        .await;
-        match result {
+        match stop_worker_record(record, timeout_secs).await {
             Ok(()) => println!(
                 "Stopped agent worker for {} (PID {}).",
                 record.session_id, record.pid
@@ -1292,6 +1355,7 @@ fn event_kind(event: &crate::acp::Event) -> &'static str {
         Event::BackgroundAgentLaunched { .. } => "background_agent_launched",
         Event::BackgroundAgentProgress { .. } => "background_agent_progress",
         Event::BackgroundAgentCompleted { .. } => "background_agent_completed",
+        Event::SubagentUpdated { .. } => "subagent_updated",
         Event::BackgroundTaskStarted { .. } => "background_task_started",
         Event::BackgroundTaskFinished { .. } => "background_task_finished",
         Event::PromptRuntimeError { .. } => "prompt_runtime_error",
@@ -1299,6 +1363,7 @@ fn event_kind(event: &crate::acp::Event) -> &'static str {
         Event::CancelRequested { .. } => "cancel_requested",
         Event::Stopped { .. } => "stopped",
         Event::AgentStartupError { .. } => "agent_startup_error",
+        Event::IntegrationLost { .. } => "integration_lost",
         Event::IncompatibleAgent { .. } => "incompatible_agent",
         Event::UserPromptSent { .. } => "user_prompt_sent",
         Event::UserDiffCommentsPrompt { .. } => "user_diff_comments_prompt",
@@ -1322,6 +1387,129 @@ fn event_kind(event: &crate::acp::Event) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::CommandExt;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stop_runner_fences_resume_ends_the_runner_then_releases_the_scope() {
+        use crate::process::worker_registry;
+        let tmp = tempfile::TempDir::with_prefix_in("aoe-stop-runner-", "/tmp").unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(tmp.path());
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let child = std::rc::Rc::new(std::cell::RefCell::new(child));
+        worker_registry::save(&worker_registry::WorkerRecord::new(
+            "sess-stop".into(),
+            pid,
+            tmp.path().join("sock"),
+            "aoe-agent".into(),
+            "aoe-agent".into(),
+            std::path::PathBuf::from("/repo"),
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+        ))
+        .unwrap();
+        let released = std::rc::Rc::new(std::cell::Cell::new(false));
+        let _probe = crate::process::systemd::release_probe::install({
+            let released = released.clone();
+            let child = child.clone();
+            move |id| {
+                assert_eq!(id, "sess-stop");
+                // `try_wait` reaps; `is_pid_alive` would still see a zombie.
+                assert!(
+                    child.borrow_mut().try_wait().unwrap().is_some(),
+                    "scope released while the runner was alive"
+                );
+                released.set(true);
+            }
+        });
+
+        stop_runner("sess-stop").await.unwrap();
+
+        assert!(worker_registry::load("sess-stop").unwrap().is_none());
+        assert!(
+            worker_registry::stop_requested("sess-stop"),
+            "the stop intent must fence an automatic respawn"
+        );
+        assert!(released.get());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stop_runner_keeps_the_scope_when_the_stop_fails() {
+        use crate::process::worker_registry;
+        let _app = crate::session::test_support::isolate_app_dir();
+        worker_registry::save(&worker_registry::WorkerRecord::new(
+            "untracked-prime".into(),
+            i32::MAX as u32,
+            worker_registry::socket_path_for("untracked-prime").unwrap(),
+            "prime-agent".into(),
+            "prime-agent".into(),
+            "/tmp".into(),
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+        ))
+        .unwrap();
+        let _probe = crate::process::systemd::release_probe::install(|id| {
+            panic!("scope of {id} released after a failed stop")
+        });
+
+        assert!(stop_runner("untracked-prime").await.is_err());
+        assert!(worker_registry::load("untracked-prime").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stop_runner_fails_on_a_record_it_cannot_parse() {
+        use crate::process::worker_registry;
+        let _app = crate::session::test_support::isolate_app_dir();
+        let record = worker_registry::record_path("garbled").unwrap();
+        std::fs::write(&record, b"{ not json").unwrap();
+        let _probe = crate::process::systemd::release_probe::install(|id| {
+            panic!("scope of {id} released without a provable stop")
+        });
+
+        assert!(stop_runner("garbled").await.is_err());
+        assert!(record.exists(), "the evidence must stay for recovery");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stop_runner_keeps_the_record_when_the_scope_cannot_be_retired() {
+        use crate::process::worker_registry::{self, ScopeOwnership};
+        let _app = crate::session::test_support::isolate_app_dir();
+        let mut record = worker_registry::WorkerRecord::new(
+            "scope-stuck".into(),
+            i32::MAX as u32,
+            worker_registry::socket_path_for("scope-stuck").unwrap(),
+            "aoe-agent".into(),
+            "aoe-agent".into(),
+            "/tmp".into(),
+            None,
+            vec![],
+            vec![],
+            None,
+            None,
+        );
+        record.scope = ScopeOwnership::Unresolved;
+        worker_registry::save(&record).unwrap();
+
+        assert!(stop_runner("scope-stuck").await.is_err());
+        assert!(
+            worker_registry::load("scope-stuck").unwrap().is_some(),
+            "the record names the scope, so it must outlive a failed retirement"
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -1694,7 +1882,7 @@ mod tests {
             version_issue: issue,
         };
         let stale_issue = AgentVersionIssue {
-            reason: "installed 0.37.0; requires >=0.99.1".to_string(),
+            reason: "installed 0.37.0; requires >=0.103.0".to_string(),
             install_command: "npm install -g @x/y@latest".to_string(),
         };
         let marks = [

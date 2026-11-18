@@ -91,7 +91,7 @@ struct Entry {
 /// Resolved `(profile, project_path)` configs shared across requests.
 #[derive(Default)]
 pub struct ResolvedConfigCache {
-    entries: Mutex<HashMap<(String, String), Entry>>,
+    entries: Mutex<HashMap<(String, PathBuf), Entry>>,
 }
 
 /// One lookup's outcome: the config and whether it came from disk.
@@ -110,10 +110,7 @@ impl ResolvedConfigCache {
     /// of its input files changed since it was resolved. The lock is never
     /// held across the disk read, so a miss does not stall concurrent hits.
     pub fn resolve_or_warn(&self, profile: &str, project_path: &Path) -> Resolved {
-        let key = (
-            profile.to_string(),
-            project_path.to_string_lossy().into_owned(),
-        );
+        let key = (profile.to_string(), project_path.to_path_buf());
         {
             let mut entries = self
                 .entries

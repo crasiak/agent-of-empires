@@ -407,6 +407,7 @@ pub(super) const CITYHALL_MUTATION_ALLOW: &[(&str, &str)] = &[
     ("POST", "/api/sessions/{id}/acp/prompt"),
     ("POST", "/api/sessions/{id}/acp/prompt/diff-comments"),
     ("POST", "/api/sessions/{id}/acp/cancel"),
+    ("POST", "/api/sessions/{id}/acp/subagents/{child_id}/cancel"),
     ("POST", "/api/sessions/{id}/acp/force_end_turn"),
     ("POST", "/api/sessions/{id}/acp/approvals/{nonce}"),
     ("POST", "/api/sessions/{id}/acp/elicitations/{nonce}"),
@@ -461,6 +462,8 @@ pub(super) const CITYHALL_MUTATION_DENY: &[(&str, &str)] = &[
     ("POST", "/api/research"),
     ("POST", "/api/workshop"),
     ("POST", "/api/research/{id}/reply"),
+    // The setup wizard never shows in CityHall mode.
+    ("PATCH", "/api/setup"),
     ("POST", "/api/sandbox/image-pull"),
     ("POST", "/api/sandbox/image-dismiss"),
     ("POST", "/api/sessions/creation-trust"),
@@ -880,6 +883,8 @@ pub(super) async fn cityhall_gate(
 ///   redirect, so both hosts must be allowed. `data:` covers inline icons.
 ///   `raw.githubusercontent.com` serves plugin screenshots resolved by the
 ///   plugin detail endpoint (#2484).
+/// - `media-src 'self' blob:`: browser sounds are fetched with auth and
+///   played from a blob URL, since `<audio src>` bypasses the fetch interceptor.
 /// - `font-src 'self'`: Geist fonts are bundled under /fonts/.
 /// - `connect-src 'self' ws: wss:`: REST + PTY WebSocket to same origin.
 /// - `frame-ancestors 'none'`: CSP-native equivalent of X-Frame-Options.
@@ -889,6 +894,7 @@ pub(super) const CSP: &str = "default-src 'self'; \
     script-src 'self' 'wasm-unsafe-eval'; \
     style-src 'self' 'unsafe-inline'; \
     img-src 'self' data: blob: https://github.com https://avatars.githubusercontent.com https://raw.githubusercontent.com; \
+    media-src 'self' blob:; \
     font-src 'self'; \
     connect-src 'self' ws: wss:; \
     frame-ancestors 'none'; \
@@ -1952,6 +1958,7 @@ mod tests {
             "default-src 'self'",
             "script-src 'self' 'wasm-unsafe-eval'",
             "img-src 'self' data: blob: https://github.com https://avatars.githubusercontent.com https://raw.githubusercontent.com",
+            "media-src 'self' blob:",
             "connect-src 'self' ws: wss:",
             "frame-ancestors 'none'",
         ] {

@@ -366,9 +366,9 @@ test("global settings migrate from profiles and reject stale profile writes", as
   const { current: temporaryFilter } = await runtimeLog.json();
 
   await page.goto(`${serve.baseUrl}/settings/session`);
-  // Sidebar Position is TUI-only, so it sits in the Terminal UI fold.
+  // Sidebar position is TUI-only, so it sits in the Terminal UI fold.
   await page.getByRole("button", { name: /Terminal UI/ }).click();
-  const position = labelledSelect(page, /^Sidebar Position$/);
+  const position = labelledSelect(page, /^Sidebar position$/);
   await expect(position).toHaveValue("left");
   const [saveResponse] = await Promise.all([
     page.waitForResponse(
@@ -398,23 +398,32 @@ test("global settings migrate from profiles and reject stale profile writes", as
   expect(persisted.session.sidebar_position).toBe("right");
 });
 
-test("shortcut bar toggle persists globally from Terminal UI settings", async ({ serve, page }) => {
+test("Terminal UI toggles default on, save off, and persist across reload and restart", async ({ serve, page }) => {
   const profile = await defaultProfile(serve);
   const settingsUrl = `${serve.baseUrl}/api/settings`;
   const machineUrl = `${settingsUrl}?layer=machine`;
   const profileUrl = `${serve.baseUrl}/api/profiles/${encodeURIComponent(profile)}/settings`;
-  const toggle = page.getByText("Show shortcut bar", { exact: true }).locator("../..").getByRole("switch");
+  const effectiveUrl = `${settingsUrl}?profile=${encodeURIComponent(profile)}`;
+  const toggle = (field: string) => page.locator(`[data-settings-field="session.${field}"]`).getByRole("switch");
+  const shortcutBar = toggle("show_shortcut_bar");
+  const structuredBadge = toggle("show_structured_badge");
+  const saveToggle = async (locator: Locator) => {
+    const [saved] = await Promise.all([
+      page.waitForResponse(
+        (response) => response.url().startsWith(settingsUrl) && response.request().method() === "PATCH",
+      ),
+      locator.click(),
+    ]);
+    expect(saved.ok()).toBe(true);
+  };
 
   await page.goto(`${serve.baseUrl}/settings/session`);
   await page.getByRole("button", { name: /Terminal UI/ }).click();
-  await expect(toggle).toBeChecked();
-  const [saved] = await Promise.all([
-    page.waitForResponse(
-      (response) => response.url().startsWith(settingsUrl) && response.request().method() === "PATCH",
-    ),
-    toggle.click(),
-  ]);
-  expect(saved.ok()).toBe(true);
+  await expect(shortcutBar).toBeChecked();
+  await expect(structuredBadge).toBeChecked();
+
+  // The shortcut bar is global-only: it lands machine-wide and a profile override is refused.
+  await saveToggle(shortcutBar);
   expect((await getJson(machineUrl)).session.show_shortcut_bar).toBe(false);
   expect((await getJson(profileUrl)).session?.show_shortcut_bar).toBeUndefined();
   const rejected = await fetch(profileUrl, {
@@ -424,12 +433,21 @@ test("shortcut bar toggle persists globally from Terminal UI settings", async ({
   });
   expect(rejected.status).toBe(400);
 
+  // The badge stays profile-overridable: the switch saves an override and the machine layer keeps the default.
+  await saveToggle(structuredBadge);
+  expect((await getJson(profileUrl)).session.show_structured_badge).toBe(false);
+  expect((await getJson(effectiveUrl)).session.show_structured_badge).toBe(false);
+  expect((await getJson(machineUrl)).session.show_structured_badge).toBe(true);
+
   await serve.restart();
   await page.reload();
   await page.getByRole("button", { name: /Terminal UI/ }).click();
-  await expect(toggle).not.toBeChecked();
-  await toggle.click();
+  await expect(shortcutBar).not.toBeChecked();
+  await expect(structuredBadge).not.toBeChecked();
+  await shortcutBar.click();
   await expect.poll(async () => (await getJson(machineUrl)).session.show_shortcut_bar).toBe(true);
+  await structuredBadge.click();
+  await expect.poll(async () => (await getJson(effectiveUrl)).session.show_structured_badge).toBe(true);
 });
 
 test("runtime logging overrides persist and clearing one preserves the other", async ({ serve, page }) => {
@@ -471,13 +489,13 @@ test("systemd settings save machine-wide and refuse an invalid slice", async ({ 
       (response) => response.url().startsWith(settingsUrl) && response.request().method() === "PATCH",
     );
   const slice = page
-    .locator("label", { hasText: /^Systemd slice$/ })
+    .locator("label", { hasText: /^Slice$/ })
     .locator("..")
     .locator("input");
   const toggle = (label: string) => page.getByText(label, { exact: true }).locator("../..").getByRole("switch");
   // The harness seeds `enabled = false`, so the spec never turns real scopes on.
-  const enabled = toggle("Use systemd scopes");
-  const survive = toggle("Sessions survive daemon restart");
+  const enabled = toggle("Run Sessions in systemd scopes");
+  const survive = toggle("Keep Sessions running when the Daemon restarts");
 
   await page.goto(`${serve.baseUrl}/settings/systemd`);
   await expect(enabled).not.toBeChecked();

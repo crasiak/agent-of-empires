@@ -325,6 +325,11 @@ fn chrome_rows(window_height: u16, pane_height: u16) -> u16 {
     }
 }
 
+/// A `capture-pane` result: its output, or `None` when tmux reported failure.
+fn capture_output(success: bool, stdout: &[u8]) -> Option<String> {
+    success.then(|| String::from_utf8_lossy(stdout).into_owned())
+}
+
 impl Session {
     pub fn new(id: &str, title: &str) -> Result<Self> {
         Ok(Self {
@@ -512,12 +517,9 @@ impl Session {
         let config = super::tmux_option_config(profile);
 
         // Forward the host desktop env so agents and browsers they open reach it.
-        let inherited_env = crate::session::environment::inherited_host_env(profile);
-        let mut protected_env = Vec::new();
-        let mut tmux_env: Vec<(&str, &str)> = inherited_env
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str()))
-            .collect();
+        let mut protected_env =
+            launch_script_env(crate::session::environment::inherited_host_env(profile));
+        let mut tmux_env: Vec<(&str, &str)> = Vec::new();
         for mutation in extra_env {
             let key = mutation.key();
             if !crate::session::environment::is_valid_env_key(key) {
@@ -815,11 +817,23 @@ impl Session {
         Ok(tty)
     }
 
+    /// The pane's last `lines` of history, or `""` when the session is gone or tmux could not
+    /// capture it. Use [`Self::try_capture_pane`] where that failure must not read as a blank pane.
     pub fn capture_pane(&self, lines: usize) -> Result<String> {
-        if !self.exists() {
-            return Ok(String::new());
-        }
+        Ok(self.capture(lines)?.unwrap_or_default())
+    }
 
+    /// Like [`Self::capture_pane`], but a missing session or a failed `capture-pane` is an error.
+    pub fn try_capture_pane(&self, lines: usize) -> Result<String> {
+        self.capture(lines)?
+            .ok_or_else(|| anyhow::anyhow!("could not capture tmux session '{}'", self.name))
+    }
+
+    /// `None` when the session is gone or `capture-pane` failed; `Err` when tmux could not run.
+    fn capture(&self, lines: usize) -> Result<Option<String>> {
+        if !self.exists() {
+            return Ok(None);
+        }
         let target =
             self.live_pane_target_with_deadline(&crate::tmux::TmuxCommandDeadline::new())?;
         let output = crate::tmux::tmux_command()
@@ -833,12 +847,7 @@ impl Session {
                 &format!("-{}", lines),
             ])
             .output()?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            Ok(String::new())
-        }
+        Ok(capture_output(output.status.success(), &output.stdout))
     }
 
     /// Wait for a known marker, or for two stable captures when no marker exists.
@@ -2426,17 +2435,50 @@ const _: () = assert!(
     SCOPED_LAUNCH_FD != 3 && SCOPED_LAUNCH_FD != crate::session::environment::CONTAINER_EXEC_ENV_FD
 );
 
+/// Set per pane by tmux or by the launch shell. A script export would run after
+/// them, pointing the pane at an outer tmux, pinning a stale `PWD`, or, for the
+/// identity names under zsh, calling `setuid`.
+const PANE_OWNED_ENV_KEYS: &[&str] = &[
+    "_",
+    "EGID",
+    "EUID",
+    "GID",
+    "IFS",
+    "OLDPWD",
+    "PWD",
+    "SHLVL",
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "TMUX",
+    "TMUX_PANE",
+    "UID",
+    "USERNAME",
+];
+
+/// Host env pairs as launch-script exports. Values stay off tmux's argv, which
+/// `ps` shows to other users and which macOS keeps as the tmux server's title.
+pub(super) fn launch_script_env(pairs: Vec<(String, String)>) -> Vec<PaneEnvMutation> {
+    pairs
+        .into_iter()
+        .filter(|(key, _)| !PANE_OWNED_ENV_KEYS.contains(&key.as_str()))
+        .map(|(key, value)| PaneEnvMutation::set(key, value))
+        .collect()
+}
+
 /// A one-shot, mode-0600 environment channel for a pane command.
 ///
 /// The guard owns cleanup until the pane unlinks the file after sourcing it.
 /// A successful tmux create alone does not transfer cleanup ownership.
-struct EphemeralEnvFile {
+pub(super) struct EphemeralEnvFile {
     path: Option<std::path::PathBuf>,
     container_env_path: Option<std::path::PathBuf>,
 }
 
 impl EphemeralEnvFile {
-    fn create(env: &[PaneEnvMutation], container_env: &[(String, String)]) -> Result<Self> {
+    pub(super) fn create(
+        env: &[PaneEnvMutation],
+        container_env: &[(String, String)],
+    ) -> Result<Self> {
         let mut channel = Self {
             path: None,
             container_env_path: None,
@@ -2468,7 +2510,10 @@ impl EphemeralEnvFile {
             }
             match mutation {
                 PaneEnvMutation::Set { key, value } => {
-                    writeln!(file, "export {}={}", key, shell_escape_script_word(value))?;
+                    // A read-only name aborts zsh and POSIX-mode bash, so try it in a
+                    // subshell first. Builtins only: the value never reaches an argv.
+                    let export = format!("export {}={}", key, shell_escape_script_word(value));
+                    writeln!(file, "if ({export}) 2>/dev/null; then {export}; fi")?;
                 }
                 PaneEnvMutation::Unset { key } => writeln!(file, "unset {}", key)?,
             }
@@ -2483,7 +2528,7 @@ impl EphemeralEnvFile {
     /// launch in a heredoc on fd 4, still a child of the pane shell, so it
     /// stays out of every argv. `env` restores the pane's `INVOCATION_ID`,
     /// which `systemd-run` overwrites.
-    fn wrap_command(
+    pub(super) fn wrap_command(
         &self,
         command: Option<&str>,
         scope: Option<&crate::process::systemd::ScopePrefix>,
@@ -2551,7 +2596,7 @@ impl EphemeralEnvFile {
         ))
     }
 
-    fn wait_until_consumed(&self, timeout: Duration) -> bool {
+    pub(super) fn wait_until_consumed(&self, timeout: Duration) -> bool {
         let Some(path) = self.path.as_deref() else {
             return true;
         };
@@ -2566,7 +2611,7 @@ impl EphemeralEnvFile {
         }
     }
 
-    fn disarm(&mut self) {
+    pub(super) fn disarm(&mut self) {
         self.path = None;
         self.container_env_path = None;
     }
@@ -2640,7 +2685,8 @@ pub(crate) fn build_create_args(
         working_dir.to_string(),
     ];
 
-    // `-e` needs tmux 3.2+, already assumed elsewhere.
+    // `-e` needs tmux 3.2+, already assumed elsewhere. Argv is world-readable:
+    // only non-secret values belong here; see `launch_script_env`.
     for (key, value) in env {
         args.push("-e".to_string());
         args.push(format!("{key}={value}"));
@@ -2901,6 +2947,35 @@ mod tests {
             "{what} for {} never painted {needle:?}; last seen: {last:?}",
             session.name
         );
+    }
+
+    /// A failed `capture-pane` is no output at all, while a successful empty one is a blank pane.
+    #[test]
+    fn a_failed_capture_is_kept_apart_from_a_blank_pane() {
+        for (success, stdout, expected) in [
+            (true, "x", Some("x")),
+            (true, "", Some("")),
+            (false, "junk", None),
+        ] {
+            assert_eq!(
+                capture_output(success, stdout.as_bytes()).as_deref(),
+                expected,
+                "{success} {stdout:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn only_the_strict_capture_reports_a_missing_session() {
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+        let missing =
+            Session::from_name(&format!("aoe_test_no_such_session_{}", std::process::id()));
+        assert!(missing.try_capture_pane(10).is_err());
+        assert_eq!(missing.capture_pane(10).unwrap(), "");
     }
 
     #[test]
@@ -4030,38 +4105,6 @@ mod tests {
         assert!(
             content.contains("got:hi"),
             "literal text followed by a named Enter token should submit the line, got: {content:?}"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_create_forwards_desktop_env_to_session() {
-        if !tmux_available() {
-            eprintln!("Skipping test: tmux not available");
-            return;
-        }
-
-        // A var only this test reads, caught by the `XDG_` forwarding rule, so
-        // it never collides with real config or another test's assertions.
-        let key = "XDG_AOE_ENV_TEST_3075";
-        let _env = crate::session::test_support::EnvGuard::set(&[(key, "sentinel-value")]);
-
-        let guard = TmuxTestSession::new("aoe_test_env_fwd");
-        let session = super::Session::from_name(guard.name());
-        let created = session.create_with_size("/tmp", Some("sleep 5"), Some((80, 24)), "default");
-
-        let shown = crate::tmux::tmux_command()
-            .args(["show-environment", "-t", guard.name(), key])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string());
-
-        created.expect("create session");
-        assert_eq!(
-            shown.as_deref(),
-            Some("XDG_AOE_ENV_TEST_3075=sentinel-value"),
-            "a created agent session must carry the forwarded desktop/session env (#3075)"
         );
     }
 
@@ -5307,6 +5350,25 @@ mod tests {
     }
 
     #[test]
+    fn test_launch_script_env_skips_variables_the_pane_owns() {
+        let pair = |key: &str| (key.to_string(), "host-value".to_string());
+        assert_eq!(
+            launch_script_env(vec![
+                pair("PWD"),
+                pair("UID"),
+                pair("DISPLAY"),
+                pair("_"),
+                pair("TMUX"),
+                pair("TMUX_PANE"),
+                pair("TERM_PROGRAM"),
+                pair("COLORTERM"),
+            ]),
+            ["DISPLAY", "COLORTERM"]
+                .map(|key| PaneEnvMutation::set(key.to_string(), "host-value".to_string()))
+        );
+    }
+
+    #[test]
     fn test_protected_env_file_keeps_secret_out_of_pane_argv_and_rejects_invalid_keys() {
         let _env = crate::session::test_support::EnvGuard::read_lock();
         let secret = "literal-secret-value";
@@ -5356,6 +5418,39 @@ mod tests {
         }
         drop(file);
         assert!(!path.exists(), "failure guard must clean up the channel");
+    }
+
+    #[test]
+    fn test_protected_env_file_survives_read_only_names_in_every_shell() {
+        let temp = tempfile::tempdir().unwrap();
+        for shell in ["sh", "bash", "zsh"] {
+            let Ok(shell) = which::which(shell) else {
+                continue;
+            };
+            let shell = shell.to_string_lossy().into_owned();
+            let _env = crate::session::test_support::EnvGuard::set(&[("SHELL", shell.as_str())]);
+            let output = temp.path().join("seen");
+            let mut file = EphemeralEnvFile::create(
+                &["PPID", "ARGC", "status", "path", "GOOD_VALUE"]
+                    .map(|key| PaneEnvMutation::set(key.to_string(), "9".to_string())),
+                &[],
+            )
+            .unwrap();
+            let command = format!(
+                "printf '%s' \"$GOOD_VALUE\" > {}",
+                shell_escape_script_word(&output.to_string_lossy())
+            );
+            let wrapper = file.wrap_command(Some(&command), None).unwrap();
+            let run = std::process::Command::new("sh")
+                .args(["-c", &wrapper])
+                .output()
+                .unwrap();
+            assert!(run.status.success(), "{shell}: {run:?}");
+            assert_eq!(std::fs::read_to_string(&output).unwrap(), "9", "{shell}");
+            assert!(file.wait_until_consumed(Duration::ZERO), "{shell}");
+            file.disarm();
+            std::fs::remove_file(output).unwrap();
+        }
     }
 
     #[test]

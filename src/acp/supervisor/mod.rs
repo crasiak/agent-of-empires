@@ -30,14 +30,14 @@ use super::runner_lifecycle::{
     Lease, LifecycleTable, ProcessControl, RunnerIdentity, SystemProcessControl, WorkerPhase,
     WorkerStart,
 };
-use super::state::AcpSessionId;
+use super::state::{AcpSessionId, Event};
 use crate::daemon::{AcpWorkerStart, AcpWorkerStartKind, AcpWorkerState};
 use crate::session::SandboxInfo;
 pub(crate) use teardown::{RetirementResources, RetirementTarget};
 
 pub(crate) use agents::{apply_agent_command_override, command_override_for_spawn};
 pub(crate) use launch::{host_spawn_environment, with_durable_launch};
-pub use sink::{BroadcastSink, ChannelSink};
+pub use sink::{BroadcastSink, ChannelSink, Persisted};
 
 /// Post-startup respawns allowed within `RESTART_WINDOW` before the session is parked.
 const MAX_RESPAWNS_IN_WINDOW: u32 = 3;
@@ -63,6 +63,7 @@ type Workers = Arc<Mutex<HashMap<String, WorkerHandle>>>;
 /// Each session's last allocated seq, under its own lock so sessions publish independently.
 type SeqMap = std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<u64>>>>;
 type SharedSet = Arc<std::sync::Mutex<HashSet<String>>>;
+
 type RestartRequests = Arc<std::sync::Mutex<HashMap<String, (u64, CancellationToken)>>>;
 type SpawnRequests = Arc<std::sync::Mutex<SpawnRequestState>>;
 
@@ -113,6 +114,9 @@ pub enum SupervisorError {
     SessionGone(String),
     #[error("native session authority unavailable")]
     NativeStoreUnavailable,
+    /// The event log could not say whether a turn is open; the caller retries.
+    #[error("session {0:?} event log is unavailable")]
+    EventStoreUnavailable(String),
 }
 
 /// What the caller does with prompt text after it was published.
@@ -223,6 +227,8 @@ pub struct Supervisor<S: BroadcastSink> {
     force_respawn: SharedSet,
     /// Sessions whose worker failed before establishing a session.
     startup_failures: SharedSet,
+    /// Signalled once a worker has ended on a provider rate limit, so the reconciler reacts at once.
+    rate_limit_wake: Arc<tokio::sync::Notify>,
     /// Sessions whose isolated native identity is not durable yet.
     pending_context_resets: SharedSet,
     /// Sessions whose crashed worker the drain task relaunched in place.
@@ -417,6 +423,8 @@ pub struct SpawnRequest {
     /// The session's logical tool (`Instance.tool`); host hooks see this as `AOE_TOOL`.
     pub tool: String,
     pub cwd: PathBuf,
+    /// Where repo config is read; a workspace's `cwd` holds none (`Instance::repo_config_path`).
+    pub config_path: PathBuf,
     pub additional_dirs: Vec<PathBuf>,
     pub provider_env: Vec<(String, String)>,
     /// LLM backend pinned on the session row, one of
@@ -426,6 +434,8 @@ pub struct SpawnRequest {
     pub effort: Option<String>,
     /// True for persisted user effort, not a resolved default.
     pub effort_explicit: bool,
+    /// Persisted `model_config` picks, re-applied after the model and effort.
+    pub model_config: std::collections::BTreeMap<String, String>,
     /// Prior ACP session id; loaded instead of a new session when the agent supports it.
     pub stored_acp_session_id: Option<String>,
     /// Parent ACP session id to `session/fork` from.
@@ -494,6 +504,7 @@ impl<S: BroadcastSink> Supervisor<S> {
             incompatible_binaries: Arc::default(),
             force_respawn: Arc::default(),
             startup_failures: Arc::default(),
+            rate_limit_wake: Arc::default(),
             pending_context_resets: Arc::default(),
             respawned_in_place: Arc::default(),
             max_concurrent_workers,
@@ -541,6 +552,11 @@ impl<S: BroadcastSink> Supervisor<S> {
 
     pub fn take_respawn_requests(&self) -> Vec<String> {
         lock_recover(&self.force_respawn).drain().collect()
+    }
+
+    /// Resolves after a worker ended on a rate limit; one wake is kept if nobody was waiting.
+    pub async fn rate_limit_parked(&self) {
+        self.rate_limit_wake.notified().await;
     }
 
     pub fn take_startup_failures(&self) -> Vec<String> {
@@ -882,6 +898,21 @@ fn publish_with_next_seq<R>(
         *last = last.saturating_add(1);
         publish(*last)
     })
+}
+
+/// Queue `event` under the session's counter lock and wait for the store after
+/// releasing it, so a slow save does not hold up the worker drain on that lock.
+/// Returns the seq and whether the event was stored.
+fn publish_next_persisted<S: BroadcastSink + ?Sized>(
+    sink: &S,
+    next_seqs: &SeqMap,
+    session_id: &str,
+    event: &Event,
+) -> (u64, bool) {
+    let (seq, persisted) = publish_with_next_seq(next_seqs, session_id, |seq| {
+        (seq, sink.queue_persisted(session_id, seq, event))
+    });
+    (seq, persisted.wait())
 }
 
 fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
