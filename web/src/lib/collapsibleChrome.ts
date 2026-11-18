@@ -7,7 +7,7 @@ export function collapsibleRegionClass(collapsed: boolean): string {
   }`;
 }
 
-/** `min-h-0` lets the row reach zero; clip only while collapsed since composer menus render outside the box. */
+/** Hide fixed descendants as well as clipped content while collapsed. */
 export function collapsibleInnerClass(collapsed: boolean): string {
-  return collapsed ? "min-h-0 overflow-hidden" : "min-h-0";
+  return collapsed ? "min-h-0 overflow-hidden invisible" : "min-h-0";
 }

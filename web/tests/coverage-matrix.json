@@ -1285,8 +1285,10 @@
         "web/src/components/CollapsibleChrome.tsx",
         "web/src/App.tsx",
         "web/src/components/acp/StructuredView.tsx",
+        "web/src/lib/collapsibleChrome.ts",
         "web/src/lib/repinOnResize.ts"
-      ]
+      ],
+      "notes": "Keyboard collapse hides open fixed model menus, releases composer height and preserves the draft without sending a prompt."
     },
     {
       "id": "sidebar.terminal-focus-handoff",

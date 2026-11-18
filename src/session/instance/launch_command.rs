@@ -2663,10 +2663,8 @@ sandbox = "unsupported"
         set_pi_integration(&instance, "identity");
         assert!(instance.identity_extension_launch().unwrap().is_some());
         assert!(instance.pi_session_id_pinnable());
-        instance.command = format!(
-            "PATH={} pi",
-            shell_words::quote(alternate.to_str().unwrap())
-        );
+        let path = format!("{}:{}", alternate.display(), std::env::var("PATH").unwrap());
+        instance.command = format!("PATH={} pi", shell_words::quote(&path));
         let execution = instance.resolve_native_execution(None).unwrap();
         assert_eq!(execution.program, binary);
         assert!(execution.inputs.identity_extension.is_none());

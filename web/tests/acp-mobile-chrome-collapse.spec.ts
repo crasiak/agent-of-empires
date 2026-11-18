@@ -1,11 +1,64 @@
 import { test, expect } from "./helpers/mockedTest";
 import { devices } from "@playwright/test";
-import { agentMessageChunk, mockAcpSession, openStructuredSession, waitForComposerConnected } from "./helpers/acpMock";
+import {
+  agentMessageChunk,
+  configOptionsUpdated,
+  mockAcpSession,
+  openStructuredSession,
+  waitForComposerConnected,
+} from "./helpers/acpMock";
 
 // On phones the top bar and composer each fold away behind a handle that stays tappable in both states.
 test.use({ ...devices["iPhone 13"] });
 
 test.describe("mobile conversation chrome collapse", () => {
+  test("keyboard collapse hides an open model menu and preserves the draft", async ({ page }) => {
+    const mock = await mockAcpSession(page, {
+      title: "story-collapse-model-menu",
+      initialEvents: [
+        agentMessageChunk("hello from the agent"),
+        configOptionsUpdated([
+          {
+            id: "model",
+            name: "Model",
+            category: "model",
+            current_value: "first",
+            options: [
+              { value: "first", name: "First model" },
+              { value: "second", name: "Second model" },
+            ],
+          },
+        ]),
+      ],
+    });
+    await openStructuredSession(page, mock);
+    await waitForComposerConnected(page);
+    const draft = page.getByRole("textbox").first();
+    await draft.fill("keep this draft");
+    await page.getByTestId("config-option-model").click();
+    const menu = page.locator('[id^="config-option-menu-model"]');
+    const result = page.getByTestId("config-option-model-value-second");
+    await expect(menu).toBeVisible();
+    await expect(result).toBeVisible();
+
+    const toggle = page.getByTestId("composer-collapse-toggle");
+    for (let step = 0; step < 12 && !(await toggle.evaluate((el) => el === document.activeElement)); step++) {
+      await page.keyboard.press("Shift+Tab");
+    }
+    await expect(toggle).toBeFocused();
+    await page.keyboard.press("Enter");
+    const composer = page.locator('[data-testid^="conversation-composer-"]');
+    await expect.poll(async () => (await composer.boundingBox())!.height).toBe(0);
+    await expect(menu).toBeHidden();
+    await expect(result).toBeHidden();
+    await expect(toggle).toBeFocused();
+
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await composer.boundingBox())!.height).toBeGreaterThan(0);
+    await expect(draft).toHaveValue("keep this draft");
+    expect(mock.promptBodies).toEqual([]);
+  });
+
   test("header and composer collapse independently and hand their height to the transcript", async ({ page }) => {
     const mock = await mockAcpSession(page, {
       title: "story-collapse",
