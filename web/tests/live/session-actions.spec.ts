@@ -136,12 +136,23 @@ test.describe("group edit (#1726)", () => {
     };
     await assertCombined();
     await expect
-      .poll(async () => (await listSessions(serve.baseUrl)).map((session) => session.group_path))
-      .toEqual(["Review/Done", "Review/Done"]);
+      .poll(async () =>
+        (await listSessions(serve.baseUrl))
+          .map((session) => ({ id: session.id, group: session.group_path }))
+          .sort((a, b) => a.id.localeCompare(b.id)),
+      )
+      .toEqual(
+        [alpha, beta]
+          .map((session) => ({ id: session.id, group: "Review/Done" }))
+          .sort((a, b) => a.id.localeCompare(b.id)),
+      );
     await page.reload();
     await assertCombined();
     const groups = await fetch(`${serve.baseUrl}/api/groups`).then((response) => response.json());
-    expect(groups).toEqual([{ path: "Review/Done", session_count: 2 }]);
+    expect(groups).toEqual([
+      { path: "Review", session_count: 0, archived: false },
+      { path: "Review/Done", session_count: 2, archived: false },
+    ]);
     await page.screenshot({ path: testInfo.outputPath("combined-existing-group.png"), animations: "disabled" });
   });
 

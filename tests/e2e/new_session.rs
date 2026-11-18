@@ -359,7 +359,6 @@ async fn test_quit_creation_waits_for_cancellation_admission_before_exit() {
 
 /// Write a global config that keeps existing-session activation at its
 /// historical tmux default while opening newly-created sessions in live mode.
-/// No hooks; the sync create path applies.
 fn write_config_new_session_mode_live_send(h: &TuiTestHarness) {
     let config_path = app_dir_in(h.home_path()).join("config.toml");
     let config_content = std::fs::read_to_string(&config_path).expect("read harness config");
@@ -371,11 +370,10 @@ fn write_config_new_session_mode_live_send(h: &TuiTestHarness) {
         ),
     )
     .expect("write state with harness flags and hook acknowledgment");
-    std::fs::write(
-        config_path,
-        format!("{config_content}\n[session]\nnew_session_mode = \"live_send\"\n"),
-    )
-    .expect("write config with new session mode");
+    let mut config: toml::Value = toml::from_str(&config_content).expect("parse harness config");
+    config["session"]["new_session_mode"] = toml::Value::String("live_send".into());
+    std::fs::write(config_path, toml::to_string(&config).unwrap())
+        .expect("write config with new session mode");
 }
 
 /// New-session mode must remain independent from the setting that controls

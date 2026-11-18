@@ -414,8 +414,6 @@ async fn daemon_group_move_preserves_live_terminal_and_restarts_in_target_profil
         "{}",
         String::from_utf8_lossy(&migrated.stderr)
     );
-    std::fs::write(app.join(".schema_version"), b"30").unwrap();
-    std::fs::remove_file(app.join("pending-purge-owners.json")).unwrap();
     let started = h.run_cli(&["serve", "--core-only", "--daemon"]);
     assert!(
         started.status.success(),
