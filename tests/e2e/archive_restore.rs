@@ -911,21 +911,32 @@ fn trash_retained_transcript_is_read_only() {
     h.assert_screen_contains("history is incomplete");
     h.assert_screen_contains("Trash · read-only");
     h.wait_for("UNFINISHED-OUTPUT-END");
-    h.wait_for("♥️x");
     h.assert_screen_contains("completion unavailable");
     h.assert_screen_not_contains("superseded unfinished output");
     for marker in ["♥️x", "MEDIA-RETAINED-TEXT"] {
-        h.wait_for(marker);
-        let screen = h.capture_screen();
-        let (y, line) = screen
-            .lines()
-            .enumerate()
-            .find(|(_, line)| line.contains(marker))
-            .unwrap();
-        let x =
-            unicode_width::UnicodeWidthStr::width(&line[..line.find(marker).unwrap()]) as u16 + 1;
+        // tmux 3.4 exposes the emoji's continuation cell as a display space.
+        let terminal_marker = marker.replace('\u{fe0f}', "\u{fe0f} ");
+        let (x, y) = wait_until(Duration::from_secs(10), Duration::from_millis(10), || {
+            let screen = h.capture_screen();
+            screen
+                .lines()
+                .enumerate()
+                .find_map(|(y, line)| {
+                    [marker, terminal_marker.as_str()]
+                        .into_iter()
+                        .find_map(|visible| {
+                            line.find(visible).map(|start| {
+                                (
+                                    unicode_width::UnicodeWidthStr::width(&line[..start]) as u16 + 1,
+                                    y as u16 + 1,
+                                )
+                            })
+                        })
+                })
+                .ok_or_else(|| format!("expected retained marker {marker:?}; screen={screen}"))
+        });
         let width = unicode_width::UnicodeWidthStr::width(marker) as u16;
-        h.send_mouse_drag((x, y as u16 + 1), (x + width, y as u16 + 1));
+        h.send_mouse_drag((x, y), (x + width, y));
         wait_until(Duration::from_secs(5), Duration::from_millis(10), || {
             let copied = std::fs::read_to_string(&clipboard).unwrap_or_default();
             (copied == marker)
