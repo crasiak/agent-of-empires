@@ -155,11 +155,7 @@ pub(crate) fn send_wake(instance: &Instance, message: &str) -> anyhow::Result<bo
 pub(crate) fn spawn_wake_worker(instance: Instance, wake_message: String) {
     let spawn_result = std::thread::Builder::new()
         .name(format!("aoe-restart-wake/{}", instance.id))
-        .stack_size(if instance.tool == "pi" {
-            2 * 1024 * 1024
-        } else {
-            128 * 1024
-        })
+        .stack_size(2 * 1024 * 1024)
         .spawn(move || {
             if instance.tool == "pi" {
                 if let Err(error) = send_wake(&instance, &wake_message) {
