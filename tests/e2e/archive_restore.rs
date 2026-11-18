@@ -927,7 +927,8 @@ fn trash_retained_transcript_is_read_only() {
                         .find_map(|visible| {
                             line.find(visible).map(|start| {
                                 (
-                                    unicode_width::UnicodeWidthStr::width(&line[..start]) as u16 + 1,
+                                    unicode_width::UnicodeWidthStr::width(&line[..start]) as u16
+                                        + 1,
                                     y as u16 + 1,
                                 )
                             })
