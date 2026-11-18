@@ -371,7 +371,10 @@ fn write_config_new_session_mode_live_send(h: &TuiTestHarness) {
     )
     .expect("write state with harness flags and hook acknowledgment");
     let mut config: toml::Value = toml::from_str(&config_content).expect("parse harness config");
-    config["session"]["new_session_mode"] = toml::Value::String("live_send".into());
+    config["session"].as_table_mut().unwrap().insert(
+        "new_session_mode".into(),
+        toml::Value::String("live_send".into()),
+    );
     std::fs::write(config_path, toml::to_string(&config).unwrap())
         .expect("write config with new session mode");
 }
