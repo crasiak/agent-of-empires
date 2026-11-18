@@ -243,6 +243,7 @@ impl DocumentWindow {
                     create_new_branch: false,
                     base_branch: None,
                     extra_repo_paths: Vec::new(),
+                    workspace: false,
                     sandbox: false,
                     sandbox_image: String::new(),
                     yolo_mode: false,

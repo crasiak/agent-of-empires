@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use std::{collections::HashSet, fs, io::ErrorKind, path::Path};
 use tracing::info;
 
-use super::v055_global_max_concurrent_workers::WORKER_CAP_FIELD;
+use super::v070_global_max_concurrent_workers::WORKER_CAP_FIELD;
 use crate::session::{
     acquire_storage_flock, atomic_write,
     config::{

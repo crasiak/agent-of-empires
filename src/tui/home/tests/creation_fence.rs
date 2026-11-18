@@ -634,7 +634,12 @@ fn commit_creation_under_filter(
         .publish_for_test(creation_snapshot(vec![], "test", 1));
     view.apply_session_feed();
     view.highlight_filters.sessions = sessions;
-    view.request_creation(creation_data(&project_dir, "Filtered", "group"), None, None);
+    view.request_creation(
+        creation_data(&project_dir, "Filtered", "group"),
+        None,
+        None,
+        false,
+    );
     let key = view.creating_stub_id.clone().unwrap();
     let stub_color = view.get_instance(&key).unwrap().color.clone();
     let mut committed = Instance::new("Filtered", project_dir.to_str().unwrap());
