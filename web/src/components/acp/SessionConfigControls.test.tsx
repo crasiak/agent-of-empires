@@ -283,7 +283,10 @@ describe("SessionConfigControls", () => {
       mount([MODEL]);
       fireEvent.click(byId("model")!);
       const menu = document.getElementById("config-option-menu-model")!;
-      expect(menu.className).toContain(direction === "up" ? "bottom-full" : "top-full");
+      expect(menu.className).toContain("fixed");
+      expect(menu.style.left).toBe("0px");
+      expect(menu.style.top).toBe(direction === "down" ? `${bottom + 4}px` : "");
+      expect(menu.style.bottom).toBe(direction === "up" ? `${innerHeight - top + 4}px` : "");
       expect(menu.style.maxHeight).toBe(`${maxHeight}px`);
     } finally {
       rectSpy.mockRestore();

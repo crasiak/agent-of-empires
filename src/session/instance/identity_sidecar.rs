@@ -140,6 +140,7 @@ impl Instance {
         backend.identity_publisher()?;
         if !self.is_sandboxed() {
             if backend != SessionCaptureBackend::Pi
+                || self.command_defines_path()
                 || launch_command::environment_defines_path(
                     &self.resolved_host_environment_from(config.environment.clone()),
                 )
@@ -608,10 +609,16 @@ impl Instance {
         FAIL_NEXT_PI_PATH_WRITE_CONSUMED.with(std::cell::Cell::get)
     }
 
+    fn command_defines_path(&self) -> bool {
+        launch_command::parse_launch_command(&self.get_tool_command())
+            .is_some_and(|parsed| parsed.assignments.iter().any(|(key, _)| key == "PATH"))
+    }
+
     /// A host Pi launch that can carry selectors may pin `--session-id`.
     pub(super) fn pi_session_id_pinnable(&self) -> bool {
         self.is_pi()
             && !self.is_sandboxed()
+            && !self.command_defines_path()
             && !launch_command::environment_defines_path(&self.resolved_host_environment())
             && crate::agents::pi_supports_session_id_flag()
     }

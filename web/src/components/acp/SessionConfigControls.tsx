@@ -132,9 +132,12 @@ interface SubProps {
 interface MenuLayout {
   direction: "up" | "down";
   maxHeight: number;
+  left: number;
+  top?: number;
+  bottom?: number;
 }
 
-const DEFAULT_MENU_LAYOUT: MenuLayout = { direction: "up", maxHeight: MENU_MAX_HEIGHT_CAP };
+const DEFAULT_MENU_LAYOUT: MenuLayout = { direction: "up", maxHeight: MENU_MAX_HEIGHT_CAP, left: 0 };
 
 /** Open upward when a floor's worth of room exists, else toward the roomier side.
  *  Uses the visual viewport: iOS `innerHeight` ignores the keyboard, and a zoom offset
@@ -154,7 +157,12 @@ function computeMenuLayout(rect: DOMRect, viewportHeight: number, viewportTop = 
     direction = "up";
     available = spaceAbove;
   }
-  return { direction, maxHeight: Math.max(0, Math.min(MENU_MAX_HEIGHT_CAP, available)) };
+  return {
+    direction,
+    maxHeight: Math.max(0, Math.min(MENU_MAX_HEIGHT_CAP, available)),
+    left: rect.left,
+    ...(direction === "up" ? { bottom: window.innerHeight - rect.top + 4 } : { top: rect.bottom + 4 }),
+  };
 }
 
 function ModelDropdown({ option, pending, onSelect, lockedReason }: SubProps) {
@@ -233,7 +241,7 @@ function ModelDropdown({ option, pending, onSelect, lockedReason }: SubProps) {
     if (!open) return;
     const vv = typeof window !== "undefined" ? window.visualViewport : null;
     const recompute = () => {
-      const rect = ref.current?.getBoundingClientRect();
+      const rect = triggerRef.current?.getBoundingClientRect();
       if (!rect) return;
       setMenuLayout(computeMenuLayout(rect, vv?.height ?? window.innerHeight, vv?.offsetTop ?? 0));
     };
@@ -293,11 +301,13 @@ function ModelDropdown({ option, pending, onSelect, lockedReason }: SubProps) {
         <div
           id={menuId}
           onKeyDown={onMenuKeyDown}
-          className={[
-            "absolute left-0 z-30 flex w-64 flex-col overflow-hidden rounded-md border border-surface-700 bg-surface-850 shadow-xl",
-            menuLayout.direction === "up" ? "bottom-full mb-1" : "top-full mt-1",
-          ].join(" ")}
-          style={{ maxHeight: menuLayout.maxHeight }}
+          className="fixed z-30 flex w-64 flex-col overflow-hidden rounded-md border border-surface-700 bg-surface-850 shadow-xl"
+          style={{
+            maxHeight: menuLayout.maxHeight,
+            left: menuLayout.left,
+            top: menuLayout.top,
+            bottom: menuLayout.bottom,
+          }}
         >
           <div className="shrink-0 border-b border-surface-800 px-3 py-1.5 text-[10px] uppercase tracking-wider text-text-dim">
             {option.name}

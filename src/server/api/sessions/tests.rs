@@ -13954,43 +13954,86 @@ async fn an_explicit_wake_discards_a_stale_continuation_before_the_worker_can_dr
     assert_eq!(pending(&state).await, None);
 }
 
-// The daemon republishes every 500 ms while a TUI subscribes, so a resolver
-// that reads disk once per request still costs seconds per publication at
-// ~100 unique pairs. A second publication on the same state must find every
-// pair resolved already and read nothing.
 #[tokio::test]
 #[serial_test::serial]
 async fn publish_reuses_resolved_config_across_publications() {
     use std::sync::atomic::Ordering;
-
-    let tmp_home = tempfile::tempdir().expect("tempdir HOME");
+    let tmp_home = tempfile::tempdir().unwrap();
     let _home = crate::session::test_support::isolate_app_dir_at(tmp_home.path());
-
-    let mk = |project_path: &str| {
-        let mut inst = Instance::new("test-session", project_path);
-        inst.tool = "custom-tool-2603".to_string();
-        inst.source_profile = "default".to_string();
-        inst
-    };
-    let state = crate::server::test_support::build_test_app_state(vec![
-        mk("/tmp/repo-a-reuse"),
-        mk("/tmp/repo-b-reuse"),
-    ]);
-
-    // `publish` is what the 500 ms loop runs; `list_sessions` would be served
-    // from the snapshot it leaves behind and never touch the resolver.
-    for _ in 0..2 {
-        state
-            .runtime
-            .publish(&state)
-            .await
-            .expect("publish projects the sessions");
+    let repos = tempfile::tempdir().unwrap();
+    let main = repos.path().join("main");
+    let other = repos.path().join("other-repository");
+    let linked = repos.path().join("linked");
+    let sibling = repos.path().join("sibling");
+    let other_linked = repos.path().join("other-linked");
+    for repo in [&main, &other] {
+        std::fs::create_dir(repo).unwrap();
+        run_git(repo, &["init", "-q"]);
+        run_git(repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
     }
-    let misses = state.list_sessions_resolver_misses.load(Ordering::Relaxed);
-
+    for (repo, worktree, branch) in [
+        (&main, &linked, "linked"),
+        (&main, &sibling, "sibling"),
+        (&other, &other_linked, "other"),
+    ] {
+        run_git(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+            ],
+        );
+    }
+    let rows = [&main, &linked, &sibling]
+        .into_iter()
+        .map(|path| {
+            let mut inst = Instance::new("test-session", path.to_str().unwrap());
+            inst.tool = "custom-tool-2603".into();
+            inst.source_profile = "default".into();
+            inst
+        })
+        .collect();
+    let state = crate::server::test_support::build_test_app_state(rows);
+    for _ in 0..2 {
+        state.runtime.publish(&state).await.unwrap();
+        assert_eq!(
+            state.list_sessions_resolver_misses.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            state
+                .session_cfg_cache
+                .source_discoveries
+                .load(Ordering::Relaxed),
+            3
+        );
+    }
+    // Change the marker length so invalidation is independent of timestamp resolution.
+    let replacement = std::fs::read(other_linked.join(".git")).unwrap();
+    assert_ne!(
+        replacement.len(),
+        std::fs::metadata(linked.join(".git")).unwrap().len() as usize
+    );
+    std::fs::write(linked.join(".git"), replacement).unwrap();
+    state.runtime.publish(&state).await.unwrap();
     assert_eq!(
-        misses, 2,
-        "the second publication must reuse the first one's resolutions; got {misses}",
+        state.list_sessions_resolver_misses.load(Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        state
+            .session_cfg_cache
+            .source_discoveries
+            .load(Ordering::Relaxed),
+        4
+    );
+    assert_eq!(
+        state.session_cfg_cache.source_path(&linked),
+        other.canonicalize().unwrap()
     );
 }
 

@@ -2643,6 +2643,62 @@ sandbox = "unsupported"
 
     #[test]
     #[serial_test::serial]
+    fn literal_path_pi_does_not_borrow_ambient_publisher_capabilities() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(home.path());
+        let _env = EnvGuard::unset(&["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"]);
+        let _pi = crate::session::test_support::install_login_shell_path_command(
+            home.path(),
+            "pi",
+            "#!/bin/sh\nprintf '%s\\n' '--session-id --session --extension'\n",
+        );
+        crate::agents::forget_agent_help_for_test();
+        let alternate = home.path().join("alternate");
+        std::fs::create_dir(&alternate).unwrap();
+        let binary = alternate.join("pi");
+        std::fs::write(&binary, "#!/bin/sh\nprintf 'alternate:%s\\n' \"$*\"\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut instance = tool_instance("pi", home.path().to_str().unwrap());
+        set_pi_integration(&instance, "identity");
+        assert!(instance.identity_extension_launch().unwrap().is_some());
+        assert!(instance.pi_session_id_pinnable());
+        instance.command = format!(
+            "PATH={} pi",
+            shell_words::quote(alternate.to_str().unwrap())
+        );
+        let execution = instance.resolve_native_execution(None).unwrap();
+        assert_eq!(execution.program, binary);
+        assert!(execution.inputs.identity_extension.is_none());
+        assert!(!execution.pi_pinnable);
+        assert!(!instance.pi_session_id_pinnable());
+        assert!(instance.identity_extension_launch().unwrap().is_none());
+        for native in [Some(&execution), None] {
+            let command = instance
+                .build_host_command(
+                    crate::agents::get_agent("pi"),
+                    native,
+                    &mut instance.conversation_state(),
+                )
+                .unwrap()
+                .command
+                .unwrap();
+            assert!(!command.contains(" -e "), "{command}");
+            assert!(!command.contains("--session-id"), "{command}");
+            let output = std::process::Command::new("sh")
+                .args(["-c", &command])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{command}: {output:?}");
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap().trim(),
+                "alternate:"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn pi_integration_policy_is_explicit_and_frozen() {
         for policy in ["none", "identity", "afk"] {
             let home = tempfile::tempdir().unwrap();

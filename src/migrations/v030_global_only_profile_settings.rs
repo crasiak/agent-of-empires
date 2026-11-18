@@ -34,7 +34,7 @@ fn read_config(path: &Path) -> Result<Option<toml::Table>> {
 }
 
 fn run_in(app_dir: &Path, write: impl FnMut(&Path, &[u8]) -> Result<()>) -> Result<()> {
-    // v055 owns this field: it must still be in the profiles when v055 picks the served one.
+    // v070 owns this field: it must still be in the profiles when v070 picks the served one.
     promote_fields(app_dir, write, None, |field| {
         !field.profile_overridable && field.path() != WORKER_CAP_FIELD
     })

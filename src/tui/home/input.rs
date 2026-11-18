@@ -5289,6 +5289,7 @@ impl HomeView {
                     self.update_selected();
                 }
             }
+            return;
         } else if self.group_by == GroupByMode::Status {
             let collapsed = self
                 .status_group_collapsed

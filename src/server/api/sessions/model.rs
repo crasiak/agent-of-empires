@@ -442,9 +442,7 @@ impl<'a> SessionCfgCache<'a> {
         {
             self.discoveries += 1;
         }
-        let source = crate::session::config::repo_config::repo_config_source_path(
-            std::path::Path::new(project_path),
-        );
+        let source = self.shared.source_path(std::path::Path::new(project_path));
         self.sources
             .insert(project_path.to_string(), source.clone());
         source
@@ -458,7 +456,7 @@ impl<'a> SessionCfgCache<'a> {
         self.entries
             .entry((profile.to_string(), source.clone()))
             .or_insert_with(|| {
-                let resolved = shared.resolve_or_warn(profile, &source);
+                let resolved = shared.resolve_source_or_warn(profile, &source);
                 if resolved.miss {
                     misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
