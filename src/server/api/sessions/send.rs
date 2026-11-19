@@ -901,9 +901,13 @@ mod send_output_tests {
         }
         let _home = crate::session::test_support::isolate_app_dir();
         let root = tempfile::tempdir_in("/tmp").unwrap();
-        // A renamed cat exercises delivery shape, not process authentication.
+        // A renamed shell exercises delivery shape, not process authentication.
         let agent_binary = root.path().join("pi");
-        std::fs::copy("/bin/cat", &agent_binary).unwrap();
+        std::fs::copy("/bin/sh", &agent_binary).unwrap();
+        let input_reader = format!(
+            "'{}' -c 'while IFS= read -r line; do printf \"%s\\n\" \"$line\"; done'",
+            agent_binary.display()
+        );
         let past_only = format!("pi>\n{}", "unrecognized screen\n".repeat(80));
         for (screen, reported, unrelated, duplicate, admitted) in [
             ("pi>\n", false, false, false, false),
@@ -931,15 +935,10 @@ mod send_output_tests {
             let scene = root.path().join(format!("{}.screen", row.id));
             let received = root.path().join(format!("{}.received", row.id));
             std::fs::write(&scene, screen).unwrap();
-            let binary = if unrelated {
-                std::path::Path::new("/bin/cat")
-            } else {
-                &agent_binary
-            };
+            let reader = if unrelated { "/bin/cat" } else { &input_reader };
             let command = format!(
-                "stty -echo; cat '{}'; exec '{}' > '{}'",
+                "stty -echo; cat '{}'; exec {reader} > '{}'",
                 scene.display(),
-                binary.display(),
                 received.display()
             );
             assert!(crate::tmux::tmux_command()
@@ -1008,8 +1007,7 @@ mod send_output_tests {
                 if duplicate {
                     let duplicate_received = root.path().join(format!("{}.duplicate", row.id));
                     let duplicate_command = format!(
-                        "exec '{}' > '{}'",
-                        agent_binary.display(),
+                        "exec {input_reader} > '{}'",
                         duplicate_received.display()
                     );
                     let output = crate::tmux::tmux_command()
