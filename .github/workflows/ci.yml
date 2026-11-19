@@ -247,6 +247,7 @@ jobs:
       - run: python3 .github/scripts/check-dependabot-pr.py --self-test
       - run: python3 .github/scripts/classify-cachix-failure.py --self-test
       - run: python3 scripts/test-export-pi-integration.py -v
+      - run: python3 .github/scripts/test_nix_build_diagnostics.py -v
       - run: .github/scripts/release-pr-fresh.sh --self-test
       - run: python3 scripts/check-no-claude-in-core.py --self-test
       # Disabled until C25 to C29 remove Claude from core on
@@ -374,7 +375,7 @@ jobs:
           # A git failure here would leave the pipeline non-zero and skip the
           # build, so keep the diff simple enough that it cannot fail.
           if git diff --name-only "$BASE"...HEAD \
-            | grep -E '^(flake\.nix$|flake\.lock$|nix/|scripts/(export-pi-integration|test-export-pi-integration)\.py$)' \
+            | grep -E '^(flake\.nix$|flake\.lock$|nix/|scripts/(export-pi-integration|test-export-pi-integration)\.py$|\.github/scripts/(nix-build-diagnostics|test_nix_build_diagnostics)\.py$)' \
             >/dev/null; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
@@ -386,7 +387,7 @@ jobs:
 
       - name: Build default package
         if: steps.changes.outputs.relevant == 'true'
-        run: nix build --no-link --print-out-paths -L .#packages.x86_64-linux.default
+        run: python3 .github/scripts/nix-build-diagnostics.py nix build --no-link --print-out-paths -L .#packages.x86_64-linux.default
 
       - name: Verify final inventory and configuration ownership
         if: steps.changes.outputs.relevant == 'true'
