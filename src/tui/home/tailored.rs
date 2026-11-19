@@ -95,6 +95,18 @@ fn idea_textarea() -> TextArea<'static> {
     textarea
 }
 
+fn is_capture_newline(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Enter => {
+            key.modifiers.is_empty()
+                || key.modifiers == KeyModifiers::SHIFT
+                || key.modifiers == KeyModifiers::ALT
+        }
+        KeyCode::Char('j') => key.modifiers == KeyModifiers::CONTROL,
+        _ => false,
+    }
+}
+
 impl TailoredWindow {
     pub(super) fn new(account: CaptureAccount) -> Self {
         Self {
@@ -150,11 +162,20 @@ impl TailoredWindow {
         if key.kind == KeyEventKind::Release || self.hidden {
             return WindowAction::Continue;
         }
-        let editing = self.terminal.is_none()
-            && (self.document.is_some()
-                || self.workshop.is_some()
-                || self.research.is_some()
-                || self.composing && self.focus == 0);
+        let capture_editing = self.composing
+            && self.focus == 0
+            && self.terminal.is_none()
+            && self.document.is_none()
+            && self.workshop.is_none()
+            && self.research.is_none();
+        let editing = capture_editing
+            || self.terminal.is_none()
+                && (self.document.is_some() || self.workshop.is_some() || self.research.is_some());
+        // Normalize terminal newline aliases before repeat events reach the textarea.
+        if capture_editing && self.checking.is_none() && is_capture_newline(key) {
+            self.idea.insert_newline();
+            return WindowAction::Continue;
+        }
         if key.kind == KeyEventKind::Repeat {
             if let Some(terminal) = &self.terminal {
                 if let live_send::LiveDispatch::Send(key) = live_send::translate(key) {
@@ -279,12 +300,6 @@ impl TailoredWindow {
             KeyCode::Tab => self.focus = (self.focus + 1) % 4,
             KeyCode::BackTab => self.focus = (self.focus + 3) % 4,
             KeyCode::Enter if key.modifiers == KeyModifiers::CONTROL => self.submit(),
-            KeyCode::Enter
-                if self.focus == 0
-                    && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
-            {
-                self.idea.insert_newline();
-            }
             KeyCode::Enter if self.focus == 3 && key.modifiers.is_empty() => self.submit(),
             KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right | KeyCode::Enter
                 if self.focus == 1 =>
@@ -1286,6 +1301,115 @@ mod tests {
     }
 
     #[test]
+    fn capture_newline_aliases_edit_on_press_and_repeat_but_ignore_release() {
+        for (code, modifiers) in [
+            (KeyCode::Enter, KeyModifiers::NONE),
+            (KeyCode::Enter, KeyModifiers::SHIFT),
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL),
+        ] {
+            for kind in [
+                KeyEventKind::Press,
+                KeyEventKind::Repeat,
+                KeyEventKind::Release,
+            ] {
+                let mut window = TailoredWindow::new(CaptureAccount::Personal);
+                window.picker_action(HistoryAction::New);
+                // NUL fences accidental submission before any Ledger worker can start.
+                window.handle_paste("first\0");
+                assert!(matches!(
+                    window.handle_key(KeyEvent::new_with_kind(code, modifiers, kind)),
+                    WindowAction::Continue
+                ));
+                window.handle_paste("second");
+                let expected = if kind == KeyEventKind::Release {
+                    "first\0second"
+                } else {
+                    "first\0\nsecond"
+                };
+                assert_eq!(
+                    window.idea.lines().join("\n"),
+                    expected,
+                    "{code:?} {modifiers:?} {kind:?}"
+                );
+                assert!(window.checking.is_none());
+                assert!(window.error.is_none());
+                assert_eq!(window.focus, 0);
+                assert_eq!(window.account, CaptureAccount::Personal);
+                assert!(!window.immediately);
+            }
+        }
+    }
+
+    #[test]
+    fn capture_ctrl_enter_still_submits_on_press_from_every_control() {
+        for focus in 0..4 {
+            for kind in [KeyEventKind::Press, KeyEventKind::Release] {
+                let mut window = TailoredWindow::new(CaptureAccount::Personal);
+                window.picker_action(HistoryAction::New);
+                window.handle_paste("invalid\0idea");
+                window.focus = focus;
+                window.handle_key(KeyEvent::new_with_kind(
+                    KeyCode::Enter,
+                    KeyModifiers::CONTROL,
+                    kind,
+                ));
+                assert_eq!(window.idea.lines().join("\n"), "invalid\0idea");
+                assert!(window.checking.is_none());
+                assert_eq!(window.focus, focus);
+                assert_eq!(window.account, CaptureAccount::Personal);
+                assert!(!window.immediately);
+                assert_eq!(
+                    window.error.as_deref(),
+                    if kind == KeyEventKind::Press {
+                        Some("Enter an idea between 1 and 16384 bytes, without NUL characters")
+                    } else {
+                        None
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn capture_keyboard_controls_and_history_preserve_account_drafts() {
+        let mut window = TailoredWindow::new(CaptureAccount::Personal);
+        window.handle_key(key(KeyCode::Enter));
+        assert!(window.composing);
+        window.handle_paste("personal\0idea");
+        window.handle_key(key(KeyCode::Tab));
+        assert_eq!(window.focus, 1);
+        window.handle_key(key(KeyCode::Enter));
+        assert_eq!(window.account, CaptureAccount::Work);
+        assert_eq!(window.idea.lines().join("\n"), "");
+        window.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        window.handle_paste("work\0idea");
+        window.handle_key(key(KeyCode::Tab));
+        window.handle_key(key(KeyCode::Left));
+        assert_eq!(window.account, CaptureAccount::Personal);
+        assert_eq!(window.idea.lines().join("\n"), "personal\0idea");
+        window.handle_key(key(KeyCode::Tab));
+        assert_eq!(window.focus, 2);
+        window.handle_key(key(KeyCode::Enter));
+        assert!(window.immediately);
+        window.handle_key(key(KeyCode::Tab));
+        assert_eq!(window.focus, 3);
+        window.handle_key(key(KeyCode::Enter));
+        assert!(window.error.is_some());
+        assert!(window.checking.is_none());
+        window.handle_key(key(KeyCode::F(2)));
+        assert!(!window.composing);
+        window.handle_key(key(KeyCode::Enter));
+        assert!(window.composing);
+        assert_eq!(window.focus, 0);
+        assert_eq!(window.account, CaptureAccount::Personal);
+        assert!(window.immediately);
+        assert_eq!(window.idea.lines().join("\n"), "personal\0idea");
+        assert!(window.checking.is_none());
+        assert!(window.error.is_none());
+    }
+
+    #[test]
     fn capture_pending_check_preserves_buffer_cursor_undo_and_request() {
         let mut window = TailoredWindow::new(CaptureAccount::Work);
         window.picker_action(HistoryAction::New);
@@ -1308,13 +1432,21 @@ mod tests {
         for (code, modifiers) in [
             (KeyCode::Char('x'), KeyModifiers::NONE),
             (KeyCode::Enter, KeyModifiers::NONE),
+            (KeyCode::Enter, KeyModifiers::SHIFT),
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL),
+            (KeyCode::Enter, KeyModifiers::CONTROL),
             (KeyCode::Backspace, KeyModifiers::NONE),
             (KeyCode::Delete, KeyModifiers::NONE),
             (KeyCode::Left, KeyModifiers::NONE),
             (KeyCode::Char('u'), KeyModifiers::CONTROL),
             (KeyCode::Char('r'), KeyModifiers::CONTROL),
         ] {
-            for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
+            for kind in [
+                KeyEventKind::Press,
+                KeyEventKind::Repeat,
+                KeyEventKind::Release,
+            ] {
                 window.handle_key(KeyEvent::new_with_kind(code, modifiers, kind));
                 assert_eq!(window.idea.lines(), expected.lines(), "{code:?} {kind:?}");
                 assert_eq!(window.idea.cursor(), expected.cursor(), "{code:?} {kind:?}");
