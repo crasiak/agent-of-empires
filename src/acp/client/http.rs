@@ -381,7 +381,8 @@ impl HttpClient {
         message: &str,
         no_revive: bool,
     ) -> Result<(), HttpError> {
-        self.send_message_with_idle_guard(session_id, message, no_revive, false).await
+        self.send_message_with_idle_guard(session_id, message, no_revive, false)
+            .await
     }
 
     /// Opt-in terminal safety guard; structured prompts use the typed prompt route.

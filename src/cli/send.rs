@@ -80,7 +80,9 @@ pub(crate) const MAX_FEEDBACK_BYTES: usize = 128 * 1024;
 
 fn read_feedback(reader: impl Read) -> Result<String> {
     let mut bytes = Vec::new();
-    reader.take((MAX_FEEDBACK_BYTES + 1) as u64).read_to_end(&mut bytes)?;
+    reader
+        .take((MAX_FEEDBACK_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_FEEDBACK_BYTES {
         bail!("Stdin message exceeds 128 KiB");
     }
@@ -91,12 +93,18 @@ fn read_feedback(reader: impl Read) -> Result<String> {
     Ok(message)
 }
 
-fn resolve_target<'a, T: super::SessionRef>(identifier: &str, sessions: &'a [T], exact: bool) -> Result<&'a T> {
+fn resolve_target<'a, T: super::SessionRef>(
+    identifier: &str,
+    sessions: &'a [T],
+    exact: bool,
+) -> Result<&'a T> {
     if !exact {
         return super::resolve_session(identifier, sessions);
     }
     let mut matches = sessions.iter().filter(|session| session.id() == identifier);
-    let session = matches.next().ok_or_else(|| anyhow::anyhow!("No exact session ID in selected profile"))?;
+    let session = matches
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No exact session ID in selected profile"))?;
     if matches.next().is_some() {
         bail!("Exact session ID is ambiguous");
     }
@@ -152,7 +160,17 @@ mod tests {
         use clap::Parser;
         for argv in [
             vec!["aoe", "send", "id", "hello"],
-            vec!["aoe", "--profile", "work", "send", "--exact", "--stdin", "--no-revive", "--require-idle", "id"],
+            vec![
+                "aoe",
+                "--profile",
+                "work",
+                "send",
+                "--exact",
+                "--stdin",
+                "--no-revive",
+                "--require-idle",
+                "id",
+            ],
         ] {
             assert!(crate::cli::Cli::try_parse_from(argv).is_ok());
         }
@@ -169,48 +187,89 @@ mod tests {
     #[serial_test::serial]
     async fn empty_exact_profile_refuses_before_default_lookup_or_delivery() {
         use clap::Parser;
-        use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
         let _home = crate::session::test_support::isolate_app_dir();
         let mut row = crate::session::Instance::new("default target", "/tmp");
         row.source_profile = "default".into();
         crate::server::test_support::seed_instances_on_disk_for_test("default", vec![row.clone()]);
         let state = crate::server::test_support::build_test_app_state_with_policy(
-            vec![row.clone()], Vec::new(), Vec::new(), Some("secret".into()),
+            vec![row.clone()],
+            Vec::new(),
+            Vec::new(),
+            Some("secret".into()),
         );
         crate::server::test_support::refresh_canonical_metadata_for_test(&state).await;
         let requests = Arc::new(AtomicUsize::new(0));
         let observed = requests.clone();
         let app = crate::server::test_support::build_router_for_test(state).layer(
-            axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
-                let observed = observed.clone();
-                async move {
-                    observed.fetch_add(1, Ordering::SeqCst);
-                    next.run(request).await
-                }
-            }),
+            axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let observed = observed.clone();
+                    async move {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        next.run(request).await
+                    }
+                },
+            ),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         let url = format!("http://{address}");
         let _env = crate::session::test_support::EnvGuard::set(&[
-            ("AOE_DAEMON_URL", url.as_str()), ("AOE_DAEMON_TOKEN", "secret"),
+            ("AOE_DAEMON_URL", url.as_str()),
+            ("AOE_DAEMON_TOKEN", "secret"),
         ]);
-        let client = HttpClient::new(DaemonEndpoint::new(url, Some("secret".into()), crate::daemon::Source::Env)).unwrap();
+        let client = HttpClient::new(DaemonEndpoint::new(
+            url,
+            Some("secret".into()),
+            crate::daemon::Source::Env,
+        ))
+        .unwrap();
         assert_eq!(resolve_profile(&client, "").await.unwrap(), "default");
-        assert!(client.list_sessions(None).await.unwrap().sessions.iter().any(|session| {
-            session.id == row.id && session.profile == "default"
-        }));
+        assert!(client
+            .list_sessions(None)
+            .await
+            .unwrap()
+            .sessions
+            .iter()
+            .any(|session| { session.id == row.id && session.profile == "default" }));
         requests.store(0, Ordering::SeqCst);
         let cli = crate::cli::Cli::try_parse_from([
-            "aoe", "--profile", "", "send", "--exact", &row.id, "feedback",
-        ]).unwrap();
-        let crate::cli::Commands::Send(args) = cli.command.unwrap() else { panic!("send command"); };
-        let error = run(cli.profile.as_deref().unwrap(), args).await.unwrap_err();
-        assert_eq!(error.to_string(), "Exact send requires a non-empty explicit profile");
-        assert_eq!(requests.load(Ordering::SeqCst), 0, "no daemon lookup or delivery");
+            "aoe",
+            "--profile",
+            "",
+            "send",
+            "--exact",
+            &row.id,
+            "feedback",
+        ])
+        .unwrap();
+        let crate::cli::Commands::Send(args) = cli.command.unwrap() else {
+            panic!("send command");
+        };
+        let error = run(cli.profile.as_deref().unwrap(), args)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Exact send requires a non-empty explicit profile"
+        );
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "no daemon lookup or delivery"
+        );
         server.abort();
         let _ = server.await;
     }
@@ -221,7 +280,10 @@ mod tests {
         assert!(read_feedback(" \n\t".as_bytes()).is_err());
         assert!(read_feedback(&[0xff][..]).is_err());
         let mut bytes = vec![b'x'; MAX_FEEDBACK_BYTES + 20];
-        assert_eq!(read_feedback(&bytes[..MAX_FEEDBACK_BYTES]).unwrap().len(), MAX_FEEDBACK_BYTES);
+        assert_eq!(
+            read_feedback(&bytes[..MAX_FEEDBACK_BYTES]).unwrap().len(),
+            MAX_FEEDBACK_BYTES
+        );
         let mut reader = std::io::Cursor::new(&mut bytes);
         let error = read_feedback(&mut reader).unwrap_err().to_string();
         assert_eq!(error, "Stdin message exceeds 128 KiB");
@@ -234,7 +296,10 @@ mod tests {
         origin.source_profile = "work".into();
         let other = crate::session::Instance::new(&origin.id, "/other/path");
         let work = vec![&origin];
-        assert_eq!(resolve_target(&origin.id, &work, true).unwrap().id, origin.id);
+        assert_eq!(
+            resolve_target(&origin.id, &work, true).unwrap().id,
+            origin.id
+        );
         for identifier in [&origin.id[..8], &origin.title, &origin.project_path] {
             assert!(resolve_target(identifier, &work, true).is_err());
             assert!(resolve_target(identifier, &work, false).is_ok());
@@ -263,8 +328,16 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = HttpClient::new(DaemonEndpoint::new(format!("http://{address}"), Some("secret".into()), crate::daemon::Source::Env)).unwrap();
-        client.send_message_with_idle_guard("full-session-id", feedback, true, true).await.unwrap();
+        let client = HttpClient::new(DaemonEndpoint::new(
+            format!("http://{address}"),
+            Some("secret".into()),
+            crate::daemon::Source::Env,
+        ))
+        .unwrap();
+        client
+            .send_message_with_idle_guard("full-session-id", feedback, true, true)
+            .await
+            .unwrap();
         server.abort();
         let _ = server.await;
     }
@@ -307,7 +380,10 @@ mod tests {
             ),
             ("archived", "session is archived; unarchive it first"),
             ("trashed", "session is in trash; restore it first"),
-            ("busy", "Verified idle agent unavailable; retain or copy feedback and retry when ready"),
+            (
+                "busy",
+                "Verified idle agent unavailable; retain or copy feedback and retry when ready",
+            ),
         ] {
             let error = client.send_message(id, "hi", true).await.unwrap_err();
             assert_eq!(refusal(error, id).to_string(), expected);

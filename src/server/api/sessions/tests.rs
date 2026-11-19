@@ -13269,23 +13269,29 @@ async fn publish_reuses_resolved_config_across_publications() {
     );
 }
 
-
 #[tokio::test]
 #[serial_test::serial]
 async fn send_router_accepts_worst_case_stdin_json_without_raising_its_wire_limit() {
     use tower::ServiceExt;
     let _home = crate::session::test_support::isolate_app_dir();
     let state = crate::server::test_support::build_test_app_state_with_policy(
-        Vec::new(), vec!["localhost".into()], Vec::new(), Some("secret".into()),
+        Vec::new(),
+        vec!["localhost".into()],
+        Vec::new(),
+        Some("secret".into()),
     );
     let app = crate::server::test_support::build_router_for_test(state);
     for (message, expected) in [
-        ("\u{1}".repeat(crate::cli::send::MAX_FEEDBACK_BYTES), StatusCode::NOT_FOUND),
+        (
+            "\u{1}".repeat(crate::cli::send::MAX_FEEDBACK_BYTES),
+            StatusCode::NOT_FOUND,
+        ),
         ("x".repeat(1024 * 1024), StatusCode::PAYLOAD_TOO_LARGE),
     ] {
         let body = serde_json::to_vec(&serde_json::json!({
             "message": message, "revive": false, "require_idle": true,
-        })).unwrap();
+        }))
+        .unwrap();
         let request = axum::http::Request::builder()
             .method("POST")
             .uri("/api/sessions/missing-full-id/send")

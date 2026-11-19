@@ -251,66 +251,96 @@ struct VerifiedIdleUnavailable;
 
 fn verified_idle_pane(instance: &mut Instance) -> anyhow::Result<String> {
     anyhow::ensure!(
-        !instance.expects_shell() && !instance.has_command_override()
+        !instance.expects_shell()
+            && !instance.has_command_override()
             && !matches!(instance.status, Status::Stopped | Status::Starting),
         VerifiedIdleUnavailable
     );
     let panes = crate::tmux::batch_pane_metadata().map_err(|_| VerifiedIdleUnavailable)?;
     let mut candidates = panes.iter().filter(|(_, pane)| {
-        pane.launch_report.as_ref().is_some_and(|report| report.instance_id == instance.id)
+        pane.launch_report
+            .as_ref()
+            .is_some_and(|report| report.instance_id == instance.id)
     });
     let (name, pane) = candidates.next().ok_or(VerifiedIdleUnavailable)?;
     anyhow::ensure!(candidates.next().is_none(), VerifiedIdleUnavailable);
     let report = pane.launch_report.as_ref().ok_or(VerifiedIdleUnavailable)?;
-    anyhow::ensure!(
-        verified_agent_pane(instance, pane),
-        VerifiedIdleUnavailable
-    );
+    anyhow::ensure!(verified_agent_pane(instance, pane), VerifiedIdleUnavailable);
     verify_unique_launch_report(report)?;
     instance.status = Status::Unknown;
     instance.detection = Default::default();
     instance.update_status_once(Some(pane), Some(name));
     anyhow::ensure!(
         (instance.status == Status::Idle
-            || (report.identity.agent == "pi" && instance.status == Status::Waiting
+            || (report.identity.agent == "pi"
+                && instance.status == Status::Waiting
                 && instance.detection.rule == Some("input_prompt")))
             && instance.unknown_since.is_none(),
         VerifiedIdleUnavailable
     );
 
     // A successful fresh capture plus visible built-in evidence excludes fallback and stale hooks.
-    let output = crate::tmux::tmux_command().args([
-        "capture-pane", "-p", "-e", "-t", &pane.pane_id,
-    ]).output().map_err(|_| VerifiedIdleUnavailable)?;
+    let output = crate::tmux::tmux_command()
+        .args(["capture-pane", "-p", "-e", "-t", &pane.pane_id])
+        .output()
+        .map_err(|_| VerifiedIdleUnavailable)?;
     anyhow::ensure!(output.status.success(), VerifiedIdleUnavailable);
     let content = String::from_utf8(output.stdout).map_err(|_| VerifiedIdleUnavailable)?;
-    anyhow::ensure!(positive_idle_capture(&report.identity.agent, &content, pane.pane_title.as_deref().unwrap_or("")), VerifiedIdleUnavailable);
+    anyhow::ensure!(
+        positive_idle_capture(
+            &report.identity.agent,
+            &content,
+            pane.pane_title.as_deref().unwrap_or("")
+        ),
+        VerifiedIdleUnavailable
+    );
     Ok(pane.pane_id.clone())
 }
 
-fn verify_unique_launch_report(expected: &crate::session::launch_identity::LaunchReport) -> anyhow::Result<()> {
-    let output = crate::tmux::run_tmux_command_with_timeout(
-        crate::tmux::tmux_query_command().args([
-            "list-panes", "-a", "-F", "#{pane_id}|#{@aoe_launch_identity}",
-        ]),
-    ).map_err(|_| VerifiedIdleUnavailable)?;
+fn verify_unique_launch_report(
+    expected: &crate::session::launch_identity::LaunchReport,
+) -> anyhow::Result<()> {
+    let output =
+        crate::tmux::run_tmux_command_with_timeout(crate::tmux::tmux_query_command().args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}|#{@aoe_launch_identity}",
+        ]))
+        .map_err(|_| VerifiedIdleUnavailable)?;
     anyhow::ensure!(output.status.success(), VerifiedIdleUnavailable);
     let inventory = std::str::from_utf8(&output.stdout).map_err(|_| VerifiedIdleUnavailable)?;
-    anyhow::ensure!(unique_launch_report(inventory, expected), VerifiedIdleUnavailable);
+    anyhow::ensure!(
+        unique_launch_report(inventory, expected),
+        VerifiedIdleUnavailable
+    );
     Ok(())
 }
 
-fn unique_launch_report(inventory: &str, expected: &crate::session::launch_identity::LaunchReport) -> bool {
+fn unique_launch_report(
+    inventory: &str,
+    expected: &crate::session::launch_identity::LaunchReport,
+) -> bool {
     use crate::session::launch_identity::{valid_pane_id, LaunchReport};
     let mut panes = std::collections::HashSet::new();
     let mut found = false;
     for line in inventory.lines() {
-        let Some((pane_id, encoded)) = line.split_once('|') else { return false; };
-        if !valid_pane_id(pane_id) || !panes.insert(pane_id) { return false; }
-        if encoded.is_empty() { continue; }
-        let Some(report) = LaunchReport::decode(encoded, pane_id) else { return false; };
+        let Some((pane_id, encoded)) = line.split_once('|') else {
+            return false;
+        };
+        if !valid_pane_id(pane_id) || !panes.insert(pane_id) {
+            return false;
+        }
+        if encoded.is_empty() {
+            continue;
+        }
+        let Some(report) = LaunchReport::decode(encoded, pane_id) else {
+            return false;
+        };
         if report.instance_id == expected.instance_id {
-            if found || &report != expected { return false; }
+            if found || &report != expected {
+                return false;
+            }
             found = true;
         }
     }
@@ -318,15 +348,19 @@ fn unique_launch_report(inventory: &str, expected: &crate::session::launch_ident
 }
 
 fn verified_agent_pane(instance: &Instance, pane: &crate::tmux::PaneMetadata) -> bool {
-    !pane.pane_dead && pane.pane_pid.is_some()
-        && pane.session_kind == Some(crate::tmux::SessionKind::Agent)
+    !pane.pane_dead
+        && pane.pane_pid.is_some()
+        && pane.session_kind.as_deref() == Some(crate::tmux::SessionKind::Agent.as_marker())
         && pane.launch_report.as_ref().is_some_and(|report| {
-            report.instance_id == instance.id && report.pane_id == pane.pane_id
+            report.instance_id == instance.id
+                && report.pane_id == pane.pane_id
                 && matches!(report.identity.agent.as_str(), "claude" | "codex" | "pi")
                 && report.identity.agent == instance.tool
         })
         && pane.pane_current_command.as_deref().is_some_and(|command| {
-            std::path::Path::new(command).file_name().and_then(|name| name.to_str())
+            std::path::Path::new(command)
+                .file_name()
+                .and_then(|name| name.to_str())
                 == Some(instance.tool.as_str())
         })
 }
@@ -425,8 +459,15 @@ pub async fn send_message(
     let revive = req.revive;
     let mut committed_cursor = None;
     let result = send_terminal_message_inner(
-        &state.session_service, &id, req.message, revive, req.require_idle, &mut committed_cursor,
-    ).await.map_err(|error| TerminalSendError {
+        &state.session_service,
+        &id,
+        req.message,
+        revive,
+        req.require_idle,
+        &mut committed_cursor,
+    )
+    .await
+    .map_err(|error| TerminalSendError {
         error,
         committed_cursor: committed_cursor.map(Box::new),
     });
@@ -783,22 +824,44 @@ mod send_output_tests {
     #[test]
     fn strict_input_evidence_does_not_reclassify_pi_or_trust_stale_idle_hooks() {
         let observation = crate::tmux::Observation::new("", None, true);
-        assert_eq!(crate::tmux::detect::detect("pi", "pi>\n", &observation).unwrap().status, Some(Status::Waiting));
+        assert_eq!(
+            crate::tmux::detect::detect("pi", "pi>\n", &observation)
+                .unwrap()
+                .status,
+            Some(Status::Waiting)
+        );
         assert!(positive_idle_capture("pi", "pi>\n", ""));
-        let observation = crate::tmux::Observation::new("", Some(crate::tmux::detect::HookObservation {
-            status: Status::Idle,
-            age: Some(std::time::Duration::from_secs(86400)),
-        }), true);
-        assert_eq!(crate::tmux::detect::detect("pi", "unknown screen\n", &observation).unwrap().status, Some(Status::Idle));
+        let observation = crate::tmux::Observation::new(
+            "",
+            Some(crate::tmux::detect::HookObservation {
+                status: Status::Idle,
+                age: Some(std::time::Duration::from_secs(86400)),
+            }),
+            true,
+        );
+        assert_eq!(
+            crate::tmux::detect::detect("pi", "unknown screen\n", &observation)
+                .unwrap()
+                .status,
+            Some(Status::Idle)
+        );
         assert!(!positive_idle_capture("pi", "unknown screen\n", ""));
     }
 
     #[test]
     fn full_pane_report_inventory_refuses_malformed_or_ambiguous_observations() {
-        use crate::session::launch_identity::{LaunchAccount, LaunchIdentity, LaunchReport, Launcher};
+        use crate::session::launch_identity::{
+            LaunchAccount, LaunchIdentity, LaunchReport, Launcher,
+        };
         let report = LaunchReport {
-            instance_id: "1234567890abcdef".into(), pane_id: "%1".into(),
-            identity: LaunchIdentity { agent: "pi".into(), account: LaunchAccount::Unknown, launcher: Launcher::Direct, profile: "default".into() },
+            instance_id: "1234567890abcdef".into(),
+            pane_id: "%1".into(),
+            identity: LaunchIdentity {
+                agent: "pi".into(),
+                account: LaunchAccount::Unknown,
+                launcher: Launcher::Direct,
+                profile: "default".into(),
+            },
         };
         let encoded = report.encode().unwrap();
         let selected = format!("%1|{encoded}\n");
@@ -826,9 +889,15 @@ mod send_output_tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn guarded_terminal_send_requires_observed_idle_and_full_pane_ownership() {
-        use crate::session::launch_identity::{LaunchAccount, LaunchIdentity, LaunchReport, Launcher};
-        use crate::tmux::test_helpers::{tmux_available, only_pane_id, wait_for_pane_command, TmuxTestSession};
-        if !tmux_available() { return; }
+        use crate::session::launch_identity::{
+            LaunchAccount, LaunchIdentity, LaunchReport, Launcher,
+        };
+        use crate::tmux::test_helpers::{
+            only_pane_id, tmux_available, wait_for_pane_command, TmuxTestSession,
+        };
+        if !tmux_available() {
+            return;
+        }
         let _home = crate::session::test_support::isolate_app_dir();
         let root = tempfile::tempdir_in("/tmp").unwrap();
         // A renamed cat exercises delivery shape, not process authentication.
@@ -839,7 +908,13 @@ mod send_output_tests {
             ("pi>\n", false, false, false, false),
             ("unrecognized screen\n", true, false, false, false),
             ("Esc to interrupt\n", true, false, false, false),
-            ("╭─ ask_user question ─╮\n╰── v1.0 ─╯\n", true, false, false, false),
+            (
+                "╭─ ask_user question ─╮\n╰── v1.0 ─╯\n",
+                true,
+                false,
+                false,
+                false,
+            ),
             (past_only.as_str(), true, false, false, false),
             ("pi>\n", true, true, false, false),
             ("pi>\n", true, false, true, false),
@@ -855,55 +930,141 @@ mod send_output_tests {
             let scene = root.path().join(format!("{}.screen", row.id));
             let received = root.path().join(format!("{}.received", row.id));
             std::fs::write(&scene, screen).unwrap();
-            let binary = if unrelated { std::path::Path::new("/bin/cat") } else { &agent_binary };
-            let command = format!("stty -echo; cat '{}'; exec '{}' > '{}'", scene.display(), binary.display(), received.display());
-            assert!(crate::tmux::tmux_command().args(["new-session", "-d", "-s", &name, &command]).status().unwrap().success());
+            let binary = if unrelated {
+                std::path::Path::new("/bin/cat")
+            } else {
+                &agent_binary
+            };
+            let command = format!(
+                "stty -echo; cat '{}'; exec '{}' > '{}'",
+                scene.display(),
+                binary.display(),
+                received.display()
+            );
+            assert!(crate::tmux::tmux_command()
+                .args(["new-session", "-d", "-s", &name, &command])
+                .status()
+                .unwrap()
+                .success());
             let pane_id = only_pane_id(session.name());
             let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while !received.exists() {
-                assert!(std::time::Instant::now() < ready_deadline, "fake agent did not start reading");
+                assert!(
+                    std::time::Instant::now() < ready_deadline,
+                    "fake agent did not start reading"
+                );
                 tokio::task::yield_now().await;
             }
             wait_for_pane_command(&pane_id, if unrelated { "cat" } else { "pi" });
             loop {
-                let output = crate::tmux::tmux_command().args(["capture-pane", "-p", "-t", &pane_id]).output().unwrap();
+                let output = crate::tmux::tmux_command()
+                    .args(["capture-pane", "-p", "-t", &pane_id])
+                    .output()
+                    .unwrap();
                 assert!(output.status.success());
                 let visible = String::from_utf8(output.stdout).unwrap();
                 if visible.contains(screen.lines().last().unwrap()) {
-                    if screen == past_only { assert!(!visible.contains("pi>")); }
+                    if screen == past_only {
+                        assert!(!visible.contains("pi>"));
+                    }
                     break;
                 }
-                assert!(std::time::Instant::now() < ready_deadline, "fake agent screen not visible");
+                assert!(
+                    std::time::Instant::now() < ready_deadline,
+                    "fake agent screen not visible"
+                );
                 tokio::task::yield_now().await;
             }
-            assert!(crate::tmux::tmux_command().args(["set-option", "-t", &name, "@aoe_kind", "agent"]).status().unwrap().success());
+            assert!(crate::tmux::tmux_command()
+                .args(["set-option", "-t", &name, "@aoe_kind", "agent"])
+                .status()
+                .unwrap()
+                .success());
             if reported {
                 let mut report = LaunchReport {
-                    instance_id: row.id.clone(), pane_id: pane_id.clone(),
-                    identity: LaunchIdentity { agent: "pi".into(), account: LaunchAccount::Unknown, launcher: Launcher::Direct, profile: "default".into() },
+                    instance_id: row.id.clone(),
+                    pane_id: pane_id.clone(),
+                    identity: LaunchIdentity {
+                        agent: "pi".into(),
+                        account: LaunchAccount::Unknown,
+                        launcher: Launcher::Direct,
+                        profile: "default".into(),
+                    },
                 };
                 let encoded = report.encode().unwrap();
-                assert!(crate::tmux::tmux_command().args(["set-option", "-p", "-t", &pane_id, "@aoe_launch_identity", &encoded]).status().unwrap().success());
+                assert!(crate::tmux::tmux_command()
+                    .args([
+                        "set-option",
+                        "-p",
+                        "-t",
+                        &pane_id,
+                        "@aoe_launch_identity",
+                        &encoded
+                    ])
+                    .status()
+                    .unwrap()
+                    .success());
                 if duplicate {
                     let duplicate_received = root.path().join(format!("{}.duplicate", row.id));
-                    let duplicate_command = format!("exec '{}' > '{}'", agent_binary.display(), duplicate_received.display());
-                    let output = crate::tmux::tmux_command().args(["split-window", "-d", "-t", &pane_id, "-P", "-F", "#{pane_id}", &duplicate_command]).output().unwrap();
+                    let duplicate_command = format!(
+                        "exec '{}' > '{}'",
+                        agent_binary.display(),
+                        duplicate_received.display()
+                    );
+                    let output = crate::tmux::tmux_command()
+                        .args([
+                            "split-window",
+                            "-d",
+                            "-t",
+                            &pane_id,
+                            "-P",
+                            "-F",
+                            "#{pane_id}",
+                            &duplicate_command,
+                        ])
+                        .output()
+                        .unwrap();
                     assert!(output.status.success());
                     report.pane_id = String::from_utf8(output.stdout).unwrap().trim().to_owned();
                     wait_for_pane_command(&report.pane_id, "pi");
                     let encoded = report.encode().unwrap();
-                    assert!(crate::tmux::tmux_command().args(["set-option", "-p", "-t", &report.pane_id, "@aoe_launch_identity", &encoded]).status().unwrap().success());
+                    assert!(crate::tmux::tmux_command()
+                        .args([
+                            "set-option",
+                            "-p",
+                            "-t",
+                            &report.pane_id,
+                            "@aoe_launch_identity",
+                            &encoded
+                        ])
+                        .status()
+                        .unwrap()
+                        .success());
                 }
             }
-            crate::server::test_support::seed_instances_on_disk_for_test("default", vec![row.clone()]);
+            crate::server::test_support::seed_instances_on_disk_for_test(
+                "default",
+                vec![row.clone()],
+            );
             let state = crate::server::test_support::build_test_app_state(vec![row.clone()]);
             if reported {
                 let panes = crate::tmux::batch_pane_metadata().unwrap();
                 let owned = panes.get(&name).unwrap();
                 assert_eq!(verified_agent_pane(&row, owned), !unrelated);
                 if duplicate {
-                    assert_eq!(panes.values().filter(|pane| pane.launch_report.as_ref().is_some_and(|report| report.instance_id == row.id)).count(), 1);
-                    assert!(verify_unique_launch_report(owned.launch_report.as_ref().unwrap()).is_err());
+                    assert_eq!(
+                        panes
+                            .values()
+                            .filter(|pane| pane
+                                .launch_report
+                                .as_ref()
+                                .is_some_and(|report| report.instance_id == row.id))
+                            .count(),
+                        1
+                    );
+                    assert!(
+                        verify_unique_launch_report(owned.launch_report.as_ref().unwrap()).is_err()
+                    );
                 }
                 for mutation in 0..8 {
                     let mut unsafe_pane = owned.clone();
@@ -911,8 +1072,14 @@ mod send_output_tests {
                         0 => unsafe_pane.pane_dead = true,
                         1 => unsafe_pane.pane_current_command = Some("bash".into()),
                         2 => unsafe_pane.pane_current_command = None,
-                        3 => unsafe_pane.session_kind = Some(crate::tmux::SessionKind::Tool),
-                        4 => unsafe_pane.launch_report.as_mut().unwrap().instance_id = "other-full-id".into(),
+                        3 => {
+                            unsafe_pane.session_kind =
+                                Some(crate::tmux::SessionKind::Tool.as_marker().into())
+                        }
+                        4 => {
+                            unsafe_pane.launch_report.as_mut().unwrap().instance_id =
+                                "other-full-id".into()
+                        }
                         5 => unsafe_pane.launch_report.as_mut().unwrap().pane_id = "%999999".into(),
                         6 => unsafe_pane.pane_current_command = Some("cat".into()),
                         _ => unsafe_pane.pane_current_command = Some("python".into()),
@@ -920,29 +1087,57 @@ mod send_output_tests {
                     assert!(!verified_agent_pane(&row, &unsafe_pane));
                 }
             }
-            let result = send_terminal_message_inner(&state.session_service, &row.id, "literal;".into(), false, true, &mut None).await;
+            let result = send_terminal_message_inner(
+                &state.session_service,
+                &row.id,
+                "literal;".into(),
+                false,
+                true,
+                &mut None,
+            )
+            .await;
             if admitted {
                 assert!(result.is_ok());
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 loop {
-                    if std::fs::read_to_string(&received).unwrap_or_default() == "literal;\n" { break; }
-                    assert!(std::time::Instant::now() < deadline, "feedback not delivered to verified pane");
+                    if std::fs::read_to_string(&received).unwrap_or_default() == "literal;\n" {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "feedback not delivered to verified pane"
+                    );
                     tokio::task::yield_now().await;
                 }
             } else {
                 let error = result.err().expect("guard must refuse");
-                let response = TerminalSendError { error, committed_cursor: None }.into_response();
+                let response = TerminalSendError {
+                    error,
+                    committed_cursor: None,
+                }
+                .into_response();
                 assert_eq!(response.status(), StatusCode::CONFLICT);
-                let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
-                assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"], "verified_idle_unavailable");
+                let body = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"],
+                    "verified_idle_unavailable"
+                );
                 // The reader was ready before the request; retain a no-delivery observation window.
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
                 loop {
                     assert_eq!(std::fs::read(&received).unwrap(), b"");
                     if duplicate {
-                        assert_eq!(std::fs::read(root.path().join(format!("{}.duplicate", row.id))).unwrap(), b"");
+                        assert_eq!(
+                            std::fs::read(root.path().join(format!("{}.duplicate", row.id)))
+                                .unwrap(),
+                            b""
+                        );
                     }
-                    if std::time::Instant::now() >= deadline { break; }
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
                     tokio::task::yield_now().await;
                 }
             }

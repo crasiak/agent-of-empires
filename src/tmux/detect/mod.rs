@@ -249,8 +249,14 @@ mod tests {
 
     #[test]
     fn input_readiness_vetoes_every_matching_non_input_state_regardless_of_priority() {
-        for (state, skip_state_update) in [("running", false), ("waiting", false), ("error", false), ("idle", true)] {
-            let source = format!(r#"
+        for (state, skip_state_update) in [
+            ("running", false),
+            ("waiting", false),
+            ("error", false),
+            ("idle", true),
+        ] {
+            let source = format!(
+                r#"
 id = "guard"
 [[rules]]
 id = "input"
@@ -265,7 +271,8 @@ priority = 1
 region = "whole_recent"
 skip_state_update = {skip_state_update}
 contains = ["blocker"]
-"#);
+"#
+            );
             let manifest = Manifest::parse(&source, &[]).unwrap();
             for (text, ready) in [("input", true), ("input blocker", false), ("", false)] {
                 let screen = region::Screen::new(Rows::new(text), "", &[]);

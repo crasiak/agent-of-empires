@@ -1430,7 +1430,10 @@ impl Session {
 
     /// Submit to an already verified immutable pane, without resolving a name again.
     pub(crate) fn send_text_to_pane(pane_id: &str, text: &str, enter_delay_ms: u64) -> Result<()> {
-        anyhow::ensure!(crate::session::launch_identity::valid_pane_id(pane_id), "Invalid pane ID");
+        anyhow::ensure!(
+            crate::session::launch_identity::valid_pane_id(pane_id),
+            "Invalid pane ID"
+        );
         Self::send_text_to_target(pane_id, text, enter_delay_ms)
     }
 

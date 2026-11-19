@@ -567,11 +567,16 @@ impl Manifest {
         let matches = |rule: &Rule| {
             !rule.is_hook && rule.matches(screen, None, &self.prompt_marker, &self.markers)
         };
-        self.rules.iter().any(|rule| input_rules.contains(&rule.id.as_str()) && matches(rule))
+        self.rules
+            .iter()
+            .any(|rule| input_rules.contains(&rule.id.as_str()) && matches(rule))
             && !self.rules.iter().any(|rule| {
                 !input_rules.contains(&rule.id.as_str())
                     && (rule.skip_state_update
-                        || matches!(rule.state, Some(Status::Waiting | Status::Running | Status::Error)))
+                        || matches!(
+                            rule.state,
+                            Some(Status::Waiting | Status::Running | Status::Error)
+                        ))
                     && matches(rule)
             })
     }
