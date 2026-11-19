@@ -22,7 +22,7 @@ pub struct SendArgs {
     stdin: bool,
 
     /// Match only a full session ID in the explicitly selected profile
-    #[arg(long, requires = "profile")]
+    #[arg(long)]
     exact: bool,
 
     /// Refuse terminal input unless a verified agent is positively observed idle
@@ -156,7 +156,7 @@ mod tests {
     use axum::{extract::Path, routing::post, Router};
 
     #[test]
-    fn send_arguments_require_one_message_source_and_an_explicit_exact_profile() {
+    fn send_arguments_require_one_message_source() {
         use clap::Parser;
         for argv in [
             vec!["aoe", "send", "id", "hello"],
@@ -177,7 +177,6 @@ mod tests {
         for argv in [
             vec!["aoe", "send", "id"],
             vec!["aoe", "send", "--stdin", "id", "hello"],
-            vec!["aoe", "send", "--exact", "id", "hello"],
         ] {
             assert!(crate::cli::Cli::try_parse_from(argv).is_err());
         }
@@ -185,7 +184,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn empty_exact_profile_refuses_before_default_lookup_or_delivery() {
+    async fn missing_or_empty_exact_profile_refuses_before_default_lookup_or_delivery() {
         use clap::Parser;
         use std::sync::{
             atomic::{AtomicUsize, Ordering},
@@ -245,26 +244,22 @@ mod tests {
             .iter()
             .any(|session| { session.id == row.id && session.profile == "default" }));
         requests.store(0, Ordering::SeqCst);
-        let cli = crate::cli::Cli::try_parse_from([
-            "aoe",
-            "--profile",
-            "",
-            "send",
-            "--exact",
-            &row.id,
-            "feedback",
-        ])
-        .unwrap();
-        let crate::cli::Commands::Send(args) = cli.command.unwrap() else {
-            panic!("send command");
-        };
-        let error = run(cli.profile.as_deref().unwrap(), args)
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "Exact send requires a non-empty explicit profile"
-        );
+        for argv in [
+            vec!["aoe", "--profile", "", "send", "--exact", &row.id, "feedback"],
+            vec!["aoe", "send", "--exact", &row.id, "feedback"],
+        ] {
+            let cli = crate::cli::Cli::try_parse_from(argv).unwrap();
+            let crate::cli::Commands::Send(args) = cli.command.unwrap() else {
+                panic!("send command");
+            };
+            let error = run(cli.profile.as_deref().unwrap_or_default(), args)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "Exact send requires a non-empty explicit profile"
+            );
+        }
         assert_eq!(
             requests.load(Ordering::SeqCst),
             0,
