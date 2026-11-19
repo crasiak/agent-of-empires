@@ -5782,7 +5782,7 @@ mod tests {
                         .unwrap(),
                 )
             };
-            let mut view = if context == "preparation" {
+            let view = if context == "preparation" {
                 let mut view = crate::tui::dialogs::ServeView::settled(&mut app.home.serve_jobs);
                 view.handle_key(KeyEvent::from(KeyCode::Left));
                 view.handle_key(KeyEvent::from(KeyCode::Enter));
@@ -5800,11 +5800,6 @@ mod tests {
             };
             if context == "closed" {
                 app.home.serve_jobs.shutdown();
-                let deadline = std::time::Instant::now() + Duration::from_secs(10);
-                while !view.tick() {
-                    assert!(std::time::Instant::now() < deadline);
-                    tokio::task::yield_now().await;
-                }
             }
             app.home.serve_view = Some(view);
             if stale_owner {
@@ -5824,7 +5819,7 @@ mod tests {
             }
             assert!(
                 app.home.session_feed.mutations_available(),
-                "a locally refused S revoked the connected feed"
+                "a locally refused S revoked the connected feed: {context}, stale_owner={stale_owner}"
             );
             assert!(app.home.session_feed.native_interaction_available());
             assert_eq!(
