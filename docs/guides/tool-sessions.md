@@ -48,7 +48,7 @@ Structured-view Sessions keep normal typed prompt queue/steer delivery. Terminal
 
 These report and process-name checks are routing safety observations, not authentication. The guard serializes AoE input but cannot freeze an autonomous agent UI between observation and delivery. It is not tool approval and does not grant permissions.
 
-On delivery failure, notes remain in Plannotator. Retry after resolving the refusal, or copy them and paste manually into the intended agent. Do not discard notes until delivery succeeds. A terminal without a supported launch report or visible idle evidence requires this clipboard fallback.
+On delivery failure, notes remain in Plannotator. Retry after resolving the refusal, or copy them and paste manually into the intended agent. If the outcome is unclear, inspect the original Session before retrying to avoid duplicates. Do not discard notes until delivery succeeds. A terminal without a supported launch report or visible idle evidence requires this clipboard fallback.
 
 ## Using tools
 

@@ -1049,6 +1049,7 @@ mod send_output_tests {
                 vec![row.clone()],
             );
             let state = crate::server::test_support::build_test_app_state(vec![row.clone()]);
+            crate::server::test_support::refresh_canonical_metadata_for_test(&state).await;
             if reported {
                 let panes = crate::tmux::batch_pane_metadata().unwrap();
                 let owned = panes.get(&name).unwrap();
@@ -1115,7 +1116,8 @@ mod send_output_tests {
                 let response = TerminalSendError {
                     error: result.expect_err("guard must refuse"),
                     committed_cursor: None,
-                }.into_response();
+                }
+                .into_response();
                 assert_eq!(response.status(), StatusCode::CONFLICT);
                 let body = axum::body::to_bytes(response.into_body(), 4096)
                     .await
