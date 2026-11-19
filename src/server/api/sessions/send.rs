@@ -1042,6 +1042,7 @@ mod send_output_tests {
                         .success());
                 }
             }
+            crate::tmux::refresh_session_cache();
             crate::server::test_support::seed_instances_on_disk_for_test(
                 "default",
                 vec![row.clone()],
@@ -1095,9 +1096,16 @@ mod send_output_tests {
                 true,
                 &mut None,
             )
-            .await;
+            .await
+            .map_err(|error| TerminalSendError {
+                error,
+                committed_cursor: None,
+            }.into_response());
             if admitted {
-                assert!(result.is_ok());
+                if let Err(response) = result {
+                    let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+                    panic!("guard refused admitted input: {}", String::from_utf8_lossy(&body));
+                }
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 loop {
                     if std::fs::read_to_string(&received).unwrap_or_default() == "literal;\n" {
@@ -1110,12 +1118,7 @@ mod send_output_tests {
                     tokio::task::yield_now().await;
                 }
             } else {
-                let error = result.err().expect("guard must refuse");
-                let response = TerminalSendError {
-                    error,
-                    committed_cursor: None,
-                }
-                .into_response();
+                let response = result.expect_err("guard must refuse");
                 assert_eq!(response.status(), StatusCode::CONFLICT);
                 let body = axum::body::to_bytes(response.into_body(), 4096)
                     .await
