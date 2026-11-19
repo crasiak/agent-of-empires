@@ -195,6 +195,21 @@ pub fn detect<'a>(
     Some(detector(agent)?.detect(screen, observation))
 }
 
+/// Strict input evidence from a current visible capture, independent of winning priority.
+/// Hooks and idle completion banners cannot establish a ready input field.
+pub(crate) fn input_ready(agent: &str, screen: &str, title: &str) -> bool {
+    let input_rules: &[&str] = match agent {
+        "claude" => &["ready_prompt"],
+        "codex" => &["completed_turn_prompt", "completed_review_prompt"],
+        "pi" => &["input_prompt"],
+        _ => return false,
+    };
+    detector(agent).is_some_and(|detector| {
+        let screen = region::Screen::new(Rows::new(screen), title, &[]);
+        detector.manifest.input_ready(&screen, input_rules)
+    })
+}
+
 /// Whether one named rule matches, so fixtures prove they carry their signal.
 #[cfg(test)]
 pub(crate) fn rule_matches(
@@ -230,6 +245,40 @@ mod tests {
                 .unwrap_or_else(|e| panic!("manifest {agent} failed to compile: {e}"));
         }
         assert_eq!(MANIFESTS.len(), MANIFEST_SOURCES.len());
+    }
+
+    #[test]
+    fn input_readiness_vetoes_every_matching_non_input_state_regardless_of_priority() {
+        for (state, skip_state_update) in [
+            ("running", false),
+            ("waiting", false),
+            ("error", false),
+            ("idle", true),
+        ] {
+            let source = format!(
+                r#"
+id = "guard"
+[[rules]]
+id = "input"
+state = "idle"
+priority = 1000
+region = "whole_recent"
+contains = ["input"]
+[[rules]]
+id = "blocker"
+state = "{state}"
+priority = 1
+region = "whole_recent"
+skip_state_update = {skip_state_update}
+contains = ["blocker"]
+"#
+            );
+            let manifest = Manifest::parse(&source, &[]).unwrap();
+            for (text, ready) in [("input", true), ("input blocker", false), ("", false)] {
+                let screen = region::Screen::new(Rows::new(text), "", &[]);
+                assert_eq!(manifest.input_ready(&screen, &["input"]), ready, "{state}");
+            }
+        }
     }
 
     #[test]

@@ -1352,9 +1352,13 @@ impl Session {
     pub fn send_raw_bytes(&self, bytes: &[u8]) -> Result<()> {
         let target =
             self.live_pane_target_with_deadline(&crate::tmux::TmuxCommandDeadline::new())?;
+        Self::send_raw_bytes_to_target(&target, bytes)
+    }
+
+    fn send_raw_bytes_to_target(target: &str, bytes: &[u8]) -> Result<()> {
         for batch in raw_byte_batches(bytes) {
             let output = crate::tmux::tmux_command()
-                .args(["send-keys", "-t", &target, "-H"])
+                .args(["send-keys", "-t", target, "-H"])
                 .args(&batch)
                 .output()?;
             if !output.status.success() {
@@ -1421,6 +1425,19 @@ impl Session {
 
         let target =
             self.live_pane_target_with_deadline(&crate::tmux::TmuxCommandDeadline::new())?;
+        Self::send_text_to_target(&target, text, enter_delay_ms)
+    }
+
+    /// Submit to an already verified immutable pane, without resolving a name again.
+    pub(crate) fn send_text_to_pane(pane_id: &str, text: &str, enter_delay_ms: u64) -> Result<()> {
+        anyhow::ensure!(
+            crate::session::launch_identity::valid_pane_id(pane_id),
+            "Invalid pane ID"
+        );
+        Self::send_text_to_target(pane_id, text, enter_delay_ms)
+    }
+
+    fn send_text_to_target(target: &str, text: &str, enter_delay_ms: u64) -> Result<()> {
         let delivery = submit_text(text);
         tracing::debug!(target: "tmux.command",
             "send_keys_with_delay: bytes={} lines={} paste={} target={}",
@@ -1431,15 +1448,15 @@ impl Session {
         );
 
         match delivery {
-            SubmitText::Paste(text) => Self::send_via_paste_buffer(&target, text)?,
+            SubmitText::Paste(text) => Self::send_via_paste_buffer(target, text)?,
             SubmitText::Literal(payload) => {
                 let (head, semis) = peel_trailing_semicolons(&payload);
                 if !head.is_empty() {
                     // `--` so lines starting with `-` are not read as tmux flags.
-                    Self::tmux_send(&target, &["-l", "--", head])?;
+                    Self::tmux_send(target, &["-l", "--", head])?;
                 }
                 if semis > 0 {
-                    self.send_raw_bytes(&vec![b';'; semis])?;
+                    Self::send_raw_bytes_to_target(target, &vec![b';'; semis])?;
                 }
             }
         }
@@ -1449,7 +1466,7 @@ impl Session {
         }
 
         // Enter to submit
-        Self::tmux_send(&target, &["Enter"])?;
+        Self::tmux_send(target, &["Enter"])?;
 
         Ok(())
     }
