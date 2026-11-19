@@ -400,7 +400,7 @@ Remove a session
 
 Send a message to a running agent session
 
-**Usage:** `aoe send [OPTIONS] <IDENTIFIER> <MESSAGE>`
+**Usage:** `aoe send [OPTIONS] <IDENTIFIER> [MESSAGE]`
 
 ###### **Arguments:**
 
@@ -409,6 +409,9 @@ Send a message to a running agent session
 
 ###### **Options:**
 
+* `--stdin` — Read UTF-8 feedback from stdin (at most 128 KiB)
+* `--exact` — Match only a full session ID in the explicitly selected profile
+* `--require-idle` — Refuse terminal input unless a verified agent is positively observed idle
 * `--no-revive` — Fail loud on dead/stopped sessions instead of auto-respawning. Default behavior is to revive the session so a `send` after a crash or stop just works; pass this for scripts that want the previous bail-out
 
 

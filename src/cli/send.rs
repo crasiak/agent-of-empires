@@ -245,7 +245,15 @@ mod tests {
             .any(|session| { session.id == row.id && session.profile == "default" }));
         requests.store(0, Ordering::SeqCst);
         for argv in [
-            vec!["aoe", "--profile", "", "send", "--exact", &row.id, "feedback"],
+            vec![
+                "aoe",
+                "--profile",
+                "",
+                "send",
+                "--exact",
+                &row.id,
+                "feedback",
+            ],
             vec!["aoe", "send", "--exact", &row.id, "feedback"],
         ] {
             let cli = crate::cli::Cli::try_parse_from(argv).unwrap();

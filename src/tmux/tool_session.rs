@@ -1065,25 +1065,19 @@ mod tests {
         let guard = TmuxTestSession::from_name(&name);
         let tool = ToolSession { name };
         let profile = "literal ' \" $() ; profile";
-        tool.create_with_size("/tmp", "sleep 600", None, profile, ID, "annotate")
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let captured = root.path().join("context");
+        let command = format!(
+            "printf '%s\\n' \"$AOE_SESSION_ID\" \"$AOE_PROFILE\" \"$AOE_DAEMON_URL\" \"$AOE_DAEMON_TOKEN\" > '{}'; exec sleep 600",
+            captured.display()
+        );
+        tool.create_with_size("/tmp", &command, None, profile, ID, "annotate")
             .unwrap();
         wait_for_pane_command(&only_pane_id(guard.name()), "sleep");
-        for (key, value) in [
-            ("AOE_SESSION_ID", ID),
-            ("AOE_PROFILE", profile),
-            ("AOE_DAEMON_URL", "server-conflict"),
-            ("AOE_DAEMON_TOKEN", "server-conflict"),
-        ] {
-            let output = crate::tmux::tmux_command()
-                .args(["show-environment", "-t", guard.name(), key])
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-            assert_eq!(
-                String::from_utf8(output.stdout).unwrap(),
-                format!("{key}={value}\n")
-            );
-        }
+        assert_eq!(
+            std::fs::read_to_string(captured).unwrap(),
+            format!("{ID}\n{profile}\nserver-conflict\nserver-conflict\n")
+        );
     }
 
     fn legacy_metadata() -> crate::tmux::PaneMetadata {
