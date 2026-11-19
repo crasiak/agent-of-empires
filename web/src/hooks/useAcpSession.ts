@@ -12,6 +12,7 @@ import {
   type QueuedPrompt,
 } from "../lib/acpTypes";
 import {
+  cancelSubagent,
   clearServerQueue,
   editServerQueuedPrompt,
   enqueueServerPrompt,
@@ -26,7 +27,15 @@ import { cacheGet, cacheSet, sweepExpiredStorage } from "./acpSession/stateCache
 import { useLatestRef } from "./useLatestRef";
 
 export { reducer, transcriptDeltaAction, type Action } from "./acpSession/reducer";
-export { clearAcpCache, useBackgroundAgents, useBackgroundTasks, useWorkflowRuns } from "./acpSession/stateCache";
+export {
+  clearAcpCache,
+  useActivity,
+  useBackgroundAgents,
+  useBackgroundShells,
+  useBackgroundTasks,
+  useSubagents,
+  useWorkflowRuns,
+} from "./acpSession/stateCache";
 
 type PromptSendResult =
   | { kind: "dispatched" }
@@ -120,29 +129,32 @@ export function useAcpSession(
   const connection = useAcpConnection(sessionId, sessionIdRef, state, dispatch);
   const { status, lastActivityRef } = connection;
 
+  // Resolvers throw on failure so the card re-enables and the same nonce can be resubmitted.
   const resolveApproval = useCallback(
     async (nonce: string, decision: ApprovalDecision, optionId?: string) => {
       if (!sessionId) return;
+      let res: Response;
       try {
-        const res = await fetch(
+        res = await fetch(
           acpUrl(sessionId, `approvals/${encodeURIComponent(nonce)}`),
           jsonPost(optionId === undefined ? { decision } : { decision, option_id: optionId }),
         );
-        const detail = res.ok ? "" : await safeText(res);
-        const outcome = classifyResolveResponse("approval", res.ok, res.status, detail, nonce);
-        dispatch(
-          outcome.kind === "resolved"
-            ? { kind: "approval_resolved_locally", nonce }
-            : { kind: "error", message: outcome.message },
-        );
       } catch (e) {
         dispatch({ kind: "error", message: `Network error resolving approval: ${describeError(e)}` });
+        throw e;
       }
+      const detail = res.ok ? "" : await safeText(res);
+      const outcome = classifyResolveResponse("approval", res.ok, res.status, detail, nonce);
+      if (outcome.kind === "resolved") {
+        dispatch({ kind: "approval_resolved_locally", nonce });
+        return;
+      }
+      dispatch({ kind: "error", message: outcome.message });
+      throw new Error(outcome.message);
     },
     [sessionId],
   );
 
-  // Throws on failure so the card re-enables and the same nonce can be resubmitted.
   const resolveElicitation = useCallback(
     async (nonce: string, resolution: ElicitationResolution) => {
       if (!sessionId) return;
@@ -351,6 +363,15 @@ export function useAcpSession(
     await postReportingErrors(dispatch, acpUrl(sessionId, "cancel"), { method: "POST" }, ["cancel", "cancelling"]);
   }, [sessionId]);
 
+  const cancelSubagentById = useCallback(
+    async (childId: string) => {
+      if (!sessionId) return;
+      const message = await cancelSubagent(sessionId, childId);
+      if (message) dispatch({ kind: "error", message });
+    },
+    [sessionId],
+  );
+
   const steerable = !!state.promptCapabilities?.steering && !state.cancelling && !state.compacting;
 
   // A non-steerable running turn is cancelled and the server drains the row instead.
@@ -417,8 +438,8 @@ export function useAcpSession(
       dismissModeSwitchFailed: () => dispatch({ kind: "dismiss_mode_switch_failed" }),
       dismissSessionNotice: (id: string) => dispatch({ kind: "dismiss_session_notice", id }),
       dismissConfigOptionSwitchFailed: () => dispatch({ kind: "dismiss_config_option_switch_failed" }),
-      markRestartStarted: (epoch: number, stoppedSent: boolean) =>
-        dispatch({ kind: "restart_started", epoch, stoppedSent }),
+      markRestartStarted: (epoch: number, stoppedSent: boolean, retriedError?: string) =>
+        dispatch({ kind: "restart_started", epoch, stoppedSent, retriedError }),
       markRestartFailed: (epoch: number, message: string, stoppedSent: boolean) =>
         dispatch({ kind: "restart_failed", epoch, message, stoppedSent }),
     }),
@@ -433,6 +454,7 @@ export function useAcpSession(
     resolveElicitation,
     sendPrompt,
     cancelPrompt,
+    cancelSubagent: cancelSubagentById,
     forceEndTurn,
     ...dismissers,
     removeQueuedPrompt,

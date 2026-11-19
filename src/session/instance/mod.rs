@@ -46,6 +46,7 @@ pub use execution::{
 mod flags;
 mod hooks;
 pub(crate) use hooks::HostHookApprovalRequired;
+pub(crate) use status_update::CAPTURE_FAILED_RULE;
 mod identity_sidecar;
 mod kill;
 mod launch_command;
@@ -108,6 +109,28 @@ enum ResumeStaticUnavailable {
     Agent,
     Sandbox,
     Command,
+}
+
+/// A profile's config as the resume check reads it. When resolution failed,
+/// `config` is the warn fallback, which answers legacy selectors but no native agent.
+pub(crate) struct ResumeProfileConfig {
+    config: crate::session::Config,
+    resolved: bool,
+}
+
+/// Resolve `source_profile` for [`Instance::terminal_context_resume_cached_with`].
+pub(crate) fn resume_profile_config(source_profile: &str) -> ResumeProfileConfig {
+    let profile = crate::session::config::effective_profile(source_profile);
+    match crate::session::config::profile_config::resolve_config(&profile) {
+        Ok(config) => ResumeProfileConfig {
+            config,
+            resolved: true,
+        },
+        Err(_) => ResumeProfileConfig {
+            config: crate::session::config::profile_config::resolve_config_or_warn(&profile),
+            resolved: false,
+        },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -651,6 +674,9 @@ pub struct Instance {
     /// See `src/session/scratch.rs`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub scratch: bool,
+    /// Created with its `on_create` hooks skipped (`skip_on_create`), so their setup never ran.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub created_without_setup: bool,
 
     // Git worktree integration
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -838,6 +864,13 @@ pub struct Instance {
     /// new one. Additive: absent in older rows, no migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_effort: Option<String>,
+    /// Picks on `category:"model_config"` on/off options (Fast mode,
+    /// Ultracode), keyed by option id and re-applied after the model and
+    /// effort on every worker (re)spawn. An option the current model does not
+    /// advertise is skipped, not dropped. Cleared on an agent switch. Additive:
+    /// absent in older rows, no migration.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub acp_model_config: std::collections::BTreeMap<String, String>,
     /// Agent-assigned ACP session id captured from `session/new`. When
     /// the agent advertises `agent_capabilities.load_session = true`
     /// (claude-agent-acp does), the next spawn calls `session/load`

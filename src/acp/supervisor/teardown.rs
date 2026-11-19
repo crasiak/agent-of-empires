@@ -79,6 +79,28 @@ impl RetirementResources {
         }));
     }
 
+    /// A reattach supersedes a lost connection, keeping any close it owed.
+    pub(super) fn replace_client(&self, lost: &Arc<AcpClient>, next: &Arc<AcpClient>) {
+        use std::sync::atomic::Ordering;
+        let mut clients = lock_recover(&self.clients);
+        let Some(slot) = clients.iter_mut().find(|slot| {
+            slot.as_ref()
+                .is_some_and(|entry| Arc::ptr_eq(&entry.client, lost))
+        }) else {
+            drop(clients);
+            return self.record_client(next, false);
+        };
+        let close = slot
+            .as_ref()
+            .is_some_and(|entry| entry.close_requested.load(Ordering::Acquire));
+        *slot = Some(Arc::new(RetiringClient {
+            client: Arc::clone(next),
+            close_requested: std::sync::atomic::AtomicBool::new(close),
+            close_done: std::sync::atomic::AtomicBool::new(false),
+            shutdown_done: std::sync::atomic::AtomicBool::new(false),
+        }));
+    }
+
     pub(super) fn record_worker(&self, handle: WorkerHandle) {
         if is_test_worker(&handle) {
             self.emit_events
@@ -171,16 +193,22 @@ fn finish_stop_completion<S: BroadcastSink>(sink: &S, seqs: &super::SeqMap, leas
     {
         let id = lease.session_id();
         for task_id in sink.unresolved_background_task_ids(id) {
-            if !super::publish_with_next_seq(seqs, id, |seq| {
-                sink.publish_persisted(
-                    id,
-                    seq,
-                    &Event::BackgroundTaskFinished {
-                        task_id,
-                        ended_at: Some(chrono::Utc::now()),
-                    },
-                )
-            }) {
+            if !super::publish_next_persisted(
+                sink,
+                seqs,
+                id,
+                &Event::BackgroundTaskFinished {
+                    task_id,
+                    ended_at: Some(chrono::Utc::now()),
+                },
+            )
+            .1
+            {
+                return false;
+            }
+        }
+        for event in super::publish::cancelled_open_subagents(sink, id) {
+            if !super::publish_next_persisted(sink, seqs, id, &event).1 {
                 return false;
             }
         }
@@ -193,16 +221,12 @@ fn finish_stop_completion<S: BroadcastSink>(sink: &S, seqs: &super::SeqMap, leas
                 warning: None,
                 ended_at: chrono::Utc::now(),
             };
-            if !super::publish_with_next_seq(seqs, id, |seq| {
-                sink.publish_persisted(id, seq, &event)
-            }) {
+            if !super::publish_next_persisted(sink, seqs, id, &event).1 {
                 return false;
             }
         }
         if let Some(reason) = debt.reason {
-            if !super::publish_with_next_seq(seqs, id, |seq| {
-                sink.publish_persisted(id, seq, &Event::Stopped { reason })
-            }) {
+            if !super::publish_next_persisted(sink, seqs, id, &Event::Stopped { reason }).1 {
                 return false;
             }
         }
@@ -337,47 +361,61 @@ impl<S: BroadcastSink> Supervisor<S> {
             return Err(SupervisorError::TeardownPending(session_id.to_owned()));
         }
         for task_id in self.sink.unresolved_background_task_ids(session_id) {
-            if !super::publish_with_next_seq(&self.next_seqs, session_id, |seq| {
-                self.sink.publish_persisted(
-                    session_id,
-                    seq,
-                    &Event::BackgroundTaskFinished {
-                        task_id,
-                        ended_at: Some(chrono::Utc::now()),
-                    },
-                )
-            }) {
+            if !super::publish_next_persisted(
+                self.sink.as_ref(),
+                &self.next_seqs,
+                session_id,
+                &Event::BackgroundTaskFinished {
+                    task_id,
+                    ended_at: Some(chrono::Utc::now()),
+                },
+            )
+            .1
+            {
+                return Err(SupervisorError::TeardownPending(session_id.to_owned()));
+            }
+        }
+        for event in super::publish::cancelled_open_subagents(self.sink.as_ref(), session_id) {
+            if !super::publish_next_persisted(
+                self.sink.as_ref(),
+                &self.next_seqs,
+                session_id,
+                &event,
+            )
+            .1
+            {
                 return Err(SupervisorError::TeardownPending(session_id.to_owned()));
             }
         }
         for agent_id in self.sink.unresolved_background_agent_ids(session_id) {
-            if !super::publish_with_next_seq(&self.next_seqs, session_id, |seq| {
-                self.sink.publish_persisted(
-                    session_id,
-                    seq,
-                    &Event::BackgroundAgentCompleted {
-                        agent_id,
-                        status: BackgroundAgentStatus::Detached,
-                        tools: Vec::new(),
-                        result: None,
-                        warning: None,
-                        ended_at: chrono::Utc::now(),
-                    },
-                )
-            }) {
+            if !super::publish_next_persisted(
+                self.sink.as_ref(),
+                &self.next_seqs,
+                session_id,
+                &Event::BackgroundAgentCompleted {
+                    agent_id,
+                    status: BackgroundAgentStatus::Detached,
+                    tools: Vec::new(),
+                    result: None,
+                    warning: None,
+                    ended_at: chrono::Utc::now(),
+                },
+            )
+            .1
+            {
                 return Err(SupervisorError::TeardownPending(session_id.to_owned()));
             }
         }
         if !stopped_already_persisted
-            && !super::publish_with_next_seq(&self.next_seqs, session_id, |seq| {
-                self.sink.publish_persisted(
-                    session_id,
-                    seq,
-                    &Event::Stopped {
-                        reason: "user_stopped".to_owned(),
-                    },
-                )
-            })
+            && !super::publish_next_persisted(
+                self.sink.as_ref(),
+                &self.next_seqs,
+                session_id,
+                &Event::Stopped {
+                    reason: "user_stopped".to_owned(),
+                },
+            )
+            .1
         {
             return Err(SupervisorError::TeardownPending(session_id.to_owned()));
         }
@@ -1566,6 +1604,7 @@ mod tests {
                     tool_call_id: None,
                     description: "work".into(),
                     workflow: None,
+                    started_at: None,
                 },
             );
             sup.publish_next(
@@ -1737,6 +1776,7 @@ mod tests {
                 tool_call_id: None,
                 description: "work".into(),
                 workflow: None,
+                started_at: None,
             })
             .await
             .unwrap();
@@ -1854,6 +1894,7 @@ mod tests {
                     tool_call_id: None,
                     description: "new work".into(),
                     workflow: None,
+                    started_at: None,
                 },
             )
         });
@@ -2338,6 +2379,7 @@ mod tests {
                     tool_call_id: None,
                     description: "sleep".into(),
                     workflow: None,
+                    started_at: None,
                 },
             )
             .unwrap();
@@ -2354,6 +2396,28 @@ mod tests {
                     output_file: String::new(),
                     started_at: chrono::Utc::now(),
                     workflow: None,
+                },
+            )
+            .unwrap();
+        store
+            .record(
+                session,
+                3,
+                &Event::SubagentUpdated {
+                    subagent: crate::acp::state::SubagentRecord {
+                        session_id: "child".into(),
+                        parent_session_id: "root".into(),
+                        parent_tool_call_id: Some("tc-1".into()),
+                        title: None,
+                        description: None,
+                        state: crate::acp::state::SubagentState::RequiresAction,
+                        stop_reason: None,
+                        error: None,
+                        cancel_capable: true,
+                        model: None,
+                        background: true,
+                    },
+                    at: chrono::Utc::now(),
                 },
             )
             .unwrap();
@@ -2374,6 +2438,20 @@ mod tests {
 
         assert!(store.unresolved_background_task_ids(session).is_empty());
         assert!(store.unresolved_background_agent_ids(session).is_empty());
+        assert!(store.open_subagents(session).is_empty());
+        let mut state = crate::acp::state::AcpState::new(
+            AcpSessionId(session.into()),
+            crate::acp::state::AgentName("claude".into()),
+            None,
+        );
+        for (seq, event) in store.replay_from(session, 0) {
+            state.apply_event(seq, event).unwrap();
+        }
+        assert_eq!(
+            state.background_agents[0].status,
+            BackgroundAgentStatus::Detached,
+            "the child's cancel must not overwrite its agent's detach"
+        );
     }
 
     #[tokio::test]
@@ -2433,6 +2511,7 @@ mod tests {
                     tool_call_id: None,
                     description: "sleep".into(),
                     workflow: None,
+                    started_at: None,
                 },
             )
             .unwrap();
@@ -2600,6 +2679,7 @@ mod tests {
                 tool_call_id: None,
                 description: "sleep".into(),
                 workflow: None,
+                started_at: None,
             })
             .await
             .unwrap();
@@ -2687,6 +2767,7 @@ mod tests {
                     tool_call_id: None,
                     description: "sleep".into(),
                     workflow: None,
+                    started_at: None,
                 },
             )
             .unwrap();

@@ -43,8 +43,11 @@ test("highlight filters support keyboard selection, grouping, compact mode, and 
   await page.getByRole("button", { name: "Filter projects by Sky" }).click();
   await expect(rows).toHaveCount(1);
   await expect(rows).toContainText("Fix login");
-  for (let i = 0; i < 4; i++) {
-    await page.getByTestId("sidebar-axis-toggle").click();
+  for (const axis of ["org", "group", "repo+group", "status", "repo"]) {
+    const picker = page.getByTestId("sidebar-axis-toggle");
+    await picker.click();
+    await page.getByTestId(`sidebar-axis-option-${axis}`).click();
+    await expect(picker).toHaveAttribute("data-axis", axis);
     await expect(rows).toHaveCount(1);
     await expect(rows).toContainText("Fix login");
   }

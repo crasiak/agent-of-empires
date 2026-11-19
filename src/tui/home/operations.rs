@@ -918,13 +918,16 @@ impl HomeView {
         });
         Ok(())
     }
-    /// Move a session to the trash and set `trashed_at`. Durable artifacts are
-    /// kept so it can be restored. The Trash section's collapse state is left
-    /// untouched: like single-row archive, the section header's count is the
-    /// feedback, so a user who collapsed it stays collapsed (#2489).
-    ///
-    /// The daemon commits the trash reservation, teardown and relocation; UI follows its receipt fence.
+    /// Preserve the shelf's collapsed state; teardown and relocation remain daemon-owned.
     pub(super) fn trash_session_by_id(&mut self, id: &str) {
+        let Some(epoch) = self.session_feed.applied_epoch().map(str::to_owned) else {
+            self.flash_status("Runtime unavailable; reopen Trash controls");
+            return;
+        };
+        self.trash_session_by_id_at_epoch(id, epoch);
+    }
+
+    pub(super) fn trash_session_by_id_at_epoch(&mut self, id: &str, expected_epoch: String) {
         let Some(instance) = self
             .get_instance(id)
             .filter(|instance| !instance.is_trashed())
@@ -932,17 +935,52 @@ impl HomeView {
             return;
         };
         let generation = instance.lifecycle_generation;
+        let profile = instance.source_profile.clone();
         if let Err(error) = self.session_feed.submit_request(
             id.to_owned(),
-            crate::tui::session_feed::SessionRequest::Trash(crate::daemon::TrashSessionBody {
-                kill_pane: true,
-                expected_generation: Some(generation),
-            }),
+            crate::tui::session_feed::SessionRequest::Trash {
+                body: crate::daemon::TrashSessionBody {
+                    kill_pane: true,
+                    expected_generation: Some(generation),
+                    expected_profile: Some(profile),
+                },
+                expected_epoch,
+            },
         ) {
             self.info_dialog = Some(InfoDialog::new(
                 "Could Not Trash Session",
                 &error.to_string(),
             ));
+        }
+    }
+
+    pub(super) fn retry_selected_trash(&mut self) {
+        let Some(instance) = self
+            .selected_session
+            .as_deref()
+            .and_then(|id| self.get_instance(id))
+            .filter(|instance| instance.has_pending_trash())
+        else {
+            return;
+        };
+        let id = instance.id.clone();
+        let Some(expected_epoch) = self.session_feed.applied_epoch().map(str::to_owned) else {
+            self.flash_status("Runtime unavailable; reopen Trash controls");
+            return;
+        };
+        let body = crate::daemon::TrashSessionBody {
+            kill_pane: true,
+            expected_generation: Some(instance.lifecycle_generation),
+            expected_profile: Some(instance.source_profile.clone()),
+        };
+        if let Err(error) = self.session_feed.submit_request(
+            id,
+            crate::tui::session_feed::SessionRequest::Trash {
+                body,
+                expected_epoch,
+            },
+        ) {
+            self.info_dialog = Some(InfoDialog::new("Could Not Retry Trash", &error.to_string()));
         }
     }
 
@@ -1113,6 +1151,20 @@ impl HomeView {
                 .filter(|i| self.org_group_key(i) == group_path)
                 .map(|i| i.id.clone())
                 .collect(),
+            // Status headers key on the status's API spelling, the same key
+            // `build_flat_items_by_status` rewrites `group_path` to.
+            crate::session::config::GroupByMode::Status => self
+                .instances
+                .values()
+                .filter(|i| !i.is_archived() && !i.is_trashed())
+                .filter(|i| {
+                    self.active_profile
+                        .as_ref()
+                        .is_none_or(|p| &i.source_profile == p)
+                })
+                .filter(|i| super::rows::status_group_key(i) == group_path)
+                .map(|i| i.id.clone())
+                .collect(),
             // Manual groups nest, so a session belongs when its path matches exactly or
             // sits beneath the group; scoped to the owning profile the same way
             // `delete_selected_group` does.
@@ -1130,13 +1182,21 @@ impl HomeView {
         }
     }
 
-    /// Queue the whole group's archive before submitting any row. The daemon
-    /// tears down each pane and publishes its committed state.
+    /// Queue the group's archive before submitting any row.
     pub(super) fn archive_selected_group(&mut self) -> anyhow::Result<()> {
         if self.require_manual_group_profile() {
             return Ok(());
         }
-        let ids = self.active_sessions_in_selected_group();
+        // Preserve the membership counted by the prompt.
+        let ids = match self.pending_archive_group_ids.take() {
+            Some(ids) => ids,
+            None => self.active_sessions_in_selected_group(),
+        };
+        // Removed and trashed sessions are no longer eligible.
+        let ids: Vec<String> = ids
+            .into_iter()
+            .filter(|id| self.instances.get(id).is_some_and(|i| !i.is_trashed()))
+            .collect();
         if ids.is_empty() {
             return Ok(());
         }

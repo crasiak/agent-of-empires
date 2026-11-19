@@ -47,6 +47,7 @@ fn compose_list_title(
     match group_by {
         GroupByMode::Project => suffix.push_str(" · project"),
         GroupByMode::Org => suffix.push_str(" · org"),
+        GroupByMode::Status => suffix.push_str(" · status"),
         GroupByMode::Manual => {}
     }
     if sort_order != SortOrder::default() {
@@ -758,15 +759,21 @@ fn branch_row_tag(inst: &crate::session::Instance) -> Option<RowTag> {
     } else {
         inst.worktree_info
             .as_ref()
-            .and_then(|w| branch_tag_content(&w.branch, BRANCH_TAG_WIDTH))
-            .map(|content| RowTag {
-                content,
-                max_width: BRANCH_TAG_WIDTH,
-            })
+            .and_then(|w| plain_branch_row_tag(&w.branch))
     }
 }
 
+fn plain_branch_row_tag(branch: &str) -> Option<RowTag> {
+    branch_tag_content(branch, BRANCH_TAG_WIDTH).map(|content| RowTag {
+        content,
+        max_width: BRANCH_TAG_WIDTH,
+    })
+}
+
 fn workspace_branch_row_tag(branch: &str, repo_count: usize) -> Option<RowTag> {
+    if repo_count <= 1 {
+        return plain_branch_row_tag(branch);
+    }
     let suffix = format!("+{repo_count}");
     let suffix_width = rendered_width(&suffix);
     if suffix_width >= BRANCH_TAG_WIDTH {
@@ -1215,6 +1222,7 @@ impl HomeView {
             if self.sidebar_source == crate::tui::session_feed::SidebarSource::Disconnected {
                 frame.render_widget(Clear, area);
                 crate::tui::dialogs::ConnectionsView::offline(
+                    self.offline_attention,
                     self.runtime_failure_reason.as_deref(),
                     matches!(
                         self.dashboard_launch,
@@ -1224,8 +1232,9 @@ impl HomeView {
                 .render(frame, area, theme);
                 return;
             }
-            // A dashboard start hidden with Esc is still running behind this screen.
-            let message = if self.dashboard_launch.is_some() {
+            let message = if self.dashboard_stop.is_some() {
+                "Connecting to runtime…\n\nEnter: back to the Web dashboard stop   q: Quit"
+            } else if self.dashboard_launch.is_some() {
                 "Connecting to runtime…\n\nEnter: back to the Web dashboard start   q: Quit"
             } else {
                 "Connecting to runtime…\n\nq: Quit"
@@ -1485,6 +1494,10 @@ impl HomeView {
             }
         }
         render_dialogs!(connections_view);
+        // Under the info dialog: a refused resubmit reopens it beneath the refusal.
+        if let Some((dialog, _)) = &mut self.create_hook_failed {
+            dialog.render(frame, area, theme);
+        }
         if self.snooze_duration_dialog.is_none() {
             render_dialogs!(info_dialog);
         }
@@ -1951,6 +1964,7 @@ impl HomeView {
             || self.rename_dialog.is_some()
             || self.worktree_name_dialog.is_some()
             || self.repo_trust_dialog.is_some()
+            || self.create_hook_failed.is_some()
             || self.hooks_install_dialog.is_some()
             || self.volume_ignores_glob_dialog.is_some()
             || self.intro_dialog.is_some()
@@ -2294,15 +2308,14 @@ impl HomeView {
                 )
             });
 
+        let show_structured = inst.is_structured() && self.show_structured_badge;
         let badge_text: Option<&'static str> =
-            if inst.is_structured() && self.view_mode != ViewMode::Terminal {
-                Some(" [structured]")
-            } else if self.view_mode == ViewMode::Terminal && inst.is_sandboxed() {
+            if self.view_mode == ViewMode::Terminal && inst.is_sandboxed() {
                 Some(match self.get_terminal_mode(id) {
                     TerminalMode::Container => " [container]",
                     TerminalMode::Host => " [host]",
                 })
-            } else if inst.is_structured() {
+            } else if show_structured {
                 Some(" [structured]")
             } else {
                 None
@@ -2315,9 +2328,12 @@ impl HomeView {
         let update_badge = (!inst.is_structured()
             && crate::session::update_restart::binary_updated(inst))
         .then_some(" [update]");
+        // Its on_create hooks were skipped at creation, so their setup never ran.
+        let setup_badge = inst.created_without_setup.then_some(" [no setup]");
         let badge_width = badge_text.map_or(0, |s| s.len())
             + terminal_badge.as_ref().map_or(0, |s| s.len())
-            + update_badge.map_or(0, |s| s.len());
+            + update_badge.map_or(0, |s| s.len())
+            + setup_badge.map_or(0, |s| s.len());
         let age = if self.show_activity_age {
             row_age(inst, in_attention)
         } else {
@@ -2388,6 +2404,17 @@ impl HomeView {
         }
         if let Some(badge) = update_badge {
             let badge_style = Style::default().fg(theme.waiting);
+            line_spans.push(Span::styled(
+                badge,
+                if is_selected {
+                    selected_row_style(badge_style, theme)
+                } else {
+                    badge_style
+                },
+            ));
+        }
+        if let Some(badge) = setup_badge {
+            let badge_style = Style::default().fg(theme.dimmed);
             line_spans.push(Span::styled(
                 badge,
                 if is_selected {
@@ -2836,6 +2863,18 @@ impl HomeView {
         self.preview_worker_pulse = observation;
         stalled
     }
+    /// Whether the preview of `target` may read through the VT pipe. Shell terminals and
+    /// a pane another surface took over use capture-pane; the latter lets the new owner
+    /// arm the pipe, which this process's lease would otherwise hold.
+    pub(super) fn preview_vt_enabled(&self, target: Option<&str>) -> bool {
+        self.vt_live_enabled
+            && !matches!(self.view_mode, ViewMode::Terminal)
+            && self
+                .live_takeover
+                .as_ref()
+                .is_none_or(|taken| Some(taken.tmux_name.as_str()) != target)
+    }
+
     /// Point the capture worker at `desired` (the displayed pane's tmux session) and
     /// retune its cadence for live-send vs idle. One long-lived worker is spawned lazily
     /// and retargeted in place; an empty target idles it. Idempotent and cheap when the
@@ -2859,9 +2898,7 @@ impl HomeView {
             // Shell terminals use capture-pane's authoritative snapshot: their prompt
             // repaint can expose a PROMPT_EOL_MARK to a pipe-pane seed, producing a false
             // frame before the grid reconciles. Slower, but no seed handoff.
-            worker.set_vt_enabled(
-                self.vt_live_enabled && !matches!(self.view_mode, ViewMode::Terminal),
-            );
+            worker.set_vt_enabled(self.preview_vt_enabled(desired.as_deref()));
             worker.set_clipboard_capture_enabled(self.agent_clipboard_forward);
             self.preview_capture_worker = Some(worker);
         }
@@ -2919,7 +2956,7 @@ impl HomeView {
         if let Some(worker) = self.preview_capture_worker.as_ref() {
             worker.set_live(live);
             worker.set_forward_empty(forward_empty);
-            worker.set_vt_enabled(self.vt_live_enabled && !forward_empty);
+            worker.set_vt_enabled(self.preview_vt_enabled(self.preview_capture_target.as_deref()));
             worker.set_clipboard_capture_enabled(self.agent_clipboard_forward);
         }
     }
@@ -4511,6 +4548,8 @@ impl HomeView {
     }
 
     fn render_status_bar(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        // The bar is on screen from here, so a queued flash can start counting.
+        self.arm_status_flash();
         // Action feedback takes precedence over a hovered link target.
         let hovered = (!self.live_send_pending_leader)
             .then(|| self.hovered_link())
@@ -4796,12 +4835,40 @@ impl HomeView {
                 }
                 None => (None, None),
             };
+            // After another window took live control: its status, then the key that takes
+            // control back. Only live entry claims the size lock; a full-screen attach doesn't.
+            let takeover = self
+                .live_takeover
+                .as_ref()
+                .filter(|taken| self.selected_session.as_deref() == Some(taken.session_id.as_str()))
+                .map(|taken| taken.taker);
+            let live_key = takeover.and_then(|taker| {
+                groups.push((
+                    0,
+                    None,
+                    vec![Span::styled(
+                        taker.label(),
+                        Style::default().fg(theme.text).bold(),
+                    )],
+                ));
+                // No key hint where neither key enters live mode; the row's hints stay.
+                let (click, key) = match self.live_key(self.selected_session.as_deref()?)? {
+                    live_send::LiveKey::Tab => (ktab, "Tab"),
+                    live_send::LiveKey::Enter => (kenter, "↵"),
+                };
+                groups.push((0, click, mk(key, "take control")));
+                Some(click)
+            });
             if let Some(enter_action_text) = enter_action_text {
                 // U+21B5 keeps Enter to one display cell without shortening its action label.
-                groups.push((0, kenter, mk("↵", enter_action_text)));
+                if live_key != Some(kenter) {
+                    groups.push((0, kenter, mk("↵", enter_action_text)));
+                }
             }
             if let Some(tab_action_text) = tab_action_text {
-                groups.push((2, ktab, mk("⇥ ", tab_action_text)));
+                if live_key != Some(ktab) {
+                    groups.push((2, ktab, mk("⇥ ", tab_action_text)));
+                }
             }
 
             let (click, key) = bound(ActionId::ToggleView);
@@ -5975,7 +6042,11 @@ mod tests {
     /// The repository count is what the workspace tag exists to carry, so the branch is
     /// cut in cells to leave room rather than filling the cap and pushing it off.
     #[test]
-    fn workspace_branch_row_tag_keeps_the_repository_count() {
+    fn workspace_branch_row_tag_counts_only_multiple_repositories() {
+        let one = workspace_branch_row_tag("feat/solo", 1)
+            .expect("branch tag")
+            .rendered();
+        assert!(one.starts_with("[solo") && !one.contains('+'), "{one:?}");
         let rendered = workspace_branch_row_tag(&"界".repeat(10), 2)
             .expect("a wide branch still yields a tag")
             .rendered();

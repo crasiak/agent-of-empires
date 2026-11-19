@@ -1108,8 +1108,8 @@ pub(super) fn derive_acp_session_change(event: &crate::acp::Event) -> Option<Acp
 pub(crate) enum StatusPolicy {
     Authoritative,
     /// A no-op while the sidebar sits on a status only the main turn may
-    /// resolve: `Waiting`, `Stopped` or `Error`. Used only by the
-    /// `Background*` arms (#4001).
+    /// resolve: `Waiting`, `Stopped` or `Error`. Used only by background
+    /// work events (#4001).
     Background,
     /// Only takes effect from `Error` or `Stopped`: a fresh worker attached.
     Heal,
@@ -1130,7 +1130,8 @@ pub(crate) fn status_policy(event: &crate::acp::Event) -> Option<StatusPolicy> {
         | Event::ToolCallStarted { .. }
         | Event::Stopped { .. }
         | Event::AgentStartupError { .. }
-        | Event::IncompatibleAgent { .. } => Some(StatusPolicy::Authoritative),
+        | Event::IncompatibleAgent { .. }
+        | Event::IntegrationLost { .. } => Some(StatusPolicy::Authoritative),
         Event::BackgroundAgentLaunched { .. }
         | Event::BackgroundTaskStarted { .. }
         | Event::BackgroundAgentProgress {
@@ -1138,7 +1139,8 @@ pub(crate) fn status_policy(event: &crate::acp::Event) -> Option<StatusPolicy> {
             ..
         }
         | Event::BackgroundAgentCompleted { .. }
-        | Event::BackgroundTaskFinished { .. } => Some(StatusPolicy::Background),
+        | Event::BackgroundTaskFinished { .. }
+        | Event::SubagentUpdated { .. } => Some(StatusPolicy::Background),
         Event::AcpSessionAssigned { .. } | Event::RateLimitAutoResumed { .. } => {
             Some(StatusPolicy::Heal)
         }
@@ -1519,6 +1521,7 @@ mod tests {
     async fn recover_structured_unread_after_lag_keeps_running_for_work_past_the_stopped() {
         use crate::acp::Event;
         let prompt = || Event::UserPromptSent {
+            merged_prompt_ids: Vec::new(),
             text: "go".into(),
             attachments: Vec::new(),
             prompt_id: None,
@@ -1973,6 +1976,7 @@ mod tests {
 
         let approval = build_approval(
             ToolCall {
+                prompt: None,
                 id: "t".into(),
                 name: "shell".into(),
                 kind: "execute".into(),
@@ -2073,6 +2077,7 @@ mod tests {
             );
 
             let tool_call = ToolCall {
+                prompt: None,
                 id: "t".into(),
                 name: "shell".into(),
                 kind: "execute".into(),
@@ -2178,9 +2183,9 @@ mod tests {
             .send(AcpBroadcastFrame {
                 session_id: id.clone(),
                 seq: 7,
-                event: Arc::new(crate::acp::Event::AgentStartupError {
-                    message: "event store write failed at seq 7".into(),
-                }),
+                event: Arc::new(crate::acp::Event::startup_error(
+                    "event store write failed at seq 7",
+                )),
                 worker_generation: None,
                 sidebar_status: None,
             })
@@ -2243,6 +2248,7 @@ mod tests {
             // The pre-restart log, persisted but never folded into this cold cache.
             let log = [
                 Event::UserPromptSent {
+                    merged_prompt_ids: Vec::new(),
                     text: "spawn and go".into(),
                     attachments: Vec::new(),
                     prompt_id: None,
@@ -2681,12 +2687,7 @@ mod tests {
             (chunk("x"), Some(Authoritative)),
             (Event::ThinkingStarted, Some(Authoritative)),
             (stopped("prompt_complete"), Some(Authoritative)),
-            (
-                Event::AgentStartupError {
-                    message: "boom".into(),
-                },
-                Some(Authoritative),
-            ),
+            (Event::startup_error("boom"), Some(Authoritative)),
             (
                 Event::ApprovalResolved {
                     nonce: Nonce("x".into()),
@@ -2704,6 +2705,25 @@ mod tests {
             ),
             (progress(BackgroundAgentStatus::Running), Some(Background)),
             (progress(BackgroundAgentStatus::Completed), None),
+            (
+                Event::SubagentUpdated {
+                    subagent: crate::acp::state::SubagentRecord {
+                        session_id: "child".into(),
+                        parent_session_id: "root".into(),
+                        parent_tool_call_id: None,
+                        title: None,
+                        description: None,
+                        state: crate::acp::state::SubagentState::Idle,
+                        stop_reason: Some("end_turn".into()),
+                        error: None,
+                        cancel_capable: false,
+                        model: None,
+                        background: true,
+                    },
+                    at: chrono::Utc::now(),
+                },
+                Some(Background),
+            ),
             (
                 Event::AcpSessionAssigned {
                     acp_session_id: "a".into(),
@@ -2874,6 +2894,7 @@ mod tests {
         let cases = [
             (
                 Event::UserPromptSent {
+                    merged_prompt_ids: Vec::new(),
                     prompt_id: None,
                     text: "go".into(),
                     attachments: Vec::new(),
@@ -2917,6 +2938,7 @@ mod tests {
             let state = test_support::build_test_app_state(vec![instance]);
             let mut events = vec![
                 crate::acp::Event::UserPromptSent {
+                    merged_prompt_ids: Vec::new(),
                     prompt_id: None,
                     text: "go".into(),
                     attachments: Vec::new(),
@@ -2928,6 +2950,7 @@ mod tests {
                     tool_call_id: Some("toolu_1".into()),
                     description: "sleep".into(),
                     workflow: None,
+                    started_at: None,
                 },
             ];
             if !main_running {
@@ -3103,6 +3126,7 @@ mod tests {
                 approval: crate::acp::approvals::Approval {
                     nonce: crate::acp::approvals::Nonce("n1".into()),
                     tool_call: crate::acp::state::ToolCall {
+                        prompt: None,
                         id: "call-7".into(),
                         name: "curl -H 'Authorization: Bearer SECRET_SENTINEL_9f3'".into(),
                         kind: "execute".into(),

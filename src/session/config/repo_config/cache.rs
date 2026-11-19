@@ -81,17 +81,23 @@ impl Fingerprint {
 
 struct Entry {
     fingerprint: Fingerprint,
-    /// Where the repo config was read from (the main repo for a worktree).
-    /// Cached so a hit never re-opens the repository.
-    source: PathBuf,
     config: Arc<Config>,
     last_used: Instant,
 }
 
-/// Resolved `(profile, project_path)` configs shared across requests.
+struct SourceEntry {
+    git_marker: Stamp,
+    source: PathBuf,
+    last_used: Instant,
+}
+
+/// Resolved configs and repository sources shared across requests.
 #[derive(Default)]
 pub struct ResolvedConfigCache {
-    entries: Mutex<HashMap<(String, String), Entry>>,
+    entries: Mutex<HashMap<(String, PathBuf), Entry>>,
+    sources: Mutex<HashMap<PathBuf, SourceEntry>>,
+    #[cfg(test)]
+    pub(crate) source_discoveries: std::sync::atomic::AtomicUsize,
 }
 
 /// One lookup's outcome: the config and whether it came from disk.
@@ -110,17 +116,54 @@ impl ResolvedConfigCache {
     /// of its input files changed since it was resolved. The lock is never
     /// held across the disk read, so a miss does not stall concurrent hits.
     pub fn resolve_or_warn(&self, profile: &str, project_path: &Path) -> Resolved {
-        let key = (
-            profile.to_string(),
-            project_path.to_string_lossy().into_owned(),
-        );
+        let source = self.source_path(project_path);
+        self.resolve_source_or_warn(profile, &source)
+    }
+
+    pub fn source_path(&self, project_path: &Path) -> PathBuf {
+        let git_marker = (!project_path.as_os_str().is_empty())
+            .then(|| stamp(&project_path.join(".git")))
+            .flatten();
+        {
+            let mut sources = self
+                .sources
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(entry) = sources.get_mut(project_path) {
+                if entry.git_marker == git_marker {
+                    entry.last_used = Instant::now();
+                    return entry.source.clone();
+                }
+            }
+        }
+        #[cfg(test)]
+        self.source_discoveries
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let source = repo_config_source_path(project_path);
+        self.sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_path.to_path_buf(),
+                SourceEntry {
+                    git_marker,
+                    source: source.clone(),
+                    last_used: Instant::now(),
+                },
+            );
+        source
+    }
+
+    /// Resolve an already discovered source, shared by linked worktrees.
+    pub fn resolve_source_or_warn(&self, profile: &str, source: &Path) -> Resolved {
+        let key = (profile.to_string(), source.to_path_buf());
         {
             let mut entries = self
                 .entries
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(entry) = entries.get_mut(&key) {
-                if entry.fingerprint == Fingerprint::take(profile, project_path, &entry.source) {
+                if entry.fingerprint == Fingerprint::take(profile, source, source) {
                     entry.last_used = Instant::now();
                     return Resolved {
                         config: entry.config.clone(),
@@ -130,9 +173,8 @@ impl ResolvedConfigCache {
             }
         }
 
-        let source = repo_config_source_path(project_path);
-        let fingerprint = Fingerprint::take(profile, project_path, &source);
-        let config = Arc::new(resolve_config_with_repo_source_or_warn(profile, &source));
+        let fingerprint = Fingerprint::take(profile, source, source);
+        let config = Arc::new(resolve_config_with_repo_source_or_warn(profile, source));
         let mut entries = self
             .entries
             .lock()
@@ -141,7 +183,6 @@ impl ResolvedConfigCache {
             key,
             Entry {
                 fingerprint,
-                source,
                 config: config.clone(),
                 last_used: Instant::now(),
             },
@@ -157,6 +198,10 @@ impl ResolvedConfigCache {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         entries.retain(|_, entry| entry.last_used.elapsed() < idle);
+        self.sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, entry| entry.last_used.elapsed() < idle);
     }
 
     pub fn len(&self) -> usize {
@@ -261,11 +306,26 @@ mod tests {
         let cache = ResolvedConfigCache::new();
 
         cache.resolve_or_warn("default", stale.path());
-        std::thread::sleep(Duration::from_millis(20));
         cache.resolve_or_warn("default", fresh.path());
-        cache.evict_idle(Duration::from_millis(10));
+        let expired = Instant::now() - Duration::from_secs(60);
+        cache
+            .entries
+            .lock()
+            .unwrap()
+            .get_mut(&("default".into(), stale.path().to_path_buf()))
+            .unwrap()
+            .last_used = expired;
+        cache
+            .sources
+            .lock()
+            .unwrap()
+            .get_mut(stale.path())
+            .unwrap()
+            .last_used = expired;
+        cache.evict_idle(Duration::from_secs(30));
 
         assert_eq!(cache.len(), 1);
+        assert_eq!(cache.sources.lock().unwrap().len(), 1);
         assert!(!cache.resolve_or_warn("default", fresh.path()).miss);
         assert!(cache.resolve_or_warn("default", stale.path()).miss);
     }

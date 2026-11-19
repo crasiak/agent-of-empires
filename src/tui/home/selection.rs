@@ -181,6 +181,11 @@ impl HomeView {
                     }
                 }
             }
+            GroupByMode::Status => {
+                let key = super::rows::status_group_key(instance);
+                self.status_group_collapsed.insert(key, false);
+                self.save_status_group_collapsed();
+            }
             GroupByMode::Manual => {
                 let path = self.session_feed.applied_snapshot().and_then(|snapshot| {
                     snapshot

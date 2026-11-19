@@ -152,7 +152,7 @@ pub(super) async fn settle_row_command(
         let base = format!("/api/sessions/{id}");
         match request {
             SessionRequest::Rename(body) => ("PATCH", base, serde_json::to_value(body).unwrap()),
-            SessionRequest::Trash(body) => (
+            SessionRequest::Trash { body, .. } => (
                 "POST",
                 format!("{base}/trash"),
                 serde_json::to_value(body).unwrap(),
@@ -173,23 +173,33 @@ pub(super) async fn settle_row_command(
         }
     }
     let before_rows = serde_json::to_value(view.cloned_instances()).unwrap();
-    let mut respond = view.session_feed.request_driver_for_test();
+    let mut capture = view.session_feed.capture_request_driver_for_test();
+    let opened_epoch = view.session_feed.applied_epoch().unwrap().to_owned();
     action(view)?;
     assert_eq!(
         serde_json::to_value(view.cloned_instances()).unwrap(),
         before_rows
     );
-    let (method, path, body) = wire(id, &expected);
-    let (status, headers, value) = request_with_headers(state, method, &path, body.clone()).await;
+    let captured = capture().expect("typed request admitted");
+    assert_eq!(captured.id, id);
+    assert_eq!(
+        std::mem::discriminant(&captured.request),
+        std::mem::discriminant(&expected)
+    );
+    let epoch = match &captured.request {
+        SessionRequest::Trash { expected_epoch, .. } => expected_epoch.as_str(),
+        _ => &opened_epoch,
+    };
+    let (method, path, body) = wire(&captured.id, &captured.request);
+    let (status, headers, value) =
+        request_at_epoch_with_headers(state, method, &path, body, epoch).await;
     if !status.is_success() {
         assert!(
             status.is_client_error(),
             "unknown commit is not rejection: {status} {value}"
         );
         let error = value.to_string();
-        let (captured_id, captured) = respond(Err(error.clone())).expect("typed request admitted");
-        assert_eq!(captured_id, id);
-        assert_eq!(wire(id, &captured), (method, path, body));
+        captured.finish(Err(error.clone()));
         view.apply_session_feed();
         apply_published(view, state).await;
         assert!(
@@ -199,12 +209,12 @@ pub(super) async fn settle_row_command(
         anyhow::bail!("{error}");
     }
     let cursor = receipt_cursor(&headers);
-    let outcome = match expected {
+    let outcome = match &captured.request {
         SessionRequest::Rename(_) => SessionCommandOutcome::Renamed(MutationReceipt {
             cursor,
             outcome: serde_json::from_value(value["outcome"].clone()).unwrap(),
         }),
-        SessionRequest::Trash(_) => SessionCommandOutcome::Trashed(MutationReceipt {
+        SessionRequest::Trash { .. } => SessionCommandOutcome::Trashed(MutationReceipt {
             cursor,
             outcome: serde_json::from_value(value["outcome"].clone()).unwrap(),
         }),
@@ -230,9 +240,7 @@ pub(super) async fn settle_row_command(
         }
         _ => unreachable!("wire rejected non-edit command"),
     };
-    let (captured_id, captured) = respond(Ok(outcome)).expect("typed request admitted");
-    assert_eq!(captured_id, id);
-    assert_eq!(wire(id, &captured), (method, path, body));
+    captured.finish(Ok(outcome));
     view.apply_session_feed();
     assert_eq!(
         serde_json::to_value(view.cloned_instances()).unwrap(),
@@ -504,14 +512,20 @@ pub(super) async fn settle_trash(
     id: &str,
 ) {
     let generation = view.get_instance(id).unwrap().lifecycle_generation;
+    let expected_profile = view.get_instance(id).unwrap().source_profile.clone();
+    let expected_epoch = view.session_feed.applied_epoch().unwrap().to_owned();
     settle_row_command(
         state,
         view,
         id,
-        crate::tui::session_feed::SessionRequest::Trash(crate::daemon::TrashSessionBody {
-            kill_pane: true,
-            expected_generation: Some(generation),
-        }),
+        crate::tui::session_feed::SessionRequest::Trash {
+            body: crate::daemon::TrashSessionBody {
+                kill_pane: true,
+                expected_generation: Some(generation),
+                expected_profile: Some(expected_profile),
+            },
+            expected_epoch,
+        },
         |view| {
             view.trash_session_by_id(id);
             Ok(())
@@ -1172,6 +1186,94 @@ fn test_prompt_archive_selected_group() {
     assert!(env.view.active_sessions_in_selected_group().is_empty());
     env.view.prompt_archive_selected_group();
     assert!(env.view.confirm_dialog.is_none());
+}
+
+#[test]
+#[serial]
+fn status_group_archive_preserves_prompt_membership_and_eligibility() {
+    use crate::session::config::GroupByMode;
+    use crate::session::Status;
+
+    for scenario in ["joins", "trashed", "removed"] {
+        let temp = TempDir::new().unwrap();
+        let _guard = setup_test_home(&temp);
+        let storage = Storage::new_unwatched("test").unwrap();
+
+        let mut kept = Instance::new("kept", "/tmp/kept");
+        kept.status = Status::Running;
+        let mut changed = Instance::new("changed", "/tmp/changed");
+        changed.status = if scenario == "joins" {
+            Status::Idle
+        } else {
+            Status::Running
+        };
+        let instances = vec![kept, changed];
+        storage
+            .update(|i, g| {
+                *i = instances.to_vec();
+                *g = GroupTree::new_with_groups(&instances, &[]).get_all_groups();
+                Ok(())
+            })
+            .unwrap();
+
+        let mut view = HomeView::new_for_test(
+            Some("test".to_string()),
+            AvailableTools::with_tools(&["claude"]),
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .unwrap();
+        view.group_by = GroupByMode::Status;
+        view.flat_items = view.build_flat_items();
+        view.cursor = view
+            .flat_items
+            .iter()
+            .position(|item| matches!(item, Item::Group { path, .. } if path == "Running"))
+            .expect("Running header");
+        view.update_selected();
+        assert_eq!(view.selected_group.as_deref(), Some("Running"));
+        view.handle_key(key(crossterm::event::KeyCode::Char('z')), None);
+        assert_eq!(
+            view.confirm_dialog.as_ref().map(|d| d.action()),
+            Some("archive_group")
+        );
+
+        let id_of = |view: &HomeView, title: &str| {
+            view.instances()
+                .find(|i| i.title == title)
+                .map(|i| i.id.clone())
+                .expect("seeded instance")
+        };
+        let kept_id = id_of(&view, "kept");
+        let changed_id = id_of(&view, "changed");
+        match scenario {
+            "joins" => view.instances.get_mut(&changed_id).unwrap().status = Status::Running,
+            "trashed" => view.instances.get_mut(&changed_id).unwrap().trash(),
+            "removed" => {
+                view.instances.shift_remove(&changed_id);
+            }
+            _ => unreachable!(),
+        }
+        view.rebuild_flat_items();
+
+        let mut respond = view.session_feed.command_driver_for_test();
+        view.handle_key(key(crossterm::event::KeyCode::Char('y')), None);
+        assert!(view.confirm_dialog.is_none());
+        let cursor = || crate::daemon::RuntimeCursor {
+            epoch: "test".into(),
+            revision: 2,
+        };
+        let (id, mutation) = respond(Ok(cursor())).unwrap();
+        assert!(
+            matches!(mutation, crate::daemon::SessionMutation::Archive(body) if body.archived && body.kill_pane),
+            "{scenario}"
+        );
+        assert_eq!(id, kept_id, "{scenario}");
+        assert!(respond(Ok(cursor())).is_none(), "{scenario}");
+        if scenario == "trashed" {
+            let trashed = view.instances.get(&changed_id).expect("trashed instance");
+            assert!(trashed.is_trashed() && !trashed.is_archived());
+        }
+    }
 }
 
 #[tokio::test]

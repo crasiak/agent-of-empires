@@ -50,7 +50,7 @@ impl Binding {
         ensure!(
             instance.tool == "pi"
                 && (instance.command.is_empty()
-                    || (super::ledger_pi::profile(&instance.tool, instance.get_tool_command())
+                    || (super::ledger_pi::profile(&instance.tool, &instance.get_tool_command())
                         .is_some()
                         && super::tailored::document::account(instance).is_none()))
                 && !instance.is_structured()

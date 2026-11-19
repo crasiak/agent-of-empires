@@ -214,24 +214,16 @@ pub(crate) fn build_test_app_state_impl_with_event_store(
     )
         -> crate::acp::supervisor::Supervisor<crate::acp::supervisor::ChannelSink>,
 ) -> Arc<AppState> {
-    let app_dir = event_store
-        .is_none()
-        .then(|| tempfile::tempdir().expect("tempdir"));
     let event_store = event_store.unwrap_or_else(|| {
-        let acp_db = app_dir
-            .as_ref()
-            .expect("default store directory")
-            .path()
-            .join("acp_events.db");
-        Arc::new(crate::acp::event_store::EventStore::open(&acp_db, 100).expect("event store"))
+        Arc::new(crate::acp::event_store::EventStore::temporary_for_test(100).expect("event store"))
     });
     let acp_events_tx = broadcast::channel::<AcpBroadcastFrame>(8).0;
     let acp_control_cache = Arc::new(crate::acp::control_cache::ControlStateCache::new());
-    let sink = std::sync::Arc::new(crate::acp::supervisor::ChannelSink {
-        tx: acp_events_tx.clone(),
-        event_store: event_store.clone(),
-        control_cache: acp_control_cache.clone(),
-    });
+    let sink = std::sync::Arc::new(crate::acp::supervisor::ChannelSink::new(
+        acp_events_tx.clone(),
+        event_store.clone(),
+        acp_control_cache.clone(),
+    ));
     let supervisor = std::sync::Arc::new(
         customize(crate::acp::supervisor::Supervisor::with_capacity(sink, 1))
             .with_native_admission(),
@@ -670,4 +662,17 @@ pub fn capture_log(f: impl FnOnce()) -> String {
     );
     let out = buf.lock().unwrap().clone();
     String::from_utf8(out).unwrap()
+}
+
+/// A launcher whose agent rejects `initialize` for want of a login, as the connection task
+/// reports it before the handshake completes.
+#[cfg(test)]
+pub(crate) fn unauthenticated_launcher() -> crate::acp::supervisor::Launcher {
+    Arc::new(|_config, _id| {
+        Box::pin(async {
+            Err::<crate::acp::acp_client::AcpClient, _>(crate::acp::acp_client::AcpError::Spawn(
+                "ACP connection failed: Authentication required".into(),
+            ))
+        })
+    })
 }

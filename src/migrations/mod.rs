@@ -80,6 +80,8 @@ mod v065_sound_volume_split;
 mod v066_structured_view;
 mod v067_runtime_filter_acp_target;
 mod v068_runtime_filter_reset;
+mod v069_retained_history_identity;
+mod v070_global_max_concurrent_workers;
 
 /// Fixtures shared by migrations that rewrite agent hook files.
 #[cfg(test)]
@@ -122,7 +124,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use tracing::{debug, info};
 
-const CURRENT_VERSION: u32 = 68;
+const CURRENT_VERSION: u32 = 70;
 const VERSION_FILE: &str = ".schema_version";
 
 /// Version, log name, and the one-time transformation to run.
@@ -341,6 +343,16 @@ const MIGRATIONS: &[Migration] = &[
         v067_runtime_filter_acp_target::run,
     ),
     (68, "runtime_filter_reset", v068_runtime_filter_reset::run),
+    (
+        69,
+        "retained_history_identity",
+        v069_retained_history_identity::run,
+    ),
+    (
+        70,
+        "global_max_concurrent_workers",
+        v070_global_max_concurrent_workers::run,
+    ),
 ];
 
 /// The data-schema version this build targets, i.e. the version every install
@@ -438,6 +450,13 @@ pub(crate) fn reconcile_serve_launch_under_transaction(
     transaction: &crate::daemon::lifecycle::Transaction,
 ) -> Result<()> {
     v059_reconcile_serve_passphrase_policy::run_with_transaction(transaction)
+}
+
+/// Whether reconciliation accepts this `serve.launch` schema and shape.
+pub(crate) fn validate_serve_launch_schema(
+    record: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    v059_reconcile_serve_passphrase_policy::validate_record_schema(record)
 }
 
 pub(crate) fn run_migrations_under_exclusion(
@@ -602,6 +621,75 @@ fn set_version(version: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn fork68_upgrade_preserves_history_and_promotes_the_served_worker_cap() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let app = crate::session::get_app_dir().unwrap();
+        for (path, bytes) in [
+            (
+                "config.toml",
+                "default_profile = 'personal'\n[acp]\nmax_concurrent_workers = 100\n",
+            ),
+            (
+                "profiles/personal/config.toml",
+                "[acp]\nmax_concurrent_workers = 3\n",
+            ),
+            (
+                "profiles/work/config.toml",
+                "[acp]\nmax_concurrent_workers = 7\n",
+            ),
+            ("serve.rollback.launch", r#"{"profile":"work"}"#),
+            ("afk-authority-v3/retained.json", "retained fork authority"),
+        ] {
+            let path = app.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        let schema = crate::events::Schema::new("acp").unwrap();
+        let database = app.join("acp_events.db");
+        let conn = crate::events::open(&database, &schema).unwrap();
+        let event = serde_json::to_string(&crate::acp::state::Event::ThinkingStarted).unwrap();
+        crate::events::insert_event(&conn, &schema, "retained", 7, &event, 1).unwrap();
+        drop(conn);
+        set_version(68).unwrap();
+        let mut identity = None;
+        for _ in 0..2 {
+            run_migrations().unwrap();
+            assert_eq!(get_current_version(), CURRENT_VERSION);
+            let conn = rusqlite::Connection::open(&database).unwrap();
+            let observed: (String, String) = conn.query_row(
+                "SELECT e.event_json, v.version FROM acp_events e JOIN acp_history_versions v USING(session_id) WHERE e.session_id = 'retained' AND e.seq = 7",
+                [], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            assert_eq!(observed.0, event);
+            if let Some(prior) = &identity {
+                assert_eq!(&observed.1, prior);
+            }
+            identity = Some(observed.1);
+            let global: toml::Table = fs::read_to_string(app.join("config.toml"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(
+                global["acp"]["max_concurrent_workers"].as_integer(),
+                Some(7)
+            );
+            for profile in ["personal", "work"] {
+                let config: toml::Table =
+                    fs::read_to_string(app.join(format!("profiles/{profile}/config.toml")))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                assert!(config.is_empty());
+            }
+            assert_eq!(
+                fs::read(app.join("afk-authority-v3/retained.json")).unwrap(),
+                b"retained fork authority"
+            );
+        }
+    }
 
     #[test]
     #[serial_test::serial]

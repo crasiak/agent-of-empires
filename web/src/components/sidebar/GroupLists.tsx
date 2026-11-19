@@ -27,7 +27,8 @@ export interface ListContext {
   readOnly?: boolean;
   offline: boolean;
   displayedActiveId: string | null;
-  onNew: () => void;
+  displayedActiveSessionId: string | null;
+  onNew: (prefill?: { group?: string }) => void;
   onCreateSession: (repoPath: string) => void;
   onUpdateAppearance: (repoId: string, update: RepoAppearanceUpdate) => void;
   onPinProject?: (repoPath: string) => void;
@@ -38,7 +39,11 @@ export interface ListContext {
 }
 
 const liveViews = (group: SidebarGroup) => group.workspaces.filter((v) => !workspaceIsSunk(v.workspace));
-const containsActive = (views: SidebarWorkspaceView[], id: string | null) => views.some((v) => v.workspace.id === id);
+// A status slice holds one session, so the workspace id alone would mark every slice.
+const containsActive = (views: SidebarWorkspaceView[], id: string | null, sessionId: string | null) =>
+  views.some(
+    (v) => v.workspace.id === id && (sessionId == null || v.workspace.sessions.some((s) => s.id === sessionId)),
+  );
 
 /** Wraps one Group's rows, collapsed or not, so its header's `aria-controls` always resolves. */
 function GroupRows({ id, children }: { id: string; children: ReactNode }) {
@@ -75,7 +80,7 @@ function GroupHeader({
   return (
     <SidebarGroupHeader
       group={{ ...full, collapsed: !expanded }}
-      hasActiveChild={!expanded && containsActive(visible, ctx.displayedActiveId)}
+      hasActiveChild={!expanded && containsActive(visible, ctx.displayedActiveId, ctx.displayedActiveSessionId)}
       onClick={() => !ctx.hasFilter && onToggle()}
       onUpdateAppearance={ctx.onUpdateAppearance}
       onArchiveAll={locked ? undefined : () => ctx.onArchiveGroup(full)}
@@ -85,7 +90,9 @@ function GroupHeader({
       onNewSession={() =>
         createsInRepo && full.capabilities.create === "repo" && full.repoPath
           ? ctx.onCreateSession(full.repoPath)
-          : ctx.onNew()
+          : full.kind === "sessionGroup" && full.groupPath
+            ? ctx.onNew({ group: full.groupPath })
+            : ctx.onNew()
       }
       offline={ctx.offline}
       dragHandle={dragHandle}
@@ -167,7 +174,6 @@ export function FlatGroupList({
               {live.map((v) => (
                 <SortableSessionRow
                   key={v.key}
-                  rowKey={v.key}
                   {...ctx.rowProps(v)}
                   onCreateSession={ctx.onCreateSession}
                   // Pinned rows float to the top of their group, so dragging them is meaningless.

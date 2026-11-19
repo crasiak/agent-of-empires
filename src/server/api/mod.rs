@@ -4,6 +4,7 @@ pub(super) use super::AppState;
 
 use axum::{http::StatusCode, response::Response};
 mod acp;
+pub(crate) use acp::{submit_prompt, PromptSubmission, PromptSubmitError, PromptSubmitted};
 mod client_log;
 mod file_provenance;
 mod git;
@@ -18,17 +19,19 @@ mod projects;
 mod queue;
 mod sandbox_image;
 pub(crate) mod sessions;
+mod setup;
 mod skills;
 pub(crate) mod system;
 mod telemetry;
 
 pub(crate) use acp::structured_spawn_error_message;
 pub use acp::{
-    acp_attachment, acp_cancel, acp_context_primer, acp_disable, acp_enable, acp_files,
-    acp_force_end_turn, acp_prompt, acp_prompt_diff_comments, acp_replay, acp_set_config_option,
-    acp_set_mode, acp_worker_log, agent_install_info, get_option_catalog, install_agent,
-    list_acp_agents, list_importable_sessions, resolve_approval, resolve_elicitation, restart_acp,
-    shutdown_acp, spawn_acp, switch_acp_agent, switch_acp_provider,
+    acp_attachment, acp_cancel, acp_cancel_subagent, acp_context_primer, acp_disable, acp_enable,
+    acp_files, acp_force_end_turn, acp_prompt, acp_prompt_diff_comments, acp_replay,
+    acp_set_config_option, acp_set_mode, acp_task_output, acp_worker_log, agent_install_info,
+    get_option_catalog, install_agent, list_acp_agents, list_importable_sessions, resolve_approval,
+    resolve_elicitation, restart_acp, shutdown_acp, spawn_acp, switch_acp_agent,
+    switch_acp_provider,
 };
 pub(crate) use acp::{
     publish_startup_error_if_current, recover_pending_terminal_handoffs, HandoffRecovery,
@@ -54,6 +57,11 @@ pub use plugins::{
     set_plugin_enabled, start_plugin_install, start_plugin_uninstall,
 };
 pub use projects::{create_project, delete_project, list_projects, update_project};
+#[cfg(test)]
+pub(crate) use sandbox_image::status_generation_for_test as sandbox_image_status_generation_for_test;
+pub(crate) use sandbox_image::{
+    create_pull_refusal, invalidate_status as invalidate_sandbox_image_status,
+};
 pub use sandbox_image::{sandbox_image_dismiss, sandbox_image_pull, sandbox_image_status};
 pub use sessions::{
     abandon_purge, attach_session_project, cancel_creation, create_session,
@@ -63,18 +71,20 @@ pub use sessions::{
     preview_volume_ignores_globs, read_output, recreate_container, rename_session, research_get,
     research_operation, research_output, research_reply, restart_for_update, restart_session,
     restore_session, review_creation_trust, search_sessions, send_message, serve_session_artifact,
-    session_diff_file, session_diff_file_raw, session_diff_files, session_file, session_file_raw,
-    session_ledger_run, session_usage, set_worktree_name, start_session, stop_auxiliary,
-    stop_session, summarize_session, touch_session_access, trash_session, update_session_archive,
-    update_session_color, update_session_diff_base, update_session_favorite, update_session_group,
-    update_session_notifications, update_session_pin, update_session_snooze, update_session_unread,
-    update_tailored_visibility, update_workspace_ordering, workshop_defaults, workshop_get,
-    workshop_operation, OutputQuery, SendMessageRequest,
+    session_account_targets, session_diff_file, session_diff_file_raw, session_diff_files,
+    session_file, session_file_raw, session_ledger_run, session_usage, set_worktree_name,
+    start_session, stop_auxiliary, stop_session, summarize_session, touch_session_access,
+    trash_session, update_session_archive, update_session_color, update_session_diff_base,
+    update_session_favorite, update_session_group, update_session_notifications,
+    update_session_pin, update_session_snooze, update_session_unread, update_tailored_visibility,
+    update_workspace_ordering, workshop_defaults, workshop_get, workshop_operation, OutputQuery,
+    SendMessageRequest,
 };
 pub(crate) use sessions::{
     lifecycle_rejection, persist_session_update, purge_expired_trash, reconcile_trashed_worktrees,
     reconcile_worktree_paths, trash_sweep_interval,
 };
+pub use setup::{get_setup, get_setup_runtimes, patch_setup};
 pub use skills::{
     adopt_skill, create_skill, delete_skill, edit_skill, list_skills, read_skill, sync_skills,
 };
@@ -231,6 +241,9 @@ pub(super) fn session_not_found() -> axum::response::Response {
     )
 }
 
+/// Why `aoe serve --read-only` refused a change.
+pub(crate) const READ_ONLY_MESSAGE: &str = "Server is in read-only mode";
+
 /// Canonical 403 body for `aoe serve --read-only`.
 pub(super) fn read_only_response() -> axum::response::Response {
     use axum::response::IntoResponse as _;
@@ -239,7 +252,7 @@ pub(super) fn read_only_response() -> axum::response::Response {
         crate::daemon::ApiErrorCode::ReadOnly.header(),
         axum::Json(serde_json::json!({
             "error": "read_only",
-            "message": "Server is in read-only mode"
+            "message": READ_ONLY_MESSAGE
         })),
     )
         .into_response()
@@ -522,6 +535,7 @@ mod tests {
             include_str!("sandbox_image.rs"),
             &["sandbox_image_pull", "sandbox_image_dismiss"],
         ),
+        ("setup.rs", include_str!("setup.rs"), &["patch_setup"]),
         (
             "system.rs",
             include_str!("system.rs"),
@@ -560,6 +574,7 @@ mod tests {
             include_str!("acp/prompt.rs"),
             &[
                 "acp_cancel",
+                "acp_cancel_subagent",
                 "acp_force_end_turn",
                 "acp_prompt",
                 "acp_prompt_diff_comments",

@@ -3,6 +3,7 @@ import { usePluginUiEntries } from "../lib/pluginUiContext";
 import { pluginSortSpecs } from "../lib/pluginUi";
 import type { ProjectInfo, RepoGroup, Workspace } from "../lib/types";
 import type { RuntimeCursor, SessionMutation } from "../lib/api";
+import type { TrashRecoveryTarget } from "../lib/trashActions";
 import { SidebarSystemHealth } from "./SystemHealthStrip";
 import { axisDrawsRepoHeaders, type SidebarAxis } from "../lib/sidebarAxis";
 import {
@@ -34,7 +35,8 @@ import {
   makeRowFilter,
   renderedOrder,
   sunkViews,
-  uniqueWorkspaces,
+  visibleOrgRepos,
+  visibleSubgroups,
 } from "./sidebar/filterGroups";
 import { FlatGroupList, NestedGroupList, OrgGroupList, type ListContext } from "./sidebar/GroupLists";
 import { SessionRow } from "./sidebar/SessionRow";
@@ -82,7 +84,7 @@ interface Props {
   onSelect: (workspaceId: string, sessionId: string | null) => void;
   onToggleGroup: (groupId: string) => void;
   onUpdateRepoAppearance: (repoId: string, update: RepoAppearanceUpdate) => void;
-  onNew: () => void;
+  onNew: (prefill?: { group?: string }) => void;
   onCreateSession: (repoPath: string) => void;
   onPinProject?: (repoPath: string) => void;
   onUnpinProject?: (group: SidebarGroup) => void;
@@ -98,6 +100,7 @@ interface Props {
   /** Receives every session id of the trashed workspace. */
   onRestoreSession?: (sessionIds: string[]) => void;
   onEmptyTrash?: (workspaces: Workspace[]) => void;
+  onRetryTrash: (target: TrashRecoveryTarget) => Promise<void>;
   onStopSession?: (sessionId: string) => void;
   onStartSession?: (sessionId: string) => void;
   onRestartForUpdate?: (sessionId: string) => void;
@@ -114,7 +117,17 @@ interface Props {
 }
 
 export function WorkspaceSidebar(props: Props) {
-  const { groups, nestedGroups, orgGroups, trashedWorkspaces = [], activeId, open, readOnly, axis } = props;
+  const {
+    groups,
+    nestedGroups,
+    orgGroups,
+    trashedWorkspaces = [],
+    activeId,
+    activeSessionId,
+    open,
+    readOnly,
+    axis,
+  } = props;
   const { settings: webSettings, update: updateWebSettings } = useWebSettings();
   const rightSide = webSettings.sidebarSide === "right";
   const compact = webSettings.sidebarCompact;
@@ -202,27 +215,55 @@ export function WorkspaceSidebar(props: Props) {
   const isNested = axis === "repo+group";
   const isOrgAxis = axis === "org";
 
-  const allWorkspaces = useMemo(() => uniqueWorkspaces(groups), [groups]);
   // An expanded sibling keeps its own optimistic override, which has to reconcile against its one session,
-  // also after its siblings are gone. `allWorkspaces` keeps one slice per id, so the records come from every
-  // slice of every axis.
+  // also after its siblings are gone. The status axis repeats a workspace per bucket, so the records come
+  // from every slice of every axis plus their session children.
   const triageWorkspaces = useMemo(() => {
     const slices = [groups, ...nestedGroups.map((n) => n.subgroups), ...orgGroups.map((o) => o.repos)]
       .flat()
       .flatMap((g) => g.workspaces.map((v) => v.workspace));
-    return [...allWorkspaces, ...sessionWorkspaces(slices)];
-  }, [allWorkspaces, groups, nestedGroups, orgGroups]);
+    return [...slices, ...sessionWorkspaces(slices)];
+  }, [groups, nestedGroups, orgGroups]);
   const triage = useSidebarTriage(triageWorkspaces);
-  const orderedIds = useMemo(
-    () => renderedOrder(filteredGroups, hasFilter, sunkExpanded),
-    [filteredGroups, hasFilter, sunkExpanded],
-  );
+  // Rows, not workspaces: the status axis renders a workspace once per bucket, and each row's
+  // actions belong to its own session. Filtering keeps the selection, so ranges use `filtered`.
+  const [orderedIds, rows] = useMemo(() => {
+    const filteredAll = isNested
+      ? filteredNested.flatMap((ng) => ng.subgroups)
+      : isOrgAxis
+        ? filteredOrgGroups.flatMap((og) => og.repos)
+        : filteredGroups;
+    // A collapsed repo or org hides its children, so a range must skip the rows it hides.
+    const rendered = isNested
+      ? visibleSubgroups(filteredNested, hasFilter)
+      : isOrgAxis
+        ? visibleOrgRepos(filteredOrgGroups, hasFilter)
+        : filteredGroups;
+    const every = isNested
+      ? nestedGroups.flatMap((ng) => ng.subgroups)
+      : isOrgAxis
+        ? orgGroups.flatMap((og) => og.repos)
+        : groups;
+    return [renderedOrder(rendered, hasFilter, sunkExpanded, filteredAll), every.flatMap((g) => g.workspaces)] as const;
+  }, [
+    isNested,
+    isOrgAxis,
+    groups,
+    nestedGroups,
+    orgGroups,
+    filteredGroups,
+    filteredNested,
+    filteredOrgGroups,
+    hasFilter,
+    sunkExpanded,
+  ]);
   const selection = useSidebarSelection({
-    allWorkspaces,
+    rows,
     orderedIds,
     triage,
     readOnly,
     activeId,
+    activeSessionId,
     onSelect: props.onSelect,
   });
   const { onBulkArchive } = selection;
@@ -244,6 +285,7 @@ export function WorkspaceSidebar(props: Props) {
     readOnly,
     offline,
     displayedActiveId: selection.displayedActiveId,
+    displayedActiveSessionId: selection.displayedActiveSessionId,
     onNew: props.onNew,
     onCreateSession: props.onCreateSession,
     onUpdateAppearance: props.onUpdateRepoAppearance,
@@ -252,12 +294,16 @@ export function WorkspaceSidebar(props: Props) {
     onEditProjectSettings: props.onEditProjectSettings,
     onArchiveGroup,
     rowProps: (v: SidebarWorkspaceView) => ({
+      rowKey: v.key,
       workspace: v.workspace,
       observedById: props.observedById,
       runtimeEpoch: props.runtimeEpoch,
       onSessionMutation: props.onSessionMutation,
-      isActive: v.workspace.id === selection.displayedActiveId,
-      isSelected: selection.isSelected(v.workspace.id),
+      isActive:
+        v.workspace.id === selection.displayedActiveId &&
+        (selection.displayedActiveSessionId == null ||
+          v.workspace.sessions.some((s) => s.id === selection.displayedActiveSessionId)),
+      isSelected: selection.isSelected(v.key),
       hasInputFocus: v.workspace.id === selection.displayedActiveId && props.mainPanelFocused,
       onActivate: selection.handleRowActivate,
       ...(v.workspace.sessions.length > 1 && {
@@ -270,7 +316,7 @@ export function WorkspaceSidebar(props: Props) {
       onRestartForUpdate: props.onRestartForUpdate,
       onSwitchView: props.onSwitchView,
       readOnly,
-      optimistic: triage.optimisticFor(v.workspace.id),
+      optimistic: triage.optimisticFor(v.workspace),
       onPinToggle: triage.pinToggle,
       onArchiveToggle: triage.archiveToggle,
       onSnooze: triage.snooze,
@@ -343,7 +389,7 @@ export function WorkspaceSidebar(props: Props) {
           filterOpen={filterOpen}
           onToggleFilter={toggleFilter}
           offline={offline}
-          onNew={props.onNew}
+          onNew={() => props.onNew()}
           onToggleCompact={() => updateWebSettings({ sidebarCompact: !compact })}
           onClose={props.onToggle}
         />
@@ -478,7 +524,7 @@ export function WorkspaceSidebar(props: Props) {
               <p className="text-sm font-medium text-text-secondary">No sessions yet</p>
               <p className="mt-1 text-[13px] text-text-muted">Create a session to start working in a repo.</p>
               <button
-                onClick={props.onNew}
+                onClick={() => props.onNew()}
                 disabled={offline}
                 className="mt-4 inline-flex items-center gap-1.5 rounded-md bg-brand-600 px-3 py-1.5 text-[13px] font-medium text-white hover:bg-brand-500 cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-brand-600"
               >
@@ -499,6 +545,8 @@ export function WorkspaceSidebar(props: Props) {
               loaded={props.trashLoaded ?? true}
               onLoad={() => props.onLoadTrash?.()}
               readOnly={readOnly}
+              runtimeEpoch={props.runtimeEpoch}
+              onRetryTrash={props.onRetryTrash}
               onOpen={selection.handleRowActivate}
               onRestore={(ids) => props.onRestoreSession?.(ids)}
               onDelete={(ids) => props.onDeleteSession?.(ids)}

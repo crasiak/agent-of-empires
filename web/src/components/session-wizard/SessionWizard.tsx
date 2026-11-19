@@ -28,7 +28,7 @@ import {
 } from "../../lib/api";
 import { VolumeIgnoresGlobDialog } from "./VolumeIgnoresGlobDialog";
 import { HooksTrustDialog } from "./HooksTrustDialog";
-import { ACP_CAPABLE_TOOLS, isAcpEligible } from "../../lib/acpCapableTools";
+import { ACP_CAPABLE_TOOLS, acpAdapterMissing, isAcpEligible, structuredAvailable } from "../../lib/acpCapableTools";
 import { safeGetItem, safeSetItem } from "../../lib/safeStorage";
 import { toastBus } from "../../lib/toastBus";
 import { normalizeProjectPathKey, overridesForPath } from "../../lib/registeredProjects";
@@ -62,6 +62,7 @@ import { agentsView, initialData, reducer, type WizardData } from "./wizardReduc
 import { buildCreateRequest, launchEligible } from "./createRequest";
 import { commandMapsFromSettings, EMPTY_COMMAND_MAPS, type CommandMaps } from "./commandMaps";
 import { profileDefaults, type ProfileDefaults } from "./profileDefaults";
+import { useSandboxImageRowStatus } from "./useSandboxImageRowStatus";
 
 // Validated against ACP_CAPABLE_TOOLS on read, since another install may have written it.
 const LAST_USED_TOOL_KEY = "aoe-acp-last-tool";
@@ -100,7 +101,8 @@ function initialWizardData(prefill: WizardPrefill | undefined, nameOnly: boolean
   if (!prefill) return base;
   return {
     ...base,
-    path: prefill.scratch ? "" : prefill.path || "",
+    // A prefill without a path (group-only) keeps the remembered project; a tab-only one opens the picker.
+    path: prefill.scratch ? "" : prefill.path || (prefill.initialTab ? "" : base.path),
     tool: prefill.tool || base.tool,
     yoloMode: prefill.yoloMode ?? false,
     sandboxEnabled: prefill.sandboxEnabled ?? false,
@@ -127,6 +129,9 @@ const PANEL_TITLE: Record<Panel, string> = {
 
 // Hook output appears only for creates slow enough to notice.
 const PROGRESS_DELAY_MS = 800;
+const PROJECT_FETCH_DELAY_MS = 300;
+/** The agent-list project key of a scratch create; NUL can't occur in a path. */
+const SCRATCH_PROJECT = "\0scratch";
 const PROGRESS_POLL_MS = 700;
 // Retries after a dropped connection; the idempotency key makes them join the running create.
 const NETWORK_RETRIES = 3;
@@ -163,11 +168,40 @@ function waitUntilVisible(): Promise<void> {
   });
 }
 
+/** Below these summary widths the lead (cue and status) leaves the image no room, so it takes its own line.
+ *  The longest lead is 159px without a cue and 260px with one, plus about 64px for the image. */
+const STACK_UNDER = {
+  status: { row: "@max-[14rem]:flex-col", lead: "@max-[14rem]:whitespace-normal", sep: "@max-[14rem]:hidden" },
+  cue: { row: "@max-[21rem]:flex-col", lead: "@max-[21rem]:whitespace-normal", sep: "@max-[21rem]:hidden" },
+};
+
+/** The failure cue and status stay whole and only the image truncates, so a narrow row still says what
+ *  went wrong and whether to update. Sized by the summary's width, not the viewport. */
+function SandboxImageSummary({ cue, status, image }: { cue: string | null; status: string | null; image: string }) {
+  const stack = cue ? STACK_UNDER.cue : STACK_UNDER.status;
+  return (
+    <span className="@container block min-w-0">
+      <span className={`flex min-w-0 ${stack.row}`}>
+        {(cue || status) && (
+          <span data-testid="sandbox-image-status" className={`shrink-0 whitespace-pre ${stack.lead}`}>
+            {cue && <span className="text-status-error">{cue}</span>}
+            {cue && status && " · "}
+            {status}
+            <span className={stack.sep}> · </span>
+          </span>
+        )}
+        <span className="min-w-0 truncate">{image || "default image"}</span>
+      </span>
+    </span>
+  );
+}
+
 /** Worktree row summary: branch name, attach mode and base. */
 function worktreeSummary(data: WizardData): string {
   const name = data.worktreeBranch.trim() || "auto";
   if (data.attachExisting) return `${name}, existing branch`;
-  return data.baseBranch.trim() ? `${name}, new from ${data.baseBranch.trim()}` : `${name}, new branch`;
+  const branch = data.baseBranch.trim() ? `${name}, new from ${data.baseBranch.trim()}` : `${name}, new branch`;
+  return data.useWorkspace || data.extraRepoPaths.length > 0 ? `${branch}, workspace` : branch;
 }
 
 const basename = (path: string) => path.replace(/\/+$/, "").split("/").pop() || path;
@@ -176,6 +210,8 @@ const basename = (path: string) => path.replace(/\/+$/, "").split("/").pop() || 
 export interface WizardRestore {
   data: WizardData;
   failure: CreateFailure;
+  /** The create's last progress snapshot, for a failed hook's output tail. */
+  progress?: CreateProgress | null;
 }
 
 interface Props {
@@ -184,7 +220,7 @@ interface Props {
   /** A create the user sent to the background finished; the wizard is already closed. */
   onCreatedInBackground?: (session?: SessionResponse) => void;
   /** Reopens the wizard on a background create's failure, from its toast. */
-  onReopenFailure?: (restore: WizardRestore) => void;
+  onReopenFailure?: (restore: WizardRestore) => boolean | void;
   /** Opens on this failure and form instead of the prefill and profile defaults. */
   restore?: WizardRestore;
   prefill?: WizardPrefill;
@@ -216,6 +252,7 @@ export function SessionWizard({
     agents: [],
     agentsStatus: "loading",
     agentsFor: null,
+    agentsProject: null,
     groups: [],
     groupsFor: null,
     profiles: [],
@@ -231,9 +268,31 @@ export function SessionWizard({
   // A Retry found the Container runtime still down after a sandbox_unavailable failure.
   const [runtimeDown, setRuntimeDown] = useState(false);
   const [rechecking, setRechecking] = useState(false);
+  const viewGroupRef = useRef<HTMLDivElement>(null);
   const offline = useServerDown();
-  const [progress, setProgress] = useState<CreateProgress | null>(null);
-  const [progressKey, setProgressKey] = useState<string | null>(null);
+  const [progress, setProgress] = useState<CreateProgress | null>(restore?.progress ?? null);
+  // The latest snapshot, which a backgrounded create keeps polling once the wizard is gone.
+  const lastProgressRef = useRef<CreateProgress | null>(null);
+  // Polls can overlap, so a response older than the last one accepted is dropped.
+  const progressSeqRef = useRef({ sent: 0, accepted: 0 });
+  const fetchNewerProgress = async (key: string) => {
+    const seq = ++progressSeqRef.current.sent;
+    const p = await fetchCreateProgress(key);
+    if (!p || seq <= progressSeqRef.current.accepted) return null;
+    progressSeqRef.current.accepted = seq;
+    return p;
+  };
+  const backgroundPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopBackgroundPoll = () => {
+    if (backgroundPollRef.current) clearInterval(backgroundPollRef.current);
+    backgroundPollRef.current = null;
+  };
+  const [progressKey, setProgressKeyState] = useState<string | null>(null);
+  const progressKeyRef = useRef<string | null>(null);
+  const setProgressKey = (key: string | null) => {
+    progressKeyRef.current = key;
+    setProgressKeyState(key);
+  };
   const [showProgress, setShowProgress] = useState(false);
   // A create whose response never arrived; Launch and reconnects retry it under its key.
   // Seeded from a create an earlier wizard left unresolved, so Launch retries it under its key.
@@ -318,21 +377,32 @@ export function SessionWizard({
     };
   }, [state.data.profile, groupsKey]);
 
-  // A custom agent's base comes from the profile the session is created in. Like Groups, a list
-  // is read only for the profile it was fetched for, so a switch never shows the last one as ready.
+  // A list is read only for the profile it was fetched for, and its `acp_create_ready` only for
+  // the live project; until the debounced fetch answers, Structured view stays available.
   const agentsProfile = state.data.profile || servedProfile;
   const agentsKey = agentsProfile ?? "";
-  const { agents, agentsStatus } = useMemo(() => agentsView(state, agentsKey), [state, agentsKey]);
+  const projectKey = state.data.scratch ? SCRATCH_PROJECT : state.data.path;
+  const [fetchProjectKey, setFetchProjectKey] = useState(projectKey);
+  useEffect(() => {
+    const delay = setTimeout(() => setFetchProjectKey(projectKey), PROJECT_FETCH_DELAY_MS);
+    return () => clearTimeout(delay);
+  }, [projectKey]);
+  const { agents, agentsStatus } = useMemo(
+    () => agentsView(state, agentsKey, projectKey),
+    [state, agentsKey, projectKey],
+  );
   useEffect(() => {
     let alive = true;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    const scratch = fetchProjectKey === SCRATCH_PROJECT;
+    const project = { path: scratch ? "" : fetchProjectKey, scratch };
     const load = (attempt: number) =>
-      void fetchProfileAgents(agentsProfile || undefined).then((list) => {
+      void fetchProfileAgents(agentsProfile || undefined, project).then((list) => {
         if (!alive) return;
         if (Array.isArray(list)) {
-          // The app-wide names describe the served profile, not the one being created in.
+          // The app-wide names describe the served profile; the project doesn't change them.
           if (agentsProfile === servedProfile) setAgentNames(list);
-          return dispatch({ type: "SET_AGENTS", agents: list, agentsFor: agentsKey });
+          return dispatch({ type: "SET_AGENTS", agents: list, agentsFor: agentsKey, agentsProject: fetchProjectKey });
         }
         const missing = list === "profile_not_found";
         dispatch({ type: "AGENTS_FAILED", agentsFor: agentsKey, missing });
@@ -343,7 +413,7 @@ export function SessionWizard({
       alive = false;
       clearTimeout(retry);
     };
-  }, [agentsProfile, agentsKey, servedProfile]);
+  }, [agentsProfile, agentsKey, servedProfile, fetchProjectKey]);
 
   useEffect(() => {
     const generations = defaultsGeneration;
@@ -439,9 +509,9 @@ export function SessionWizard({
     };
   }, [probePath]);
 
-  const directEdits = useRef({ sandboxEnabled: 0, useWorktree: 0 });
+  const directEdits = useRef({ sandboxEnabled: 0, useWorktree: 0, useWorkspace: 0 });
   const handleChange = useCallback((field: string, value: unknown) => {
-    if (field === "sandboxEnabled" || field === "useWorktree") directEdits.current[field]++;
+    if (field === "sandboxEnabled" || field === "useWorktree" || field === "useWorkspace") directEdits.current[field]++;
     dispatch({ type: "SET_FIELD", field, value });
   }, []);
 
@@ -456,8 +526,10 @@ export function SessionWizard({
     let cancelled = false;
     const delay = setTimeout(() => !cancelled && setShowProgress(true), PROGRESS_DELAY_MS);
     const poll = setInterval(() => {
-      void fetchCreateProgress(progressKey).then((p) => {
-        if (!cancelled && p) setProgress(p);
+      void fetchNewerProgress(progressKey).then((p) => {
+        if (cancelled || !p) return;
+        lastProgressRef.current = p;
+        setProgress(p);
       });
     }, PROGRESS_POLL_MS);
     return () => {
@@ -523,7 +595,7 @@ export function SessionWizard({
           commandMaps: commandMapsFromSettings(settings),
         });
         // The confirmation resets earlier edits, not choices made while this read was pending.
-        for (const field of ["sandboxEnabled", "useWorktree"] as const) {
+        for (const field of ["sandboxEnabled", "useWorktree", "useWorkspace"] as const) {
           if (directEdits.current[field] !== editsAtSelection[field]) {
             dispatch({ type: "SET_FIELD", field, value: latest[field] });
           }
@@ -576,6 +648,15 @@ export function SessionWizard({
   const runCreate = async (body: CreateSessionRequest, tool: string, resume?: PendingCreate, sent?: WizardData) => {
     // The last snapshot outlives the request: a failed hook's output tail comes from it.
     setProgress(null);
+    lastProgressRef.current = null;
+    try {
+      await sendCreate(body, tool, resume, sent);
+    } finally {
+      stopBackgroundPoll();
+    }
+  };
+
+  const sendCreate = async (body: CreateSessionRequest, tool: string, resume?: PendingCreate, sent?: WizardData) => {
     // A create can be sent twice: once, then again after a review that asks for no trust.
     for (let resend = 0; ; resend++) {
       setUnknownOutcome(null);
@@ -643,7 +724,7 @@ export function SessionWizard({
       } else if (background) {
         const failure = result.failure;
         if (failure && onReopenFailure && sent) {
-          const restored = { data: sent, failure };
+          const restored = { data: sent, failure, progress: lastProgressRef.current };
           const { title } = failureView(failure, { sandboxEnabled: restored.data.sandboxEnabled, runtimeDown: false });
           const reference = failure.reference ? ` Reference ${failure.reference.slice(0, 8)}… · in debug.log` : "";
           toastBus.handler?.action(`Session was not created: ${title}.${reference}`, "Reopen", () =>
@@ -676,7 +757,12 @@ export function SessionWizard({
   };
 
   // `overrides` and `runtimeUp` were dispatched in the same event, which `state` doesn't hold yet.
-  const handleSubmit = async (overrides: Partial<WizardData> = {}, runtimeUp = false) => {
+  // `skipOnCreate` stays out of the form, so a reopened or later Launch runs setup again.
+  const handleSubmit = async (
+    overrides: Partial<WizardData> = {},
+    runtimeUp = false,
+    { skipOnCreate = false }: { skipOnCreate?: boolean } = {},
+  ) => {
     dispatch({ type: "SUBMIT_START" });
     setRuntimeDown(false);
     if (unknownOutcome) {
@@ -697,10 +783,12 @@ export function SessionWizard({
     const body = {
       ...buildCreateRequest(
         d,
-        isAcpEligible(
+        structuredAvailable(
           d.tool,
           agents.find((a) => a.name === d.tool),
+          d,
         ),
+        { skipOnCreate },
       ),
       idempotency_key: newIdempotencyKey(),
     };
@@ -727,6 +815,15 @@ export function SessionWizard({
     return () => {
       backgroundRef.current = true;
       unmountedRef.current = true;
+      // A create still in flight reports its failure later, so keep its output tail current.
+      const key = progressKeyRef.current;
+      if (key) {
+        backgroundPollRef.current = setInterval(() => {
+          void fetchNewerProgress(key).then((p) => {
+            if (p && backgroundPollRef.current) lastProgressRef.current = p;
+          });
+        }, PROGRESS_POLL_MS);
+      }
       if (unknownOutcomeRef.current) releasePendingCreate(unknownOutcomeRef.current.body.idempotency_key);
     };
   }, []);
@@ -789,11 +886,26 @@ export function SessionWizard({
         await handleSubmit({}, true);
         return;
       }
-      case "launch_without_sandbox":
+      case "launch_without_sandbox": {
+        const sent = state.data;
+        const agent = agents.find((a) => a.name === sent.tool);
         handleChange("sandboxEnabled", false);
+        // On the host a missing adapter turns Structured into Terminal, so show that rather than send it.
+        if (
+          sent.useStructuredView &&
+          structuredAvailable(sent.tool, agent, sent) &&
+          !structuredAvailable(sent.tool, agent, { ...sent, sandboxEnabled: false })
+        ) {
+          // The box held focus and is gone, so focus the row that explains why nothing launched.
+          requestAnimationFrame(() =>
+            viewGroupRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus(),
+          );
+          return;
+        }
         // A relaunch, not a retry: handleSubmit sends it under a new key.
         await handleSubmit({ sandboxEnabled: false });
         return;
+      }
       case "change_image":
         setPanel("sandbox");
         return;
@@ -802,6 +914,11 @@ export function SessionWizard({
         return;
       case "try_again":
         await handleSubmit();
+        return;
+      case "create_without_setup":
+        // A new key: the server answers a reused key with the failed create's stored result.
+        await handleSubmit({}, false, { skipOnCreate: true });
+        return;
     }
   };
 
@@ -811,7 +928,9 @@ export function SessionWizard({
   };
 
   const d = state.data;
-  const failed = state.failure && failureView(state.failure, { sandboxEnabled: d.sandboxEnabled, runtimeDown });
+  const failed =
+    state.failure &&
+    failureView(state.failure, { sandboxEnabled: d.sandboxEnabled, runtimeDown, canSkipSetup: !nameOnly });
   // A scratch session has no project whose overrides could be unknown.
   const projectUnresolved = registryUnresolved && !d.scratch && !d.importAcpSessionId;
   // Only the Yolo row needs the agent list, and a name-only form has none.
@@ -824,10 +943,14 @@ export function SessionWizard({
   const resendBlocked = (action: FailureAction) => {
     if (action === "change_image" || action === "choose_project") return false;
     // Retry checks the runtime itself, and Launch without Sandbox doesn't need it.
-    return !canResend || (action === "try_again" && d.sandboxEnabled && !state.dockerChecked);
+    const resendsSandbox = action === "try_again" || action === "create_without_setup";
+    return !canResend || (resendsSandbox && d.sandboxEnabled && !state.dockerChecked);
   };
   const selectedAgent = agents.find((a) => a.name === d.tool);
   const acpCapable = isAcpEligible(d.tool, selectedAgent);
+  // `agents` is the list loaded for the selected Profile and project, whose hooks `acp_create_ready` counts.
+  const adapterMissing = acpCapable && acpAdapterMissing(selectedAgent, d);
+  const structuredOn = acpCapable && !adapterMissing && d.useStructuredView;
   const isHostOnly = selectedAgent?.host_only ?? false;
   const hostOnlyReason = `${d.tool} runs on the host only`;
   const worktreeBlocked = d.scratch
@@ -837,14 +960,15 @@ export function SessionWizard({
       : isHostOnly
         ? hostOnlyReason
         : null;
+  const sandboxCue = failed?.row === "sandbox" ? failed.cue : null;
   const sandboxBlocked = isHostOnly
     ? hostOnlyReason
     : !state.dockerAvailable
       ? `${state.dockerRuntimeName ?? "Container runtime"} is not running`
       : null;
+  const imageStatus = useSandboxImageRowStatus(d.sandboxImage, defaultsReady && d.sandboxEnabled && !sandboxBlocked);
   // Locked on without touching the stored value, so another agent gets it back.
-  const alwaysYolo =
-    (acpCapable && d.useStructuredView ? selectedAgent?.acp_always_yolo : selectedAgent?.always_yolo) === true;
+  const alwaysYolo = (structuredOn ? selectedAgent?.acp_always_yolo : selectedAgent?.always_yolo) === true;
   const agentCustomized = !!(d.extraArgs || d.commandOverride || d.customInstruction);
   const openPanel = (next: Panel) => () => setPanel(next);
   const effectiveProfile = d.profile || servedProfile;
@@ -978,10 +1102,16 @@ export function SessionWizard({
           <SegmentedRow
             label="View"
             testId="wizard-view-row"
-            value={acpCapable && d.useStructuredView ? "structured" : "terminal"}
+            groupRef={viewGroupRef}
+            value={structuredOn ? "structured" : "terminal"}
             onChange={(v) => handleChange("useStructuredView", v === "structured")}
             options={[
-              { value: "structured", label: "Structured", name: "Structured view", disabled: !acpCapable },
+              {
+                value: "structured",
+                label: "Structured",
+                name: "Structured view",
+                disabled: !acpCapable || adapterMissing,
+              },
               { value: "terminal", label: "Terminal", name: "Terminal view" },
             ]}
             summary={
@@ -991,9 +1121,11 @@ export function SessionWizard({
                   : selectedAgent?.kind === "custom"
                     ? "needs agent_acp_cmd"
                     : "no ACP adapter, terminal only"
-                : d.useStructuredView
-                  ? "plan, tool calls and diffs as cards"
-                  : "the Agent's own terminal UI"
+                : adapterMissing
+                  ? "ACP adapter not installed"
+                  : d.useStructuredView
+                    ? "plan, tool calls and diffs as cards"
+                    : "the Agent's own terminal UI"
             }
           />
         )}
@@ -1034,10 +1166,14 @@ export function SessionWizard({
           disabled={!!sandboxBlocked && !d.sandboxEnabled}
           highlight={failed?.row === "sandbox" ? "error" : undefined}
           summary={
-            <>
-              {failed?.row === "sandbox" && <span className="text-status-error">{failed.cue} · </span>}
-              {sandboxBlocked ?? (d.sandboxEnabled ? d.sandboxImage || "default image" : "run on the host")}
-            </>
+            sandboxBlocked == null && d.sandboxEnabled ? (
+              <SandboxImageSummary cue={sandboxCue} status={imageStatus} image={d.sandboxImage} />
+            ) : (
+              <>
+                {sandboxCue && <span className="text-status-error">{sandboxCue} · </span>}
+                {sandboxBlocked ?? "run on the host"}
+              </>
+            )
           }
           onConfigure={!sandboxBlocked && d.sandboxEnabled ? openPanel("sandbox") : undefined}
         />

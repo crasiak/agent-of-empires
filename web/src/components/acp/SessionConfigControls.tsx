@@ -46,6 +46,12 @@ function findByCategory(
   return options.find((o) => o.category === category);
 }
 
+/** Fast mode and Ultracode arrive as `model_config` selects with exactly on/off choices. */
+function isModelConfigToggle(option: ConfigOptionDescriptor): boolean {
+  const values = option.options.map((o) => o.value).sort();
+  return option.category === "model_config" && values.length === 2 && values[0] === "off" && values[1] === "on";
+}
+
 /** Reuses the config-option dropdown so the provider pick gets its placement,
  *  keyboard handling and pending state for free. While unpinned the list leads
  *  with a non-selectable entry naming that state: the dropdown already refuses
@@ -74,8 +80,9 @@ export function SessionConfigControls({
 }: Props) {
   const model = findByCategory(configOptions, "model");
   const effort = findByCategory(configOptions, "thought_level");
+  const toggles = configOptions.filter(isModelConfigToggle);
 
-  if (!model && !effort && !onSetProvider) return null;
+  if (!model && !effort && toggles.length === 0 && !onSetProvider) return null;
 
   return (
     <div data-testid="session-config-controls" className="flex flex-wrap items-center gap-1.5">
@@ -93,6 +100,14 @@ export function SessionConfigControls({
           onSelect={(value) => onSetConfigOption(effort.id, value)}
         />
       )}
+      {toggles.map((toggle) => (
+        <ModelConfigToggle
+          key={toggle.id}
+          option={toggle}
+          pending={pendingConfigOption?.configId === toggle.id ? pendingConfigOption.value : null}
+          onSelect={(value) => onSetConfigOption(toggle.id, value)}
+        />
+      ))}
       {onSetProvider && (
         <ModelDropdown
           option={providerDescriptor(provider)}
@@ -117,9 +132,12 @@ interface SubProps {
 interface MenuLayout {
   direction: "up" | "down";
   maxHeight: number;
+  left: number;
+  top?: number;
+  bottom?: number;
 }
 
-const DEFAULT_MENU_LAYOUT: MenuLayout = { direction: "up", maxHeight: MENU_MAX_HEIGHT_CAP };
+const DEFAULT_MENU_LAYOUT: MenuLayout = { direction: "up", maxHeight: MENU_MAX_HEIGHT_CAP, left: 0 };
 
 /** Open upward when a floor's worth of room exists, else toward the roomier side.
  *  Uses the visual viewport: iOS `innerHeight` ignores the keyboard, and a zoom offset
@@ -139,7 +157,12 @@ function computeMenuLayout(rect: DOMRect, viewportHeight: number, viewportTop = 
     direction = "up";
     available = spaceAbove;
   }
-  return { direction, maxHeight: Math.max(0, Math.min(MENU_MAX_HEIGHT_CAP, available)) };
+  return {
+    direction,
+    maxHeight: Math.max(0, Math.min(MENU_MAX_HEIGHT_CAP, available)),
+    left: rect.left,
+    ...(direction === "up" ? { bottom: window.innerHeight - rect.top + 4 } : { top: rect.bottom + 4 }),
+  };
 }
 
 function ModelDropdown({ option, pending, onSelect, lockedReason }: SubProps) {
@@ -218,7 +241,7 @@ function ModelDropdown({ option, pending, onSelect, lockedReason }: SubProps) {
     if (!open) return;
     const vv = typeof window !== "undefined" ? window.visualViewport : null;
     const recompute = () => {
-      const rect = ref.current?.getBoundingClientRect();
+      const rect = triggerRef.current?.getBoundingClientRect();
       if (!rect) return;
       setMenuLayout(computeMenuLayout(rect, vv?.height ?? window.innerHeight, vv?.offsetTop ?? 0));
     };
@@ -278,11 +301,13 @@ function ModelDropdown({ option, pending, onSelect, lockedReason }: SubProps) {
         <div
           id={menuId}
           onKeyDown={onMenuKeyDown}
-          className={[
-            "absolute left-0 z-30 flex w-64 flex-col overflow-hidden rounded-md border border-surface-700 bg-surface-850 shadow-xl",
-            menuLayout.direction === "up" ? "bottom-full mb-1" : "top-full mt-1",
-          ].join(" ")}
-          style={{ maxHeight: menuLayout.maxHeight }}
+          className="fixed z-30 flex w-64 flex-col overflow-hidden rounded-md border border-surface-700 bg-surface-850 shadow-xl"
+          style={{
+            maxHeight: menuLayout.maxHeight,
+            left: menuLayout.left,
+            top: menuLayout.top,
+            bottom: menuLayout.bottom,
+          }}
         >
           <div className="shrink-0 border-b border-surface-800 px-3 py-1.5 text-[10px] uppercase tracking-wider text-text-dim">
             {option.name}
@@ -361,6 +386,33 @@ function EffortControl(props: SubProps) {
     option.options.length <= EFFORT_SEGMENTED_MAX_COUNT &&
     totalLabelLen <= EFFORT_SEGMENTED_MAX_TOTAL_LABEL_LEN;
   return useSegmented ? <EffortSegmented {...props} /> : <ModelDropdown {...props} />;
+}
+
+/** Shows the confirmed value; a rejected flip never shows as on. */
+function ModelConfigToggle({ option, pending, onSelect }: SubProps) {
+  const isOn = option.current_value === "on";
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={isOn}
+      aria-label={option.name}
+      disabled={pending !== null}
+      onClick={() => void onSelect(isOn ? "off" : "on")}
+      title={option.description ?? `${option.name}: ${isOn ? "On" : "Off"}`}
+      data-testid={`config-option-${option.id}`}
+      className={[
+        "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors",
+        isOn
+          ? "border-brand-600/60 bg-brand-600/20 text-text-primary"
+          : "border-surface-700 bg-surface-800/60 text-text-secondary hover:text-text-primary",
+        pending !== null ? "cursor-not-allowed opacity-50" : "",
+      ].join(" ")}
+    >
+      {option.name}
+      <span className="text-[10px] uppercase">{pending !== null ? "…" : isOn ? "On" : "Off"}</span>
+    </button>
+  );
 }
 
 function EffortSegmented({ option, pending, onSelect }: SubProps) {

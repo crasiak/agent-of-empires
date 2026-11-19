@@ -105,7 +105,7 @@ or confirmed absent. A failed container removal retains them for retry.
 
 ## Environment Variables
 
-Each `environment` entry is a bare `KEY` (pass the host value through) or `KEY=VALUE`. A value starting with `$` reads a host variable (`$$` escapes a literal `$`), so secrets can live in your shell profile rather than in `config.toml`; an unset variable is skipped. Keys must match `[A-Za-z_][A-Za-z0-9_]*`; anything else is dropped with a warning.
+Each `environment` entry is a bare `KEY` (pass the host value through) or `KEY=VALUE`. A value starting with `$` reads a host variable (`$$` escapes a literal `$`), so secrets can live in your shell profile rather than in `config.toml`; an unset variable is skipped. Keys must match `[A-Za-z_][A-Za-z0-9_]*`; anything else is dropped with a warning. A `KEY=VALUE` literal reaches only the container, through an env-file, so it cannot contain a newline.
 
 ```toml
 [sandbox]
@@ -137,9 +137,9 @@ Two official images are available:
 
 Use the dev image per session with `aoe add --sandbox-image ghcr.io/agent-of-empires/aoe-dev-sandbox:latest .`, or set `[sandbox] default_image`.
 
-When a newer version of the image a Sandbox uses is published, the web dashboard shows a **Sandbox image update available** banner at the top (while update checks are on, `[updates] update_check_mode`). **Update now** pulls it on the host with your `container_runtime`, as the daemon user, and the banner follows the pull to its outcome. When the dashboard can't pull (`allow_image_pull = false`, read-only or CityHall mode), the banner shows the pull command to run instead. The check is cached, so the banner can take up to an hour to appear after a release.
+When a newer version of the image a Sandbox uses is published, the web dashboard shows a **Sandbox image update available** banner at the top (while update checks are on, `[updates] update_check_mode`). **Update now** pulls it on the host with your `container_runtime`, as the daemon user, and the banner follows the pull to its outcome. When the dashboard can't pull (`allow_image_pull = false`, read-only or CityHall mode), the banner shows the pull command to run instead. The check is cached, so the banner can take up to an hour to appear after a release. A create request can also pull the latest image first, under the same rules (`pull_latest_image`, see [POST /api/sessions](../api.md#post-apisessions)).
 
-A session keeps the container it was created with, so pulling a newer image only affects new sessions. To move an existing sandboxed session onto the current local image, open its context menu in the web dashboard and choose **More > Recreate container**. The container is removed and the session restarts on a new one: anything outside the working directory and the mounted folders is lost, including tools installed inside the container, and a running turn stops.
+A session keeps the container it was created with, so pulling a newer image only affects new sessions. To move an existing sandboxed session onto the current local image, open its context menu in the web dashboard and choose **More > Recreate container**, or use **Recreate container** on the structured view's [adapter error screen](../structured-view/troubleshooting.md#an-adapter-is-missing-or-too-old). The container is removed and the session restarts on a new one: anything outside the working directory and the mounted folders is lost, including tools installed inside the container, and a running turn stops.
 
 ## Custom Docker Images
 
