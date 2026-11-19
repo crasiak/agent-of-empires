@@ -1,7 +1,7 @@
 # Marks, bulk actions and Breakout windows
 
 **Date:** 2026-11-19
-**Status:** Design approved in chat 2026-11-19. Not yet planned or implemented.
+**Status:** Design approved in chat 2026-11-19. Amended the same day after code research (see "Amendments"). Not yet implemented.
 **Repo:** agent-of-empires (crasiak fork, branch `multi-window-aoe`).
 
 ## Goal
@@ -49,13 +49,14 @@ Each phase is usable on its own and lands as its own PR.
 
 - `Space` toggles the Mark on the cursor row. `Space` is unbound in the sidebar today.
 - `Space` on a Group header marks every Session that Group currently shows (respecting active filters, including rows hidden only by collapse). If all of them are already marked, it unmarks them.
-- `Shift+Up` / `Shift+Down` moves the cursor one row and marks both the row left and the row reached. This replaces the current ten-row jump on those chords. `PageUp` / `PageDown` already page the list, so the ten-row jump is removed rather than rebound.
-- `Esc` clears the Marked set when no dialog or overlay is open and the set is non-empty. Existing `Esc` behaviour applies otherwise.
+- `Shift+Up` / `Shift+Down` moves the cursor one row and marks both the row left and the row reached. This replaces the current ten-row jump on those chords. `PageUp` / `PageDown` and `{` / `}` already jump ten rows, so nothing is lost.
+- `Esc` clears the Marked set when no dialog or overlay is open and the set is non-empty. It runs after the existing sidebar `Esc` steps (clear an active highlight filter, clear a committed search, leave Tool view), so each press undoes one thing.
+- Marking does nothing on a trashed row, the creating stub, or the Archived and Trash headers.
 - All four are registered in `src/tui/home/bindings.rs` so they appear in help and the palette and follow strict-mode rules.
 
 **Lifetime.** Marks survive sorting, filtering, grouping changes and collapsing. A Mark is dropped when its Session is trashed, purged or no longer present after a reload. Marks are cleared after a bulk action is submitted.
 
-**Rendering.** A marked row shows a marker glyph in the row gutter and a distinct style from the theme. While the Marked set is non-empty the footer shows `N marked`, plus `(M hidden)` when some marked rows are not visible, and lists the keys that are in bulk mode.
+**Rendering.** A marked row shows a single-width marker glyph in a gutter column, drawn in the theme's existing accent colour (no new theme colour). While the Marked set is non-empty the sidebar title shows `N marked`, plus `(M hidden)` when some marked rows are not visible. The title is used because the footer hint area is replaced by flash messages and filter summaries and can be turned off. The footer additionally shows a hint group for the bulk keys when it is visible.
 
 ## 1b. Bulk action framework and bulk send
 
@@ -64,38 +65,41 @@ Each phase is usable on its own and lands as its own PR.
 **Entry points.**
 
 - While the Marked set is non-empty, the send key (`m`, `M` in strict mode) and the restart key (`e` / `E` / `F5`) act on the Marked set. Every other key keeps acting on the cursor row.
-- A new key opens a "N marked" menu listing the bulk actions. Proposed: `x`; the plan confirms it is free in both modes.
+- `K` opens a "N marked" menu listing the bulk actions. (`x` is Stop. `J`, `K` and `Q` are the only letters free in both key modes.)
+- With Marks present, the restart key goes straight to the bulk confirm instead of the restart-options dialog, because per-session overrides do not apply to a bulk restart.
 - The same actions are in the command palette and the right-click context menu when the Marked set is non-empty.
 
 **Bulk send.**
 
-- The existing compose dialog opens, titled `Send to N sessions`, and lists skipped Sessions with reasons.
-- The target is always the agent pane, whatever the current view mode.
-- Skipped: no live agent pane; archived or trashed; Status Creating or Deleting; waiting on a permission prompt (typed text could answer the prompt).
-- Delivery reuses the existing per-session prepare-then-deliver path (`finish_send` and the daemon-confirmed lease), one Session after another. A failure for one Session does not stop the rest.
+- The existing compose dialog opens, titled `Send to N sessions`, with a one-line note of how many Sessions are skipped. `K` shows the full skip list with reasons.
+- The target is always the agent, whatever the current view mode.
+- Skipped: no live agent pane; archived or trashed; Status Creating or Deleting; waiting on a permission prompt or approval (typed text could answer the prompt).
+- Delivery does not use the TUI's interactive send path, which holds one pending send tied to the cursor row. A background worker calls the daemon's send endpoints, the ones `aoe send` uses: `send_message` for terminal Sessions and `prompt` for structured-view Sessions, both with revive off so a dead pane fails instead of being started. Sessions are sent one after another. A failure for one Session does not stop the rest.
 - When all deliveries finish, the TUI shows `Sent to X` or, on any failure, a dialog listing each failed Session and its error.
-- Open item for the plan: confirm how a structured-view (ACP) Session receives a message on this path. If it cannot, it is skipped with its own reason.
 
 ## 1c. Bulk restart
 
-- A confirm dialog shows the marked Sessions grouped by Status (for example `3 idle, 2 running`) and the skipped ones with reasons. Choices: `Restart all`, `Restart idle only`, `Cancel`.
+- A confirm dialog shows the marked Sessions grouped by Status (for example `3 idle, 2 running`) and the skipped ones with reasons. Choices: `Restart` and `Cancel`, with an `Idle only` checkbox (unchecked by default). The confirm dialog type has two buttons plus checkboxes; this avoids a new dialog type.
 - Skipped: archived, trashed, Creating, Deleting, restart already in flight, snoozed under Attention sort (same rules as the single restart).
 - Each restart is the existing plain restart with no overrides (`RestartSessionBody` with no profile, tool, args or command override). The Session therefore keeps its stored profile, tool, extra args, command override and Ledger launch, and resumes its conversation when `auto_resume_on_restart` is on. The configured wake message applies as it does for a single restart.
 - Restarts are staggered: at most two in flight. The rest wait in a TUI-side queue that submits the next restart when one completes or is refused. Quitting the TUI abandons the unsent remainder.
-- Rows show the existing restarting state. A summary reports successes, refusals and failures when the queue drains.
-- The single-restart guards (cooldown, in-flight set, shelved refusal) are reused per Session by extracting the body of `restart_selected_session_with_wake` into a function that takes a session id.
+- Rows show the existing Starting status. A summary reports successes, refusals and failures when the queue drains. The daemon reports no per-session success for a plain restart, so success means the restart left the pending set with no error recorded for that Session.
+- The single-restart guards (cooldown, in-flight set) are reused per Session by extracting the body of `restart_selected_session_with_wake` into a function that takes a session id and returns what happened.
 
 ## 2. Breakout
 
 ### Shared pieces
 
-- **Surface command.** Each surface runs `aoe session attach <id>` (`--profile` as needed), which exists today. tmux allows several clients on one tmux session, so the aoe preview and a Breakout window can show the same Session; tmux sizes the window to the smallest attached client.
+- **Surface command.** Each surface runs `<current aoe binary> --profile <profile> session attach <id>`. The binary path is the running aoe's own executable, so a dev build attaches in its own namespace. Remote Breakout uses `aoe` on the host's ssh PATH.
+- **Sizing.** aoe sets tmux `window-size latest`, so a tmux session follows its most recently active client; the home preview is not a tmux client and stops resizing a Session once a client is attached. `aoe session attach` gains the same size reset the TUI attach already does, so a Breakout window does not open stuck at the preview's size. If the same Session is also attached in the aoe TUI, the two clients trade size as each becomes active.
+- **Eligibility.** Skipped: structured-view Sessions (the CLI cannot attach them), Sessions with no live agent pane, archived or trashed, Creating or Deleting.
 - **Breakout request.** A small serialisable value: the ordered session ids with their Titles and profiles, the layout (`windows` or `splits`), and the host the Sessions run on. Local and remote Breakout both produce this value; only the transport differs.
 - **Grid.** A pure function maps a count and a screen rectangle to cell rectangles: 2 side by side, 3 in columns, 4 as 2x2, 5 and 6 as 3x2, 7 to 9 as 3x3. More than 6 Sessions asks for confirmation; more than 9 is refused.
 - **Driver.** A Ghostty driver turns a Breakout request into AppleScript and runs it with `osascript`. Script generation is a pure function with unit tests; running it is a thin wrapper.
 - **Tracking.** aoe records the ids of the windows it opened so a `Close breakout windows` action can close them. A window also closes when its attach exits.
 - **Availability.** Breakout is offered only on macOS with Ghostty present, or when a Breakout agent socket is reachable. Otherwise the action reports that it is unsupported.
-- **Setting.** `breakout.layout = "windows" | "splits"`, default `windows`.
+- **Setting.** A new `[breakout]` config section shown on the existing Interaction settings tab, TUI only: `layout = "windows" | "splits"`, default `windows`.
+- **Platform.** The Ghostty driver is macOS-only code and must sit behind a `target_os = "macos"` gate so the macOS CI leg covers it.
 
 ### 2a. Separate windows (default)
 
@@ -123,7 +127,7 @@ When aoe runs on bender and is viewed over ssh, the TUI cannot run AppleScript o
 
 ### Stretch
 
-When every Session in a Breakout shares one Group, collapse that Group in the sidebar. Controlled by a setting, default off.
+When every Session in a Breakout shares one Group, collapse that Group in the sidebar. Controlled by a setting, default off. There are three grouping modes (Manual, Project, Org); single-profile Manual collapse is a daemon change that can be refused, in which case the Group stays open.
 
 ## Error handling
 
@@ -137,3 +141,12 @@ When every Session in a Breakout shares one Group, collapse that Group in the si
 - TUI harness (`src/tui/home/tests`): key retargeting while marked, `Esc` clearing, dialog contents, footer text, single-session behaviour unchanged when nothing is marked.
 - Agent: socket round-trip with a fake driver; rejection of malformed or disallowed requests.
 - Manual: Ghostty window creation and tiling locally; Breakout from bender to the laptop.
+
+## Amendments (2026-11-19, after code research)
+
+- Bulk send goes through the daemon send endpoints from a background worker, not the TUI's interactive send path. Structured-view Sessions are included.
+- Bulk restart confirm is two buttons plus an `Idle only` checkbox.
+- The bulk menu key is `K`, not `x`.
+- `Esc` clears Marks after the existing sidebar `Esc` steps.
+- `N marked` lives in the sidebar title; the marker reuses the accent colour.
+- Breakout: tmux sizing follows the latest client, `aoe session attach` resets sizing first, structured-view Sessions are skipped, the surface command uses the running binary's path, the setting is a `[breakout]` section on the Interaction tab, and the stretch covers three grouping modes.
