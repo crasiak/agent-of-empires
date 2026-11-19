@@ -923,6 +923,13 @@ impl ToolSession {
             args.extend(["-y".to_string(), height.to_string()]);
         }
 
+        // Per-pane routing context overrides both caller and tmux-server inheritance.
+        for (key, value) in [
+            ("AOE_SESSION_ID", instance_id),
+            ("AOE_PROFILE", profile),
+        ] {
+            args.extend(["-e".to_owned(), format!("{key}={value}")]);
+        }
         args.push(command.to_string());
 
         let target = format!("={}:", self.name);
@@ -992,6 +999,56 @@ mod tests {
 
     /// A session id long enough that `truncate_id(.., 8)` truncates.
     const ID: &str = "abc12345deadbeef";
+
+    #[test]
+    #[serial_test::serial]
+    fn tool_routing_environment_is_literal_and_overrides_inheritance() {
+        use crate::session::test_support::{isolate_app_dir, EnvGuard};
+        use crate::tmux::test_helpers::{tmux_available, wait_for_pane_command, only_pane_id};
+        if !tmux_available() { return; }
+        let _home = isolate_app_dir();
+        let _env = EnvGuard::set(&[
+            ("AOE_SESSION_ID", "inherited-wrong-id"),
+            ("AOE_PROFILE", "inherited-wrong-profile"),
+            ("AOE_DAEMON_URL", "https://unrelated.invalid"),
+            ("AOE_DAEMON_TOKEN", "unrelated-secret"),
+        ]);
+        let unique = TmuxTestSession::new("tool_context");
+        let sentinel = TmuxTestSession::new("tool_context_server");
+        assert!(crate::tmux::tmux_command().args(["new-session", "-d", "-s", sentinel.name(), "sleep 600"]).status().unwrap().success());
+        struct ServerEnv(Vec<(String, Option<String>)>);
+        impl Drop for ServerEnv {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    let mut command = crate::tmux::tmux_command();
+                    command.args(["set-environment", "-g"]);
+                    match value {
+                        Some(value) => { command.args([key, value]); }
+                        None => { command.args(["-u", key]); }
+                    }
+                    let _ = command.status();
+                }
+            }
+        }
+        let mut server_env = ServerEnv(Vec::new());
+        for key in ["AOE_SESSION_ID", "AOE_PROFILE", "AOE_DAEMON_URL", "AOE_DAEMON_TOKEN"] {
+            let old = crate::tmux::tmux_command().args(["show-environment", "-g", key]).output().unwrap();
+            let old = String::from_utf8(old.stdout).unwrap();
+            server_env.0.push((key.into(), old.trim_end_matches('\n').split_once('=').map(|(_, value)| value.into())));
+            assert!(crate::tmux::tmux_command().args(["set-environment", "-g", key, "server-conflict"]).status().unwrap().success());
+        }
+        let name = ToolSession::generate_name(ID, unique.name(), "annotate");
+        let guard = TmuxTestSession::from_name(&name);
+        let tool = ToolSession { name };
+        let profile = "literal ' \" $() ; profile";
+        tool.create_with_size("/tmp", "sleep 600", None, profile, ID, "annotate").unwrap();
+        wait_for_pane_command(&only_pane_id(guard.name()), "sleep");
+        for (key, value) in [("AOE_SESSION_ID", ID), ("AOE_PROFILE", profile), ("AOE_DAEMON_URL", "server-conflict"), ("AOE_DAEMON_TOKEN", "server-conflict")] {
+            let output = crate::tmux::tmux_command().args(["show-environment", "-t", guard.name(), key]).output().unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("{key}={value}\n"));
+        }
+    }
 
     fn legacy_metadata() -> crate::tmux::PaneMetadata {
         crate::tmux::PaneMetadata {

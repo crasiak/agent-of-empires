@@ -30,6 +30,26 @@ background = true
 
 Non-ASCII hotkeys are case-sensitive and depend on terminal Alt support; ASCII is more portable. Invalid bindings appear in a startup or reload dialog; the tool remains in the picker and palette. When bindings collide, the alphabetically-first tool name wins. Tool hotkeys precede built-in home bindings.
 
+## Plannotator feedback (opt-in)
+
+Install [plannotator-tui v0.10.0 or later](https://github.com/plannotator/plannotator-tui#install) on the host, with `aoe` on its `PATH`, then add this ordinary foreground Tool:
+
+```toml
+[tools.annotate]
+command = '''env -u AOE_DAEMON_URL -u AOE_DAEMON_TOKEN -u AOE_DAEMON_PASSPHRASE -u AOE_DASHBOARD_URL PLANNOTATOR_TUI_DELIVER_CMD='aoe --profile "$AOE_PROFILE" send --exact --stdin --no-revive --require-idle "$AOE_SESSION_ID"' plannotator-tui .'''
+hotkey = "Alt+a"
+```
+
+Select a Session and press `Alt+a` to annotate its folder. AoE binds the full original Session ID and profile to that Tool pane, so feedback targets that exact Session even if you navigate elsewhere or rename it. These environment values are routing context, not authentication. Tools run on the local host, including for sandboxed agents. This opt-in command clears inherited remote Daemon endpoints and credentials so the callback uses the host's local Daemon; other Tools keep their existing environment.
+
+Feedback must be UTF-8 and at most 128 KiB. Exact delivery requires a non-empty explicit profile; it never falls back to the default profile.
+
+Structured-view Sessions keep normal typed prompt queue/steer delivery. Terminal delivery requires a unique pane-scoped launch report for Claude, Codex or Pi, a foreground executable basename matching that agent, no command override, and fresh visible input-ready evidence. Generic `node`, `python` and wrapper foreground names are refused; use the clipboard fallback even if they run a supported agent. Legacy or unreported panes, ambiguous ownership, running agents, observed approval/question dialogs and viewers, unknown screens, startup and dead/stopped panes are refused. It never revives the Session.
+
+These report and process-name checks are routing safety observations, not authentication. The guard serializes AoE input but cannot freeze an autonomous agent UI between observation and delivery. It is not tool approval and does not grant permissions.
+
+On delivery failure, notes remain in Plannotator. Retry after resolving the refusal, or copy them and paste manually into the intended agent. Do not discard notes until delivery succeeds. A terminal without a supported launch report or visible idle evidence requires this clipboard fallback.
+
 ## Using tools
 
 Open a tool through its hotkey, the `;` picker (arrows or `j`/`k`, then `Enter`), or `Ctrl+K` **Open tool: <name>**. Background entries use **Run: <name>**. `;` or `Esc` closes the picker.

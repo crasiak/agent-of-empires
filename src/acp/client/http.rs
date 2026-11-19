@@ -381,12 +381,26 @@ impl HttpClient {
         message: &str,
         no_revive: bool,
     ) -> Result<(), HttpError> {
+        self.send_message_with_idle_guard(session_id, message, no_revive, false).await
+    }
+
+    /// Opt-in terminal safety guard; structured prompts use the typed prompt route.
+    pub async fn send_message_with_idle_guard(
+        &self,
+        session_id: &str,
+        message: &str,
+        no_revive: bool,
+        require_idle: bool,
+    ) -> Result<(), HttpError> {
         let url = format!(
             "{}/api/sessions/{}/send",
             self.endpoint.base_url,
             path_segment(session_id)?
         );
-        let body = serde_json::json!({ "message": message, "revive": !no_revive });
+        let mut body = serde_json::json!({ "message": message, "revive": !no_revive });
+        if require_idle {
+            body["require_idle"] = serde_json::Value::Bool(true);
+        }
         let res = self
             .execute(self.http.post(&url).json(&body).timeout(SEND_TIMEOUT))
             .await?;

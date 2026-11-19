@@ -563,6 +563,19 @@ impl Manifest {
             .is_some_and(|r| r.matches(screen, hook, &self.prompt_marker, &self.markers))
     }
 
+    pub(super) fn input_ready(&self, screen: &Screen, input_rules: &[&str]) -> bool {
+        let matches = |rule: &Rule| {
+            !rule.is_hook && rule.matches(screen, None, &self.prompt_marker, &self.markers)
+        };
+        self.rules.iter().any(|rule| input_rules.contains(&rule.id.as_str()) && matches(rule))
+            && !self.rules.iter().any(|rule| {
+                !input_rules.contains(&rule.id.as_str())
+                    && (rule.skip_state_update
+                        || matches!(rule.state, Some(Status::Waiting | Status::Running | Status::Error)))
+                    && matches(rule)
+            })
+    }
+
     /// The deciding rule: descending priority; positional peers of equal priority
     /// are evaluated together and the lowest match wins.
     pub(super) fn evaluate(&self, screen: &Screen, hook: Option<HookObservation>) -> Option<&Rule> {
