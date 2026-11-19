@@ -1006,10 +1006,8 @@ mod send_output_tests {
                     .success());
                 if duplicate {
                     let duplicate_received = root.path().join(format!("{}.duplicate", row.id));
-                    let duplicate_command = format!(
-                        "exec {input_reader} > '{}'",
-                        duplicate_received.display()
-                    );
+                    let duplicate_command =
+                        format!("exec {input_reader} > '{}'", duplicate_received.display());
                     let output = crate::tmux::tmux_command()
                         .args([
                             "split-window",
