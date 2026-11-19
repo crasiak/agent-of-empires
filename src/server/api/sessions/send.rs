@@ -22,6 +22,7 @@ fn default_revive() -> bool {
 }
 
 /// Terminal delivery failures shared by HTTP and plugin callers.
+#[derive(Debug)]
 pub(crate) enum SendKeysError {
     NotFound,
     NotRunning,
@@ -1096,16 +1097,9 @@ mod send_output_tests {
                 true,
                 &mut None,
             )
-            .await
-            .map_err(|error| TerminalSendError {
-                error,
-                committed_cursor: None,
-            }.into_response());
+            .await;
             if admitted {
-                if let Err(response) = result {
-                    let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
-                    panic!("guard refused admitted input: {}", String::from_utf8_lossy(&body));
-                }
+                result.expect("guard must admit positively observed input");
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 loop {
                     if std::fs::read_to_string(&received).unwrap_or_default() == "literal;\n" {
@@ -1118,7 +1112,10 @@ mod send_output_tests {
                     tokio::task::yield_now().await;
                 }
             } else {
-                let response = result.expect_err("guard must refuse");
+                let response = TerminalSendError {
+                    error: result.expect_err("guard must refuse"),
+                    committed_cursor: None,
+                }.into_response();
                 assert_eq!(response.status(), StatusCode::CONFLICT);
                 let body = axum::body::to_bytes(response.into_body(), 4096)
                     .await
