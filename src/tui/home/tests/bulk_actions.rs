@@ -1179,3 +1179,48 @@ fn the_preview_header_says_a_session_is_in_a_breakout_window() {
         "the selected Session is broken out"
     );
 }
+
+#[test]
+#[serial]
+fn a_session_stopped_while_its_breakout_opens_gets_no_marker_and_its_window_closes() {
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    make_sendable(&mut env);
+    let ids = env.view.marked_in_view_order();
+    env.view.start_breakout();
+    assert!(env.view.breakout_job.is_some(), "the open job is running");
+
+    let _respond = env.view.session_feed.command_driver_for_test();
+    assert!(env.view.submit_daemon_stop(&ids[0]).unwrap());
+    assert_eq!(
+        env.view.breakout_close_queue.len(),
+        1,
+        "queued behind the open"
+    );
+    assert!(crate::breakout::title_is_for(
+        &env.view.breakout_close_queue[0],
+        &ids[0]
+    ));
+
+    assert!(env.view.tick_breakout());
+    assert!(!env.view.is_broken_out(&ids[0]), "no stale marker");
+    assert!(env.view.is_broken_out(&ids[1]));
+    assert!(env.view.breakout_close_queue.is_empty());
+    assert!(
+        env.view.breakout_session_close_job.is_some(),
+        "the queued close runs after the open lands"
+    );
+}
+
+#[test]
+#[serial]
+fn a_finished_open_skips_titles_already_queued_to_close() {
+    let mut env = create_test_env_with_sessions(1);
+    let (tx, rx) = std::sync::mpsc::channel();
+    env.view.breakout_job = Some(rx);
+    env.view.breakout_close_queue.push("t0".into());
+    tx.send(Ok(breakout_outcome(2, None))).unwrap();
+    assert!(env.view.tick_breakout());
+    assert_eq!(env.view.breakout_titles, ["t1"]);
+}

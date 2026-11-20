@@ -98,6 +98,10 @@ impl HomeView {
             .keys()
             .map(|id| crate::breakout::id_prefix(id))
             .collect();
+        self.breakout_opening_titles = crate::breakout::request::surfaces(&request, "")
+            .into_iter()
+            .map(|surface| surface.title)
+            .collect();
         self.breakout_job = Some(spawn_open(request, keep));
         self.flash_status("Opening breakout windows...");
     }
@@ -123,10 +127,19 @@ impl HomeView {
             .into_iter()
             .partition(|title| crate::breakout::title_is_for(title, session_id));
         self.breakout_titles = kept;
-        if gone.is_empty() {
+        // A window still being opened closes once the open job lands.
+        let opening = self
+            .breakout_opening_titles
+            .iter()
+            .filter(|title| crate::breakout::title_is_for(title, session_id))
+            .filter(|title| !gone.contains(title))
+            .cloned()
+            .collect::<Vec<_>>();
+        if gone.is_empty() && opening.is_empty() {
             return;
         }
         self.breakout_close_queue.extend(gone);
+        self.breakout_close_queue.extend(opening);
         self.drain_breakout_close_queue();
     }
 
@@ -165,10 +178,18 @@ impl HomeView {
             }
         };
         self.breakout_job = None;
+        self.breakout_opening_titles.clear();
         match result {
             Ok(outcome) => {
                 self.clear_marks();
-                self.breakout_titles.extend(outcome.titles);
+                // Titles queued to close went with their Sessions while this job ran.
+                let queued = &self.breakout_close_queue;
+                self.breakout_titles.extend(
+                    outcome
+                        .titles
+                        .into_iter()
+                        .filter(|title| !queued.contains(title)),
+                );
                 match outcome.note {
                     Some(note) => {
                         self.info_dialog = Some(InfoDialog::sized_to_fit("Breakout", &note));

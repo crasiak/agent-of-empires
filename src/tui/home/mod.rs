@@ -424,6 +424,8 @@ pub struct HomeView {
     breakout_session_close_job: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     /// Window titles waiting to close with their Sessions while another job runs.
     breakout_close_queue: Vec<String>,
+    /// Titles the running open job will give its windows.
+    breakout_opening_titles: Vec<String>,
     /// Titles of the Breakout windows this TUI opened and has not closed.
     breakout_titles: Vec<String>,
     /// The bulk restart in progress, if any.

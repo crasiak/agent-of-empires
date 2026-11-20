@@ -98,6 +98,10 @@ pub fn place_script(placements: &[(String, Rect)]) -> String {
     with_timeout(&script)
 }
 
+/// Opens the guard that keeps close and sweep from launching a Ghostty that is
+/// not running; `tell application` alone would start it. Closed by `end if`.
+const GHOSTTY_RUNNING_GUARD: &str = "if application \"Ghostty\" is running then\n";
+
 /// Close the windows a Breakout opened. Ids are collected first and each window is
 /// closed by id, because a live `every window whose ...` filter shrinks as windows
 /// close. A failed lookup of one id means the window is already gone, so every
@@ -105,7 +109,8 @@ pub fn place_script(placements: &[(String, Rect)]) -> String {
 /// Breaking out the same Session twice while the first windows are open gives
 /// both windows one title, so close matches both and placement hits the older one.
 pub fn close_script(titles: &[String]) -> String {
-    let mut script = String::from("tell application \"Ghostty\"\n");
+    let mut script = String::from(GHOSTTY_RUNNING_GUARD);
+    script.push_str("tell application \"Ghostty\"\n");
     for title in titles {
         script.push_str(&format!(
             "    set winIds to id of every window whose name is {}\n",
@@ -121,7 +126,7 @@ pub fn close_script(titles: &[String]) -> String {
             "    end repeat\n",
         ));
     }
-    script.push_str("end tell\n");
+    script.push_str("end tell\nend if\n");
     with_timeout(&script)
 }
 
@@ -134,7 +139,8 @@ pub fn sweep_script(keep_id_prefixes: &[String]) -> String {
         .iter()
         .map(|prefix| as_literal(&super::title_suffix(prefix)))
         .collect();
-    let mut script = String::from("tell application \"Ghostty\"\n");
+    let mut script = String::from(GHOSTTY_RUNNING_GUARD);
+    script.push_str("tell application \"Ghostty\"\n");
     script.push_str(&format!(
         "    set keepSuffixes to {{{}}}\n",
         keep.join(", ")
@@ -170,6 +176,8 @@ pub fn sweep_script(keep_id_prefixes: &[String]) -> String {
         "    end repeat\n",
         "    return closedCount\n",
         "end tell\n",
+        "end if\n",
+        "return 0\n",
     ));
     with_timeout(&script)
 }
@@ -464,6 +472,27 @@ mod tests {
         assert!(close.contains("repeat with i in closeIds"));
         assert!(script.contains("if errNum is -1712 or errNum is -1743 then error errMsg"));
         assert!(script.contains("return closedCount"));
+    }
+
+    #[test]
+    fn close_and_sweep_never_launch_ghostty() {
+        for script in [close_script(&["t".to_string()]), sweep_script(&[])] {
+            let guard = script
+                .find("if application \"Ghostty\" is running then")
+                .expect("guarded");
+            let tell = script.find("tell application \"Ghostty\"").unwrap();
+            assert!(guard < tell, "{script}");
+            assert!(script.contains("end tell\nend if\n"), "{script}");
+        }
+        let sweep = sweep_script(&[]);
+        assert!(
+            sweep.contains("end if\nreturn 0\n"),
+            "a sweep with Ghostty not running closes nothing: {sweep}"
+        );
+        assert!(
+            !open_windows_script(&[surface("t", "c")]).contains("is running"),
+            "opening is what launches Ghostty"
+        );
     }
 
     #[test]
