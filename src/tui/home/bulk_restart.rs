@@ -45,7 +45,7 @@ impl HomeView {
         let busy = plan.eligible.iter().filter(|c| c.is_busy()).count();
         let noun = if total == 1 { "session" } else { "sessions" };
         let mut message = format!(
-            "Restart {total} marked {noun}?\n\n{} idle, {busy} busy (running, waiting or starting)\n\n\
+            "Restart {total} marked {noun}?\n\n{} idle, {busy} busy (running, waiting, starting or unknown)\n\n\
              Each restarts with its current profile, agent and arguments.",
             total - busy
         );

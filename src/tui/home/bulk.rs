@@ -18,6 +18,7 @@ pub(super) enum SkipReason {
     AwaitingPermission,
     RestartInFlight,
     Snoozed,
+    Starting,
 }
 
 impl SkipReason {
@@ -30,6 +31,7 @@ impl SkipReason {
             Self::AwaitingPermission => "waiting on a prompt",
             Self::RestartInFlight => "already restarting",
             Self::Snoozed => "snoozed",
+            Self::Starting => "starting",
         }
     }
 }
@@ -50,11 +52,11 @@ pub(super) struct BulkCandidate {
 }
 
 impl BulkCandidate {
-    /// Mid-work: a restart would interrupt it.
+    /// Mid-work: a restart would interrupt it. An Unknown Session may be running.
     pub(super) fn is_busy(&self) -> bool {
         matches!(
             self.status,
-            Status::Running | Status::Waiting | Status::Starting
+            Status::Running | Status::Waiting | Status::Starting | Status::Unknown
         )
     }
 }
@@ -104,6 +106,9 @@ fn skip_reason(action: BulkAction, c: &BulkCandidate, attention_sort: bool) -> O
         return Some(SkipReason::Transient);
     }
     match action {
+        // Text typed into a booting agent is lost or garbled.
+        BulkAction::Send if c.restart_in_flight => Some(SkipReason::RestartInFlight),
+        BulkAction::Send if c.status == Status::Starting => Some(SkipReason::Starting),
         BulkAction::Send if c.structured => c
             .awaiting_approval
             .then_some(SkipReason::AwaitingPermission),
@@ -182,13 +187,14 @@ impl HomeView {
         let mut sections = Vec::new();
         for (name, action) in [("Send", BulkAction::Send), ("Restart", BulkAction::Restart)] {
             let plan = self.bulk_plan(action);
+            let total = plan.eligible.len() + plan.skipped.len();
+            let noun = if total == 1 { "session" } else { "sessions" };
             sections.push(if plan.skipped.is_empty() {
-                format!("{name}: all {} marked sessions", plan.eligible.len())
+                format!("{name}: all {total} marked {noun}")
             } else {
                 format!(
-                    "{name}: {} of {} marked sessions. Skipped:\n{}",
+                    "{name}: {} of {total} marked {noun}. Skipped:\n{}",
                     plan.eligible.len(),
-                    plan.eligible.len() + plan.skipped.len(),
                     plan.skipped_lines()
                 )
             });
@@ -269,6 +275,14 @@ mod tests {
             }),
             Some(SkipReason::AwaitingPermission)
         );
+        assert_eq!(
+            reason_for(Send, false, |c| c.status = Status::Starting),
+            Some(SkipReason::Starting)
+        );
+        assert_eq!(
+            reason_for(Send, false, |c| c.restart_in_flight = true),
+            Some(SkipReason::RestartInFlight)
+        );
         // A running Session takes the message as queued input.
         assert_eq!(
             reason_for(Send, false, |c| c.status = Status::Running),
@@ -333,11 +347,12 @@ mod tests {
     }
 
     #[test]
-    fn busy_means_running_waiting_or_starting() {
+    fn busy_means_running_waiting_starting_or_unknown() {
         for (status, busy) in [
             (Status::Running, true),
             (Status::Waiting, true),
             (Status::Starting, true),
+            (Status::Unknown, true),
             (Status::Idle, false),
             (Status::Stopped, false),
             (Status::Error, false),

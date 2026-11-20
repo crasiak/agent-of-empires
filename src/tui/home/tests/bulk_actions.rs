@@ -692,3 +692,38 @@ fn submit_with_no_eligible_target_left_sends_nothing_and_says_so() {
     assert_eq!(info.title(), "Nothing Sent");
     assert!(info.message().contains("waiting on a prompt"));
 }
+
+#[test]
+#[serial]
+fn show_skipped_uses_the_singular_for_one_marked_session() {
+    let mut env = create_test_env_with_sessions(1);
+    mark_all(&mut env);
+    make_sendable(&mut env);
+
+    env.view.show_bulk_skips();
+
+    let info = env.view.info_dialog.as_ref().expect("summary");
+    assert!(info.message().contains("Send: all 1 marked session"));
+    assert!(!info.message().contains("1 marked sessions"));
+}
+
+#[test]
+#[serial]
+fn an_unknown_session_counts_as_busy_in_the_restart_confirm() {
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    let ids = env.view.marked_in_view_order();
+    env.view
+        .mutate_instance(&ids[0], |inst| inst.status = Status::Unknown);
+    env.view
+        .mutate_instance(&ids[1], |inst| inst.status = Status::Idle);
+
+    env.view.handle_key(key(KeyCode::Char('e')), None);
+
+    let dialog = env.view.confirm_dialog.as_ref().expect("confirm");
+    assert_eq!(
+        dialog.checkbox_labels_for_test(),
+        ["Idle only (leave 1 busy running)"],
+        "the Unknown session is the busy one"
+    );
+}
