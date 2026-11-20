@@ -3029,3 +3029,37 @@ fn tui_send_refuses_a_shelved_live_pane() {
 // side, which owns the archive write: `sessions::tests::archive_persists_under_the_lifecycle_lock`
 // and `sessions::tests::group_archive_gates_each_member_on_its_own_lifecycle_lock`
 // (`src/server/api/sessions/tests.rs`).
+
+#[test]
+#[serial]
+fn restart_by_id_does_not_need_the_cursor() {
+    let mut env = create_test_env_with_sessions(2);
+    let other = env.view.instance_at(1).id.clone();
+    env.view.selected_session = Some(env.view.instance_at(0).id.clone());
+    let mut respond = env.view.session_feed.command_driver_for_test();
+
+    let outcome = env
+        .view
+        .restart_session_by_id(&other, None, None, None, None, false);
+
+    assert!(matches!(
+        outcome,
+        crate::tui::home::operations::RestartSubmit::Submitted
+    ));
+    assert!(env.view.restart_in_flight.contains(&other));
+    assert!(respond(Ok(crate::daemon::RuntimeCursor {
+        epoch: "test".into(),
+        revision: 2,
+    }))
+    .is_some_and(|(target, mutation)| target == other
+        && matches!(mutation, crate::daemon::SessionMutation::Restart(_))));
+
+    // A second submit inside the cooldown is a skip, not an error.
+    let again = env
+        .view
+        .restart_session_by_id(&other, None, None, None, None, false);
+    assert!(matches!(
+        again,
+        crate::tui::home::operations::RestartSubmit::Skipped
+    ));
+}
