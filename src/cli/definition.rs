@@ -5,6 +5,7 @@ use clap_complete::Shell;
 
 use super::acp::AcpCommands;
 use super::add::AddArgs;
+use super::breakout_agent::BreakoutAgentArgs;
 use super::cityhall::CityHallCommands;
 use super::extract_session_id::ExtractSessionIdArgs;
 use super::group::GroupCommands;
@@ -256,6 +257,9 @@ pub enum Commands {
     /// Print the URL of a running `aoe serve` daemon
     Url(UrlArgs),
 
+    /// Open Breakout windows on this machine for aoe running on another host
+    BreakoutAgent(BreakoutAgentArgs),
+
     /// Manage the ACP structured-view workers (doctor, ps, logs, prompt, approve, ...).
     Acp {
         #[command(subcommand)]
@@ -375,6 +379,7 @@ pub const CLI_COMMAND_NAMES: &[&str] = &[
     "hooks",
     "serve",
     "url",
+    "breakout_agent",
     "acp",
     "uninstall",
     "update",
@@ -416,6 +421,7 @@ pub fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Hooks { .. } => "hooks",
         Commands::Serve(_) => "serve",
         Commands::Url(_) => "url",
+        Commands::BreakoutAgent(_) => "breakout_agent",
         Commands::Acp { .. } => "acp",
         Commands::AcpRunner(_) | Commands::PrimeRunner(_) => return None,
         Commands::ExtractSessionId(_) | Commands::HookAttention(_) => return None,

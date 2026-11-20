@@ -4,6 +4,7 @@ pub mod acp;
 pub mod add;
 pub mod afk;
 pub mod agents;
+pub mod breakout_agent;
 pub mod cityhall;
 pub mod definition;
 pub mod extract_session_id;

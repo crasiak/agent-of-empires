@@ -1264,3 +1264,157 @@ fn a_session_stopped_while_its_splits_window_opens_closes_nothing() {
     assert!(env.view.breakout_close_queue.is_empty());
     assert!(env.view.breakout_session_close_job.is_none());
 }
+
+/// Runs one test as if aoe were shown over ssh, and restores it even when an assertion fails.
+struct OverSsh;
+
+impl OverSsh {
+    fn on() -> Self {
+        crate::tui::home::breakout::test_support::UNDER_SSH.with(|u| u.set(true));
+        crate::tui::home::breakout::test_support::OPENED_FOR.with(|o| *o.borrow_mut() = None);
+        Self
+    }
+}
+
+impl Drop for OverSsh {
+    fn drop(&mut self) {
+        crate::tui::home::breakout::test_support::UNDER_SSH.with(|u| u.set(false));
+        crate::tui::home::breakout::test_support::OPENED_FOR.with(|o| *o.borrow_mut() = None);
+    }
+}
+
+/// Stand-in for the ssh-forwarded agent socket: the TUI only checks that it exists,
+/// and tests never open a real socket.
+fn forward_agent_socket() {
+    let path = crate::breakout::agent::socket_path().unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "").unwrap();
+}
+
+fn opened_for() -> Option<crate::tui::home::breakout::test_support::Opened> {
+    crate::tui::home::breakout::test_support::OPENED_FOR.with(|o| o.borrow().clone())
+}
+
+#[test]
+#[serial]
+fn over_ssh_without_a_forwarded_socket_breakout_is_unavailable() {
+    let _forced = ForcedSupport::on();
+    let _ssh = OverSsh::on();
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    make_sendable(&mut env);
+    env.view.start_breakout();
+    assert!(
+        env.view.info_dialog.is_some(),
+        "never falls back to opening windows on this machine"
+    );
+    assert!(env.view.breakout_job.is_none());
+    assert!(opened_for().is_none());
+}
+
+#[test]
+#[serial]
+fn over_ssh_with_a_forwarded_socket_the_agent_opens_and_the_sessions_are_marked() {
+    let _forced = ForcedSupport::set(false);
+    let _ssh = OverSsh::on();
+    let mut env = create_test_env_with_sessions(2);
+    forward_agent_socket();
+    let ids = break_out_all(&mut env);
+    let opened = opened_for().expect("opened");
+    let (socket, host) = opened.agent.expect("the agent transport was used");
+    assert_eq!(socket, crate::breakout::agent::socket_path().unwrap());
+    assert_eq!(
+        opened.request_host,
+        Some(host),
+        "the request names this host"
+    );
+    for id in &ids {
+        assert!(env.view.is_broken_out(id));
+    }
+    assert!(env.view.marked.is_empty());
+}
+
+#[test]
+#[serial]
+fn a_local_breakout_names_no_host() {
+    let _forced = ForcedSupport::on();
+    crate::tui::home::breakout::test_support::OPENED_FOR.with(|o| *o.borrow_mut() = None);
+    let mut env = create_test_env_with_sessions(1);
+    break_out_all(&mut env);
+    let opened = opened_for().expect("opened");
+    assert_eq!((opened.request_host, opened.agent), (None, None));
+}
+
+#[test]
+#[serial]
+fn over_ssh_closing_clears_the_markers_without_a_close_job() {
+    let _forced = ForcedSupport::set(false);
+    let _ssh = OverSsh::on();
+    let mut env = create_test_env_with_sessions(2);
+    forward_agent_socket();
+    let ids = break_out_all(&mut env);
+
+    mark_all(&mut env);
+    env.view.handle_key(shift_k(), None);
+    let menu = env.view.context_menu.as_ref().unwrap();
+    assert!(
+        menu.items_contain(ContextMenuAction::CloseBreakout),
+        "offered over ssh, where it clears the markers"
+    );
+    env.view.context_menu = None;
+
+    env.view.close_breakout();
+    assert!(env.view.breakout_close_job.is_none(), "no osascript here");
+    assert!(env.view.breakout_titles.is_empty());
+    for id in &ids {
+        assert!(!env.view.is_broken_out(id));
+    }
+    assert!(env
+        .view
+        .status_flash_text()
+        .is_some_and(|text| text.contains("machine with the screen")));
+}
+
+#[test]
+#[serial]
+fn over_ssh_stopping_a_broken_out_session_clears_its_marker_only() {
+    let _forced = ForcedSupport::set(false);
+    let _ssh = OverSsh::on();
+    let mut env = create_test_env_with_sessions(2);
+    forward_agent_socket();
+    let ids = break_out_all(&mut env);
+    let _respond = env.view.session_feed.command_driver_for_test();
+    assert!(env.view.submit_daemon_stop(&ids[1]).unwrap());
+    assert!(!env.view.is_broken_out(&ids[1]));
+    assert!(env.view.is_broken_out(&ids[0]));
+    assert!(
+        env.view.breakout_session_close_job.is_none(),
+        "no osascript here"
+    );
+    assert!(env.view.breakout_close_queue.is_empty());
+    assert!(env
+        .view
+        .status_flash_text()
+        .is_some_and(|text| text.contains("machine with the screen")));
+}
+
+#[test]
+#[serial]
+fn over_ssh_a_session_stopped_mid_open_gets_no_marker() {
+    let _forced = ForcedSupport::set(false);
+    let _ssh = OverSsh::on();
+    let mut env = create_test_env_with_sessions(2);
+    forward_agent_socket();
+    mark_all(&mut env);
+    make_sendable(&mut env);
+    let ids = env.view.marked_in_view_order();
+    env.view.start_breakout();
+    assert!(env.view.breakout_job.is_some());
+    let _respond = env.view.session_feed.command_driver_for_test();
+    assert!(env.view.submit_daemon_stop(&ids[0]).unwrap());
+    assert!(env.view.tick_breakout());
+    assert!(!env.view.is_broken_out(&ids[0]));
+    assert!(env.view.is_broken_out(&ids[1]));
+    assert!(env.view.breakout_session_close_job.is_none());
+    assert!(env.view.breakout_close_queue.is_empty());
+}

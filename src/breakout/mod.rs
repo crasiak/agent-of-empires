@@ -1,5 +1,6 @@
 //! Breakout: opening Sessions as tiled terminal surfaces outside the aoe TUI.
 
+pub mod agent;
 #[cfg(target_os = "macos")]
 pub mod ghostty;
 pub mod grid;
