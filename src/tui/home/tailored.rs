@@ -54,6 +54,9 @@ pub(in crate::tui) struct TailoredWindow {
     error: Option<String>,
     checking: Option<mpsc::Receiver<Result<TailoredRequest, String>>>,
     checking_quick: Option<mpsc::Receiver<Result<QuickPlan, String>>>,
+    starting_quick: Option<QuickStart>,
+    #[cfg(test)]
+    quick_starter: Option<Box<dyn Fn(crate::session::Instance) -> document::StartWorker + Send>>,
     terminal: Option<CaptureTerminal>,
     account_rect: Rect,
     immediately_rect: Rect,
@@ -66,6 +69,12 @@ pub(super) enum WindowAction {
     Open(String),
     Quick(QuickPreset),
     Visibility { id: String, hidden: bool },
+}
+
+struct QuickStart {
+    id: String,
+    worker: document::StartWorker,
+    foreground: bool,
 }
 
 enum TailoredStart {
@@ -189,6 +198,9 @@ impl TailoredWindow {
             error: None,
             checking: None,
             checking_quick: None,
+            starting_quick: None,
+            #[cfg(test)]
+            quick_starter: None,
             terminal: None,
             account_rect: Rect::default(),
             immediately_rect: Rect::default(),
@@ -211,7 +223,7 @@ impl TailoredWindow {
         if key.kind == KeyEventKind::Release || self.hidden {
             return WindowAction::Continue;
         }
-        if self.checking_quick.is_some() {
+        if self.checking_quick.is_some() || self.starting_quick.is_some() {
             return if key.code == KeyCode::Esc
                 || super::bindings::is_tailored_shortcut(&key)
                 || (key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::CONTROL)
@@ -409,7 +421,7 @@ impl TailoredWindow {
     }
 
     pub(super) fn handle_paste(&mut self, text: &str) {
-        if self.hidden || self.checking_quick.is_some() {
+        if self.hidden || self.checking_quick.is_some() || self.starting_quick.is_some() {
             return;
         }
         if let Some(workshop) = &mut self.workshop {
@@ -440,7 +452,7 @@ impl TailoredWindow {
     }
 
     pub(super) fn handle_click(&mut self, col: u16, row: u16) -> WindowAction {
-        if self.hidden || self.checking_quick.is_some() {
+        if self.hidden || self.checking_quick.is_some() || self.starting_quick.is_some() {
             return WindowAction::Continue;
         }
         if self
@@ -831,6 +843,16 @@ impl HomeView {
                     return;
                 }
                 if self.get_instance(&id).is_some_and(|instance| {
+                    crate::session::tailored::quick::preset(instance).is_some()
+                }) {
+                    if let Err(error) = self.start_quick_terminal(&id, true) {
+                        if let Some(window) = &mut self.tailored_window {
+                            window.error = Some(format!("{error:#}"));
+                        }
+                    }
+                    return;
+                }
+                if self.get_instance(&id).is_some_and(|instance| {
                     crate::session::tailored::document::account(instance).is_some()
                 }) {
                     if let Err(error) = self.start_document_terminal(&id, true) {
@@ -919,6 +941,7 @@ impl HomeView {
             return;
         };
         if window.checking_quick.is_some()
+            || window.starting_quick.is_some()
             || window.checking.is_some()
             || window.starting_document.is_some()
         {
@@ -1063,6 +1086,48 @@ impl HomeView {
                     .is_none_or(|last| last.elapsed() >= Duration::from_secs(2))
         });
         let mut refreshed = (refresh && self.refresh_tailored_history()) || workshop_changed;
+        let quick_started = self
+            .tailored_window
+            .as_ref()
+            .and_then(|window| window.starting_quick.as_ref())
+            .and_then(|start| {
+                start
+                    .worker
+                    .take_result()
+                    .map(|(id, outcome)| (start.id.clone(), id, start.foreground, outcome))
+            });
+        if let Some((id, returned_id, requested_foreground, outcome)) = quick_started {
+            let window = self.tailored_window.as_ref().expect("Quick owner");
+            let foreground = requested_foreground && !window.hidden;
+            let profile = window.profile.clone();
+            let result = (|| -> anyhow::Result<Option<CaptureTerminal>> {
+                anyhow::ensure!(returned_id == id, "Quick start identity was not confirmed");
+                if !self.storages.contains_key(&profile) {
+                    let storage = crate::session::Storage::new(&profile, self.file_watch.clone())?;
+                    self.storages.insert(profile, storage);
+                }
+                self.reload()?;
+                outcome.map_err(anyhow::Error::msg)?;
+                if foreground {
+                    self.ready_capture_terminal(&id).map(Some)
+                } else {
+                    Ok(None)
+                }
+            })();
+            if let Some(window) = &mut self.tailored_window {
+                window.starting_quick = None;
+                window.history_refreshed = None;
+                match result {
+                    Ok(terminal) => {
+                        window.terminal = terminal;
+                        window.error = None;
+                        if window.hidden && requested_foreground { window.suspended_terminal = Some(id); }
+                    }
+                    Err(error) => window.error = Some(format!("Quick start not confirmed for {id}: {error:#}. The existing Session is preserved; inspect history before retrying.")),
+                }
+            }
+            return true;
+        }
         let started = self
             .tailored_window
             .as_ref()
@@ -1211,18 +1276,9 @@ impl HomeView {
                     let result = ready
                         .unwrap_or_else(|_| Err("Quick profile check stopped unexpectedly".into()))
                         .map_err(anyhow::Error::msg)
-                        .and_then(|plan| self.launch_tailored_pi(TailoredStart::Quick(plan)))
-                        .and_then(|id| {
-                            if self
-                                .tailored_window
-                                .as_ref()
-                                .is_some_and(|window| window.hidden)
-                            {
-                                Ok((id, None))
-                            } else {
-                                self.ready_capture_terminal(&id)
-                                    .map(|terminal| (id, Some(terminal)))
-                            }
+                        .and_then(|plan| {
+                            let id = self.create_tailored_pi(TailoredStart::Quick(plan))?;
+                            self.start_quick_terminal(&id, true)
                         });
                     if let Some(id) = previous {
                         self.select_and_reveal_session(&id);
@@ -1231,11 +1287,8 @@ impl HomeView {
                         window.checking_quick = None;
                         window.history_refreshed = None;
                         match result {
-                            Ok((id, terminal)) => {
-                                window.terminal = terminal;
+                            Ok(()) => {
                                 window.composing = false;
-                                window.error = None;
-                                if window.hidden { window.suspended_terminal = Some(id); }
                             }
                             Err(error) => window.error = Some(format!("Quick create/start not confirmed: {error:#}. Inspect history before creating another copy.")),
                         }
@@ -1300,21 +1353,58 @@ impl HomeView {
     }
 
     fn launch_capture(&mut self, request: TailoredRequest) -> anyhow::Result<String> {
-        self.launch_tailored_pi(TailoredStart::Capture(request))
+        let id = self.create_tailored_pi(TailoredStart::Capture(request))?;
+        self.try_mutate_instance_writeback_on_err(&id, |instance| {
+            instance.ensure_pane_ready().map_err(Into::into)
+        })?;
+        Ok(id)
     }
 
-    fn launch_tailored_pi(&mut self, start: TailoredStart) -> anyhow::Result<String> {
+    fn create_tailored_pi(&mut self, start: TailoredStart) -> anyhow::Result<String> {
         let profile = self
             .tailored_window
             .as_ref()
             .expect("Tailored owner")
             .profile
             .clone();
-        let id = self.create_session(start.data(profile)?)?;
-        self.try_mutate_instance_writeback_on_err(&id, |instance| {
-            instance.ensure_pane_ready().map_err(Into::into)
-        })?;
-        Ok(id)
+        self.create_session(start.data(profile)?)
+    }
+
+    fn start_quick_terminal(&mut self, id: &str, foreground: bool) -> anyhow::Result<()> {
+        let instance = self
+            .get_instance(id)
+            .filter(|instance| crate::session::tailored::quick::preset(instance).is_some())
+            .ok_or_else(|| anyhow::anyhow!("Quick Session disappeared"))?
+            .clone();
+        let window = self
+            .tailored_window
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Quick window closed"))?;
+        anyhow::ensure!(
+            window.starting_quick.is_none(),
+            "A Quick start is already in progress"
+        );
+        if foreground {
+            window.terminal = None;
+            window.composing = false;
+            window.error = Some(
+                "Starting Quick conversation; guarded Ledger qualification is running…".into(),
+            );
+        }
+        #[cfg(test)]
+        let worker = if let Some(start) = &window.quick_starter {
+            start(instance)
+        } else {
+            document::StartWorker::spawn(instance)
+        };
+        #[cfg(not(test))]
+        let worker = document::StartWorker::spawn(instance);
+        window.starting_quick = Some(QuickStart {
+            id: id.to_owned(),
+            worker,
+            foreground,
+        });
+        Ok(())
     }
 
     fn start_document_terminal(&mut self, id: &str, foreground: bool) -> anyhow::Result<()> {
@@ -1875,6 +1965,93 @@ mod tests {
             window.handle_paste(&fresh);
             assert!(assert_visible(&window, 33, 7, "TAIL") > 1);
             assert_eq!(window.idea.lines(), &[fresh]);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn quick_start_and_reopen_keep_pending_result_with_original_profile_and_session() {
+        use crate::session::{Instance, Storage};
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+        let knowledge = root.path().join("knowledge");
+        std::fs::create_dir(&knowledge).unwrap();
+        for reopen in [false, true] {
+            let mut instance = Instance::new("Work Quick", knowledge.to_str().unwrap());
+            instance.source_profile = "test".into();
+            instance.tool = "pi".into();
+            instance.command = "ledger run pi --profile aoe-quick-work --".into();
+            instance.agent_session_id = reopen.then(|| "original-conversation".into());
+            let id = instance.id.clone();
+            let storage = Storage::new_unwatched("test").unwrap();
+            storage
+                .update(|rows, _| {
+                    *rows = vec![instance.clone()];
+                    Ok(())
+                })
+                .unwrap();
+            let mut view = HomeView::new_for_test(
+                Some("test".into()),
+                crate::tmux::AvailableTools::with_tools(&["pi"]),
+                crate::file_watch::FileWatchService::noop(),
+            )
+            .unwrap();
+            view.open_tailored();
+            let (started, arrivals) = mpsc::channel();
+            view.tailored_window.as_mut().unwrap().quick_starter =
+                Some(Box::new(move |instance| {
+                    let (done, pending) = mpsc::channel();
+                    started.send((instance.id, done)).unwrap();
+                    document::StartWorker::from_receiver_for_test(pending)
+                }));
+            if reopen {
+                view.apply_tailored_action(WindowAction::Open(id.clone()));
+            } else {
+                view.start_quick_terminal(&id, true).unwrap();
+            }
+            let (started_id, finish) = arrivals.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(started_id, id);
+            view.tick_tailored();
+            assert!(view
+                .tailored_window
+                .as_ref()
+                .unwrap()
+                .starting_quick
+                .is_some());
+            view.close_tailored();
+            assert!(view.tailored_window.is_none());
+            view.switch_profile(Some("second".into())).unwrap();
+            view.open_tailored();
+            let active = view.tailored_window.as_mut().unwrap();
+            active.picker_action(HistoryAction::New);
+            active.handle_paste("second profile draft");
+            let cursor = active.idea.cursor();
+            finish
+                .send((id.clone(), Err("injected native guard refusal".into())))
+                .unwrap();
+            view.tick_tailored();
+            let active = view.tailored_window.as_ref().unwrap();
+            assert_eq!(active.profile, "second");
+            assert_eq!(active.idea.lines().join("\n"), "second profile draft");
+            assert_eq!(active.idea.cursor(), cursor);
+            assert!(active.error.is_none() && active.terminal.is_none());
+            let owner = view
+                .retained_tailored_windows
+                .iter()
+                .find(|w| w.profile == "test")
+                .unwrap();
+            assert!(owner.starting_quick.is_none());
+            assert!(owner.error.as_ref().unwrap().contains(&id));
+            let rows = storage.load().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, id);
+            assert_eq!(rows[0].agent_session_id, instance.agent_session_id);
+            assert!(Storage::new_unwatched("second")
+                .unwrap()
+                .load()
+                .unwrap()
+                .is_empty());
+            assert!(arrivals.try_recv().is_err(), "start was duplicated");
         }
     }
 
