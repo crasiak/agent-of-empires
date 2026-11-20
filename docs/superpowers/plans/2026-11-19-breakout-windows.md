@@ -233,7 +233,7 @@ After Task 6 local Breakout works end to end with separate windows. Task 7 adds 
 - Breakout size limits: more than **6** Sessions asks for confirmation; more than **9** is refused.
 - Grid: 1 is full screen, 2 side by side, 3 in columns, 4 as 2x2, 5 and 6 as 3x2, 7 to 9 as 3x3.
 - The Breakout agent never executes text supplied by the remote side. It builds `ssh -t <host> aoe --profile <profile> session attach <id>` itself from validated fields, and `<host>` must be in the laptop's `breakout.agent_hosts` list.
-- Validation patterns: session id and profile `[A-Za-z0-9_-]{1,64}`; host `[A-Za-z0-9][A-Za-z0-9.-]{0,252}`; nonce 8 to 64 hex characters.
+- Validation patterns: session id and profile `[A-Za-z0-9_][A-Za-z0-9_-]{0,63}` (no leading `-`, so neither can be read as an option); host `[A-Za-z0-9][A-Za-z0-9.-]{0,252}`; nonce 8 to 64 hex characters.
 - macOS-only code carries a `#[cfg(target_os = "macos")]` attribute in its own file, so the macOS CI leg (`.github/workflows/tests.yml`, which triggers on a `target_os = "macos"` diff line) covers it.
 - AppleScript is generated as Rust strings. Do not add `.applescript` files (embedded assets need `flake.nix` changes).
 - New tracing targets use the existing roots: `cli.breakout`, `tui.breakout`.
