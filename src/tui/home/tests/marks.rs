@@ -326,3 +326,27 @@ fn switching_profile_drops_marks_on_sessions_it_no_longer_shows() {
     );
     assert_eq!(view.marks_title().as_deref(), Some("1 marked"));
 }
+
+#[test]
+#[serial]
+fn the_footer_hides_esc_clear_marks_while_the_retained_reader_is_focused() {
+    let mut env = create_test_env_with_sessions(2);
+    let id = env.view.instance_at(0).id.clone();
+    env.view
+        .mutate_instance(&id, |inst| inst.trashed_at = Some(chrono::Utc::now()));
+    env.view.trashed_section_collapsed = false;
+    env.view.rebuild_flat_items();
+    env.view.select_session_by_id(&id);
+    let other = env.view.instance_at(1).id.clone();
+    env.view.marked.insert(other);
+
+    let unfocused = render_home_to_string(&mut env.view, 140, 40);
+    assert!(!env.view.retained_reader_focused());
+    assert!(unfocused.contains("clear marks"), "{unfocused}");
+
+    env.view.handle_key(key(KeyCode::Enter), None);
+    assert!(env.view.retained_reader_focused());
+    let focused = render_home_to_string(&mut env.view, 140, 40);
+    assert!(focused.contains("Space"), "the Marks hint stays");
+    assert!(!focused.contains("clear marks"), "{focused}");
+}
