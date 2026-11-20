@@ -4905,13 +4905,7 @@ impl HomeView {
             }
 
             if !self.marked.is_empty() {
-                let hint = vec![
-                    Span::styled("Space", key_style),
-                    Span::styled(" mark ", desc_style),
-                    Span::styled("Esc", key_style),
-                    Span::styled(" clear marks", desc_style),
-                ];
-                groups.push((0, None, hint));
+                groups.push((0, None, marks_footer_hint(key_style, desc_style)));
             }
 
             let (click, key) = bound(ActionId::SearchStart);
@@ -4933,13 +4927,7 @@ impl HomeView {
             groups.push((0, click, mk_key(&key)));
         } else {
             if !self.marked.is_empty() {
-                let hint = vec![
-                    Span::styled("Space", key_style),
-                    Span::styled(" mark ", desc_style),
-                    Span::styled("Esc", key_style),
-                    Span::styled(" clear marks", desc_style),
-                ];
-                groups.push((0, None, hint));
+                groups.push((0, None, marks_footer_hint(key_style, desc_style)));
             }
             let focused = self.retained_reader_focused();
             if focused {
@@ -5158,6 +5146,18 @@ pub(super) fn live_pane_origin(
         view.pane.x as i32 + left,
         view.pane.y as i32 + pane_top + top,
     )
+}
+
+/// The footer's Marks hint, shown while anything is marked.
+fn marks_footer_hint(key_style: Style, desc_style: Style) -> Vec<Span<'static>> {
+    vec![
+        Span::styled("Space", key_style),
+        Span::styled(" mark ", desc_style),
+        Span::styled("K", key_style),
+        Span::styled(" bulk ", desc_style),
+        Span::styled("Esc", key_style),
+        Span::styled(" clear marks", desc_style),
+    ]
 }
 
 /// The footer's R entry: the Daemon's problem (red) or limit (dim) when it has one, else

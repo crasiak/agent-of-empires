@@ -3564,6 +3564,7 @@ impl HomeView {
                     | ActionId::ExtendMarkUp
                     | ActionId::ExtendMarkDown
                     | ActionId::ClearMarks
+                    | ActionId::BulkMenu
             )
         {
             return None;
@@ -3645,6 +3646,10 @@ impl HomeView {
                 if !self.clear_marks() {
                     self.flash_status("No sessions marked");
                 }
+            }
+            ActionId::BulkMenu => {
+                let anchor = self.cursor_row_anchor();
+                self.open_bulk_menu(anchor);
             }
             ActionId::SendMessage => {
                 if let Some(id) = self.selected_structured_session() {
@@ -5697,6 +5702,12 @@ impl HomeView {
                 self.flash_status("Still creating this session; it has no runtime yet");
                 return true;
             }
+            // A right-click on a marked row offers the Bulk actions for the whole set.
+            if matches!(self.flat_items.get(idx), Some(Item::Session { id, .. }) if self.marked.contains(id))
+            {
+                self.context_menu = Some(ContextMenuDialog::for_marks(anchor));
+                return true;
+            }
             // Mirror the web sidebar's row-aware copy so a group row reads as "Rename
             // Group / Delete Group".
             // The synthetic Trash / Archived headers are `Item::Group` rows but not user
@@ -5896,7 +5907,17 @@ impl HomeView {
                 return;
             }
         }
+        // Bulk actions target the Marked set, not the cursor row, so the row's own
+        // state cannot refuse them.
+        let bulk = matches!(
+            action,
+            ContextMenuAction::BulkSend
+                | ContextMenuAction::BulkRestart
+                | ContextMenuAction::BulkShowSkipped
+                | ContextMenuAction::ClearMarks
+        );
         if self.selected_is_trashed()
+            && !bulk
             && !matches!(
                 action,
                 ContextMenuAction::Restore
@@ -5911,7 +5932,7 @@ impl HomeView {
         // The creating stub has no actions yet, so opening a menu whose every
         // entry would refuse it is worse than saying why. Same refusal as
         // `run_action`, which the menu is the second dispatcher for.
-        if self.is_creating_stub_selected() {
+        if !bulk && self.is_creating_stub_selected() {
             self.flash_status("Still creating this session; it has no runtime yet");
             return;
         }
@@ -5989,6 +6010,12 @@ impl HomeView {
                 Some(SidebarSection::Archived) => self.toggle_archived_section(),
                 None => {}
             },
+            ContextMenuAction::BulkSend => self.open_bulk_send_dialog(),
+            ContextMenuAction::BulkRestart => self.open_bulk_restart_confirm(),
+            ContextMenuAction::BulkShowSkipped => self.show_bulk_skips(),
+            ContextMenuAction::ClearMarks => {
+                self.clear_marks();
+            }
         }
     }
 

@@ -167,6 +167,37 @@ impl HomeView {
             self.sort_order == crate::session::config::SortOrder::Attention,
         )
     }
+
+    /// Open the Bulk action menu, or say why not.
+    pub(super) fn open_bulk_menu(&mut self, anchor: (u16, u16)) {
+        if self.marked.is_empty() {
+            self.flash_status("No sessions marked. Space marks the cursor row");
+            return;
+        }
+        self.context_menu = Some(ContextMenuDialog::for_marks(anchor));
+    }
+
+    /// List what each Bulk action would skip.
+    pub(super) fn show_bulk_skips(&mut self) {
+        let mut sections = Vec::new();
+        for (name, action) in [("Send", BulkAction::Send), ("Restart", BulkAction::Restart)] {
+            let plan = self.bulk_plan(action);
+            sections.push(if plan.skipped.is_empty() {
+                format!("{name}: all {} marked sessions", plan.eligible.len())
+            } else {
+                format!(
+                    "{name}: {} of {} marked sessions. Skipped:\n{}",
+                    plan.eligible.len(),
+                    plan.eligible.len() + plan.skipped.len(),
+                    plan.skipped_lines()
+                )
+            });
+        }
+        self.info_dialog = Some(InfoDialog::sized_to_fit(
+            "Marked Sessions",
+            &sections.join("\n\n"),
+        ));
+    }
 }
 
 #[cfg(test)]

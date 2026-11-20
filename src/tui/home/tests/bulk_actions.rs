@@ -1,6 +1,7 @@
 //! Bulk actions on the Marked set, driven through the home view.
 
 use super::*;
+use crate::tui::dialogs::ContextMenuAction;
 use crate::tui::session_feed::SessionFeedResult;
 
 fn mark_all(env: &mut TestEnv) {
@@ -368,4 +369,128 @@ fn a_bulk_send_with_failures_lists_them() {
 
     assert!(env.view.tick_bulk_send());
     assert!(env.view.info_dialog.is_some());
+}
+
+fn shift_k() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT)
+}
+
+#[test]
+#[serial]
+fn shift_k_opens_the_bulk_menu_only_with_marks() {
+    let mut env = create_test_env_with_sessions(2);
+    env.view.handle_key(shift_k(), None);
+    assert!(env.view.context_menu.is_none());
+    assert!(
+        env.view.status_flash.is_some(),
+        "explains that nothing is marked"
+    );
+
+    mark_all(&mut env);
+    env.view.handle_key(shift_k(), None);
+    assert!(env.view.context_menu.is_some());
+}
+
+#[test]
+#[serial]
+fn shift_k_works_in_strict_mode() {
+    let mut env = create_test_env_with_sessions(2);
+    env.view.strict_hotkeys = true;
+    mark_all(&mut env);
+    env.view.handle_key(shift_k(), None);
+    assert!(env.view.context_menu.is_some());
+}
+
+#[test]
+#[serial]
+fn the_bulk_menu_restart_entry_opens_the_confirm() {
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    env.view.handle_key(shift_k(), None);
+    // Entries: Send, Restart, Show skipped, Clear marks.
+    env.view.handle_key(key(KeyCode::Down), None);
+    env.view.handle_key(key(KeyCode::Enter), None);
+
+    assert!(env.view.context_menu.is_none());
+    assert!(env.view.pending_bulk_restart.is_some());
+}
+
+#[test]
+#[serial]
+fn the_bulk_menu_can_clear_marks() {
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    env.view.handle_key(shift_k(), None);
+    for _ in 0..3 {
+        env.view.handle_key(key(KeyCode::Down), None);
+    }
+    env.view.handle_key(key(KeyCode::Enter), None);
+    assert!(env.view.marked.is_empty());
+}
+
+#[test]
+#[serial]
+fn the_bulk_menu_lists_what_would_be_skipped() {
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    env.view.handle_key(shift_k(), None);
+    for _ in 0..2 {
+        env.view.handle_key(key(KeyCode::Down), None);
+    }
+    env.view.handle_key(key(KeyCode::Enter), None);
+    assert!(env.view.context_menu.is_none());
+    assert!(env.view.info_dialog.is_some());
+    assert_eq!(env.view.marked.len(), 2, "listing skips keeps the Marks");
+}
+
+fn sidebar_area(env: &mut TestEnv) {
+    env.view.list_inner_area = ratatui::layout::Rect::new(1, 1, 28, 10);
+    env.view.list_area = ratatui::layout::Rect::new(0, 0, 30, 12);
+}
+
+#[test]
+#[serial]
+fn right_click_on_a_marked_row_opens_the_bulk_menu() {
+    let mut env = create_test_env_with_sessions(3);
+    sidebar_area(&mut env);
+    let id = session_id_at(&env.view, 2).expect("a Session row");
+    env.view.marked.insert(id);
+
+    assert!(env.view.handle_right_click(5, 3));
+    let menu = env.view.context_menu.as_ref().expect("a menu opens");
+    assert_eq!(menu.selected_action(), ContextMenuAction::BulkSend);
+}
+
+#[test]
+#[serial]
+fn right_click_on_an_unmarked_row_keeps_the_session_menu() {
+    let mut env = create_test_env_with_sessions(3);
+    sidebar_area(&mut env);
+    let id = session_id_at(&env.view, 0).expect("a Session row");
+    env.view.marked.insert(id);
+
+    assert!(env.view.handle_right_click(5, 3));
+    let menu = env.view.context_menu.as_ref().expect("a menu opens");
+    assert_eq!(menu.selected_action(), ContextMenuAction::NewFromSelection);
+}
+
+#[test]
+#[serial]
+fn right_click_on_a_group_header_keeps_its_menu_with_marks() {
+    let mut env = create_test_env_with_groups();
+    sidebar_area(&mut env);
+    mark_all(&mut env);
+    assert!(!env.view.marked.is_empty());
+    let group_idx = env
+        .view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { .. }))
+        .expect("a Group row");
+
+    assert!(env
+        .view
+        .handle_right_click(5, env.view.list_inner_area.y + group_idx as u16));
+    let menu = env.view.context_menu.as_ref().expect("a menu opens");
+    assert_eq!(menu.selected_action(), ContextMenuAction::NewFromSelection);
 }

@@ -60,6 +60,8 @@ pub enum ActionId {
     ExtendMarkDown,
     /// Drop every Mark (palette and `Esc`; no chord of its own).
     ClearMarks,
+    /// Open the menu of Bulk actions on the Marked set.
+    BulkMenu,
     RespondToPermission,
     Stop,
     Delete,
@@ -1042,6 +1044,21 @@ pub static BINDINGS: &[Binding] = &[
         }),
     },
     Binding {
+        id: ActionId::BulkMenu,
+        non_strict: &[k('K')],
+        strict: &[k('K')],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Bulk actions on marked sessions",
+        }),
+        palette: Some(PaletteMeta {
+            title: "Bulk actions on marked sessions",
+            keywords: &["marked", "bulk", "many", "multi", "all"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
         id: ActionId::RespondToPermission,
         non_strict: &[k('a')],
         strict: &[k('A')],
@@ -1522,6 +1539,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::ExtendMarkUp => "extend-mark-up",
         ActionId::ExtendMarkDown => "extend-mark-down",
         ActionId::ClearMarks => "clear-marks",
+        ActionId::BulkMenu => "bulk-menu",
         ActionId::RespondToPermission => "respond-to-permission",
         ActionId::Stop => "stop",
         ActionId::Delete => "delete",

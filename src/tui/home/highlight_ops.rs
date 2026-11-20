@@ -107,7 +107,7 @@ impl HomeView {
 
     /// Where a keyboard-opened menu sits: just below the cursor's row, found by
     /// hit-testing the rendered rows so it follows the list and shelf scroll.
-    fn cursor_row_anchor(&self) -> (u16, u16) {
+    pub(super) fn cursor_row_anchor(&self) -> (u16, u16) {
         for area in [self.list_inner_area, self.shelf_inner_area] {
             for y in area.y..area.bottom() {
                 if self.resolve_row_to_index(area.x, y) == Some(self.cursor) {

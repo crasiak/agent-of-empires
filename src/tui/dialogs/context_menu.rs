@@ -73,6 +73,14 @@ pub enum ContextMenuAction {
     ToggleSectionCollapse,
     /// Restore a trashed session.
     Restore,
+    /// Send one message to the Marked set.
+    BulkSend,
+    /// Restart the Marked set after a confirm.
+    BulkRestart,
+    /// List the marked Sessions each bulk action would skip, with reasons.
+    BulkShowSkipped,
+    /// Drop every Mark.
+    ClearMarks,
 }
 
 /// A menu that opens in place of its parent, with a "‹ Back" row on top.
@@ -522,6 +530,22 @@ impl ContextMenuDialog {
                 (ContextMenuAction::NewSession, "New Session"),
                 (ContextMenuAction::OpenSortPicker, "Change Sort"),
                 (ContextMenuAction::OpenGroupPicker, "Change Grouping"),
+            ],
+        )
+    }
+
+    /// The menu of Bulk actions on the Marked set.
+    pub fn for_marks(anchor: (u16, u16)) -> Self {
+        Self::new(
+            anchor,
+            vec![
+                (ContextMenuAction::BulkSend, "Send Message to Marked"),
+                (ContextMenuAction::BulkRestart, "Restart Marked"),
+                (
+                    ContextMenuAction::BulkShowSkipped,
+                    "Show What Would Be Skipped",
+                ),
+                (ContextMenuAction::ClearMarks, "Clear Marks"),
             ],
         )
     }
