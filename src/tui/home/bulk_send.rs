@@ -20,6 +20,8 @@ pub(super) struct BulkSendTarget {
 pub(super) struct BulkSendRequest {
     pub targets: Vec<BulkSendTarget>,
     pub message: String,
+    /// `(title, reason)` for each target dropped at submit; reported with the result.
+    pub skipped: Vec<(String, String)>,
 }
 
 pub(super) struct BulkSendResult {
@@ -41,6 +43,14 @@ fn refusal_text(error: HttpError) -> String {
         },
         _ => error.to_string(),
     }
+}
+
+/// Run a request, listing the targets dropped at submit ahead of the failures.
+async fn run(mut request: BulkSendRequest) -> BulkSendResult {
+    let skipped = std::mem::take(&mut request.skipped);
+    let mut result = deliver(request).await;
+    result.failed.splice(0..0, skipped);
+    result
 }
 
 /// Send to each target in turn. One failure does not stop the rest.
@@ -98,7 +108,7 @@ impl BulkSendWorker {
             worker: Worker::spawn(
                 "aoe-bulk-send",
                 move |request: BulkSendRequest| match runtime.as_ref() {
-                    Ok(runtime) => runtime.block_on(deliver(request)),
+                    Ok(runtime) => runtime.block_on(run(request)),
                     Err(error) => BulkSendResult {
                         sent: 0,
                         failed: request
@@ -166,14 +176,58 @@ impl HomeView {
         self.send_message_dialog = Some(dialog);
     }
 
+    /// Re-check the targets frozen when the dialog opened: a Session may have changed
+    /// state, or lost its Mark, while the message was being typed.
+    pub(super) fn prepare_bulk_send(
+        &self,
+        targets: Vec<BulkSendTarget>,
+        message: String,
+    ) -> BulkSendRequest {
+        let plan = self.bulk_plan(BulkAction::Send);
+        let mut request = BulkSendRequest {
+            targets: Vec::new(),
+            message,
+            skipped: Vec::new(),
+        };
+        for target in targets {
+            if plan.eligible.iter().any(|c| c.id == target.id) {
+                request.targets.push(target);
+                continue;
+            }
+            let reason = plan
+                .skipped
+                .iter()
+                .find(|(c, _)| c.id == target.id)
+                .map_or("no longer marked", |(_, reason)| reason.label());
+            request.skipped.push((target.title, reason.to_string()));
+        }
+        request
+    }
+
     /// Hand the message to the worker and clear the Marks.
     pub(super) fn submit_bulk_send(&mut self, targets: Vec<BulkSendTarget>, message: String) {
         if message.trim().is_empty() || targets.is_empty() {
             return;
         }
-        let count = targets.len();
+        let request = self.prepare_bulk_send(targets, message);
+        if request.targets.is_empty() {
+            let lines: Vec<String> = request
+                .skipped
+                .iter()
+                .map(|(title, reason)| format!("  {title}: {reason}"))
+                .collect();
+            self.info_dialog = Some(InfoDialog::sized_to_fit(
+                "Nothing Sent",
+                &format!(
+                    "None of the marked sessions can take the message now.\n\n{}",
+                    lines.join("\n")
+                ),
+            ));
+            return;
+        }
+        let count = request.targets.len();
         let worker = BulkSendWorker::spawn();
-        worker.worker.request(BulkSendRequest { targets, message });
+        worker.worker.request(request);
         self.bulk_send_worker = Some(worker);
         self.clear_marks();
         let noun = if count == 1 { "session" } else { "sessions" };

@@ -591,3 +591,104 @@ fn cursor_bound_surfaces_on_a_trashed_row_still_close_with_marks() {
     assert!(env.view.pending_send_session.is_none());
     assert!(env.view.pending_bulk_send.is_none());
 }
+
+fn bulk_targets(env: &TestEnv) -> Vec<crate::tui::home::bulk_send::BulkSendTarget> {
+    env.view
+        .pending_bulk_send
+        .as_ref()
+        .expect("bulk targets")
+        .iter()
+        .map(|target| crate::tui::home::bulk_send::BulkSendTarget {
+            id: target.id.clone(),
+            title: target.title.clone(),
+            structured: target.structured,
+        })
+        .collect()
+}
+
+#[test]
+#[serial]
+fn submit_with_every_target_still_eligible_builds_a_request_for_all() {
+    let mut env = create_test_env_with_sessions(3);
+    mark_all(&mut env);
+    make_sendable(&mut env);
+    env.view.handle_key(key(KeyCode::Char('m')), None);
+
+    let request = env
+        .view
+        .prepare_bulk_send(bulk_targets(&env), "hello".to_string());
+
+    assert_eq!(request.targets.len(), 3);
+    assert!(request.skipped.is_empty());
+    assert_eq!(request.message, "hello");
+}
+
+#[test]
+#[serial]
+fn a_target_that_starts_waiting_after_the_dialog_opened_is_dropped_with_its_reason() {
+    let mut env = create_test_env_with_sessions(3);
+    mark_all(&mut env);
+    make_sendable(&mut env);
+    env.view.handle_key(key(KeyCode::Char('m')), None);
+    let targets = bulk_targets(&env);
+    let waiting = targets[1].id.clone();
+    let title = targets[1].title.clone();
+    env.view
+        .mutate_instance(&waiting, |inst| inst.status = Status::Waiting);
+
+    let request = env.view.prepare_bulk_send(targets, "hello".to_string());
+
+    assert_eq!(request.targets.len(), 2);
+    assert!(request.targets.iter().all(|target| target.id != waiting));
+    assert_eq!(
+        request.skipped,
+        vec![(title, "waiting on a prompt".to_string())]
+    );
+}
+
+#[test]
+#[serial]
+fn a_target_unmarked_after_the_dialog_opened_is_dropped_as_no_longer_marked() {
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    make_sendable(&mut env);
+    env.view.handle_key(key(KeyCode::Char('m')), None);
+    let targets = bulk_targets(&env);
+    env.view.marked.remove(&targets[0].id);
+    let title = targets[0].title.clone();
+
+    let request = env.view.prepare_bulk_send(targets, "hello".to_string());
+
+    assert_eq!(request.targets.len(), 1);
+    assert_eq!(
+        request.skipped,
+        vec![(title, "no longer marked".to_string())]
+    );
+}
+
+#[test]
+#[serial]
+fn submit_with_no_eligible_target_left_sends_nothing_and_says_so() {
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    make_sendable(&mut env);
+    env.view.handle_key(key(KeyCode::Char('m')), None);
+    let ids: Vec<String> = env.view.marked.iter().cloned().collect();
+    for id in ids {
+        env.view
+            .mutate_instance(&id, |inst| inst.status = Status::Waiting);
+    }
+    // A stale single-Session slot must not win over the bulk slot.
+    env.view.pending_send_session = Some(session_id_at(&env.view, 0).unwrap());
+
+    env.view.handle_key(key(KeyCode::Char('h')), None);
+    let action = env.view.handle_key(key(KeyCode::Enter), None);
+
+    assert!(action.is_none(), "the single slot was not used");
+    assert!(env.view.bulk_send_worker.is_none(), "nothing was sent");
+    assert!(env.view.pending_bulk_send.is_none());
+    assert_eq!(env.view.marked.len(), 2, "Marks stay when nothing was sent");
+    let info = env.view.info_dialog.as_ref().expect("explains why");
+    assert_eq!(info.title(), "Nothing Sent");
+    assert!(info.message().contains("waiting on a prompt"));
+}
