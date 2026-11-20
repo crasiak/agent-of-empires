@@ -2631,12 +2631,12 @@ Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>"
 
 ## Spike results
 
-To be filled in by Task 1:
+Run by the owner on 2026-11-20 (Ghostty on macOS, usable frame `{"x":0,"y":31,"width":3440,"height":1409}`). Steps 1, 2, 4 and 4b ran; Step 3 (placement) was not completed, so items 4 and 5 are still open.
 
-1. `new window` return value:
-2. Surface configuration syntax:
-3. Which `name override` sets the window title:
-4. Accessibility: error text, application named in the prompt, placement result:
-5. Cell snapping and gaps:
-6. Closing windows with a running process:
-7. What runs a window's command (parent process), and the quoting rule that follows:
+1. `new window` return value: the script ran without error and two windows opened, so `new window with configuration` returns a window that accepts `selected tab` / `focused terminal`. The returned ids were not recorded.
+2. Surface configuration syntax: `new surface configuration`, then `set command of cfg to "..."`, then `new window with configuration cfg`, as written in Step 1. No change needed.
+3. Which `name override` sets the window title: `name override of (focused terminal of selected tab of win)` gave both windows their titles.
+4. Accessibility: error text, application named in the prompt, placement result: OPEN. Step 3 was not completed.
+5. Cell snapping and gaps: OPEN. Depends on Step 3.
+6. Closing windows with a running process: `close.sh` closed the windows (each was running `cat`). Whether a confirmation was shown was not recorded.
+7. What runs a window's command (parent process), and the quoting rule that follows: parent is `/usr/bin/login`, so Ghostty runs the command directly and not through the login shell (fish). The `/bin/sh -c '<script>' probe 'it''s' 'a b'` command arrived intact and printed `args: probe its a b`, so POSIX single-quoting of the command string holds. The output cannot tell `a b` as one argument from two; `sh_quote` output is therefore proven for the script argument only. Tasks 4 and 7 keep passing surface commands as written by `attach_command()`; no fish-safe quoting is needed.
