@@ -1,6 +1,8 @@
 //! Home view - main session list and navigation
 
 pub(crate) mod bindings;
+mod bulk;
+mod bulk_restart;
 mod config_refresh;
 mod creation;
 mod dialogs;
@@ -403,6 +405,10 @@ pub struct HomeView {
     pub(super) pending_trash_session: Option<SessionDialogTarget>,
     /// Sessions and the color a confirmed bulk highlight change sets on them.
     pub(super) pending_highlight_bulk: Option<(Vec<String>, Option<&'static str>)>,
+    /// The plan shown in the open bulk-restart confirm.
+    pending_bulk_restart: Option<bulk::BulkPlan>,
+    /// The bulk restart in progress, if any.
+    bulk_restart: Option<bulk_restart::BulkRestartRun>,
     pub(super) pending_dialog_click_action: Option<crate::tui::app::Action>,
     pub(super) search_active: bool,
     pub(super) search_query: Input,

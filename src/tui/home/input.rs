@@ -1533,6 +1533,13 @@ impl HomeView {
                 self.apply_highlight_bulk();
                 None
             }
+            "bulk_restart" => {
+                let checked = std::mem::take(&mut self.confirm_checked);
+                self.start_bulk_restart(
+                    checked.contains(&super::bulk_restart::BULK_RESTART_IDLE_ONLY),
+                );
+                None
+            }
             "empty_trash" => {
                 let checked = std::mem::take(&mut self.confirm_checked);
                 self.empty_trash_all(
@@ -1875,6 +1882,7 @@ impl HomeView {
                         self.pending_force_remove_session = None;
                         self.pending_trash_session = None;
                         self.pending_highlight_bulk = None;
+                        self.pending_bulk_restart = None;
                         self.pending_image_pull = None;
                         // Mirrors the keyboard route: Cancel means "don't discard", so
                         // settings stays open and `settings_close_confirm` resets.
@@ -2747,6 +2755,7 @@ impl HomeView {
                     self.pending_force_remove_session = None;
                     self.pending_trash_session = None;
                     self.pending_highlight_bulk = None;
+                    self.pending_bulk_restart = None;
                     self.pending_image_pull = None;
                 }
                 DialogResult::Submit(_) => {
@@ -3490,6 +3499,11 @@ impl HomeView {
         id: ActionId,
         update_info: Option<&crate::update::UpdateInfo>,
     ) -> Option<Action> {
+        // With Marks present, restart acts on the Marked set, whatever the cursor is on.
+        if !self.marked.is_empty() && id == ActionId::Restart {
+            self.open_bulk_restart_confirm();
+            return None;
+        }
         // A row still being created has no runtime to command yet. The
         // keyboard dispatcher and the command palette both route here, so they
         // cannot diverge on what an action does.

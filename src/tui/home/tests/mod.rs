@@ -195,6 +195,7 @@ fn key(code: KeyCode) -> KeyEvent {
 mod afk;
 mod apply_session_id_updates;
 mod archive_restart_grouping;
+mod bulk_actions;
 mod click_to_select;
 mod command_errors;
 mod creation_fence;

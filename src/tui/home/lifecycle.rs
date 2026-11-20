@@ -244,6 +244,8 @@ impl HomeView {
             pending_force_remove_session: None,
             pending_trash_session: None,
             pending_highlight_bulk: None,
+            pending_bulk_restart: None,
+            bulk_restart: None,
             pending_dialog_click_action: None,
             search_active: false,
             search_query: Input::default(),

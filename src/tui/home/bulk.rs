@@ -1,0 +1,250 @@
+//! Bulk actions on the Marked set: which marked Sessions an action may touch, and why not.
+
+use super::*;
+use crate::session::{Item, Status};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BulkAction {
+    Restart,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SkipReason {
+    Trashed,
+    Archived,
+    Transient,
+    RestartInFlight,
+    Snoozed,
+}
+
+impl SkipReason {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Trashed => "in the trash",
+            Self::Archived => "archived",
+            Self::Transient => "being created or deleted",
+            Self::RestartInFlight => "already restarting",
+            Self::Snoozed => "snoozed",
+        }
+    }
+}
+
+/// The facts eligibility needs about one marked Session, captured so the rule is pure.
+#[derive(Debug, Clone)]
+pub(super) struct BulkCandidate {
+    pub id: String,
+    pub title: String,
+    pub status: Status,
+    pub trashed: bool,
+    pub archived: bool,
+    pub snoozed: bool,
+    pub restart_in_flight: bool,
+}
+
+impl BulkCandidate {
+    /// Mid-work: a restart would interrupt it.
+    pub(super) fn is_busy(&self) -> bool {
+        matches!(
+            self.status,
+            Status::Running | Status::Waiting | Status::Starting
+        )
+    }
+}
+
+pub(super) struct BulkPlan {
+    pub eligible: Vec<BulkCandidate>,
+    pub skipped: Vec<(BulkCandidate, SkipReason)>,
+}
+
+impl BulkPlan {
+    /// One `title: reason` line per skipped Session.
+    pub(super) fn skipped_lines(&self) -> String {
+        self.skipped
+            .iter()
+            .map(|(candidate, reason)| format!("  {}: {}", candidate.title, reason.label()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+pub(super) fn plan_bulk(
+    action: BulkAction,
+    candidates: Vec<BulkCandidate>,
+    attention_sort: bool,
+) -> BulkPlan {
+    let mut plan = BulkPlan {
+        eligible: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for candidate in candidates {
+        match skip_reason(action, &candidate, attention_sort) {
+            Some(reason) => plan.skipped.push((candidate, reason)),
+            None => plan.eligible.push(candidate),
+        }
+    }
+    plan
+}
+
+fn skip_reason(action: BulkAction, c: &BulkCandidate, attention_sort: bool) -> Option<SkipReason> {
+    if c.trashed {
+        return Some(SkipReason::Trashed);
+    }
+    if c.archived {
+        return Some(SkipReason::Archived);
+    }
+    if matches!(c.status, Status::Creating | Status::Deleting) {
+        return Some(SkipReason::Transient);
+    }
+    match action {
+        BulkAction::Restart if c.restart_in_flight => Some(SkipReason::RestartInFlight),
+        // The single restart skips a snoozed Session only under Attention sort.
+        BulkAction::Restart => (c.snoozed && attention_sort).then_some(SkipReason::Snoozed),
+    }
+}
+
+impl HomeView {
+    /// Marked Sessions in sidebar order, then any the sidebar does not show, by title.
+    pub(super) fn marked_in_view_order(&self) -> Vec<String> {
+        let mut ordered: Vec<String> = self
+            .flat_items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Session { id, .. } if self.marked.contains(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut hidden: Vec<&String> = self
+            .marked
+            .iter()
+            .filter(|id| !ordered.contains(id))
+            .collect();
+        hidden.sort_by_key(|id| self.get_instance(id).map(|inst| inst.title.clone()));
+        ordered.extend(hidden.into_iter().cloned());
+        ordered
+    }
+
+    /// Split the Marked set into the Sessions `action` may touch and the rest.
+    pub(super) fn bulk_plan(&self, action: BulkAction) -> BulkPlan {
+        let candidates = self
+            .marked_in_view_order()
+            .into_iter()
+            .filter_map(|id| {
+                let inst = self.get_instance(&id)?;
+                Some(BulkCandidate {
+                    title: inst.title.clone(),
+                    status: inst.status,
+                    trashed: inst.is_trashed(),
+                    archived: inst.is_archived(),
+                    snoozed: inst.is_snoozed(),
+                    restart_in_flight: self.restart_in_flight.contains(&id),
+                    id,
+                })
+            })
+            .collect();
+        plan_bulk(
+            action,
+            candidates,
+            self.sort_order == crate::session::config::SortOrder::Attention,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(title: &str) -> BulkCandidate {
+        BulkCandidate {
+            id: title.to_string(),
+            title: title.to_string(),
+            status: Status::Idle,
+            trashed: false,
+            archived: false,
+            snoozed: false,
+            restart_in_flight: false,
+        }
+    }
+
+    fn reason_for(
+        action: BulkAction,
+        attention: bool,
+        edit: impl FnOnce(&mut BulkCandidate),
+    ) -> Option<SkipReason> {
+        let mut c = candidate("s");
+        edit(&mut c);
+        let plan = plan_bulk(action, vec![c], attention);
+        plan.skipped.first().map(|(_, reason)| *reason)
+    }
+
+    #[test]
+    fn restart_eligibility() {
+        use BulkAction::Restart;
+        assert_eq!(reason_for(Restart, false, |_| {}), None);
+        assert_eq!(
+            reason_for(Restart, false, |c| c.status = Status::Stopped),
+            None,
+            "a stopped Session can be restarted"
+        );
+        assert_eq!(
+            reason_for(Restart, false, |c| c.status = Status::Running),
+            None,
+            "a busy Session is eligible; the confirm offers to leave it running"
+        );
+        assert_eq!(
+            reason_for(Restart, false, |c| c.trashed = true),
+            Some(SkipReason::Trashed)
+        );
+        assert_eq!(
+            reason_for(Restart, false, |c| c.status = Status::Creating),
+            Some(SkipReason::Transient)
+        );
+        assert_eq!(
+            reason_for(Restart, false, |c| c.status = Status::Deleting),
+            Some(SkipReason::Transient)
+        );
+        assert_eq!(
+            reason_for(Restart, false, |c| c.restart_in_flight = true),
+            Some(SkipReason::RestartInFlight)
+        );
+        assert_eq!(
+            reason_for(Restart, true, |c| c.snoozed = true),
+            Some(SkipReason::Snoozed),
+            "matches the single restart under Attention sort"
+        );
+        assert_eq!(reason_for(Restart, false, |c| c.snoozed = true), None);
+        assert_eq!(
+            reason_for(Restart, false, |c| c.archived = true),
+            Some(SkipReason::Archived)
+        );
+    }
+
+    #[test]
+    fn plan_keeps_order_and_splits() {
+        let mut shelved = candidate("b");
+        shelved.archived = true;
+        let plan = plan_bulk(
+            BulkAction::Restart,
+            vec![candidate("a"), shelved, candidate("c")],
+            false,
+        );
+        let titles: Vec<&str> = plan.eligible.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, ["a", "c"]);
+        assert_eq!(plan.skipped_lines(), "  b: archived");
+    }
+
+    #[test]
+    fn busy_means_running_waiting_or_starting() {
+        for (status, busy) in [
+            (Status::Running, true),
+            (Status::Waiting, true),
+            (Status::Starting, true),
+            (Status::Idle, false),
+            (Status::Stopped, false),
+            (Status::Error, false),
+        ] {
+            let mut c = candidate("s");
+            c.status = status;
+            assert_eq!(c.is_busy(), busy, "{status:?}");
+        }
+    }
+}

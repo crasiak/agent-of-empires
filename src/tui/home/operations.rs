@@ -438,6 +438,13 @@ impl HomeView {
         Ok(())
     }
 
+    /// Whether `id` was restarted too recently for another restart to be accepted.
+    pub(super) fn restart_cooling_down(&self, id: &str) -> bool {
+        self.restart_cooldown_at
+            .get(id)
+            .is_some_and(|prev| prev.elapsed() < std::time::Duration::from_millis(1500))
+    }
+
     /// Submit a restart for one Session, whatever the cursor is on. Launch edits travel
     /// with the command; `None` keeps what the Session already runs.
     pub(super) fn restart_session_by_id(
@@ -481,12 +488,10 @@ impl HomeView {
 
         // Spam-debounce. Holding `e` or pressing it twice fast otherwise
         // races overlapping restart_with_size calls.
-        let now = std::time::Instant::now();
-        if let Some(prev) = self.restart_cooldown_at.get(id) {
-            if now.duration_since(*prev) < std::time::Duration::from_millis(1500) {
-                return RestartSubmit::Skipped;
-            }
+        if self.restart_cooling_down(id) {
+            return RestartSubmit::Skipped;
         }
+        let now = std::time::Instant::now();
         let body = crate::daemon::RestartSessionBody {
             size: crate::terminal::get_size().and_then(|(cols, rows)| {
                 Some(crate::daemon::TerminalSize {
