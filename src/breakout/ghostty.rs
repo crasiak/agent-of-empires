@@ -37,21 +37,39 @@ fn with_timeout(body: &str) -> String {
 }
 
 /// Open one Ghostty window per surface, each running its command under a title.
+/// The script keeps the ids of the windows it creates; if anything fails it closes
+/// those ids (never by title, which could hit a window from an earlier Breakout)
+/// and re-raises the original error with its number.
 pub fn open_windows_script(surfaces: &[Surface]) -> String {
-    let mut script = String::from("tell application \"Ghostty\"\n");
+    let mut script = String::from(concat!(
+        "tell application \"Ghostty\"\n",
+        "    set createdIds to {}\n",
+        "    try\n",
+    ));
     for surface in surfaces {
-        script.push_str("    set cfg to new surface configuration\n");
+        script.push_str("        set cfg to new surface configuration\n");
         script.push_str(&format!(
-            "    set command of cfg to {}\n",
+            "        set command of cfg to {}\n",
             as_literal(&surface.command)
         ));
-        script.push_str("    set win to new window with configuration cfg\n");
+        script.push_str("        set win to new window with configuration cfg\n");
+        script.push_str("        set end of createdIds to id of win\n");
         script.push_str(&format!(
-            "    set name override of (focused terminal of selected tab of win) to {}\n",
+            "        set name override of (focused terminal of selected tab of win) to {}\n",
             as_literal(&surface.title)
         ));
     }
-    script.push_str("end tell\n");
+    script.push_str(concat!(
+        "    on error errMsg number errNum\n",
+        "        repeat with i in createdIds\n",
+        "            try\n",
+        "                close window (first window whose id is (contents of i))\n",
+        "            end try\n",
+        "        end repeat\n",
+        "        error errMsg number errNum\n",
+        "    end try\n",
+        "end tell\n",
+    ));
     with_timeout(&script)
 }
 
@@ -132,6 +150,20 @@ fn friendly_error(stderr: &str) -> String {
     }
 }
 
+/// Start of the error text when the runner killed `osascript` on its overall wait.
+const KILLED_PREFIX: &str = "osascript timed out after";
+
+/// What to tell the user about windows after a failed open. The script closes
+/// the ids it created on its own errors; a killed `osascript` cannot, and no
+/// title-based cleanup is attempted either way.
+fn open_failure_note(error: &str) -> String {
+    if error.starts_with(KILLED_PREFIX) {
+        "some windows may still be open; use Close breakout windows to remove them".to_string()
+    } else {
+        "windows it had opened were closed where possible".to_string()
+    }
+}
+
 /// Overall wait for a script: a base plus a share per window it touches, so many
 /// slow `new window` events do not get killed while still succeeding.
 fn wait_for(windows: usize) -> Duration {
@@ -163,7 +195,7 @@ fn osascript(language_args: &[&str], script: &str, wait: Duration) -> Result<Str
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("osascript timed out after {wait:?}"));
+                return Err(format!("{KILLED_PREFIX} {wait:?}"));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(e) => return Err(format!("osascript wait: {e}")),
@@ -224,11 +256,7 @@ pub fn run_windows(surfaces: &[Surface]) -> Result<super::BreakoutOutcome, Strin
         &open_windows_script(surfaces),
         wait_for(surfaces.len()),
     ) {
-        let cleanup = match close(&titles) {
-            Ok(()) => "windows already opened were closed".to_string(),
-            Err(close_error) => format!("closing windows already opened failed: {close_error}"),
-        };
-        return Err(format!("{error} ({cleanup})"));
+        return Err(format!("{error} ({})", open_failure_note(&error)));
     }
     let placed = osascript(&["-l", "JavaScript"], FRAME_SCRIPT, wait_for(0))
         .and_then(|json| {
@@ -391,5 +419,38 @@ mod tests {
     fn the_wait_grows_with_the_window_count() {
         assert!(wait_for(9) > wait_for(1));
         assert!(wait_for(1) > Duration::from_secs(15));
+    }
+
+    #[test]
+    fn open_script_closes_what_it_created_and_reraises() {
+        let script = open_windows_script(&[surface("t", "c")]);
+        assert!(script.contains("set createdIds to {}"));
+        assert!(script.contains("set end of createdIds to id of win"));
+        let handler = script
+            .split("on error errMsg number errNum")
+            .nth(1)
+            .expect("handler");
+        assert!(handler.contains("repeat with i in createdIds"));
+        assert!(handler.contains("close window (first window whose id is (contents of i))"));
+        assert!(handler.contains("error errMsg number errNum"));
+        assert!(
+            !script.contains("whose name"),
+            "cleanup must never match by title"
+        );
+        let created = script.find("set end of createdIds").unwrap();
+        let named = script.find("set name override").unwrap();
+        assert!(
+            created < named,
+            "the id is kept before anything else can fail"
+        );
+    }
+
+    #[test]
+    fn open_failure_notes_say_what_was_cleaned_up() {
+        let reported = open_failure_note("execution error: x (-1712)");
+        assert!(reported.contains("windows it had opened were closed where possible"));
+        let killed = open_failure_note(&format!("{KILLED_PREFIX} 25s"));
+        assert!(killed.contains("some windows may still be open"));
+        assert!(killed.contains("Close breakout windows"));
     }
 }
