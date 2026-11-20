@@ -12,6 +12,220 @@
 
 **Depends on:** `docs/superpowers/plans/2026-11-19-marks-and-bulk-actions.md` merged first. This plan uses its `marked`, `bulk.rs` (`BulkAction`, `SkipReason`, `BulkCandidate`, `plan_bulk`, `bulk_plan`), `ContextMenuDialog::for_marks` and `clear_marks`.
 
+## Overview
+
+This section is for the human reviewer. It shows what the user sees and where the boundaries are. The tasks below are the instructions for the implementer.
+
+### What the user gets
+
+Mark three to five Sessions, press `K`, choose **Break Out into Windows**. Each marked Session opens in its own Ghostty window, attached to the Session's tmux pane, and the windows are arranged in a grid that fills the screen. aoe keeps running where it was. Detaching in a window closes that window. **Close Breakout Windows** (bulk menu or command palette) closes them all.
+
+A setting picks between two layouts. `windows` (the default, built first) is one Ghostty window per Session. `splits` (opt-in, built second) is one Ghostty window split into panes.
+
+The same action works when aoe runs on another host (bender) and is viewed over ssh from the laptop: the windows open on the laptop, each one running its own ssh to bender.
+
+### Wireframes
+
+Bulk menu after this plan (the first four entries come from Phase 1; "Close" appears only while Breakout windows are tracked):
+
+```
+┌───────────────────────────────┐
+│ Send Message to Marked        │
+│ Restart Marked                │
+│ Break Out into Windows        │
+│ Show What Would Be Skipped    │
+│ Clear Marks                   │
+│ Close Breakout Windows        │
+└───────────────────────────────┘
+```
+
+Layout `windows`, three Sessions. Three separate Ghostty windows, each with its own title bar, sized to thirds of the screen. The aoe window is left alone and ends up behind them.
+
+```
+┌ aoe breakout · fix-auth ──┐┌ aoe breakout · rate-limit ┐┌ aoe breakout · dark-mode ─┐
+│                           ││                           ││                           │
+│  claude                   ││  claude                   ││  codex                    │
+│  (tmux attach to the      ││                           ││                           │
+│   Session's agent pane)   ││                           ││                           │
+│                           ││                           ││                           │
+│                           ││                           ││                           │
+└───────────────────────────┘└───────────────────────────┘└───────────────────────────┘
+```
+
+Layout `splits`, the same three Sessions. One Ghostty window, three panes. No Accessibility permission needed, because Ghostty does the arranging itself.
+
+```
+┌ aoe breakout ─────────────────────────────────────────────────────────────────────────┐
+│ fix-auth                  │ rate-limit                 │ dark-mode                    │
+│                           │                            │                              │
+│  claude                   │  claude                    │  codex                       │
+│                           │                            │                              │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+The grid by Session count (both layouts):
+
+```
+ 1          2            3              4           5 or 6          7 to 9
+┌─────┐   ┌──┬──┐     ┌──┬──┬──┐     ┌──┬──┐      ┌──┬──┬──┐      ┌──┬──┬──┐
+│     │   │  │  │     │  │  │  │     ├──┼──┤      ├──┼──┼──┤      ├──┼──┼──┤
+└─────┘   └──┴──┘     └──┴──┴──┘     └──┴──┘      └──┴──┴──┘      ├──┼──┼──┤
+                                                  (5 leaves one   └──┴──┴──┘
+                                                   cell empty)
+```
+
+More than 6 asks first; more than 9 is refused:
+
+```
+┌ Break Out ────────────────────────────────────────┐
+│ Open 7 sessions in separate windows?              │
+│                                                   │
+│               [ Open ]   [ Cancel ]               │
+└───────────────────────────────────────────────────┘
+```
+
+Windows opened but macOS has not granted Accessibility, so they could not be moved:
+
+```
+┌ Breakout ─────────────────────────────────────────┐
+│ The windows are open but not tiled: macOS has not │
+│ granted Accessibility access. ...                 │
+│                      [ OK ]                       │
+└───────────────────────────────────────────────────┘
+```
+
+### Where the code sits
+
+```mermaid
+flowchart LR
+  subgraph TUI["aoe TUI (src/tui/home)"]
+    marks["Marked set + plan_bulk<br/>(Phase 1)"]
+    hb["breakout.rs<br/>build request, pick transport,<br/>background job, tracking"]
+  end
+  subgraph Core["crate::breakout (no TUI, no I/O except the driver)"]
+    req["request.rs<br/>BreakoutRequest, validation,<br/>surface commands"]
+    grid["grid.rs<br/>tile(count, screen)"]
+    drv["ghostty.rs (macOS only)<br/>generate AppleScript,<br/>run osascript"]
+    agent["agent.rs<br/>socket protocol"]
+  end
+  subgraph Mac["macOS"]
+    gh["Ghostty<br/>AppleScript dictionary"]
+    ax["System Events<br/>Accessibility: move, resize"]
+  end
+  cli["aoe breakout-agent<br/>(CLI, on the laptop)"]
+  marks --> hb
+  hb --> req
+  hb -->|"Transport::Local"| drv
+  hb -->|"Transport::Agent<br/>(under ssh)"| agent
+  agent --> cli
+  cli --> drv
+  drv --> grid
+  drv -->|"new window / split"| gh
+  drv -->|"position, size"| ax
+```
+
+Three boundaries matter:
+
+1. **The request is a plain value.** `BreakoutRequest` is a list of `(session id, title, profile)`, a layout, and optionally a host. It is the only thing that crosses from the TUI to the driver, and the only thing that crosses the wire to the agent. It carries no commands.
+2. **Commands are built on the side that runs them.** The driver side turns each validated entry into a fixed command: `<this aoe binary> --profile <p> session attach <id>` locally, or `ssh -t <host> aoe --profile <p> session attach <id>` through the agent. Text from the remote side is never executed.
+3. **The driver is the only macOS-specific code.** Ghostty has no AppleScript for window position or size, so creating windows goes through Ghostty and moving them goes through System Events. That second step is what needs the Accessibility permission, and it is the unproven part: Task 1 is a spike that tests it by hand before anything is built on it.
+
+### Local Breakout, step by step
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant Home as HomeView
+  participant Job as background thread
+  participant Drv as ghostty driver
+  participant Gh as Ghostty
+  participant AX as System Events
+  participant Tmux as tmux
+  User->>Home: K, Break Out into Windows
+  Home->>Home: plan_bulk(Breakout): eligible, skipped
+  alt 0 eligible, or more than 9
+    Home-->>User: dialog explaining why
+  else more than 6
+    Home-->>User: confirm "Open N sessions in separate windows?"
+  end
+  Home->>Job: BreakoutRequest
+  Home->>Home: clear Marks, flash "Opening breakout windows..."
+  Job->>Drv: run_local(request)
+  loop each Session
+    Drv->>Gh: new window running "aoe session attach id", unique title
+    Gh->>Tmux: attach (aoe resets tmux sizing to the latest client)
+  end
+  Drv->>AX: move and size each window, found by its title
+  alt Accessibility refused
+    Drv-->>Job: opened N, tiled = false, note
+  else
+    Drv-->>Job: opened N, tiled = true
+  end
+  Job-->>Home: outcome (picked up on a tick)
+  Home->>Home: remember window titles for Close
+  Home-->>User: flash "Opened N windows" or dialog with the note
+```
+
+Breakout skips Sessions it cannot attach: structured Sessions (they have no tmux pane; `aoe session attach` refuses them), Sessions whose agent is not running, and anything archived, trashed, or being created or deleted.
+
+Task 2 exists because of the tmux step: aoe sets tmux `window-size latest`, and the CLI attach path does not currently reset sizing the way the TUI attach does, so a Breakout window could be stuck at the preview pane's size.
+
+### Remote Breakout (aoe on bender, windows on the laptop)
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant TUI as aoe TUI on bender (seen over ssh)
+  participant Sock as forwarded Unix socket
+  participant Agent as aoe breakout-agent on laptop
+  participant Drv as ghostty driver on laptop
+  participant Gh as Ghostty on laptop
+  Note over Agent: started by hand on the laptop, listens on<br/>~/.agent-of-empires/breakout/agent.sock
+  Note over Sock: ssh RemoteForward maps a socket on bender<br/>to the agent's socket on the laptop
+  User->>TUI: K, Break Out into Windows
+  TUI->>TUI: under ssh and socket present: Transport Agent
+  TUI->>Sock: one JSON line: sessions, layout, host = bender, nonce
+  Sock->>Agent: same line
+  Agent->>Agent: peer uid check, validate fields, host in breakout.agent_hosts?
+  alt refused
+    Agent-->>TUI: refused + reason
+  else accepted
+    Agent->>Drv: run_local with ssh surface commands
+    Drv->>Gh: windows running "ssh -t bender aoe session attach id"
+    Agent-->>TUI: opened + outcome, same nonce
+  end
+  TUI-->>User: flash or dialog
+```
+
+Transport choice is automatic: not under ssh and on macOS with Ghostty means local; under ssh with the forwarded socket present means agent; anything else shows "Breakout Unavailable" with the reason. The agent only acts for hosts listed in the laptop's `breakout.agent_hosts`, so a host that can reach the socket still cannot make the laptop ssh somewhere arbitrary.
+
+### Task order
+
+```mermaid
+flowchart LR
+  T1["1 Spike<br/>(human watches, STOP)"] --> T4["4 Driver: windows"]
+  T2["2 attach resets<br/>tmux sizing"]
+  T3["3 Request, validation,<br/>grid"] --> T4
+  T5["5 [breakout] setting"] --> T6["6 Breakout from TUI"]
+  T4 --> T6
+  T2 --> T6
+  T4 --> T7["7 Splits layout"]
+  T6 --> T7
+  T6 --> T8["8 Agent + remote"]
+  T7 --> T9["9 Guide, glossary,<br/>end-to-end checks"]
+  T8 --> T9
+```
+
+After Task 6 local Breakout works end to end with separate windows. Task 7 adds splits. Task 8 adds bender. Tasks 2, 3 and 5 do not depend on the spike and can go ahead of it.
+
+### Decisions worth a second look
+
+- The Ghostty driver lives in `src/breakout/ghostty.rs` behind a macOS gate. `AGENTS.md` says OS-specific code belongs in `src/process/{macos,linux}.rs`; the clipboard, URL opener and sound code already sit outside it the same way, and this keeps Breakout in one place.
+- Structured Sessions are skipped, not opened some other way.
+- The agent is started by hand (no launchd job yet), and remote Breakout windows are closed on the laptop, not from the remote TUI.
+- Left out: collapsing the Group after a Breakout, and a Tailscale transport. See "Not in this plan".
+- If the spike shows Accessibility placement does not work, the fallback is `splits` as the default and `windows` untiled. That is your call at the Task 1 stop point.
+
 ## Global Constraints
 
 - Everything in the Phase 1 plan's "Global Constraints" applies, including the `/tmp/aoe-test-env.sh` wrapper for every cargo command.

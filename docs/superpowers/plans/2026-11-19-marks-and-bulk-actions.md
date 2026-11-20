@@ -2,13 +2,291 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let the user mark several Sessions in the TUI sidebar, then send one message to all of them or restart all of them.
+**Goal:** Let the user arbitrarily mark several Sessions in the TUI sidebar (any rows, in any Group, contiguous or not), then send one message to all of them or restart all of them.
 
 **Architecture:** A TUI-local Marked set on `HomeView` (`src/tui/home/marks.rs`). A pure eligibility function (`bulk.rs`) decides which marked Sessions an action may touch. Bulk restart loops the existing per-session restart through a two-at-a-time queue (`bulk_restart.rs`). Bulk send calls the daemon's send endpoints from a background worker (`bulk_send.rs`), because the TUI's interactive send path holds a single pending send tied to the cursor row.
 
 **Tech Stack:** Rust, ratatui, crossterm, tokio (current-thread runtime inside a worker thread), the existing `crate::tui::worker::Worker`, `crate::acp::client::HttpClient`.
 
 **Spec:** `docs/superpowers/specs/2026-11-19-marks-bulk-actions-breakout-design.md` (sections 1a, 1b, 1c and "Amendments"). Phase 2 (Breakout) has its own plan: `docs/superpowers/plans/2026-11-19-breakout-windows.md`.
+
+## Overview
+
+This section is for the human reviewer. It shows what the user sees and where the boundaries are. The tasks below are the instructions for the implementer.
+
+### What the user gets
+
+Today every sidebar action applies to one Session: the cursor row. This plan adds a second, independent idea, the **Mark**. A Mark is a tick on a Session row. The cursor still moves freely, and the set of ticked rows (the **Marked set**) stays put while it moves. Marks can be on any rows, in any Group, in any order.
+
+Once at least one Session is marked, the two existing keys `m` (send message) and `e` (restart) act on the Marked set instead of the cursor row. With nothing marked they behave exactly as they do today. A new key `K` opens a small menu with the same two actions plus "what would be skipped" and "clear marks".
+
+Marks live only in the running TUI. They are not saved, not sent to the daemon, and not shared with the web dashboard. Quitting aoe drops them.
+
+### Keys
+
+| Key | Nothing marked | One or more marked |
+|-----|----------------|--------------------|
+| `Space` on a Session row | Mark it | Toggle its Mark |
+| `Space` on a Group header | Mark every shown Session in the Group | Same; if all are already marked, unmark them |
+| `Shift+Up` / `Shift+Down` | Mark the cursor row, move, mark the row reached | Same (extends the run) |
+| `Esc` | Unchanged | Clear all Marks (only after the three existing `Esc` uses have had their turn) |
+| `m` | Send to the cursor row (unchanged) | Bulk send to the Marked set |
+| `e` | Restart dialog for the cursor row (unchanged) | Bulk restart confirm for the Marked set |
+| `K` or right-click on a marked row | Flash "No sessions marked" | Open the bulk menu |
+
+`Shift+Up`/`Shift+Down` currently jump ten rows. That jump is removed; `PageUp`/`PageDown` already cover it.
+
+### Wireframes
+
+Sidebar with three Marks. The tick column appears on every row while anything is marked, so titles stay aligned, and disappears when the Marked set is empty. The title carries the count, the footer carries the hint.
+
+```
+┌ Sessions  3 marked ───────────────┐┌ Preview ───────────────────────────┐
+│   ▾ api                           ││                                    │
+│ ✓   ● fix-auth-timeout     [cc:p] ││  (preview of the cursor row,       │
+│ ✓ ▸ ○ add-rate-limit       [cc:p] ││   unchanged by Marks)              │
+│     ○ bump-deps            [cx:p] ││                                    │
+│   ▾ web                           ││                                    │
+│ ✓   ◐ dark-mode            [cc:p] ││                                    │
+│     ○ a11y-audit           [cc:p] ││                                    │
+│   ▸ infra (4)                     ││                                    │
+└───────────────────────────────────┘└────────────────────────────────────┘
+ Space mark  K bulk  Esc clear marks   …existing hints…
+```
+
+`▸` is the cursor. It is on a marked row here, but need not be.
+
+A Mark can be on a row the sidebar is not showing (its Group is collapsed, or a filter hides it). The Mark is kept and counted:
+
+```
+┌ Sessions  3 marked (1 hidden) ────┐
+│   ▾ api                           │
+│ ✓   ● fix-auth-timeout     [cc:p] │
+│ ✓ ▸ ○ add-rate-limit       [cc:p] │
+│     ○ bump-deps            [cx:p] │
+│   ▸ web (2)                       │
+└───────────────────────────────────┘
+```
+
+Bulk menu (`K`, or right-click on a marked row):
+
+```
+┌───────────────────────────────┐
+│ Send Message to Marked        │
+│ Restart Marked                │
+│ Show What Would Be Skipped    │
+│ Clear Marks                   │
+└───────────────────────────────┘
+```
+
+Bulk send (`m`). This is the existing send dialog; only the target label changes. Skipped Sessions are counted in the label and listed by "Show What Would Be Skipped".
+
+```
+┌ > 2 marked sessions, 1 skipped ───────────────────┐
+│ rebase onto main and rerun the tests              │
+│                                                   │
+│                                                   │
+└──────────────────────── (existing send hints) ────┘
+```
+
+Bulk restart (`e`). The existing confirm dialog, with a breakdown and one checkbox. The checkbox appears only when the set mixes idle and busy Sessions.
+
+```
+┌ Restart Marked Sessions ──────────────────────────┐
+│ Restart 3 marked sessions?                        │
+│                                                   │
+│ 2 idle, 1 busy (running, waiting or starting)     │
+│                                                   │
+│ Each restarts with its current profile, agent     │
+│ and arguments.                                    │
+│                                                   │
+│ Skipped:                                          │
+│   old-spike: already restarting                   │
+│                                                   │
+│ [ ] Idle only (leave 1 busy running)              │
+│                                                   │
+│              [ Restart ]   [ Cancel ]             │
+└───────────────────────────────────────────────────┘
+```
+
+Results. If everything worked, a one-line flash in the status bar ("Sent to 2 sessions", "Restarted 3 sessions"). If anything failed, a dialog that names each failure:
+
+```
+┌ Bulk Send ────────────────────────────────────────┐
+│ Sent to 1 session. 1 did not get the message:     │
+│                                                   │
+│   dark-mode: not running                          │
+│                                                   │
+│                      [ OK ]                       │
+└───────────────────────────────────────────────────┘
+```
+
+### Where the code sits
+
+Everything new is inside the TUI home view. The daemon and its HTTP API are not changed; bulk send calls two endpoints the CLI already uses.
+
+```mermaid
+flowchart LR
+  subgraph TUI["TUI process (src/tui/home)"]
+    input["input.rs<br/>keys, mouse, Esc"]
+    marks["marks.rs<br/>Marked set"]
+    bulk["bulk.rs<br/>eligibility + bulk menu"]
+    brestart["bulk_restart.rs<br/>confirm + queue of 2"]
+    bsend["bulk_send.rs<br/>dialog + worker handle"]
+    render["render.rs<br/>tick column, title, footer"]
+    feed["session_feed<br/>(existing)"]
+    worker(["worker thread<br/>aoe-bulk-send"])
+  end
+  subgraph Daemon["aoe daemon (unchanged)"]
+    mut["Session mutations<br/>Restart"]
+    http["HTTP send endpoints<br/>send_message / prompt"]
+  end
+  input --> marks
+  input --> bulk
+  marks --> render
+  bulk --> brestart
+  bulk --> bsend
+  brestart -->|"restart_session_by_id"| feed
+  feed -->|"SessionMutation::Restart"| mut
+  bsend --> worker
+  worker -->|"no_revive = true"| http
+  mut -.->|"projection refresh"| feed
+  feed -.->|"prune_marks"| marks
+```
+
+Two boundaries matter:
+
+1. **Marks are view state.** Only `marks.rs` writes the set. Rendering reads it. A projection refresh from the daemon prunes Marks whose Session is gone, trashed or mid-deletion.
+2. **Eligibility is a pure function.** `plan_bulk` takes a snapshot of facts about each marked Session and returns two lists, eligible and skipped-with-reason. The confirm text, the send label, the skip list and the actual run all come from that one function, so they cannot disagree.
+
+### Life of a Mark
+
+```mermaid
+stateDiagram-v2
+  [*] --> Unmarked
+  Unmarked --> Marked: Space / Shift+arrow / Space on Group header
+  Marked --> Unmarked: Space
+  Marked --> Unmarked: Esc or Clear Marks
+  Marked --> Unmarked: bulk action submitted
+  Marked --> Unmarked: Session trashed, deleted or gone (prune)
+  Marked --> Marked: cursor moves, Group collapses, filter hides the row
+```
+
+A bulk action clears the whole Marked set when it is submitted, not when it finishes. A Session in the trash, or one still being created or deleted, cannot be marked.
+
+### Which marked Sessions an action touches
+
+```mermaid
+flowchart TD
+  start(["each marked Session"]) --> t{"trashed?"}
+  t -->|yes| s1["skip: in the trash"]
+  t -->|no| a{"archived?"}
+  a -->|yes| s2["skip: archived"]
+  a -->|no| c{"creating or deleting?"}
+  c -->|yes| s3["skip: being created or deleted"]
+  c -->|no| which{"action"}
+  which -->|Send| st{"structured Session?"}
+  st -->|yes| ap{"approval pending?"}
+  ap -->|yes| s4["skip: waiting on a prompt"]
+  ap -->|no| ok1(["eligible"])
+  st -->|no| pane{"agent pane alive?"}
+  pane -->|no| s5["skip: agent is not running"]
+  pane -->|yes| w{"Status is Waiting?"}
+  w -->|yes| s4
+  w -->|no| ok1
+  which -->|Restart| rf{"restart already in flight?"}
+  rf -->|yes| s6["skip: already restarting"]
+  rf -->|no| sn{"snoozed, in Attention sort?"}
+  sn -->|yes| s7["skip: snoozed"]
+  sn -->|no| ok2(["eligible"])
+```
+
+Send skips a Session that is waiting on a permission prompt because the typed text could answer the prompt. Send never starts a dead agent (`no_revive = true`); it reports it instead.
+
+### Bulk send, step by step
+
+The TUI's own send path holds a single pending send tied to the cursor row, so it cannot be looped. Bulk send goes around it: a one-shot worker thread calls the daemon's send endpoints, one Session after another, and the TUI stays responsive while it runs.
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant Home as HomeView
+  participant Plan as plan_bulk
+  participant Worker as worker thread
+  participant Daemon as aoe daemon
+  User->>Home: m (with Marks)
+  Home->>Plan: marked Sessions, action Send
+  Plan-->>Home: eligible, skipped
+  alt none eligible
+    Home-->>User: dialog "Nothing to Send To" with reasons
+  else some eligible
+    Home-->>User: send dialog "N marked sessions, M skipped"
+    User->>Home: type message, Enter
+    Home->>Worker: targets + message
+    Home->>Home: clear Marks, flash "Sending to N sessions..."
+    loop each target, in sidebar order
+      Worker->>Daemon: send_message or prompt, no_revive
+      Daemon-->>Worker: ok or refusal code
+    end
+    Worker-->>Home: sent count, failures (picked up on a tick)
+    Home-->>User: flash "Sent to N sessions" or failure dialog
+  end
+```
+
+One failure does not stop the rest. Cancelling the dialog keeps the Marks.
+
+### Bulk restart, step by step
+
+Restart reuses the per-session restart the single-row `e` already performs, extracted into `restart_session_by_id` (Task 5). Each Session restarts with what it is already running: its own profile, agent and arguments. There is no options dialog in the bulk path. Restarts are staggered two at a time because each one spawns a harness and a launch.
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant Home as HomeView
+  participant Run as BulkRestartRun
+  participant Feed as session_feed
+  participant Daemon as aoe daemon
+  User->>Home: e (with Marks)
+  Home-->>User: confirm with idle/busy breakdown, skipped list, "Idle only"
+  User->>Home: Restart
+  Home->>Home: recompute eligibility, clear Marks
+  Home->>Run: queue of eligible Sessions
+  loop every TUI tick until the queue drains
+    Run->>Feed: submit Restart, while fewer than 2 in flight
+    Feed->>Daemon: SessionMutation Restart
+    Daemon-->>Feed: command error, only on failure
+    Feed-->>Run: error recorded as failed
+    Run->>Run: no longer pending and no error means succeeded
+  end
+  Home-->>User: flash "Restarted N sessions" or failure dialog
+```
+
+The daemon gives no per-session "restart succeeded" signal. A restart counts as done when it has left the feed's pending set, and as failed only if a command error named it. Eligibility is recomputed when the user confirms, because Sessions can change while the dialog is open.
+
+### Task order
+
+```mermaid
+flowchart LR
+  T1["1 Marked set<br/>Space"] --> T2["2 Group toggle<br/>Shift range, Esc"]
+  T2 --> T3["3 Render<br/>tick, title, footer"]
+  T1 --> T4["4 Eligibility<br/>plan_bulk"]
+  T5["5 Extract<br/>restart_session_by_id"] --> T6["6 Bulk restart"]
+  T4 --> T6
+  T4 --> T7["7 Bulk send"]
+  T6 --> T8["8 Bulk menu K<br/>right-click, gates"]
+  T7 --> T8
+  T3 --> T8
+```
+
+Tasks 1 to 3 give a usable (if pointless) marking UI. Task 4 is staged and committed together with Task 6, its first caller. Tasks 6 and 7 are independent of each other.
+
+### Decisions worth a second look
+
+- `K` is the bulk menu key. The other free letters in both key modes are `J` and `Q`.
+- With Marks, `e` skips the restart-options dialog (no per-run model or argument override). The single-row `e` keeps it.
+- The ten-row `Shift+Up`/`Shift+Down` jump is removed.
+- Marks clear when a bulk action is submitted, not when it completes.
+- The confirm has two buttons and an "Idle only" checkbox, because the existing confirm dialog supports exactly that and no third button.
 
 ## Global Constraints
 
