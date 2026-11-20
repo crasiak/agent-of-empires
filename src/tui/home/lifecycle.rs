@@ -200,6 +200,8 @@ impl HomeView {
             pending_permission_response: None,
             pending_send_session: None,
             pending_send_target: live_send::LiveSendTarget::Agent,
+            pending_bulk_send: None,
+            bulk_send_worker: None,
             pending_live_send_target: live_send::LiveSendTarget::Agent,
             pending_native_attachment: None,
             live_send: None,

@@ -5,6 +5,7 @@ use crate::session::{Item, Status};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BulkAction {
+    Send,
     Restart,
 }
 
@@ -13,6 +14,8 @@ pub(super) enum SkipReason {
     Trashed,
     Archived,
     Transient,
+    NoAgentPane,
+    AwaitingPermission,
     RestartInFlight,
     Snoozed,
 }
@@ -23,6 +26,8 @@ impl SkipReason {
             Self::Trashed => "in the trash",
             Self::Archived => "archived",
             Self::Transient => "being created or deleted",
+            Self::NoAgentPane => "agent is not running",
+            Self::AwaitingPermission => "waiting on a prompt",
             Self::RestartInFlight => "already restarting",
             Self::Snoozed => "snoozed",
         }
@@ -38,6 +43,9 @@ pub(super) struct BulkCandidate {
     pub trashed: bool,
     pub archived: bool,
     pub snoozed: bool,
+    pub structured: bool,
+    pub pane_alive: bool,
+    pub awaiting_approval: bool,
     pub restart_in_flight: bool,
 }
 
@@ -96,6 +104,12 @@ fn skip_reason(action: BulkAction, c: &BulkCandidate, attention_sort: bool) -> O
         return Some(SkipReason::Transient);
     }
     match action {
+        BulkAction::Send if c.structured => c
+            .awaiting_approval
+            .then_some(SkipReason::AwaitingPermission),
+        BulkAction::Send if !c.pane_alive => Some(SkipReason::NoAgentPane),
+        // Text typed at a permission prompt could answer it.
+        BulkAction::Send => (c.status == Status::Waiting).then_some(SkipReason::AwaitingPermission),
         BulkAction::Restart if c.restart_in_flight => Some(SkipReason::RestartInFlight),
         // The single restart skips a snoozed Session only under Attention sort.
         BulkAction::Restart => (c.snoozed && attention_sort).then_some(SkipReason::Snoozed),
@@ -136,6 +150,12 @@ impl HomeView {
                     trashed: inst.is_trashed(),
                     archived: inst.is_archived(),
                     snoozed: inst.is_snoozed(),
+                    structured: inst.is_structured(),
+                    pane_alive: inst.agent_pane.state == crate::session::PanePresence::Alive,
+                    awaiting_approval: self
+                        .structured_pending_approvals
+                        .get(&id)
+                        .is_some_and(|pending| !pending.is_empty()),
                     restart_in_flight: self.restart_in_flight.contains(&id),
                     id,
                 })
@@ -161,6 +181,9 @@ mod tests {
             trashed: false,
             archived: false,
             snoozed: false,
+            structured: false,
+            pane_alive: true,
+            awaiting_approval: false,
             restart_in_flight: false,
         }
     }
@@ -174,6 +197,52 @@ mod tests {
         edit(&mut c);
         let plan = plan_bulk(action, vec![c], attention);
         plan.skipped.first().map(|(_, reason)| *reason)
+    }
+
+    #[test]
+    fn send_eligibility() {
+        use BulkAction::Send;
+        assert_eq!(reason_for(Send, false, |_| {}), None);
+        assert_eq!(
+            reason_for(Send, false, |c| c.trashed = true),
+            Some(SkipReason::Trashed)
+        );
+        assert_eq!(
+            reason_for(Send, false, |c| c.archived = true),
+            Some(SkipReason::Archived)
+        );
+        assert_eq!(
+            reason_for(Send, false, |c| c.status = Status::Creating),
+            Some(SkipReason::Transient)
+        );
+        assert_eq!(
+            reason_for(Send, false, |c| c.pane_alive = false),
+            Some(SkipReason::NoAgentPane)
+        );
+        assert_eq!(
+            reason_for(Send, false, |c| c.status = Status::Waiting),
+            Some(SkipReason::AwaitingPermission)
+        );
+        // A structured Session has no agent pane; only a pending approval blocks it.
+        assert_eq!(
+            reason_for(Send, false, |c| {
+                c.structured = true;
+                c.pane_alive = false;
+            }),
+            None
+        );
+        assert_eq!(
+            reason_for(Send, false, |c| {
+                c.structured = true;
+                c.awaiting_approval = true;
+            }),
+            Some(SkipReason::AwaitingPermission)
+        );
+        // A running Session takes the message as queued input.
+        assert_eq!(
+            reason_for(Send, false, |c| c.status = Status::Running),
+            None
+        );
     }
 
     #[test]

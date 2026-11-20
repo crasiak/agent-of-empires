@@ -271,3 +271,101 @@ fn a_session_restarted_moments_ago_waits_instead_of_failing() {
     env.view.tick_bulk_restart();
     assert_eq!(respond(applied()).map(|(target, _)| target), Some(id));
 }
+
+fn make_sendable(env: &mut TestEnv) {
+    let ids: Vec<String> = env.view.marked.iter().cloned().collect();
+    for id in ids {
+        env.view.mutate_instance(&id, |inst| {
+            inst.status = Status::Idle;
+            inst.agent_pane.state = crate::session::PanePresence::Alive;
+        });
+    }
+}
+
+#[test]
+#[serial]
+fn send_key_with_marks_opens_one_dialog_for_all_eligible_sessions() {
+    let mut env = create_test_env_with_sessions(3);
+    mark_all(&mut env);
+    make_sendable(&mut env);
+    let waiting = env.view.marked_in_view_order()[0].clone();
+    env.view
+        .mutate_instance(&waiting, |inst| inst.status = Status::Waiting);
+
+    env.view.handle_key(key(KeyCode::Char('m')), None);
+
+    assert!(env.view.send_message_dialog.is_some());
+    let targets = env.view.pending_bulk_send.as_ref().expect("bulk targets");
+    assert_eq!(targets.len(), 2, "the waiting session is skipped");
+    assert!(targets.iter().all(|target| target.id != waiting));
+    assert!(
+        env.view.pending_send_session.is_none(),
+        "the single-session send slot is not used"
+    );
+}
+
+#[test]
+#[serial]
+fn cancelling_the_bulk_send_dialog_keeps_marks() {
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    make_sendable(&mut env);
+    env.view.handle_key(key(KeyCode::Char('m')), None);
+    env.view.handle_key(key(KeyCode::Esc), None);
+
+    assert!(env.view.pending_bulk_send.is_none());
+    assert_eq!(env.view.marked.len(), 2);
+}
+
+#[test]
+#[serial]
+fn nothing_sendable_explains_why() {
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    let ids: Vec<String> = env.view.marked.iter().cloned().collect();
+    for id in ids {
+        env.view.mutate_instance(&id, |inst| {
+            inst.agent_pane.state = crate::session::PanePresence::Dead;
+        });
+    }
+
+    env.view.handle_key(key(KeyCode::Char('m')), None);
+
+    assert!(env.view.send_message_dialog.is_none());
+    assert!(env.view.info_dialog.is_some());
+}
+
+#[test]
+#[serial]
+fn a_finished_bulk_send_reports_the_count() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.bulk_send_worker = Some(
+        crate::tui::home::bulk_send::BulkSendWorker::seeded_for_test(
+            crate::tui::home::bulk_send::BulkSendResult {
+                sent: 3,
+                failed: Vec::new(),
+            },
+        ),
+    );
+
+    assert!(env.view.tick_bulk_send());
+    assert!(env.view.bulk_send_worker.is_none());
+    assert!(env.view.info_dialog.is_none());
+}
+
+#[test]
+#[serial]
+fn a_bulk_send_with_failures_lists_them() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.bulk_send_worker = Some(
+        crate::tui::home::bulk_send::BulkSendWorker::seeded_for_test(
+            crate::tui::home::bulk_send::BulkSendResult {
+                sent: 1,
+                failed: vec![("Vikings".to_string(), "not running".to_string())],
+            },
+        ),
+    );
+
+    assert!(env.view.tick_bulk_send());
+    assert!(env.view.info_dialog.is_some());
+}

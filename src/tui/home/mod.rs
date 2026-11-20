@@ -3,6 +3,7 @@
 pub(crate) mod bindings;
 mod bulk;
 mod bulk_restart;
+mod bulk_send;
 mod config_refresh;
 mod creation;
 mod dialogs;
@@ -355,6 +356,10 @@ pub struct HomeView {
     pub(super) pending_permission_response: Option<PermissionResponseTarget>,
     pub(super) pending_send_session: Option<String>,
     pub(super) pending_send_target: live_send::LiveSendTarget,
+    /// Targets of the open bulk send dialog. Set instead of `pending_send_session`.
+    pending_bulk_send: Option<Vec<bulk_send::BulkSendTarget>>,
+    /// The bulk send being delivered, if any. Dropped when its result arrives.
+    bulk_send_worker: Option<bulk_send::BulkSendWorker>,
     pub(super) pending_live_send_target: live_send::LiveSendTarget,
     pending_native_attachment: Option<panes::PendingNativeAttachment>,
     pub(super) live_send: Option<live_send::LiveSendState>,

@@ -661,6 +661,7 @@ impl HomeView {
         self.hover_forward_cell = None;
         self.send_message_dialog = None;
         self.pending_send_session = None;
+        self.pending_bulk_send = None;
         self.permission_response_dialog = None;
         self.pending_permission_response = None;
         self.restart_dialog = None;
@@ -3059,10 +3060,15 @@ impl HomeView {
                 DialogResult::Cancel => {
                     self.send_message_dialog = None;
                     self.pending_send_session = None;
+                    self.pending_bulk_send = None;
                     self.pending_send_target = live_send::LiveSendTarget::Agent;
                 }
                 DialogResult::Submit(message) => {
                     self.send_message_dialog = None;
+                    if let Some(targets) = self.pending_bulk_send.take() {
+                        self.submit_bulk_send(targets, message);
+                        return None;
+                    }
                     if let Some(session_id) = self.pending_send_session.take() {
                         // Defer the work to execute_action so the loop can render a
                         // status indicator first: the send path may start a container or
@@ -3499,10 +3505,20 @@ impl HomeView {
         id: ActionId,
         update_info: Option<&crate::update::UpdateInfo>,
     ) -> Option<Action> {
-        // With Marks present, restart acts on the Marked set, whatever the cursor is on.
-        if !self.marked.is_empty() && id == ActionId::Restart {
-            self.open_bulk_restart_confirm();
-            return None;
+        // With Marks present, restart and send act on the Marked set, whatever the
+        // cursor is on.
+        if !self.marked.is_empty() {
+            match id {
+                ActionId::Restart => {
+                    self.open_bulk_restart_confirm();
+                    return None;
+                }
+                ActionId::SendMessage => {
+                    self.open_bulk_send_dialog();
+                    return None;
+                }
+                _ => {}
+            }
         }
         // A row still being created has no runtime to command yet. The
         // keyboard dispatcher and the command palette both route here, so they
