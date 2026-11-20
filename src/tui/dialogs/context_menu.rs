@@ -79,6 +79,10 @@ pub enum ContextMenuAction {
     BulkRestart,
     /// List the marked Sessions each bulk action would skip, with reasons.
     BulkShowSkipped,
+    /// Open the marked Sessions in separate windows.
+    BulkBreakout,
+    /// Close the Breakout windows this TUI opened.
+    CloseBreakout,
     /// Drop every Mark.
     ClearMarks,
 }
@@ -88,7 +92,12 @@ impl ContextMenuAction {
     pub fn is_bulk(self) -> bool {
         matches!(
             self,
-            Self::BulkSend | Self::BulkRestart | Self::BulkShowSkipped | Self::ClearMarks
+            Self::BulkSend
+                | Self::BulkRestart
+                | Self::BulkBreakout
+                | Self::CloseBreakout
+                | Self::BulkShowSkipped
+                | Self::ClearMarks
         )
     }
 }
@@ -551,19 +560,21 @@ impl ContextMenuDialog {
     }
 
     /// The menu of Bulk actions on the Marked set.
-    pub fn for_marks(anchor: (u16, u16)) -> Self {
-        Self::new(
-            anchor,
-            vec![
-                (ContextMenuAction::BulkSend, "Send Message to Marked"),
-                (ContextMenuAction::BulkRestart, "Restart Marked"),
-                (
-                    ContextMenuAction::BulkShowSkipped,
-                    "Show What Would Be Skipped",
-                ),
-                (ContextMenuAction::ClearMarks, "Clear Marks"),
-            ],
-        )
+    pub fn for_marks(anchor: (u16, u16), breakout_open: bool) -> Self {
+        let mut items = vec![
+            (ContextMenuAction::BulkSend, "Send Message to Marked"),
+            (ContextMenuAction::BulkRestart, "Restart Marked"),
+            (ContextMenuAction::BulkBreakout, "Break Out into Windows"),
+            (
+                ContextMenuAction::BulkShowSkipped,
+                "Show What Would Be Skipped",
+            ),
+            (ContextMenuAction::ClearMarks, "Clear Marks"),
+        ];
+        if breakout_open {
+            items.push((ContextMenuAction::CloseBreakout, "Close Breakout Windows"));
+        }
+        Self::new(anchor, items)
     }
 
     fn new(anchor: (u16, u16), items: Vec<MenuItem>) -> Self {
@@ -621,6 +632,11 @@ impl ContextMenuDialog {
     /// hover cleared the highlight.
     pub fn selected_action(&self) -> ContextMenuAction {
         self.items[self.highlight.unwrap_or(0)].0
+    }
+
+    #[cfg(test)]
+    pub fn items_contain(&self, action: ContextMenuAction) -> bool {
+        self.items.iter().any(|(a, _)| *a == action)
     }
 
     #[cfg(test)]

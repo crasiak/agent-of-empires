@@ -1,6 +1,7 @@
 //! Home view - main session list and navigation
 
 pub(crate) mod bindings;
+mod breakout;
 mod bulk;
 mod bulk_restart;
 mod bulk_send;
@@ -412,6 +413,13 @@ pub struct HomeView {
     pub(super) pending_highlight_bulk: Option<(Vec<String>, Option<&'static str>)>,
     /// A bulk-restart confirm is open. Eligibility is recomputed when it is confirmed.
     pending_bulk_restart: bool,
+    /// A Breakout confirm (more than six Sessions) is open.
+    pending_breakout: bool,
+    /// The Breakout being opened off the event loop.
+    breakout_job:
+        Option<std::sync::mpsc::Receiver<Result<crate::breakout::BreakoutOutcome, String>>>,
+    /// Titles of the Breakout windows this TUI opened and has not closed.
+    breakout_titles: Vec<String>,
     /// The bulk restart in progress, if any.
     bulk_restart: Option<bulk_restart::BulkRestartRun>,
     pub(super) pending_dialog_click_action: Option<crate::tui::app::Action>,

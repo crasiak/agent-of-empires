@@ -62,6 +62,8 @@ pub enum ActionId {
     ClearMarks,
     /// Open the menu of Bulk actions on the Marked set.
     BulkMenu,
+    /// Close the Breakout windows this TUI opened (palette only; no chord).
+    CloseBreakout,
     RespondToPermission,
     Stop,
     Delete,
@@ -1044,6 +1046,18 @@ pub static BINDINGS: &[Binding] = &[
         }),
     },
     Binding {
+        id: ActionId::CloseBreakout,
+        non_strict: &[],
+        strict: &[],
+        context: Context::Always,
+        help: None,
+        palette: Some(PaletteMeta {
+            title: "Close breakout windows",
+            keywords: &["breakout", "windows", "ghostty", "close"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
         id: ActionId::BulkMenu,
         non_strict: &[k('K')],
         strict: &[k('K')],
@@ -1540,6 +1554,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::ExtendMarkDown => "extend-mark-down",
         ActionId::ClearMarks => "clear-marks",
         ActionId::BulkMenu => "bulk-menu",
+        ActionId::CloseBreakout => "close-breakout",
         ActionId::RespondToPermission => "respond-to-permission",
         ActionId::Stop => "stop",
         ActionId::Delete => "delete",

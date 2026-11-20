@@ -1547,6 +1547,10 @@ impl HomeView {
                 );
                 None
             }
+            "breakout" => {
+                self.run_breakout();
+                None
+            }
             "empty_trash" => {
                 let checked = std::mem::take(&mut self.confirm_checked);
                 self.empty_trash_all(
@@ -1890,6 +1894,7 @@ impl HomeView {
                         self.pending_trash_session = None;
                         self.pending_highlight_bulk = None;
                         self.pending_bulk_restart = false;
+                        self.pending_breakout = false;
                         self.pending_image_pull = None;
                         // Mirrors the keyboard route: Cancel means "don't discard", so
                         // settings stays open and `settings_close_confirm` resets.
@@ -2763,6 +2768,7 @@ impl HomeView {
                     self.pending_trash_session = None;
                     self.pending_highlight_bulk = None;
                     self.pending_bulk_restart = false;
+                    self.pending_breakout = false;
                     self.pending_image_pull = None;
                 }
                 DialogResult::Submit(_) => {
@@ -3571,6 +3577,7 @@ impl HomeView {
                     | ActionId::ExtendMarkDown
                     | ActionId::ClearMarks
                     | ActionId::BulkMenu
+                    | ActionId::CloseBreakout
             )
         {
             return None;
@@ -3653,6 +3660,7 @@ impl HomeView {
                     self.flash_status("No sessions marked");
                 }
             }
+            ActionId::CloseBreakout => self.close_breakout(),
             ActionId::BulkMenu => {
                 let anchor = self.cursor_row_anchor();
                 self.open_bulk_menu(anchor);
@@ -5711,7 +5719,10 @@ impl HomeView {
             // A right-click on a marked row offers the Bulk actions for the whole set.
             if matches!(self.flat_items.get(idx), Some(Item::Session { id, .. }) if self.marked.contains(id))
             {
-                self.context_menu = Some(ContextMenuDialog::for_marks(anchor));
+                self.context_menu = Some(ContextMenuDialog::for_marks(
+                    anchor,
+                    !self.breakout_titles.is_empty(),
+                ));
                 return true;
             }
             // Mirror the web sidebar's row-aware copy so a group row reads as "Rename
@@ -6012,6 +6023,8 @@ impl HomeView {
             },
             ContextMenuAction::BulkSend => self.open_bulk_send_dialog(),
             ContextMenuAction::BulkRestart => self.open_bulk_restart_confirm(),
+            ContextMenuAction::BulkBreakout => self.start_breakout(),
+            ContextMenuAction::CloseBreakout => self.close_breakout(),
             ContextMenuAction::BulkShowSkipped => self.show_bulk_skips(),
             ContextMenuAction::ClearMarks => {
                 self.clear_marks();

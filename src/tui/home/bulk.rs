@@ -7,6 +7,7 @@ use crate::session::{Item, Status};
 pub(super) enum BulkAction {
     Send,
     Restart,
+    Breakout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +20,7 @@ pub(super) enum SkipReason {
     RestartInFlight,
     Snoozed,
     Starting,
+    Structured,
 }
 
 impl SkipReason {
@@ -32,6 +34,7 @@ impl SkipReason {
             Self::RestartInFlight => "already restarting",
             Self::Snoozed => "snoozed",
             Self::Starting => "starting",
+            Self::Structured => "structured view (open it in aoe)",
         }
     }
 }
@@ -115,6 +118,9 @@ fn skip_reason(action: BulkAction, c: &BulkCandidate, attention_sort: bool) -> O
         BulkAction::Send if !c.pane_alive => Some(SkipReason::NoAgentPane),
         // Text typed at a permission prompt could answer it.
         BulkAction::Send => (c.status == Status::Waiting).then_some(SkipReason::AwaitingPermission),
+        // The CLI cannot attach a structured view; a waiting Session is what the user wants to see.
+        BulkAction::Breakout if c.structured => Some(SkipReason::Structured),
+        BulkAction::Breakout => (!c.pane_alive).then_some(SkipReason::NoAgentPane),
         BulkAction::Restart if c.restart_in_flight => Some(SkipReason::RestartInFlight),
         // The single restart skips a snoozed Session only under Attention sort.
         BulkAction::Restart => (c.snoozed && attention_sort).then_some(SkipReason::Snoozed),
@@ -179,13 +185,20 @@ impl HomeView {
             self.flash_status("No sessions marked. Space marks the cursor row");
             return;
         }
-        self.context_menu = Some(ContextMenuDialog::for_marks(anchor));
+        self.context_menu = Some(ContextMenuDialog::for_marks(
+            anchor,
+            !self.breakout_titles.is_empty(),
+        ));
     }
 
     /// List what each Bulk action would skip.
     pub(super) fn show_bulk_skips(&mut self) {
         let mut sections = Vec::new();
-        for (name, action) in [("Send", BulkAction::Send), ("Restart", BulkAction::Restart)] {
+        for (name, action) in [
+            ("Send", BulkAction::Send),
+            ("Restart", BulkAction::Restart),
+            ("Break out", BulkAction::Breakout),
+        ] {
             let plan = self.bulk_plan(action);
             let total = plan.eligible.len() + plan.skipped.len();
             let noun = if total == 1 { "session" } else { "sessions" };
@@ -328,6 +341,30 @@ mod tests {
         assert_eq!(reason_for(Restart, false, |c| c.snoozed = true), None);
         assert_eq!(
             reason_for(Restart, false, |c| c.archived = true),
+            Some(SkipReason::Archived)
+        );
+    }
+
+    #[test]
+    fn breakout_eligibility() {
+        use BulkAction::Breakout;
+        assert_eq!(reason_for(Breakout, false, |_| {}), None);
+        assert_eq!(
+            reason_for(Breakout, false, |c| c.structured = true),
+            Some(SkipReason::Structured),
+            "the CLI cannot attach a structured view"
+        );
+        assert_eq!(
+            reason_for(Breakout, false, |c| c.pane_alive = false),
+            Some(SkipReason::NoAgentPane)
+        );
+        assert_eq!(
+            reason_for(Breakout, false, |c| c.status = Status::Waiting),
+            None,
+            "a waiting Session is exactly what the user wants to look at"
+        );
+        assert_eq!(
+            reason_for(Breakout, false, |c| c.archived = true),
             Some(SkipReason::Archived)
         );
     }

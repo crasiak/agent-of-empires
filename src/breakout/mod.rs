@@ -22,6 +22,10 @@ pub struct BreakoutOutcome {
 
 /// Whether this machine can open Breakout surfaces itself.
 pub fn supported_here() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = test_support::FORCED.with(|f| f.get()) {
+        return forced;
+    }
     #[cfg(target_os = "macos")]
     {
         ghostty::ghostty_present()
@@ -61,6 +65,16 @@ pub fn close_local(titles: &[String]) -> Result<(), String> {
     {
         let _ = titles;
         Err("Breakout needs macOS with Ghostty".to_string())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Forces `supported_here` on this thread so TUI tests do not depend on Ghostty.
+        pub(crate) static FORCED: Cell<Option<bool>> = const { Cell::new(None) };
     }
 }
 

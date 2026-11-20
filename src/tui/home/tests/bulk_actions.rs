@@ -411,7 +411,7 @@ fn the_bulk_menu_can_clear_marks() {
     let mut env = create_test_env_with_sessions(2);
     mark_all(&mut env);
     env.view.handle_key(shift_k(), None);
-    for _ in 0..3 {
+    for _ in 0..4 {
         env.view.handle_key(key(KeyCode::Down), None);
     }
     env.view.handle_key(key(KeyCode::Enter), None);
@@ -716,4 +716,114 @@ fn an_unknown_session_counts_as_busy_in_the_restart_confirm() {
         ["Idle only (leave 1 busy running)"],
         "the Unknown session is the busy one"
     );
+}
+
+fn breakout_outcome(opened: usize, note: Option<&str>) -> crate::breakout::BreakoutOutcome {
+    crate::breakout::BreakoutOutcome {
+        opened,
+        tiled: note.is_none(),
+        titles: (0..opened).map(|i| format!("t{i}")).collect(),
+        note: note.map(str::to_string),
+    }
+}
+
+#[test]
+#[serial]
+fn a_finished_breakout_records_its_windows() {
+    let mut env = create_test_env_with_sessions(2);
+    let (tx, rx) = std::sync::mpsc::channel();
+    env.view.breakout_job = Some(rx);
+    tx.send(Ok(breakout_outcome(2, None))).unwrap();
+
+    assert!(env.view.tick_breakout());
+    assert_eq!(env.view.breakout_titles, ["t0", "t1"]);
+    assert!(env.view.breakout_job.is_none());
+    assert!(env.view.info_dialog.is_none());
+}
+
+#[test]
+#[serial]
+fn an_untiled_breakout_shows_the_note() {
+    let mut env = create_test_env_with_sessions(1);
+    let (tx, rx) = std::sync::mpsc::channel();
+    env.view.breakout_job = Some(rx);
+    tx.send(Ok(breakout_outcome(1, Some("not tiled: grant access"))))
+        .unwrap();
+
+    assert!(env.view.tick_breakout());
+    assert!(env.view.info_dialog.is_some());
+    assert_eq!(
+        env.view.breakout_titles.len(),
+        1,
+        "the windows are still tracked"
+    );
+}
+
+#[test]
+#[serial]
+fn a_failed_breakout_is_reported() {
+    let mut env = create_test_env_with_sessions(1);
+    let (tx, rx) = std::sync::mpsc::channel();
+    env.view.breakout_job = Some(rx);
+    tx.send(Err("Ghostty is not installed".to_string()))
+        .unwrap();
+
+    assert!(env.view.tick_breakout());
+    assert!(env.view.info_dialog.is_some());
+    assert!(env.view.breakout_titles.is_empty());
+}
+
+#[test]
+#[serial]
+fn more_than_nine_sessions_is_refused_and_seven_asks_first() {
+    crate::breakout::test_support::FORCED.with(|f| f.set(Some(true)));
+    let mut env = create_test_env_with_sessions(10);
+    mark_all(&mut env);
+    make_sendable(&mut env);
+    env.view.start_breakout();
+    assert!(env.view.info_dialog.is_some(), "ten is refused");
+    assert!(!env.view.pending_breakout);
+
+    env.view.info_dialog = None;
+    let extra: Vec<String> = env
+        .view
+        .marked_in_view_order()
+        .into_iter()
+        .skip(7)
+        .collect();
+    for id in extra {
+        env.view.marked.remove(&id);
+    }
+    env.view.start_breakout();
+    crate::breakout::test_support::FORCED.with(|f| f.set(None));
+    assert!(
+        env.view.confirm_dialog.is_some(),
+        "seven asks for confirmation"
+    );
+    assert!(env.view.pending_breakout);
+    assert!(
+        env.view.breakout_job.is_none(),
+        "nothing opens before confirm"
+    );
+}
+
+#[test]
+#[serial]
+fn the_bulk_menu_offers_close_only_while_windows_are_open() {
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    env.view.handle_key(shift_k(), None);
+    let menu = env.view.context_menu.as_ref().unwrap();
+    assert!(menu.is_marks_menu());
+    assert!(!menu.items_contain(ContextMenuAction::CloseBreakout));
+
+    env.view.context_menu = None;
+    env.view.breakout_titles.push("t0".into());
+    env.view.handle_key(shift_k(), None);
+    let menu = env.view.context_menu.as_ref().unwrap();
+    assert!(
+        menu.is_marks_menu(),
+        "still a bulk menu with the close entry"
+    );
+    assert!(menu.items_contain(ContextMenuAction::CloseBreakout));
 }
