@@ -2631,12 +2631,17 @@ Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>"
 
 ## Spike results
 
-Run by the owner on 2026-11-20 (Ghostty on macOS, usable frame `{"x":0,"y":31,"width":3440,"height":1409}`). Steps 1, 2, 4 and 4b ran; Step 3 (placement) was not completed, so items 4 and 5 are still open.
+Run by the owner on 2026-11-20 from their own Ghostty terminal (macOS, usable frame `{"x":0,"y":31,"width":3440,"height":1409}`). All steps ran.
 
-1. `new window` return value: the script ran without error and two windows opened, so `new window with configuration` returns a window that accepts `selected tab` / `focused terminal`. The returned ids were not recorded.
+1. `new window` return value: `new window with configuration` returns a window that accepts `selected tab` / `focused terminal`; two windows opened, one on top of the other. The returned ids were not recorded.
 2. Surface configuration syntax: `new surface configuration`, then `set command of cfg to "..."`, then `new window with configuration cfg`, as written in Step 1. No change needed.
-3. Which `name override` sets the window title: `name override of (focused terminal of selected tab of win)` gave both windows their titles.
-4. Accessibility: error text, application named in the prompt, placement result: OPEN. Step 3 was not completed.
-5. Cell snapping and gaps: OPEN. Depends on Step 3.
-6. Closing windows with a running process: `close.sh` closed the windows (each was running `cat`). Whether a confirmation was shown was not recorded.
+3. Which `name override` sets the window title: `name override of (focused terminal of selected tab of win)` gave both windows their titles, and System Events found the windows by those titles.
+4. Accessibility: placement through System Events (`set position`, `set size` on `first window whose name is ...`) worked: A filled the left half and B the right half. No Accessibility prompt or error was reported, so the terminal already had the permission; the denial error text and the application named in the prompt are NOT known. The driver must treat any System Events error during placement as "placement unavailable", fall back to untiled windows, and show the error text it got.
+5. Cell snapping and gaps: the owner reported a tiled layout with nothing to note. Not measured.
+6. Closing windows with a running process: no confirmation dialog was reported. Closing inside `repeat with w in (every window whose name starts with ...)` closes the first window and then fails with `Can't get item 2 of every window whose name starts with "aoe breakout spike". Invalid index. (-1719)`, because the filtered list is re-evaluated as windows disappear. The driver must collect window ids first and close each with `close window (first window whose id is <id>)`, and treat a missing id as already closed.
 7. What runs a window's command (parent process), and the quoting rule that follows: parent is `/usr/bin/login`, so Ghostty runs the command directly and not through the login shell (fish). The `/bin/sh -c '<script>' probe 'it''s' 'a b'` command arrived intact and printed `args: probe its a b`, so POSIX single-quoting of the command string holds. The output cannot tell `a b` as one argument from two; `sh_quote` output is therefore proven for the script argument only. Tasks 4 and 7 keep passing surface commands as written by `attach_command()`; no fish-safe quoting is needed.
+
+Found outside the planned steps:
+
+8. Sender and consent: the same scripts sent from a process inside an aoe session (not the owner's terminal) got no answer. `osascript` waited the default two minutes per call and failed with `Ghostty got an error: AppleEvent timed out. (-1712)` on the first Ghostty command, and the same from System Events. The cause was not observed; an unanswered macOS Automation consent prompt is the likely one. The driver must wrap every script in `with timeout of 10 seconds`, and turn `-1712` and `-1743` (not authorised) into a message that names System Settings > Privacy & Security > Automation. Task 9's guide must describe first-use consent for both Automation and Accessibility.
+9. Placement does not raise a window. The driver should raise each window after placing it (`perform action "AXRaise"`), so a Breakout is not left behind other applications.
