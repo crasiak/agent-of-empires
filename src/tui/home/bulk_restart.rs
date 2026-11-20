@@ -60,14 +60,14 @@ impl HomeView {
                 &format!("Idle only (leave {busy} busy running)"),
             );
         }
-        self.pending_bulk_restart = Some(plan);
+        self.pending_bulk_restart = true;
         self.confirm_dialog = Some(dialog);
     }
 
     /// Start the confirmed bulk restart. Eligibility is recomputed, since Sessions may
     /// have changed while the confirm was open.
     pub(super) fn start_bulk_restart(&mut self, idle_only: bool) {
-        if self.pending_bulk_restart.take().is_none() {
+        if !std::mem::take(&mut self.pending_bulk_restart) {
             return;
         }
         let plan = self.bulk_plan(BulkAction::Restart);

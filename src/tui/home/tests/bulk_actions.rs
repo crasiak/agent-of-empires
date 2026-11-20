@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::tui::dialogs::ContextMenuAction;
+use crate::tui::home::bulk::BulkAction;
 use crate::tui::session_feed::SessionFeedResult;
 
 fn mark_all(env: &mut TestEnv) {
@@ -87,13 +88,8 @@ fn restart_key_with_marks_opens_the_bulk_confirm() {
         Some("bulk_restart"),
         "bulk confirm, not the restart options dialog"
     );
-    assert_eq!(
-        env.view
-            .pending_bulk_restart
-            .as_ref()
-            .map(|plan| plan.eligible.len()),
-        Some(3)
-    );
+    assert!(env.view.pending_bulk_restart);
+    assert_eq!(env.view.bulk_plan(BulkAction::Restart).eligible.len(), 3);
 }
 
 #[test]
@@ -109,11 +105,8 @@ fn bulk_confirm_lists_skipped_sessions() {
 
     env.view.handle_key(key(KeyCode::Char('e')), None);
 
-    let plan = env
-        .view
-        .pending_bulk_restart
-        .as_ref()
-        .expect("confirm open");
+    assert!(env.view.pending_bulk_restart, "confirm open");
+    let plan = env.view.bulk_plan(BulkAction::Restart);
     assert_eq!(plan.eligible.len(), 1);
     assert_eq!(plan.skipped_lines(), format!("  {title}: archived"));
 }
@@ -129,7 +122,7 @@ fn nothing_eligible_explains_instead_of_confirming() {
     env.view.handle_key(key(KeyCode::Char('e')), None);
 
     assert!(env.view.confirm_dialog.is_none());
-    assert!(env.view.pending_bulk_restart.is_none());
+    assert!(!env.view.pending_bulk_restart);
     let dialog = env.view.info_dialog.as_ref().expect("explanation");
     assert_eq!(dialog.title(), "Nothing to Restart");
     assert!(dialog.message().contains("session0: already restarting"));
@@ -143,7 +136,7 @@ fn cancelling_the_confirm_keeps_marks_and_drops_the_plan() {
     env.view.handle_key(key(KeyCode::Char('e')), None);
     env.view.handle_key(key(KeyCode::Esc), None);
 
-    assert!(env.view.pending_bulk_restart.is_none());
+    assert!(!env.view.pending_bulk_restart);
     assert!(env.view.bulk_restart.is_none());
     assert_eq!(env.view.marked.len(), 2);
 }
@@ -231,11 +224,8 @@ fn idle_only_leaves_busy_sessions_running() {
         .mutate_instance(&idle, |inst| inst.status = Status::Idle);
 
     env.view.handle_key(key(KeyCode::Char('e')), None);
-    let plan = env
-        .view
-        .pending_bulk_restart
-        .as_ref()
-        .expect("bulk confirm");
+    assert!(env.view.pending_bulk_restart, "bulk confirm");
+    let plan = env.view.bulk_plan(BulkAction::Restart);
     assert_eq!(plan.eligible.iter().filter(|c| c.is_busy()).count(), 1);
     env.view.confirm_checked = vec![crate::tui::home::bulk_restart::BULK_RESTART_IDLE_ONLY];
     env.view.confirm_dialog = None;
@@ -412,7 +402,7 @@ fn the_bulk_menu_restart_entry_opens_the_confirm() {
     env.view.handle_key(key(KeyCode::Enter), None);
 
     assert!(env.view.context_menu.is_none());
-    assert!(env.view.pending_bulk_restart.is_some());
+    assert!(env.view.pending_bulk_restart);
 }
 
 #[test]
@@ -525,7 +515,7 @@ fn the_bulk_menu_survives_a_trashed_cursor_row() {
         "the next key keeps the menu"
     );
     env.view.handle_key(key(KeyCode::Enter), None);
-    assert!(env.view.pending_bulk_restart.is_some());
+    assert!(env.view.pending_bulk_restart);
 }
 
 #[test]
@@ -560,11 +550,11 @@ fn the_send_key_with_marks_survives_a_trashed_cursor_row() {
 fn the_bulk_restart_confirm_survives_a_trashed_cursor_row() {
     let mut env = trashed_cursor_env();
     env.view.handle_key(key(KeyCode::Char('e')), None);
-    assert!(env.view.pending_bulk_restart.is_some());
+    assert!(env.view.pending_bulk_restart);
 
     env.view.handle_key(key(KeyCode::Tab), None);
     assert!(env.view.confirm_dialog.is_some());
-    assert!(env.view.pending_bulk_restart.is_some());
+    assert!(env.view.pending_bulk_restart);
 }
 
 #[test]

@@ -410,8 +410,8 @@ pub struct HomeView {
     pub(super) pending_trash_session: Option<SessionDialogTarget>,
     /// Sessions and the color a confirmed bulk highlight change sets on them.
     pub(super) pending_highlight_bulk: Option<(Vec<String>, Option<&'static str>)>,
-    /// The plan shown in the open bulk-restart confirm.
-    pending_bulk_restart: Option<bulk::BulkPlan>,
+    /// A bulk-restart confirm is open. Eligibility is recomputed when it is confirmed.
+    pending_bulk_restart: bool,
     /// The bulk restart in progress, if any.
     bulk_restart: Option<bulk_restart::BulkRestartRun>,
     pub(super) pending_dialog_click_action: Option<crate::tui::app::Action>,

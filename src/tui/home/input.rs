@@ -1889,7 +1889,7 @@ impl HomeView {
                         self.pending_force_remove_session = None;
                         self.pending_trash_session = None;
                         self.pending_highlight_bulk = None;
-                        self.pending_bulk_restart = None;
+                        self.pending_bulk_restart = false;
                         self.pending_image_pull = None;
                         // Mirrors the keyboard route: Cancel means "don't discard", so
                         // settings stays open and `settings_close_confirm` resets.
@@ -2762,7 +2762,7 @@ impl HomeView {
                     self.pending_force_remove_session = None;
                     self.pending_trash_session = None;
                     self.pending_highlight_bulk = None;
-                    self.pending_bulk_restart = None;
+                    self.pending_bulk_restart = false;
                     self.pending_image_pull = None;
                 }
                 DialogResult::Submit(_) => {
@@ -3302,7 +3302,7 @@ impl HomeView {
                 return None;
             }
             KeyCode::Esc if !self.marked.is_empty() => {
-                self.marked.clear();
+                self.clear_marks();
                 return None;
             }
             _ => {}
@@ -7119,6 +7119,7 @@ impl HomeView {
         // Losing dictation is worse than silently catching it.
         if let Some((id, title, target)) = self.resolve_send_target() {
             let label = live_send::format_target_label(&title, &target);
+            self.pending_bulk_send = None;
             self.pending_send_session = Some(id);
             self.pending_send_target = target;
             let mut dialog = SendMessageDialog::new(&label);
@@ -7744,6 +7745,7 @@ impl HomeView {
             return;
         };
         let label = live_send::format_target_label(&title, &target);
+        self.pending_bulk_send = None;
         self.pending_send_session = Some(id);
         self.pending_send_target = target;
         let mut dialog = SendMessageDialog::new(&label);
@@ -7833,6 +7835,7 @@ impl HomeView {
 
         if let Some((id, title, target)) = self.resolve_send_target() {
             let label = live_send::format_target_label(&title, &target);
+            self.pending_bulk_send = None;
             self.pending_send_session = Some(id);
             self.pending_send_target = target;
             let mut dialog = SendMessageDialog::new(&label);
