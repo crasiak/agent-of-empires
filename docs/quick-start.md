@@ -82,6 +82,10 @@ In Project grouping (`g`), select a project header and press `F6`, or right-clic
 
 Remote TUI sessions support the same `F4` filter editor and show session and project highlights fetched from the daemon. Changes refresh automatically; remote highlight assignment remains in the web dashboard. Remote Escape clears active filters first, then exits when no filter is active.
 
+## Marks and bulk actions
+
+Press Space on a Session to mark it, or Shift+Up and Shift+Down to mark rows as the cursor moves (PgUp and PgDn jump ten rows). Space on a Group header marks every Session in the Group, or unmarks them when all are already marked. Escape clears the Marked set. With Marks, `m` sends one message to all of them and `e` restarts all of them: the restart asks first, offers "Idle only" to leave busy and unknown Sessions running, and runs two at a time. `K`, or a right-click on a marked row, opens the bulk menu, which also lists the Sessions an action would skip and why. Marks clear when an action is submitted.
+
 ## Worktrees
 
 To work on a new branch in its own directory:
