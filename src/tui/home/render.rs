@@ -12,8 +12,8 @@ use super::bindings::ActionId;
 use super::{
     get_indent, live_send, DragKind, HomeView, TerminalMode, ViewMode, ICON_ARCHIVED_SECTION,
     ICON_COLLAPSED, ICON_DELETING, ICON_DORMANT, ICON_ERROR, ICON_EXPANDED, ICON_FAVORITE,
-    ICON_IDLE, ICON_PINNED, ICON_STOPPED, ICON_TERMINAL, ICON_TRASH_SECTION, ICON_UNKNOWN,
-    ICON_UNREAD,
+    ICON_IDLE, ICON_MARK, ICON_PINNED, ICON_STOPPED, ICON_TERMINAL, ICON_TRASH_SECTION,
+    ICON_UNKNOWN, ICON_UNREAD,
 };
 use crate::containers::image_update::ImageUpdate;
 use crate::session::config::{GroupByMode, RowTagMode, SidebarPosition, SortOrder};
@@ -1635,6 +1635,9 @@ impl HomeView {
             let plural = if count == 1 { "" } else { "s" };
             title.push_str(&format!("  \u{26a0} {count} ambiguous session{plural}"));
         }
+        if let Some(marks) = self.marks_title() {
+            title.push_str(&format!("  {marks}"));
+        }
         let (border_color, title_color) = match self.view_mode {
             ViewMode::Structured => (theme.border, theme.title),
             ViewMode::Terminal | ViewMode::Tool(_) => {
@@ -2186,7 +2189,24 @@ impl HomeView {
             }
         };
 
-        let mut line_spans = Vec::with_capacity(6);
+        let mut line_spans = Vec::with_capacity(7);
+        // The column exists on every row while anything is marked, so titles stay aligned.
+        if !self.marked.is_empty() {
+            let marked = matches!(item, Item::Session { id, .. } if self.marked.contains(id));
+            line_spans.push(if marked {
+                let mark_style = Style::default().fg(theme.accent).bold();
+                Span::styled(
+                    format!("{ICON_MARK} "),
+                    if is_selected {
+                        selected_row_style(mark_style, theme)
+                    } else {
+                        mark_style
+                    },
+                )
+            } else {
+                Span::raw("  ")
+            });
+        }
         if favorite_gutter {
             let favorited = matches!(item, Item::Session { id, .. }
                 if self.get_instance(id).is_some_and(crate::session::is_live_favorite));
@@ -4884,6 +4904,16 @@ impl HomeView {
                 groups.push((0, kc('n'), hint));
             }
 
+            if !self.marked.is_empty() {
+                let hint = vec![
+                    Span::styled("Space", key_style),
+                    Span::styled(" mark ", desc_style),
+                    Span::styled("Esc", key_style),
+                    Span::styled(" clear marks", desc_style),
+                ];
+                groups.push((0, None, hint));
+            }
+
             let (click, key) = bound(ActionId::SearchStart);
             groups.push((4, click, mk_key(&key)));
             let (click, key) = bound(ActionId::Diff);
@@ -4902,6 +4932,15 @@ impl HomeView {
             let (click, key) = bound(ActionId::Help);
             groups.push((0, click, mk_key(&key)));
         } else {
+            if !self.marked.is_empty() {
+                let hint = vec![
+                    Span::styled("Space", key_style),
+                    Span::styled(" mark ", desc_style),
+                    Span::styled("Esc", key_style),
+                    Span::styled(" clear marks", desc_style),
+                ];
+                groups.push((0, None, hint));
+            }
             let focused = self.retained_reader_focused();
             if focused {
                 groups.push((

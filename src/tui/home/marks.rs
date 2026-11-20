@@ -4,6 +4,25 @@ use super::*;
 use crate::session::{Item, Status};
 
 impl HomeView {
+    /// Sidebar title text for the Marked set, or `None` when nothing is marked.
+    pub(super) fn marks_title(&self) -> Option<String> {
+        if self.marked.is_empty() {
+            return None;
+        }
+        let visible = self
+            .flat_items
+            .iter()
+            .filter(|item| matches!(item, Item::Session { id, .. } if self.marked.contains(id)))
+            .count();
+        let total = self.marked.len();
+        let hidden = total - visible;
+        Some(if hidden == 0 {
+            format!("{total} marked")
+        } else {
+            format!("{total} marked ({hidden} hidden)")
+        })
+    }
+
     /// Whether a Mark may sit on this Session.
     pub(super) fn markable(&self, id: &str) -> bool {
         self.get_instance(id).is_some_and(|inst| {

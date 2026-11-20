@@ -148,3 +148,51 @@ fn esc_clears_marks_only_after_the_search_is_cleared() {
     env.view.handle_key(key(KeyCode::Esc), None);
     assert!(env.view.marked.is_empty(), "second Esc clears the marks");
 }
+
+#[test]
+#[serial]
+fn a_marked_row_shows_the_marker_and_others_stay_aligned() {
+    let mut env = create_test_env_with_sessions(2);
+    put_cursor(&mut env, 0);
+    let unmarked_before = rendered_row_text(&env.view, &env.view.flat_items[1].clone());
+
+    env.view.handle_key(space(), None);
+    let marked = rendered_row_text(&env.view, &env.view.flat_items[0].clone());
+    let unmarked = rendered_row_text(&env.view, &env.view.flat_items[1].clone());
+
+    assert!(marked.starts_with(crate::tui::home::icons::ICON_MARK));
+    // Rows are padded to the width, so compare the content before the padding.
+    assert_eq!(
+        unmarked.trim_end(),
+        format!("  {}", unmarked_before.trim_end()),
+        "unmarked rows are padded by the marker column"
+    );
+}
+
+#[test]
+#[serial]
+fn the_sidebar_title_counts_marks_and_hidden_marks() {
+    let mut env = create_test_env_with_group_sessions();
+    let row = group_row(&env, "work");
+    put_cursor(&mut env, row);
+    env.view.handle_key(space(), None);
+    assert_eq!(env.view.marks_title().as_deref(), Some("3 marked"));
+    assert!(render_home_to_string(&mut env.view, 120, 40).contains("3 marked"));
+
+    // Collapsing "work" goes through the daemon in this harness, so drop its rows
+    // directly: the sessions leave the list but stay marked.
+    env.view
+        .flat_items
+        .retain(|item| !matches!(item, Item::Session { .. }));
+    assert_eq!(
+        env.view.marks_title().as_deref(),
+        Some("3 marked (3 hidden)")
+    );
+}
+
+#[test]
+#[serial]
+fn no_marks_means_no_title_text() {
+    let env = create_test_env_with_sessions(1);
+    assert_eq!(env.view.marks_title(), None);
+}
