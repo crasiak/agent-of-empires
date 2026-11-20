@@ -82,7 +82,10 @@ pub fn place_script(placements: &[(String, Rect)]) -> String {
 
 /// Close the windows a Breakout opened. Ids are collected first and each window is
 /// closed by id, because a live `every window whose ...` filter shrinks as windows
-/// close. A missing id (error -1719) means the window is already gone.
+/// close. A failed lookup of one id means the window is already gone, so every
+/// error is swallowed except -1712 and -1743 (no Automation consent).
+/// Breaking out the same Session twice while the first windows are open gives
+/// both windows one title, so close matches both and placement hits the older one.
 pub fn close_script(titles: &[String]) -> String {
     let mut script = String::from("tell application \"Ghostty\"\n");
     for title in titles {
@@ -95,7 +98,7 @@ pub fn close_script(titles: &[String]) -> String {
             "        try\n",
             "            close window (first window whose id is (contents of i))\n",
             "        on error errMsg number errNum\n",
-            "            if errNum is not -1719 then error errMsg number errNum\n",
+            "            if errNum is -1712 or errNum is -1743 then error errMsg number errNum\n",
             "        end try\n",
             "    end repeat\n",
         ));
@@ -129,10 +132,15 @@ fn friendly_error(stderr: &str) -> String {
     }
 }
 
-const OSASCRIPT_WAIT: Duration = Duration::from_secs(15);
+/// Overall wait for a script: a base plus a share per window it touches, so many
+/// slow `new window` events do not get killed while still succeeding.
+fn wait_for(windows: usize) -> Duration {
+    Duration::from_secs(15 + 5 * windows as u64)
+}
 
 /// Run a script on `osascript`'s stdin. Returns stdout, or the error text.
-fn osascript(language_args: &[&str], script: &str) -> Result<String, String> {
+/// The pipes are not drained while polling; our scripts print almost nothing.
+fn osascript(language_args: &[&str], script: &str, wait: Duration) -> Result<String, String> {
     let mut child = Command::new("osascript")
         .args(language_args)
         .arg("-")
@@ -148,14 +156,14 @@ fn osascript(language_args: &[&str], script: &str) -> Result<String, String> {
             return Err(format!("osascript stdin: {e}"));
         }
     }
-    let deadline = Instant::now() + OSASCRIPT_WAIT;
+    let deadline = Instant::now() + wait;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("osascript timed out after {OSASCRIPT_WAIT:?}"));
+                return Err(format!("osascript timed out after {wait:?}"));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(e) => return Err(format!("osascript wait: {e}")),
@@ -183,18 +191,46 @@ pub fn ghostty_present() -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Open the surfaces as separate windows and tile them. Any error while placing
-/// leaves the windows open untiled and is carried in the outcome's note.
-pub fn run_windows(surfaces: &[Surface]) -> Result<super::BreakoutOutcome, String> {
-    osascript(&[], &open_windows_script(surfaces))?;
-    let titles: Vec<String> = surfaces.iter().map(|s| s.title.clone()).collect();
-    let mut outcome = super::BreakoutOutcome {
-        opened: surfaces.len(),
-        tiled: false,
-        titles: titles.clone(),
-        note: None,
+/// The outcome once placement has been tried. Any placement error leaves the
+/// windows open and carries its text; some may already have been placed.
+fn outcome_after_placement(
+    titles: Vec<String>,
+    placed: Result<(), String>,
+) -> super::BreakoutOutcome {
+    let (tiled, note) = match placed {
+        Ok(()) => (true, None),
+        Err(error) => (
+            false,
+            Some(format!(
+                "The windows are open but not tiled (some may be partly placed): {error}"
+            )),
+        ),
     };
-    let placed = osascript(&["-l", "JavaScript"], FRAME_SCRIPT)
+    super::BreakoutOutcome {
+        opened: titles.len(),
+        tiled,
+        titles,
+        note,
+    }
+}
+
+/// Open the surfaces as separate windows and tile them. Any error while placing
+/// leaves the windows open untiled and is carried in the outcome's note. If the
+/// open script itself fails, windows it already opened are closed best-effort.
+pub fn run_windows(surfaces: &[Surface]) -> Result<super::BreakoutOutcome, String> {
+    let titles: Vec<String> = surfaces.iter().map(|s| s.title.clone()).collect();
+    if let Err(error) = osascript(
+        &[],
+        &open_windows_script(surfaces),
+        wait_for(surfaces.len()),
+    ) {
+        let cleanup = match close(&titles) {
+            Ok(()) => "windows already opened were closed".to_string(),
+            Err(close_error) => format!("closing windows already opened failed: {close_error}"),
+        };
+        return Err(format!("{error} ({cleanup})"));
+    }
+    let placed = osascript(&["-l", "JavaScript"], FRAME_SCRIPT, wait_for(0))
         .and_then(|json| {
             serde_json::from_str::<Rect>(&json).map_err(|e| format!("screen frame: {e}"))
         })
@@ -202,18 +238,14 @@ pub fn run_windows(surfaces: &[Surface]) -> Result<super::BreakoutOutcome, Strin
             super::grid::tile(surfaces.len(), screen).ok_or_else(|| "no grid".to_string())
         })
         .and_then(|cells| {
-            let placements: Vec<(String, Rect)> = titles.into_iter().zip(cells).collect();
-            osascript(&[], &place_script(&placements)).map(|_| ())
+            let placements: Vec<(String, Rect)> = titles.iter().cloned().zip(cells).collect();
+            osascript(&[], &place_script(&placements), wait_for(placements.len())).map(|_| ())
         });
-    match placed {
-        Ok(()) => outcome.tiled = true,
-        Err(error) => outcome.note = Some(format!("The windows are open but not tiled: {error}")),
-    }
-    Ok(outcome)
+    Ok(outcome_after_placement(titles, placed))
 }
 
 pub fn close(titles: &[String]) -> Result<(), String> {
-    osascript(&[], &close_script(titles)).map(|_| ())
+    osascript(&[], &close_script(titles), wait_for(titles.len())).map(|_| ())
 }
 
 #[cfg(test)]
@@ -319,8 +351,8 @@ mod tests {
         assert!(script.contains("close window (first window whose id is (contents of i))"));
         assert!(!script.contains("close window w"));
         assert!(
-            script.contains("-1719"),
-            "a missing id must count as already closed"
+            script.contains("if errNum is -1712 or errNum is -1743 then error errMsg"),
+            "only consent errors may abort; any lookup failure means already closed"
         );
     }
 
@@ -338,5 +370,26 @@ mod tests {
         }
         let other = "execution error: Can't get window 1. (-1719)";
         assert_eq!(friendly_error(other), other);
+    }
+
+    #[test]
+    fn placement_failure_leaves_windows_open_with_the_error() {
+        let titles = vec!["a".to_string(), "b".to_string()];
+        let done = outcome_after_placement(titles.clone(), Ok(()));
+        assert!(done.tiled && done.note.is_none() && done.opened == 2);
+        let failed = outcome_after_placement(titles.clone(), Err("boom (-25211)".into()));
+        assert!(!failed.tiled);
+        assert_eq!(failed.titles, titles);
+        let note = failed.note.unwrap();
+        assert!(
+            note.contains("boom (-25211)") && note.contains("partly placed"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn the_wait_grows_with_the_window_count() {
+        assert!(wait_for(9) > wait_for(1));
+        assert!(wait_for(1) > Duration::from_secs(15));
     }
 }
