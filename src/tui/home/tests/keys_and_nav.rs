@@ -58,17 +58,11 @@ fn tailored_history_hide_is_persistent_without_touching_session_lifecycle() {
     instance.tool = "pi".into();
     instance.scratch = true;
     instance.command = "ledger run pi --profile aoe-capture-personal --".into();
+    instance.title = "Existing captured conversation".into();
     let original = serde_json::to_value(&*instance).unwrap();
     let shortcut = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
     env.view.handle_key(shortcut, None);
-    env.view
-        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), None);
-    env.view
-        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), None);
-    env.view
-        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), None);
-    env.view
-        .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), None);
+    env.view.handle_paste("Existing captured conversation");
     env.view
         .handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE), None);
     assert!(
