@@ -15,6 +15,7 @@ mod layout;
 mod lifecycle;
 mod live_send;
 mod live_send_prep;
+mod marks;
 mod operations;
 mod overlays;
 pub(in crate::tui) mod panes;
@@ -455,6 +456,8 @@ pub struct HomeView {
     // snapshot drives the row; see `apply_restart_results`.
     /// Sessions awaiting a daemon start snapshot (see `apply_restart_results`).
     pub(super) restart_in_flight: std::collections::HashSet<String>,
+    /// Sessions carrying a Mark. Local to this TUI; never persisted.
+    pub(super) marked: std::collections::HashSet<String>,
 
     /// The creation this view submitted to the daemon and still displays. The
     /// daemon owns provisioning, hooks, and the committed row.

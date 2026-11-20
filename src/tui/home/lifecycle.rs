@@ -290,6 +290,7 @@ impl HomeView {
             sidebar_source: crate::tui::session_feed::SidebarSource::Disconnected,
             runtime_failure_reason: None,
             restart_in_flight: std::collections::HashSet::new(),
+            marked: std::collections::HashSet::new(),
             pending_creation: None,
             structured_transcript_painted: false,
             creating_hook_progress: HashMap::new(),
@@ -591,6 +592,7 @@ impl HomeView {
 
         let prev_selected_session = self.selected_session.clone();
 
+        self.prune_marks();
         self.rebuild_flat_items_keeping_cursor();
 
         // Storage rebuilds and search re-scoring must not move the live-send

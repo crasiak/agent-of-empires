@@ -76,6 +76,16 @@ _Avoid_: star, pin (different concept)
 **Unread**:
 A Session with output the user has not looked at since it last changed.
 
+**Mark**:
+A transient flag the user puts on a Session in the sidebar so a Bulk action can target it. Local to one TUI and never saved.
+_Avoid_: select, selection (that is the cursor row)
+
+**Marked set**:
+Every Session currently carrying a Mark.
+
+**Bulk action**:
+An action applied to every eligible Session in the Marked set, such as sending one message or restarting.
+
 **Work arc**:
 A short, provenance-bound orientation cue for one Session's Agent conversation: goal, current progress, remaining work and next permissible action. It is derived from bounded conversation evidence, not the Session's Title, Status, a progress percentage or an independent verification of the Agent's claims. A stale arc does not describe the current branch.
 _Avoid_: conversation summary (the separate ACP transcript callout), task list, status report

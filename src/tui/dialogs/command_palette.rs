@@ -623,6 +623,10 @@ mod tests {
         (ActionId::Update, "surfaced via the update banner"),
         (ActionId::OpenCommandPalette, "opens the palette itself"),
         (
+            ActionId::ToggleMark,
+            "acts on the cursor row, which the palette covers",
+        ),
+        (
             ActionId::DismissUpdateBanner,
             "only meaningful while a banner shows",
         ),

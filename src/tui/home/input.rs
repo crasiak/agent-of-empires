@@ -3603,6 +3603,7 @@ impl HomeView {
                     }
                 }
             }
+            ActionId::ToggleMark => self.toggle_mark_at_cursor(),
             ActionId::SendMessage => {
                 if let Some(id) = self.selected_structured_session() {
                     // Drain pending_paste into the structured composer so buffered

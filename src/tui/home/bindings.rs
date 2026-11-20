@@ -52,6 +52,8 @@ pub enum ActionId {
     AttachTerminal,
     ToggleView,
     SendMessage,
+    /// Toggle the Mark on the cursor row (a Group header toggles all its Sessions).
+    ToggleMark,
     RespondToPermission,
     Stop,
     Delete,
@@ -498,6 +500,9 @@ pub fn key_event(id: ActionId, strict: bool) -> Option<KeyEvent> {
 }
 
 fn format_chord(c: &Chord) -> String {
+    if c.code == KeyCode::Char(' ') && !c.ctrl && !c.alt {
+        return "Space".to_string();
+    }
     let key = match c.code {
         KeyCode::Char(ch) => ch.to_ascii_uppercase().to_string(),
         KeyCode::F(n) => format!("F{n}"),
@@ -986,6 +991,17 @@ pub static BINDINGS: &[Binding] = &[
         }),
     },
     Binding {
+        id: ActionId::ToggleMark,
+        non_strict: &[k(' ')],
+        strict: &[k(' ')],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Mark or unmark for bulk actions",
+        }),
+        palette: None,
+    },
+    Binding {
         id: ActionId::RespondToPermission,
         non_strict: &[k('a')],
         strict: &[k('A')],
@@ -1462,6 +1478,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::AttachTerminal => "attach-terminal",
         ActionId::ToggleView => "toggle-view",
         ActionId::SendMessage => "send-message",
+        ActionId::ToggleMark => "toggle-mark",
         ActionId::RespondToPermission => "respond-to-permission",
         ActionId::Stop => "stop",
         ActionId::Delete => "delete",
