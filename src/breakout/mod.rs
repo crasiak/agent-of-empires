@@ -9,6 +9,37 @@ pub mod request;
 use request::BreakoutLayout;
 use request::BreakoutRequest;
 
+/// Every Breakout window title starts with this. It is the only tag: the sweep
+/// finds windows by it, including ones no running TUI tracks.
+pub const TITLE_PREFIX: &str = "aoe breakout \u{b7} ";
+
+/// Separates a window title's display text from its trailing id characters.
+const TITLE_SEPARATOR: &str = " \u{b7} ";
+
+/// The id characters a window title ends with.
+pub fn id_prefix(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// The window title for a Session, from its printable title text and id.
+pub(crate) fn window_title(display_title: &str, id: &str) -> String {
+    format!(
+        "{TITLE_PREFIX}{display_title}{TITLE_SEPARATOR}{}",
+        id_prefix(id)
+    )
+}
+
+/// The text a window title of the Session with these id characters ends with.
+/// Ids use a validated alphabet without spaces, so only that Session's titles match.
+pub(crate) fn title_suffix(id_prefix: &str) -> String {
+    format!("{TITLE_SEPARATOR}{id_prefix}")
+}
+
+/// Whether `title` is a Breakout window title of the Session `id`.
+pub fn title_is_for(title: &str, id: &str) -> bool {
+    title.starts_with(TITLE_PREFIX) && title.ends_with(&title_suffix(&id_prefix(id)))
+}
+
 /// What a Breakout did.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BreakoutOutcome {
@@ -68,6 +99,20 @@ pub fn close_local(titles: &[String]) -> Result<(), String> {
     }
 }
 
+/// Close every Breakout window on this machine whose trailing id characters are
+/// not in `keep_id_prefixes`, tracked or not. Returns how many it closed.
+pub fn sweep_local(keep_id_prefixes: &[String]) -> Result<usize, String> {
+    #[cfg(target_os = "macos")]
+    {
+        ghostty::sweep(keep_id_prefixes)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = keep_id_prefixes;
+        Err("Breakout needs macOS with Ghostty".to_string())
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::cell::Cell;
@@ -97,5 +142,22 @@ mod tests {
             }],
         };
         assert_eq!(run_local(&bad), Err("malformed nonce".to_string()));
+    }
+
+    #[test]
+    fn titles_match_only_their_own_session() {
+        let title = window_title("Vikings", "a1b2c3d4e5f60718");
+        assert_eq!(title, "aoe breakout \u{b7} Vikings \u{b7} a1b2c3d4");
+        assert!(title_is_for(&title, "a1b2c3d4e5f60718"));
+        assert!(
+            title_is_for(&title, "a1b2c3d4ffff"),
+            "only 8 id characters are kept"
+        );
+        assert!(!title_is_for(&title, "b2c3d4"));
+        assert!(!title_is_for(&title, "1b2c3d4"));
+        let short = window_title("Celts", "ffff");
+        assert!(title_is_for(&short, "ffff"));
+        assert!(!title_is_for(&short, "ffffabcd"));
+        assert!(!title_is_for("Vikings \u{b7} a1b2c3d4", "a1b2c3d4"));
     }
 }

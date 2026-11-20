@@ -541,8 +541,12 @@ impl HomeView {
         body.delete_sandbox = options.delete_sandbox;
         body.force_delete = options.force_delete;
         body.keep_scratch = options.keep_scratch;
-        self.session_feed
-            .submit_request(id, crate::tui::session_feed::SessionRequest::Purge(body))
+        self.session_feed.submit_request(
+            id.clone(),
+            crate::tui::session_feed::SessionRequest::Purge(body),
+        )?;
+        self.close_breakout_of(&id);
+        Ok(())
     }
 
     pub(super) fn delete_selected_group(
@@ -602,6 +606,13 @@ impl HomeView {
         };
         anyhow::ensure!(!has_creating, "A session in this group is still being created. Wait for it to finish before deleting the group.");
         anyhow::ensure!(!has_restarting, "A session in this group is still restarting. Wait for it to finish before deleting the group.");
+        let members: Vec<String> = {
+            let is_member = group_membership(&path, &prefix, Some(&group.profile));
+            self.instances()
+                .filter(|row| is_member(row))
+                .map(|row| row.id.clone())
+                .collect()
+        };
         self.submit_namespace_intent(
             crate::daemon::NamespaceMutation::DeleteGroup(crate::daemon::DeleteGroupBody {
                 group,
@@ -616,7 +627,11 @@ impl HomeView {
                 },
             }),
             super::NamespaceIntent::Plain,
-        )
+        )?;
+        for id in members {
+            self.close_breakout_of(&id);
+        }
+        Ok(())
     }
 
     /// Forget a stuck deletion record; finish runtime cleanup off the input thread.
@@ -979,7 +994,9 @@ impl HomeView {
                 "Could Not Trash Session",
                 &error.to_string(),
             ));
+            return;
         }
+        self.close_breakout_of(id);
     }
 
     /// Restore the selected trashed session, clearing `trashed_at` so it
@@ -1105,8 +1122,13 @@ impl HomeView {
             ));
         }
         requests.sort_by(|a, b| a.0.cmp(&b.0));
+        let ids: Vec<String> = requests.iter().map(|(id, _)| id.clone()).collect();
         if let Err(error) = self.session_feed.submit_batch(requests) {
             self.info_dialog = Some(InfoDialog::new("Could Not Empty Trash", &error.to_string()));
+            return;
+        }
+        for id in ids {
+            self.close_breakout_of(&id);
         }
     }
 

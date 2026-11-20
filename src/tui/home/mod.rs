@@ -70,8 +70,8 @@ use super::diff::DiffView;
 use super::settings::SettingsView;
 
 use self::icons::{
-    ICON_ARCHIVED_SECTION, ICON_COLLAPSED, ICON_DELETING, ICON_DORMANT, ICON_ERROR, ICON_EXPANDED,
-    ICON_FAVORITE, ICON_IDLE, ICON_MARK, ICON_PINNED, ICON_STOPPED, ICON_TERMINAL,
+    ICON_ARCHIVED_SECTION, ICON_BREAKOUT, ICON_COLLAPSED, ICON_DELETING, ICON_DORMANT, ICON_ERROR,
+    ICON_EXPANDED, ICON_FAVORITE, ICON_IDLE, ICON_MARK, ICON_PINNED, ICON_STOPPED, ICON_TERMINAL,
     ICON_TRASH_SECTION, ICON_UNKNOWN, ICON_UNREAD, UNREAD_DWELL,
 };
 use self::preview::{PreviewCache, PreviewSelection, PreviewTextView, PreviewTimings};
@@ -418,8 +418,12 @@ pub struct HomeView {
     /// The Breakout being opened off the event loop.
     breakout_job:
         Option<std::sync::mpsc::Receiver<Result<crate::breakout::BreakoutOutcome, String>>>,
-    /// The close of Breakout windows running off the event loop.
-    breakout_close_job: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// "Close breakout windows" sweeping every Breakout window off the event loop.
+    breakout_close_job: Option<std::sync::mpsc::Receiver<Result<usize, String>>>,
+    /// The close of windows whose Sessions were stopped, trashed or deleted.
+    breakout_session_close_job: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// Window titles waiting to close with their Sessions while another job runs.
+    breakout_close_queue: Vec<String>,
     /// Titles of the Breakout windows this TUI opened and has not closed.
     breakout_titles: Vec<String>,
     /// The bulk restart in progress, if any.

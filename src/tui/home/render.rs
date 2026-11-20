@@ -11,9 +11,9 @@ use rattles::presets::prelude as spinners;
 use super::bindings::ActionId;
 use super::{
     get_indent, live_send, DragKind, HomeView, TerminalMode, ViewMode, ICON_ARCHIVED_SECTION,
-    ICON_COLLAPSED, ICON_DELETING, ICON_DORMANT, ICON_ERROR, ICON_EXPANDED, ICON_FAVORITE,
-    ICON_IDLE, ICON_MARK, ICON_PINNED, ICON_STOPPED, ICON_TERMINAL, ICON_TRASH_SECTION,
-    ICON_UNKNOWN, ICON_UNREAD,
+    ICON_BREAKOUT, ICON_COLLAPSED, ICON_DELETING, ICON_DORMANT, ICON_ERROR, ICON_EXPANDED,
+    ICON_FAVORITE, ICON_IDLE, ICON_MARK, ICON_PINNED, ICON_STOPPED, ICON_TERMINAL,
+    ICON_TRASH_SECTION, ICON_UNKNOWN, ICON_UNREAD,
 };
 use crate::containers::image_update::ImageUpdate;
 use crate::session::config::{GroupByMode, RowTagMode, SidebarPosition, SortOrder};
@@ -105,6 +105,9 @@ fn sidebar_areas(
 /// Extra rows captured beyond the visible window so moderate scrolls don't force a fresh
 /// capture on every wheel tick. Cache invalidation uses the same reserve.
 const CAPTURE_BUFFER: u16 = 20;
+
+/// Preview header text for a Session shown in a Breakout window.
+pub(super) const BREAKOUT_PREVIEW_NOTE: &str = "In a Breakout window";
 
 /// Rows the compact system-health strip occupies.
 const DIAGNOSTICS_STRIP_HEIGHT: u16 = 1;
@@ -2207,6 +2210,23 @@ impl HomeView {
                 Span::raw("  ")
             });
         }
+        // Likewise while any Breakout window is tracked.
+        if !self.breakout_titles.is_empty() {
+            let broken_out = matches!(item, Item::Session { id, .. } if self.is_broken_out(id));
+            line_spans.push(if broken_out {
+                let style = Style::default().fg(theme.accent);
+                Span::styled(
+                    format!("{ICON_BREAKOUT} "),
+                    if is_selected {
+                        selected_row_style(style, theme)
+                    } else {
+                        style
+                    },
+                )
+            } else {
+                Span::raw("  ")
+            });
+        }
         if favorite_gutter {
             let favorited = matches!(item, Item::Session { id, .. }
                 if self.get_instance(id).is_some_and(crate::session::is_live_favorite));
@@ -3591,8 +3611,19 @@ impl HomeView {
         } else {
             None
         };
+        let breakout_note = self
+            .selected_session
+            .as_deref()
+            .filter(|id| self.is_broken_out(id))
+            .map(|_| {
+                Span::styled(
+                    format!("{ICON_BREAKOUT} {BREAKOUT_PREVIEW_NOTE} "),
+                    Style::default().fg(theme.accent),
+                )
+            });
 
-        if let Some(line) = compact_title {
+        if let Some(mut line) = compact_title {
+            line.spans.extend(breakout_note);
             block = block.title(line);
         } else {
             let title = match &self.view_mode {
@@ -3600,9 +3631,9 @@ impl HomeView {
                 ViewMode::Terminal => " Terminal Preview ".to_string(),
                 ViewMode::Tool(name) => format!(" {} Preview ", name),
             };
-            block = block
-                .title(title)
-                .title_style(Style::default().fg(title_color));
+            let mut title = Line::from(Span::styled(title, Style::default().fg(title_color)));
+            title.spans.extend(breakout_note);
+            block = block.title(title);
 
             // Advertise the info-header toggle: `i` gates the header in every view mode
             // (Agent's worktree-flavored one, Terminal/Tool's minimal one), so the hint

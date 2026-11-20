@@ -399,7 +399,10 @@ impl HomeView {
             .session_feed
             .submit(id.to_string(), crate::daemon::SessionMutation::Stop)
         {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                self.close_breakout_of(id);
+                Ok(true)
+            }
             Err(error) => {
                 self.info_dialog = Some(InfoDialog::sized_to_fit(
                     "Stop failed",

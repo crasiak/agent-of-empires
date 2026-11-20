@@ -187,7 +187,7 @@ impl HomeView {
         }
         self.context_menu = Some(ContextMenuDialog::for_marks(
             anchor,
-            !self.breakout_titles.is_empty(),
+            crate::breakout::supported_here(),
         ));
     }
 

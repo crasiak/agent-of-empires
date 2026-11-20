@@ -121,11 +121,7 @@ pub fn surfaces(request: &BreakoutRequest, local_exe: &str) -> Vec<Surface> {
         .sessions
         .iter()
         .map(|session| Surface {
-            title: format!(
-                "aoe breakout \u{b7} {} \u{b7} {}",
-                display_title(&session.title),
-                session.id.chars().take(8).collect::<String>()
-            ),
+            title: super::window_title(&display_title(&session.title), &session.id),
             command: attach_command(request.host.as_deref(), session, local_exe),
         })
         .collect()
@@ -399,6 +395,14 @@ mod tests {
             "default profile needs no flag"
         );
         assert_eq!(got[1].title, "aoe breakout \u{b7} Celts \u{b7} ffff");
+    }
+
+    #[test]
+    fn every_title_starts_with_the_title_prefix() {
+        let r = request(None, vec![session("abc", "T", "")]);
+        let title = &surfaces(&r, "aoe")[0].title;
+        assert!(title.starts_with(super::super::TITLE_PREFIX), "{title}");
+        assert_eq!(super::super::TITLE_PREFIX, "aoe breakout \u{b7} ");
     }
 
     #[test]

@@ -250,6 +250,8 @@ impl HomeView {
             pending_breakout: false,
             breakout_job: None,
             breakout_close_job: None,
+            breakout_session_close_job: None,
+            breakout_close_queue: Vec::new(),
             breakout_titles: Vec::new(),
             bulk_restart: None,
             pending_dialog_click_action: None,

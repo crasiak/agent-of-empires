@@ -808,23 +808,30 @@ fn more_than_nine_sessions_is_refused_and_seven_asks_first() {
 
 #[test]
 #[serial]
-fn the_bulk_menu_offers_close_only_while_windows_are_open() {
+fn the_bulk_menu_offers_close_wherever_breakout_works() {
     let mut env = create_test_env_with_sessions(2);
     mark_all(&mut env);
-    env.view.handle_key(shift_k(), None);
-    let menu = env.view.context_menu.as_ref().unwrap();
-    assert!(menu.is_marks_menu());
-    assert!(!menu.items_contain(ContextMenuAction::CloseBreakout));
+    {
+        let _forced = ForcedSupport::set(false);
+        env.view.handle_key(shift_k(), None);
+        let menu = env.view.context_menu.as_ref().unwrap();
+        assert!(menu.is_marks_menu());
+        assert!(!menu.items_contain(ContextMenuAction::CloseBreakout));
+    }
 
     env.view.context_menu = None;
-    env.view.breakout_titles.push("t0".into());
+    let _forced = ForcedSupport::on();
+    assert!(env.view.breakout_titles.is_empty());
     env.view.handle_key(shift_k(), None);
     let menu = env.view.context_menu.as_ref().unwrap();
     assert!(
         menu.is_marks_menu(),
         "still a bulk menu with the close entry"
     );
-    assert!(menu.items_contain(ContextMenuAction::CloseBreakout));
+    assert!(
+        menu.items_contain(ContextMenuAction::CloseBreakout),
+        "offered with no tracked windows, since the sweep finds untracked ones"
+    );
 }
 
 /// Forces `supported_here` for one test and restores it even when an assertion fails.
@@ -832,7 +839,11 @@ struct ForcedSupport;
 
 impl ForcedSupport {
     fn on() -> Self {
-        crate::breakout::test_support::FORCED.with(|f| f.set(Some(true)));
+        Self::set(true)
+    }
+
+    fn set(supported: bool) -> Self {
+        crate::breakout::test_support::FORCED.with(|f| f.set(Some(supported)));
         Self
     }
 }
@@ -877,6 +888,7 @@ fn a_disconnected_breakout_worker_keeps_the_marks() {
 #[test]
 #[serial]
 fn closing_runs_as_a_job_and_clears_titles_on_success() {
+    let _forced = ForcedSupport::on();
     let mut env = create_test_env_with_sessions(1);
     env.view.breakout_titles = vec!["t0".into()];
     env.view.close_breakout();
@@ -978,4 +990,192 @@ fn submitting_the_breakout_confirm_resets_the_flag_and_opens() {
     env.view.handle_key(key(KeyCode::Char('y')), None);
     assert!(!env.view.pending_breakout);
     assert!(env.view.breakout_job.is_some());
+}
+
+/// Open a finished Breakout of every Session through the real request path.
+fn break_out_all(env: &mut TestEnv) -> Vec<String> {
+    mark_all(env);
+    make_sendable(env);
+    let ids = env.view.marked_in_view_order();
+    env.view.start_breakout();
+    assert!(env.view.tick_breakout());
+    ids
+}
+
+#[test]
+#[serial]
+fn a_finished_breakout_marks_its_sessions_until_closed() {
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(3);
+    let ids = break_out_all(&mut env);
+    assert_eq!(env.view.breakout_titles.len(), 3);
+    assert!(env
+        .view
+        .breakout_titles
+        .iter()
+        .all(|t| t.starts_with(crate::breakout::TITLE_PREFIX)));
+    for id in &ids {
+        assert!(env.view.is_broken_out(id));
+    }
+    assert!(!env.view.is_broken_out("not-a-session"));
+
+    env.view.close_breakout();
+    assert!(env.view.tick_breakout());
+    for id in &ids {
+        assert!(!env.view.is_broken_out(id));
+    }
+}
+
+#[test]
+#[serial]
+fn close_breakout_windows_sweeps_even_with_nothing_tracked() {
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(1);
+    assert!(env.view.breakout_titles.is_empty());
+    env.view.close_breakout();
+    assert!(
+        env.view.breakout_close_job.is_some(),
+        "the sweep finds windows this TUI does not track"
+    );
+    assert!(env.view.tick_breakout());
+    assert!(env.view.breakout_close_job.is_none());
+}
+
+#[test]
+#[serial]
+fn close_breakout_windows_is_refused_where_breakout_does_not_work() {
+    let _forced = ForcedSupport::set(false);
+    let mut env = create_test_env_with_sessions(1);
+    env.view.close_breakout();
+    assert!(env.view.breakout_close_job.is_none());
+}
+
+#[test]
+#[serial]
+fn trashing_a_broken_out_session_queues_a_close_for_exactly_its_title() {
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(2);
+    let ids = break_out_all(&mut env);
+    let gone = env
+        .view
+        .breakout_titles
+        .iter()
+        .find(|t| crate::breakout::title_is_for(t, &ids[0]))
+        .cloned()
+        .unwrap();
+
+    // A sweep is running, so the close waits in the queue rather than being dropped.
+    let (tx, rx) = std::sync::mpsc::channel();
+    env.view.breakout_close_job = Some(rx);
+    let _respond = env.view.session_feed.request_driver_for_test();
+    env.view.trash_session_by_id(&ids[0]);
+
+    assert_eq!(env.view.breakout_close_queue, [gone]);
+    assert!(!env.view.is_broken_out(&ids[0]));
+    assert!(env.view.is_broken_out(&ids[1]), "other windows stay");
+    assert!(env.view.breakout_session_close_job.is_none());
+
+    tx.send(Ok(0)).unwrap();
+    assert!(env.view.tick_breakout());
+    assert!(
+        env.view.breakout_close_queue.is_empty(),
+        "the queued close starts once the sweep is done"
+    );
+    assert!(env.view.breakout_session_close_job.is_some());
+    assert!(env.view.tick_breakout());
+    assert!(env.view.breakout_session_close_job.is_none());
+}
+
+#[test]
+#[serial]
+fn stopping_a_broken_out_session_closes_its_window() {
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(2);
+    let ids = break_out_all(&mut env);
+    let _respond = env.view.session_feed.command_driver_for_test();
+    assert!(env.view.submit_daemon_stop(&ids[1]).unwrap());
+    assert!(!env.view.is_broken_out(&ids[1]));
+    assert!(env.view.is_broken_out(&ids[0]));
+    assert!(
+        env.view.breakout_session_close_job.is_some(),
+        "nothing else runs, so the close starts at once"
+    );
+    assert!(env.view.breakout_close_queue.is_empty());
+}
+
+#[test]
+#[serial]
+fn stopping_a_session_that_is_not_broken_out_closes_nothing() {
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instance_at(0).id.clone();
+    let _respond = env.view.session_feed.command_driver_for_test();
+    assert!(env.view.submit_daemon_stop(&id).unwrap());
+    assert!(env.view.breakout_session_close_job.is_none());
+    assert!(env.view.breakout_close_queue.is_empty());
+}
+
+#[test]
+#[serial]
+fn a_broken_out_row_shows_the_marker_and_others_stay_aligned() {
+    use crate::tui::home::icons::ICON_BREAKOUT;
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(2);
+    let plain_before = rendered_row_text(&env.view, &env.view.flat_items[1].clone());
+    mark_all(&mut env);
+    let only_first: Vec<String> = env
+        .view
+        .marked_in_view_order()
+        .into_iter()
+        .skip(1)
+        .collect();
+    for id in only_first {
+        env.view.marked.remove(&id);
+    }
+    make_sendable(&mut env);
+    env.view.start_breakout();
+    assert!(env.view.tick_breakout());
+
+    let broken_out = rendered_row_text(&env.view, &env.view.flat_items[0].clone());
+    let plain = rendered_row_text(&env.view, &env.view.flat_items[1].clone());
+    assert!(broken_out.starts_with(ICON_BREAKOUT), "{broken_out:?}");
+    assert_eq!(
+        plain.trim_end(),
+        format!("  {}", plain_before.trim_end()),
+        "other rows are padded by the marker column"
+    );
+}
+
+#[test]
+#[serial]
+fn the_preview_header_says_a_session_is_in_a_breakout_window() {
+    use crate::tui::home::render::BREAKOUT_PREVIEW_NOTE;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(1);
+    let screen = |view: &mut HomeView| {
+        let theme = crate::tui::styles::load_theme("empire");
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                view.render(f, area, &theme, None, None, None);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+    assert!(!screen(&mut env.view).contains(BREAKOUT_PREVIEW_NOTE));
+
+    break_out_all(&mut env);
+    env.view.update_selected();
+    assert!(
+        screen(&mut env.view).contains(BREAKOUT_PREVIEW_NOTE),
+        "the selected Session is broken out"
+    );
 }

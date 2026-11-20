@@ -559,8 +559,9 @@ impl ContextMenuDialog {
         )
     }
 
-    /// The menu of Bulk actions on the Marked set.
-    pub fn for_marks(anchor: (u16, u16), breakout_open: bool) -> Self {
+    /// The menu of Bulk actions on the Marked set. Closing Breakout windows is
+    /// offered wherever Breakout works, since the sweep also finds untracked windows.
+    pub fn for_marks(anchor: (u16, u16), breakout_supported: bool) -> Self {
         let mut items = vec![
             (ContextMenuAction::BulkSend, "Send Message to Marked"),
             (ContextMenuAction::BulkRestart, "Restart Marked"),
@@ -571,7 +572,7 @@ impl ContextMenuDialog {
             ),
             (ContextMenuAction::ClearMarks, "Clear Marks"),
         ];
-        if breakout_open {
+        if breakout_supported {
             items.push((ContextMenuAction::CloseBreakout, "Close Breakout Windows"));
         }
         Self::new(anchor, items)

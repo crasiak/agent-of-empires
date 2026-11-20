@@ -125,6 +125,55 @@ pub fn close_script(titles: &[String]) -> String {
     with_timeout(&script)
 }
 
+/// Close every Breakout window, found by the title prefix, except those whose
+/// title ends with one of the kept id prefixes. Ids and names are collected
+/// before anything closes, then each window is closed by id with the same error
+/// rules as `close_script`. The script returns how many windows it closed.
+pub fn sweep_script(keep_id_prefixes: &[String]) -> String {
+    let keep: Vec<String> = keep_id_prefixes
+        .iter()
+        .map(|prefix| as_literal(&super::title_suffix(prefix)))
+        .collect();
+    let mut script = String::from("tell application \"Ghostty\"\n");
+    script.push_str(&format!(
+        "    set keepSuffixes to {{{}}}\n",
+        keep.join(", ")
+    ));
+    script.push_str(&format!(
+        "    set winIds to id of every window whose name starts with {}\n",
+        as_literal(super::TITLE_PREFIX)
+    ));
+    script.push_str(concat!(
+        "    set closeIds to {}\n",
+        "    repeat with i in winIds\n",
+        "        try\n",
+        "            set winName to name of (first window whose id is (contents of i))\n",
+        "            set keep to false\n",
+        "            considering case\n",
+        "                repeat with s in keepSuffixes\n",
+        "                    if winName ends with (contents of s) then set keep to true\n",
+        "                end repeat\n",
+        "            end considering\n",
+        "            if not keep then set end of closeIds to (contents of i)\n",
+        "        on error errMsg number errNum\n",
+        "            if errNum is -1712 or errNum is -1743 then error errMsg number errNum\n",
+        "        end try\n",
+        "    end repeat\n",
+        "    set closedCount to 0\n",
+        "    repeat with i in closeIds\n",
+        "        try\n",
+        "            close window (first window whose id is (contents of i))\n",
+        "            set closedCount to closedCount + 1\n",
+        "        on error errMsg number errNum\n",
+        "            if errNum is -1712 or errNum is -1743 then error errMsg number errNum\n",
+        "        end try\n",
+        "    end repeat\n",
+        "    return closedCount\n",
+        "end tell\n",
+    ));
+    with_timeout(&script)
+}
+
 /// JXA: the usable frame of the screen with keyboard focus, as top-left-origin JSON.
 pub const FRAME_SCRIPT: &str = r#"ObjC.import('AppKit');
 const primaryHeight = $.NSScreen.screens.objectAtIndex(0).frame.size.height;
@@ -276,6 +325,19 @@ pub fn close(titles: &[String]) -> Result<(), String> {
     osascript(&[], &close_script(titles), wait_for(titles.len())).map(|_| ())
 }
 
+/// Run the sweep. Its window count is unknown up front, so it waits as long as
+/// the largest Breakout would.
+pub fn sweep(keep_id_prefixes: &[String]) -> Result<usize, String> {
+    let output = osascript(
+        &[],
+        &sweep_script(keep_id_prefixes),
+        wait_for(super::request::MAX_SESSIONS),
+    )?;
+    output
+        .parse()
+        .map_err(|_| format!("unexpected sweep output: {output}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +375,7 @@ mod tests {
                 },
             )]),
             close_script(&["t".to_string()]),
+            sweep_script(&[]),
         ] {
             assert!(
                 script.starts_with("with timeout of 10 seconds\n"),
@@ -382,6 +445,36 @@ mod tests {
             script.contains("if errNum is -1712 or errNum is -1743 then error errMsg"),
             "only consent errors may abort; any lookup failure means already closed"
         );
+    }
+
+    #[test]
+    fn sweep_script_finds_by_prefix_and_closes_by_id() {
+        let script = sweep_script(&[]);
+        assert!(script.contains(
+            "set winIds to id of every window whose name starts with \"aoe breakout \u{b7} \""
+        ));
+        assert!(script.contains("set keepSuffixes to {}"));
+        assert!(script.contains("close window (first window whose id is (contents of i))"));
+        assert!(!script.contains("close window w"));
+        let (collect, close) = script.split_once("set closedCount to 0").unwrap();
+        assert!(
+            !collect.contains("close window"),
+            "nothing closes while collecting"
+        );
+        assert!(close.contains("repeat with i in closeIds"));
+        assert!(script.contains("if errNum is -1712 or errNum is -1743 then error errMsg"));
+        assert!(script.contains("return closedCount"));
+    }
+
+    #[test]
+    fn sweep_script_skips_kept_id_prefixes() {
+        let script = sweep_script(&["a1b2c3d4".to_string(), "x\"y".to_string()]);
+        assert!(
+            script.contains("set keepSuffixes to {\" \u{b7} a1b2c3d4\", \" \u{b7} x\\\"y\"}"),
+            "{script}"
+        );
+        assert!(script.contains("if winName ends with (contents of s) then set keep to true"));
+        assert!(script.contains("if not keep then set end of closeIds to (contents of i)"));
     }
 
     #[test]
