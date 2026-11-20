@@ -626,6 +626,8 @@ mod tests {
             ActionId::ToggleMark,
             "acts on the cursor row, which the palette covers",
         ),
+        (ActionId::ExtendMarkUp, "a cursor movement, not a command"),
+        (ActionId::ExtendMarkDown, "a cursor movement, not a command"),
         (
             ActionId::DismissUpdateBanner,
             "only meaningful while a banner shows",

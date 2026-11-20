@@ -58,3 +58,93 @@ fn a_mark_on_a_vanished_session_is_pruned() {
     env.view.prune_marks();
     assert!(env.view.marked.is_empty());
 }
+
+fn shift(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::SHIFT)
+}
+
+fn group_row(env: &TestEnv, group: &str) -> usize {
+    env.view
+        .flat_items
+        .iter()
+        .position(|item| matches!(item, Item::Group { path, .. } if path == group))
+        .expect("group header row")
+}
+
+#[test]
+#[serial]
+fn space_on_a_group_header_marks_then_unmarks_its_sessions() {
+    // ungrouped sessions, 2 in "work", 1 in "work/projects"
+    let mut env = create_test_env_with_group_sessions();
+    let row = group_row(&env, "work");
+    put_cursor(&mut env, row);
+
+    env.view.handle_key(space(), None);
+    assert_eq!(
+        env.view.marked.len(),
+        3,
+        "nested group sessions are included"
+    );
+
+    env.view.handle_key(space(), None);
+    assert!(
+        env.view.marked.is_empty(),
+        "all marked, so the header unmarks"
+    );
+}
+
+#[test]
+#[serial]
+fn a_partly_marked_group_becomes_fully_marked() {
+    let mut env = create_test_env_with_group_sessions();
+    let row = group_row(&env, "work");
+    put_cursor(&mut env, row + 1);
+    env.view.handle_key(space(), None);
+    assert_eq!(env.view.marked.len(), 1);
+
+    put_cursor(&mut env, row);
+    env.view.handle_key(space(), None);
+    assert_eq!(env.view.marked.len(), 3);
+}
+
+#[test]
+#[serial]
+fn shift_arrows_extend_marks_one_row_at_a_time() {
+    let mut env = create_test_env_with_sessions(5);
+    put_cursor(&mut env, 1);
+
+    env.view.handle_key(shift(KeyCode::Down), None);
+    env.view.handle_key(shift(KeyCode::Down), None);
+    assert_eq!(env.view.cursor, 3, "moves one row per press, not ten");
+    let expected: std::collections::HashSet<String> = (1..=3)
+        .map(|row| session_id_at(&env.view, row).unwrap())
+        .collect();
+    assert_eq!(env.view.marked, expected);
+
+    env.view.handle_key(shift(KeyCode::Up), None);
+    assert_eq!(env.view.cursor, 2);
+    assert_eq!(
+        env.view.marked, expected,
+        "extending back keeps existing marks"
+    );
+}
+
+#[test]
+#[serial]
+fn esc_clears_marks_only_after_the_search_is_cleared() {
+    let mut env = create_test_env_with_sessions(3);
+    put_cursor(&mut env, 0);
+    env.view.handle_key(space(), None);
+    env.view.search_query = Input::new("zzz".to_string());
+
+    env.view.handle_key(key(KeyCode::Esc), None);
+    assert!(env.view.search_query.value().is_empty());
+    assert_eq!(
+        env.view.marked.len(),
+        1,
+        "first Esc clears the committed search"
+    );
+
+    env.view.handle_key(key(KeyCode::Esc), None);
+    assert!(env.view.marked.is_empty(), "second Esc clears the marks");
+}

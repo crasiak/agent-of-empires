@@ -54,6 +54,12 @@ pub enum ActionId {
     SendMessage,
     /// Toggle the Mark on the cursor row (a Group header toggles all its Sessions).
     ToggleMark,
+    /// Mark the cursor row and the row above it, moving the cursor up.
+    ExtendMarkUp,
+    /// Mark the cursor row and the row below it, moving the cursor down.
+    ExtendMarkDown,
+    /// Drop every Mark (palette and `Esc`; no chord of its own).
+    ClearMarks,
     RespondToPermission,
     Stop,
     Delete,
@@ -1002,6 +1008,40 @@ pub static BINDINGS: &[Binding] = &[
         palette: None,
     },
     Binding {
+        id: ActionId::ExtendMarkUp,
+        non_strict: &[shift_code(KeyCode::Up)],
+        strict: &[shift_code(KeyCode::Up)],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Extend marks upward",
+        }),
+        palette: None,
+    },
+    Binding {
+        id: ActionId::ExtendMarkDown,
+        non_strict: &[shift_code(KeyCode::Down)],
+        strict: &[shift_code(KeyCode::Down)],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Extend marks downward",
+        }),
+        palette: None,
+    },
+    Binding {
+        id: ActionId::ClearMarks,
+        non_strict: &[],
+        strict: &[],
+        context: Context::Always,
+        help: None,
+        palette: Some(PaletteMeta {
+            title: "Clear marks",
+            keywords: &["unmark", "deselect", "bulk"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
         id: ActionId::RespondToPermission,
         non_strict: &[k('a')],
         strict: &[k('A')],
@@ -1479,6 +1519,9 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::ToggleView => "toggle-view",
         ActionId::SendMessage => "send-message",
         ActionId::ToggleMark => "toggle-mark",
+        ActionId::ExtendMarkUp => "extend-mark-up",
+        ActionId::ExtendMarkDown => "extend-mark-down",
+        ActionId::ClearMarks => "clear-marks",
         ActionId::RespondToPermission => "respond-to-permission",
         ActionId::Stop => "stop",
         ActionId::Delete => "delete",

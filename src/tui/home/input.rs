@@ -3280,6 +3280,10 @@ impl HomeView {
                 self.view_mode = ViewMode::Structured;
                 return None;
             }
+            KeyCode::Esc if !self.marked.is_empty() => {
+                self.marked.clear();
+                return None;
+            }
             _ => {}
         }
 
@@ -3305,8 +3309,6 @@ impl HomeView {
 
         // Navigation / structural keys: identical in both modes, never relocate.
         match key.code {
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => self.move_cursor(-10),
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => self.move_cursor(10),
             KeyCode::Char('{') => self.move_cursor(-10),
             KeyCode::Char('}') => self.move_cursor(10),
             KeyCode::Up | KeyCode::Char('k') => self.move_cursor(-1),
@@ -3529,6 +3531,9 @@ impl HomeView {
                     | ActionId::PreviewScrollUp
                     | ActionId::PreviewScrollDown
                     | ActionId::DismissUpdateBanner
+                    | ActionId::ExtendMarkUp
+                    | ActionId::ExtendMarkDown
+                    | ActionId::ClearMarks
             )
         {
             return None;
@@ -3604,6 +3609,13 @@ impl HomeView {
                 }
             }
             ActionId::ToggleMark => self.toggle_mark_at_cursor(),
+            ActionId::ExtendMarkUp => self.extend_marks(-1),
+            ActionId::ExtendMarkDown => self.extend_marks(1),
+            ActionId::ClearMarks => {
+                if !self.clear_marks() {
+                    self.flash_status("No sessions marked");
+                }
+            }
             ActionId::SendMessage => {
                 if let Some(id) = self.selected_structured_session() {
                     // Drain pending_paste into the structured composer so buffered

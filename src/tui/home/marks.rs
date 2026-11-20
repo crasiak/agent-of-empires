@@ -11,14 +11,63 @@ impl HomeView {
         })
     }
 
-    /// Toggle the Mark on the cursor row's Session.
+    /// Toggle the Mark on the cursor row. On a Group header, mark every Session the
+    /// Group shows, or unmark them when all are already marked.
     pub(super) fn toggle_mark_at_cursor(&mut self) {
-        let Some(Item::Session { id, .. }) = self.flat_items.get(self.cursor) else {
+        match self.flat_items.get(self.cursor) {
+            Some(Item::Session { id, .. }) => {
+                let id = id.clone();
+                if !self.marked.remove(&id) && self.markable(&id) {
+                    self.marked.insert(id);
+                }
+            }
+            Some(Item::Group { .. }) => self.toggle_group_marks(),
+            None => {}
+        }
+    }
+
+    /// Collapsed children are absent from `flat_items`, so membership comes from the
+    /// Group helper, narrowed to what the active filters show.
+    fn toggle_group_marks(&mut self) {
+        let shown: std::collections::HashSet<String> =
+            self.shown_session_ids().into_iter().collect();
+        let members: Vec<String> = self
+            .active_sessions_in_selected_group()
+            .into_iter()
+            .filter(|id| shown.contains(id) && self.markable(id))
+            .collect();
+        if members.is_empty() {
             return;
-        };
-        let id = id.clone();
-        if !self.marked.remove(&id) && self.markable(&id) {
-            self.marked.insert(id);
+        }
+        if members.iter().all(|id| self.marked.contains(id)) {
+            for id in &members {
+                self.marked.remove(id);
+            }
+        } else {
+            self.marked.extend(members);
+        }
+    }
+
+    /// Drop every Mark. Returns whether there were any.
+    pub(super) fn clear_marks(&mut self) -> bool {
+        let had = !self.marked.is_empty();
+        self.marked.clear();
+        had
+    }
+
+    /// Mark the cursor row, step the cursor, and mark the row reached.
+    pub(super) fn extend_marks(&mut self, delta: i32) {
+        self.mark_cursor_session();
+        self.move_cursor(delta);
+        self.mark_cursor_session();
+    }
+
+    fn mark_cursor_session(&mut self) {
+        if let Some(Item::Session { id, .. }) = self.flat_items.get(self.cursor) {
+            let id = id.clone();
+            if self.markable(&id) {
+                self.marked.insert(id);
+            }
         }
     }
 
