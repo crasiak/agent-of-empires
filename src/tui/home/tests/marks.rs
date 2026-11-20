@@ -196,3 +196,133 @@ fn no_marks_means_no_title_text() {
     let env = create_test_env_with_sessions(1);
     assert_eq!(env.view.marks_title(), None);
 }
+
+/// Two Sessions in a collapsed "work" Group and one ungrouped Session.
+fn collapsed_group_env() -> TestEnv {
+    use crate::session::config::GroupByMode;
+    let (temp, guard) = test_home();
+    let instances = [
+        instance_in("w1", "/tmp/w1", "work"),
+        instance_in("w2", "/tmp/w2", "work"),
+        instance_in("solo", "/tmp/solo", ""),
+    ];
+    Storage::new_unwatched("test")
+        .unwrap()
+        .update(|i, g| {
+            *i = instances.to_vec();
+            let mut groups = GroupTree::new_with_groups(&instances, &[]).get_all_groups();
+            for group in &mut groups {
+                group.collapsed = group.path == "work";
+            }
+            *g = groups;
+            Ok(())
+        })
+        .unwrap();
+    let mut view = test_view(Some("test"));
+    view.group_by = GroupByMode::Manual;
+    view.flat_items = view.build_flat_items();
+    view.update_selected();
+    TestEnv {
+        view,
+        _guard: guard,
+        _temp: temp,
+    }
+}
+
+#[test]
+#[serial]
+fn space_on_a_collapsed_group_header_marks_its_hidden_sessions() {
+    let mut env = collapsed_group_env();
+    let row = group_row(&env, "work");
+    assert_eq!(
+        env.view
+            .flat_items
+            .iter()
+            .filter(|item| matches!(item, Item::Session { .. }))
+            .count(),
+        1,
+        "only the ungrouped Session is listed"
+    );
+    put_cursor(&mut env, row);
+
+    env.view.handle_key(space(), None);
+
+    assert_eq!(
+        env.view.marked.len(),
+        2,
+        "the collapsed Sessions are marked"
+    );
+    assert_eq!(
+        env.view.marks_title().as_deref(),
+        Some("2 marked (2 hidden)")
+    );
+
+    env.view.handle_key(space(), None);
+    assert!(env.view.marked.is_empty());
+}
+
+#[test]
+#[serial]
+fn space_on_a_project_header_marks_that_projects_sessions() {
+    use crate::session::config::{GroupByMode, SortOrder};
+    let mut env = create_test_env_two_projects_mixed_attention();
+    env.view.group_by = GroupByMode::Project;
+    env.view.sort_order = SortOrder::Newest;
+    env.view.flat_items = env.view.build_flat_items();
+    let rows: Vec<usize> = env
+        .view
+        .flat_items
+        .iter()
+        .enumerate()
+        .filter_map(|(row, item)| matches!(item, Item::Group { .. }).then_some(row))
+        .collect();
+    assert_eq!(rows.len(), 2, "one header per project");
+    put_cursor(&mut env, rows[0]);
+
+    env.view.handle_key(space(), None);
+
+    assert_eq!(env.view.marked.len(), 2, "only that project's Sessions");
+    let titles: Vec<String> = env
+        .view
+        .marked
+        .iter()
+        .map(|id| env.view.get_instance(id).unwrap().title.clone())
+        .collect();
+    let prefix = titles[0].split('-').next().unwrap().to_string();
+    assert!(
+        titles.iter().all(|title| title.starts_with(&prefix)),
+        "{titles:?}"
+    );
+
+    env.view.handle_key(space(), None);
+    assert!(env.view.marked.is_empty());
+}
+
+#[test]
+#[serial]
+fn switching_profile_drops_marks_on_sessions_it_no_longer_shows() {
+    let (_temp, _guard) = test_home();
+    seed_profile("alpha", &[instance_in("a1", "/tmp/a", "")]);
+    seed_profile("beta", &[instance_in("b1", "/tmp/b", "")]);
+    let mut view = test_view(None);
+    view.rebuild_flat_items();
+    let ids: Vec<String> = view
+        .flat_items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Session { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids.len(), 2);
+    view.marked.extend(ids);
+
+    view.switch_profile(Some("beta".to_string())).unwrap();
+
+    assert_eq!(
+        view.marked.len(),
+        1,
+        "only the Session still shown stays marked"
+    );
+    assert_eq!(view.marks_title().as_deref(), Some("1 marked"));
+}

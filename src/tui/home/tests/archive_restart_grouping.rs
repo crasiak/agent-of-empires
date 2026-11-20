@@ -3054,7 +3054,8 @@ fn restart_by_id_does_not_need_the_cursor() {
     .is_some_and(|(target, mutation)| target == other
         && matches!(mutation, crate::daemon::SessionMutation::Restart(_))));
 
-    // A second submit inside the cooldown is a skip, not an error.
+    // A second submit while the first is still pending is stopped by the in-flight
+    // guard: a skip, not an error.
     let again = env
         .view
         .restart_session_by_id(&other, None, None, None, None, false);

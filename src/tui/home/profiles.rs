@@ -57,6 +57,7 @@ impl HomeView {
         self.selected_session = None;
         self.selected_group = None;
         self.selected_group_profile = None;
+        self.prune_marks();
         self.rebuild_flat_items_keeping_cursor();
         self.update_selected();
         self.refresh_from_config(ConfigRefreshOrigin::Interactive);
