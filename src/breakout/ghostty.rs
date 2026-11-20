@@ -248,7 +248,7 @@ fn outcome_after_placement(
 
 /// Open the surfaces as separate windows and tile them. Any error while placing
 /// leaves the windows open untiled and is carried in the outcome's note. If the
-/// open script itself fails, windows it already opened are closed best-effort.
+/// open script itself fails, the script closes the ids it created.
 pub fn run_windows(surfaces: &[Surface]) -> Result<super::BreakoutOutcome, String> {
     let titles: Vec<String> = surfaces.iter().map(|s| s.title.clone()).collect();
     if let Err(error) = osascript(
