@@ -494,3 +494,100 @@ fn right_click_on_a_group_header_keeps_its_menu_with_marks() {
     let menu = env.view.context_menu.as_ref().expect("a menu opens");
     assert_eq!(menu.selected_action(), ContextMenuAction::NewFromSelection);
 }
+
+/// Three Sessions: the cursor sits on a trashed first row, the other two are marked
+/// and can take a message.
+fn trashed_cursor_env() -> TestEnv {
+    let mut env = create_test_env_with_sessions(3);
+    let trashed = session_id_at(&env.view, 0).expect("a Session row");
+    env.view.marked.extend([
+        session_id_at(&env.view, 1).expect("a Session row"),
+        session_id_at(&env.view, 2).expect("a Session row"),
+    ]);
+    make_sendable(&mut env);
+    env.view
+        .mutate_instance(&trashed, |inst| inst.trashed_at = Some(chrono::Utc::now()));
+    env.view.select_session_by_id(&trashed);
+    assert!(env.view.selected_is_trashed());
+    env
+}
+
+#[test]
+#[serial]
+fn the_bulk_menu_survives_a_trashed_cursor_row() {
+    let mut env = trashed_cursor_env();
+    env.view.handle_key(shift_k(), None);
+    assert!(env.view.context_menu.is_some());
+
+    env.view.handle_key(key(KeyCode::Down), None);
+    assert!(
+        env.view.context_menu.is_some(),
+        "the next key keeps the menu"
+    );
+    env.view.handle_key(key(KeyCode::Enter), None);
+    assert!(env.view.pending_bulk_restart.is_some());
+}
+
+#[test]
+#[serial]
+fn the_bulk_send_dialog_survives_a_trashed_cursor_row() {
+    let mut env = trashed_cursor_env();
+    env.view.handle_key(shift_k(), None);
+    env.view.handle_key(key(KeyCode::Enter), None);
+    assert!(env.view.send_message_dialog.is_some());
+
+    env.view.handle_key(key(KeyCode::Char('h')), None);
+    assert!(
+        env.view.send_message_dialog.is_some(),
+        "typing keeps the dialog"
+    );
+    let targets = env.view.pending_bulk_send.as_ref().expect("bulk targets");
+    assert_eq!(targets.len(), 2);
+}
+
+#[test]
+#[serial]
+fn the_send_key_with_marks_survives_a_trashed_cursor_row() {
+    let mut env = trashed_cursor_env();
+    env.view.handle_key(key(KeyCode::Char('m')), None);
+    env.view.handle_key(key(KeyCode::Char('h')), None);
+    assert!(env.view.send_message_dialog.is_some());
+    assert_eq!(env.view.pending_bulk_send.as_ref().map(Vec::len), Some(2));
+}
+
+#[test]
+#[serial]
+fn the_bulk_restart_confirm_survives_a_trashed_cursor_row() {
+    let mut env = trashed_cursor_env();
+    env.view.handle_key(key(KeyCode::Char('e')), None);
+    assert!(env.view.pending_bulk_restart.is_some());
+
+    env.view.handle_key(key(KeyCode::Tab), None);
+    assert!(env.view.confirm_dialog.is_some());
+    assert!(env.view.pending_bulk_restart.is_some());
+}
+
+#[test]
+#[serial]
+fn cursor_bound_surfaces_on_a_trashed_row_still_close_with_marks() {
+    let mut env = trashed_cursor_env();
+    env.view.context_menu = Some(crate::tui::dialogs::ContextMenuDialog::for_session(
+        (1, 1),
+        false,
+        None,
+        None,
+        false,
+        None,
+    ));
+    env.view.enforce_trash_read_only();
+    assert!(env.view.context_menu.is_none());
+
+    // A single-Session send dialog never keeps, or inherits, bulk targets.
+    let trashed = env.view.selected_session.clone().expect("a selection");
+    env.view.pending_send_session = Some(trashed);
+    env.view.send_message_dialog = Some(crate::tui::dialogs::SendMessageDialog::new("one"));
+    env.view.enforce_trash_read_only();
+    assert!(env.view.send_message_dialog.is_none());
+    assert!(env.view.pending_send_session.is_none());
+    assert!(env.view.pending_bulk_send.is_none());
+}

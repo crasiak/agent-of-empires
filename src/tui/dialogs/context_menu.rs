@@ -83,6 +83,16 @@ pub enum ContextMenuAction {
     ClearMarks,
 }
 
+impl ContextMenuAction {
+    /// Whether this acts on the Marked set rather than the row the menu opened on.
+    pub fn is_bulk(self) -> bool {
+        matches!(
+            self,
+            Self::BulkSend | Self::BulkRestart | Self::BulkShowSkipped | Self::ClearMarks
+        )
+    }
+}
+
 /// A menu that opens in place of its parent, with a "‹ Back" row on top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Submenu {
@@ -447,6 +457,12 @@ impl ContextMenuDialog {
                     | ContextMenuAction::OpenGroupPicker
             )
         })
+    }
+
+    /// Whether this is the Bulk action menu (`for_marks`), which acts on the Marked set
+    /// and so does not belong to the row under the cursor.
+    pub fn is_marks_menu(&self) -> bool {
+        !self.items.is_empty() && self.items.iter().all(|(action, _)| action.is_bulk())
     }
 
     pub fn for_group(anchor: (u16, u16)) -> Self {

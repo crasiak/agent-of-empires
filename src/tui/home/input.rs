@@ -659,9 +659,15 @@ impl HomeView {
         }
         self.mouse_forward_btn = None;
         self.hover_forward_cell = None;
-        self.send_message_dialog = None;
+        // Bulk surfaces act on the Marked set, not the cursor row, so they stay open.
+        // A send dialog is the bulk one only while the single-Session slot is empty.
+        let bulk_send_open =
+            self.pending_bulk_send.is_some() && self.pending_send_session.is_none();
+        if !bulk_send_open {
+            self.send_message_dialog = None;
+            self.pending_bulk_send = None;
+        }
         self.pending_send_session = None;
-        self.pending_bulk_send = None;
         self.permission_response_dialog = None;
         self.pending_permission_response = None;
         self.restart_dialog = None;
@@ -690,7 +696,7 @@ impl HomeView {
         if self
             .context_menu
             .as_ref()
-            .is_some_and(|menu| !menu.is_read_only_session_menu())
+            .is_some_and(|menu| !menu.is_read_only_session_menu() && !menu.is_marks_menu())
         {
             self.context_menu = None;
         }
@@ -5909,13 +5915,7 @@ impl HomeView {
         }
         // Bulk actions target the Marked set, not the cursor row, so the row's own
         // state cannot refuse them.
-        let bulk = matches!(
-            action,
-            ContextMenuAction::BulkSend
-                | ContextMenuAction::BulkRestart
-                | ContextMenuAction::BulkShowSkipped
-                | ContextMenuAction::ClearMarks
-        );
+        let bulk = action.is_bulk();
         if self.selected_is_trashed()
             && !bulk
             && !matches!(
