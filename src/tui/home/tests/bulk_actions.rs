@@ -776,7 +776,7 @@ fn a_failed_breakout_is_reported() {
 #[test]
 #[serial]
 fn more_than_nine_sessions_is_refused_and_seven_asks_first() {
-    crate::breakout::test_support::FORCED.with(|f| f.set(Some(true)));
+    let _forced = ForcedSupport::on();
     let mut env = create_test_env_with_sessions(10);
     mark_all(&mut env);
     make_sendable(&mut env);
@@ -795,7 +795,6 @@ fn more_than_nine_sessions_is_refused_and_seven_asks_first() {
         env.view.marked.remove(&id);
     }
     env.view.start_breakout();
-    crate::breakout::test_support::FORCED.with(|f| f.set(None));
     assert!(
         env.view.confirm_dialog.is_some(),
         "seven asks for confirmation"
@@ -826,4 +825,157 @@ fn the_bulk_menu_offers_close_only_while_windows_are_open() {
         "still a bulk menu with the close entry"
     );
     assert!(menu.items_contain(ContextMenuAction::CloseBreakout));
+}
+
+/// Forces `supported_here` for one test and restores it even when an assertion fails.
+struct ForcedSupport;
+
+impl ForcedSupport {
+    fn on() -> Self {
+        crate::breakout::test_support::FORCED.with(|f| f.set(Some(true)));
+        Self
+    }
+}
+
+impl Drop for ForcedSupport {
+    fn drop(&mut self) {
+        crate::breakout::test_support::FORCED.with(|f| f.set(None));
+    }
+}
+
+#[test]
+#[serial]
+fn a_failed_breakout_keeps_the_marks_and_a_finished_one_clears_them() {
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    let (tx, rx) = std::sync::mpsc::channel();
+    env.view.breakout_job = Some(rx);
+    tx.send(Err("boom".to_string())).unwrap();
+    assert!(env.view.tick_breakout());
+    assert_eq!(env.view.marked.len(), 2, "a failure keeps the Marked set");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    env.view.breakout_job = Some(rx);
+    tx.send(Ok(breakout_outcome(2, None))).unwrap();
+    assert!(env.view.tick_breakout());
+    assert!(env.view.marked.is_empty());
+}
+
+#[test]
+#[serial]
+fn a_disconnected_breakout_worker_keeps_the_marks() {
+    let mut env = create_test_env_with_sessions(1);
+    mark_all(&mut env);
+    let (tx, rx) = std::sync::mpsc::channel::<Result<crate::breakout::BreakoutOutcome, String>>();
+    drop(tx);
+    env.view.breakout_job = Some(rx);
+    assert!(env.view.tick_breakout());
+    assert!(env.view.info_dialog.is_some());
+    assert_eq!(env.view.marked.len(), 1);
+}
+
+#[test]
+#[serial]
+fn closing_runs_as_a_job_and_clears_titles_on_success() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.breakout_titles = vec!["t0".into()];
+    env.view.close_breakout();
+    assert!(env.view.breakout_close_job.is_some());
+    assert_eq!(
+        env.view.breakout_titles,
+        ["t0"],
+        "kept until the close lands"
+    );
+
+    env.view.close_breakout();
+    assert!(
+        env.view.breakout_close_job.is_some(),
+        "a second close is refused"
+    );
+
+    assert!(env.view.tick_breakout());
+    assert!(env.view.breakout_close_job.is_none());
+    assert!(env.view.breakout_titles.is_empty());
+}
+
+#[test]
+#[serial]
+fn a_failed_close_keeps_the_titles_for_a_retry() {
+    let mut env = create_test_env_with_sessions(1);
+    env.view.breakout_titles = vec!["t0".into()];
+    let (tx, rx) = std::sync::mpsc::channel();
+    env.view.breakout_close_job = Some(rx);
+    tx.send(Err("Ghostty hung".to_string())).unwrap();
+    assert!(env.view.tick_breakout());
+    assert!(env.view.info_dialog.is_some());
+    assert_eq!(env.view.breakout_titles, ["t0"]);
+    assert!(env.view.breakout_close_job.is_none());
+}
+
+#[test]
+#[serial]
+fn a_running_close_refuses_a_new_breakout() {
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    make_sendable(&mut env);
+    let (_tx, rx) = std::sync::mpsc::channel();
+    env.view.breakout_close_job = Some(rx);
+    env.view.start_breakout();
+    assert!(env.view.breakout_job.is_none());
+    assert_eq!(env.view.marked.len(), 2);
+}
+
+#[test]
+#[serial]
+fn run_breakout_builds_one_job_and_waits_for_success_to_clear_marks() {
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(2);
+    mark_all(&mut env);
+    make_sendable(&mut env);
+    env.view.start_breakout();
+    assert!(env.view.breakout_job.is_some());
+    assert_eq!(env.view.marked.len(), 2, "Marks stay while the job runs");
+    assert!(env.view.tick_breakout());
+    assert_eq!(env.view.breakout_titles.len(), 2);
+    assert!(env.view.marked.is_empty());
+}
+
+fn open_breakout_confirm(env: &mut TestEnv) {
+    mark_all(env);
+    make_sendable(env);
+    let extra: Vec<String> = env
+        .view
+        .marked_in_view_order()
+        .into_iter()
+        .skip(7)
+        .collect();
+    for id in extra {
+        env.view.marked.remove(&id);
+    }
+    env.view.start_breakout();
+    assert!(env.view.pending_breakout);
+}
+
+#[test]
+#[serial]
+fn cancelling_the_breakout_confirm_resets_the_flag() {
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(8);
+    open_breakout_confirm(&mut env);
+    env.view.handle_key(key(KeyCode::Esc), None);
+    assert!(!env.view.pending_breakout);
+    assert!(env.view.breakout_job.is_none());
+    assert_eq!(env.view.marked.len(), 7);
+}
+
+#[test]
+#[serial]
+fn submitting_the_breakout_confirm_resets_the_flag_and_opens() {
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(8);
+    open_breakout_confirm(&mut env);
+    env.view.handle_key(key(KeyCode::Char('y')), None);
+    assert!(!env.view.pending_breakout);
+    assert!(env.view.breakout_job.is_some());
 }

@@ -418,6 +418,8 @@ pub struct HomeView {
     /// The Breakout being opened off the event loop.
     breakout_job:
         Option<std::sync::mpsc::Receiver<Result<crate::breakout::BreakoutOutcome, String>>>,
+    /// The close of Breakout windows running off the event loop.
+    breakout_close_job: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     /// Titles of the Breakout windows this TUI opened and has not closed.
     breakout_titles: Vec<String>,
     /// The bulk restart in progress, if any.
