@@ -13,7 +13,10 @@ use ratatui::{prelude::*, widgets::*};
 use ratatui_textarea::{TextArea, WrapMode};
 
 use super::{live_send, HomeView};
-use crate::session::tailored::{CaptureAccount, TailoredRequest};
+use crate::session::tailored::{
+    quick::{QuickPlan, QuickPreset},
+    CaptureAccount, TailoredRequest,
+};
 use crate::tui::styles::Theme;
 
 pub(in crate::tui) struct TailoredWindow {
@@ -50,6 +53,7 @@ pub(in crate::tui) struct TailoredWindow {
     focus: usize,
     error: Option<String>,
     checking: Option<mpsc::Receiver<Result<TailoredRequest, String>>>,
+    checking_quick: Option<mpsc::Receiver<Result<QuickPlan, String>>>,
     terminal: Option<CaptureTerminal>,
     account_rect: Rect,
     immediately_rect: Rect,
@@ -60,7 +64,51 @@ pub(super) enum WindowAction {
     Continue,
     Close,
     Open(String),
+    Quick(QuickPreset),
     Visibility { id: String, hidden: bool },
+}
+
+enum TailoredStart {
+    Capture(TailoredRequest),
+    Quick(QuickPlan),
+}
+
+impl TailoredStart {
+    fn data(self, profile: String) -> anyhow::Result<crate::tui::dialogs::NewSessionData> {
+        let (title, path, scratch, launch) = match self {
+            Self::Capture(request) => ("Capture an idea", String::new(), true, request.launch()?),
+            Self::Quick(plan) => (
+                plan.preset.title(),
+                plan.cwd.to_string_lossy().into_owned(),
+                false,
+                plan.launch,
+            ),
+        };
+        Ok(crate::tui::dialogs::NewSessionData {
+            profile,
+            title: title.into(),
+            title_typed: false,
+            path,
+            group: "Tailored".into(),
+            tool: "pi".into(),
+            worktree_enabled: false,
+            worktree_branch: None,
+            create_new_branch: false,
+            base_branch: None,
+            extra_repo_paths: Vec::new(),
+            workspace: false,
+            sandbox: false,
+            sandbox_image: String::new(),
+            yolo_mode: false,
+            extra_env: Vec::new(),
+            hook_env: Vec::new(),
+            extra_args: launch.extra_args,
+            command_override: launch.command,
+            scratch,
+            fork_seed: None,
+            structured: false,
+        })
+    }
 }
 
 struct CaptureTerminal {
@@ -140,6 +188,7 @@ impl TailoredWindow {
             focus: 0,
             error: None,
             checking: None,
+            checking_quick: None,
             terminal: None,
             account_rect: Rect::default(),
             immediately_rect: Rect::default(),
@@ -161,6 +210,16 @@ impl TailoredWindow {
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> WindowAction {
         if key.kind == KeyEventKind::Release || self.hidden {
             return WindowAction::Continue;
+        }
+        if self.checking_quick.is_some() {
+            return if key.code == KeyCode::Esc
+                || super::bindings::is_tailored_shortcut(&key)
+                || (key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::CONTROL)
+            {
+                WindowAction::Close
+            } else {
+                WindowAction::Continue
+            };
         }
         let capture_editing = self.composing
             && self.focus == 0
@@ -320,6 +379,7 @@ impl TailoredWindow {
     fn picker_action(&mut self, action: HistoryAction) -> WindowAction {
         match action {
             HistoryAction::None => WindowAction::Continue,
+            HistoryAction::Quick(preset) => WindowAction::Quick(preset),
             HistoryAction::Document => {
                 self.open_document(self.document_account);
                 WindowAction::Continue
@@ -349,7 +409,7 @@ impl TailoredWindow {
     }
 
     pub(super) fn handle_paste(&mut self, text: &str) {
-        if self.hidden {
+        if self.hidden || self.checking_quick.is_some() {
             return;
         }
         if let Some(workshop) = &mut self.workshop {
@@ -380,7 +440,7 @@ impl TailoredWindow {
     }
 
     pub(super) fn handle_click(&mut self, col: u16, row: u16) -> WindowAction {
-        if self.hidden {
+        if self.hidden || self.checking_quick.is_some() {
             return WindowAction::Continue;
         }
         if self
@@ -730,6 +790,7 @@ impl HomeView {
     fn apply_tailored_action(&mut self, action: WindowAction) {
         match action {
             WindowAction::Continue => {}
+            WindowAction::Quick(preset) => self.prepare_quick(preset),
             WindowAction::Close => {
                 if let Some(mut window) = self.tailored_window.take() {
                     window.hidden = true;
@@ -851,6 +912,37 @@ impl HomeView {
                 self.refresh_tailored_history();
             }
         }
+    }
+
+    fn prepare_quick(&mut self, preset: QuickPreset) {
+        let Some(window) = &mut self.tailored_window else {
+            return;
+        };
+        if window.checking_quick.is_some()
+            || window.checking.is_some()
+            || window.starting_document.is_some()
+        {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        window.checking_quick = Some(rx);
+        window.error = Some(format!("Checking {} Ledger profile…", preset.title()));
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<QuickPlan> {
+                let home = dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Home directory unavailable"))?;
+                let plan = preset.plan(&home)?;
+                anyhow::ensure!(
+                    plan.cwd.is_dir(),
+                    "Quick workspace does not exist: {}",
+                    plan.cwd.display()
+                );
+                preset.verify_profile()?;
+                Ok(plan)
+            })()
+            .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(result);
+        });
     }
 
     fn refresh_tailored_history(&mut self) -> bool {
@@ -1106,6 +1198,52 @@ impl HomeView {
             }
             return true;
         }
+        let quick = self
+            .tailored_window
+            .as_ref()
+            .and_then(|window| window.checking_quick.as_ref())
+            .map(|rx| rx.try_recv());
+        if let Some(result) = quick {
+            match result {
+                Err(mpsc::TryRecvError::Empty) => return refreshed,
+                ready => {
+                    let previous = self.selected_session.clone();
+                    let result = ready
+                        .unwrap_or_else(|_| Err("Quick profile check stopped unexpectedly".into()))
+                        .map_err(anyhow::Error::msg)
+                        .and_then(|plan| self.launch_tailored_pi(TailoredStart::Quick(plan)))
+                        .and_then(|id| {
+                            if self
+                                .tailored_window
+                                .as_ref()
+                                .is_some_and(|window| window.hidden)
+                            {
+                                Ok((id, None))
+                            } else {
+                                self.ready_capture_terminal(&id)
+                                    .map(|terminal| (id, Some(terminal)))
+                            }
+                        });
+                    if let Some(id) = previous {
+                        self.select_and_reveal_session(&id);
+                    }
+                    if let Some(window) = &mut self.tailored_window {
+                        window.checking_quick = None;
+                        window.history_refreshed = None;
+                        match result {
+                            Ok((id, terminal)) => {
+                                window.terminal = terminal;
+                                window.composing = false;
+                                window.error = None;
+                                if window.hidden { window.suspended_terminal = Some(id); }
+                            }
+                            Err(error) => window.error = Some(format!("Quick create/start not confirmed: {error:#}. Inspect history before creating another copy.")),
+                        }
+                    }
+                    return true;
+                }
+            }
+        }
         let result = self
             .tailored_window
             .as_ref()
@@ -1162,36 +1300,17 @@ impl HomeView {
     }
 
     fn launch_capture(&mut self, request: TailoredRequest) -> anyhow::Result<String> {
-        let launch = request.launch()?;
-        let id = self.create_session(crate::tui::dialogs::NewSessionData {
-            profile: self
-                .tailored_window
-                .as_ref()
-                .expect("capture owner")
-                .profile
-                .clone(),
-            title: "Capture an idea".into(),
-            title_typed: false,
-            path: String::new(),
-            group: "Tailored".into(),
-            tool: "pi".into(),
-            worktree_enabled: false,
-            worktree_branch: None,
-            create_new_branch: false,
-            base_branch: None,
-            extra_repo_paths: Vec::new(),
-            workspace: false,
-            sandbox: false,
-            sandbox_image: String::new(),
-            yolo_mode: false,
-            extra_env: Vec::new(),
-            hook_env: Vec::new(),
-            extra_args: launch.extra_args,
-            command_override: launch.command,
-            scratch: true,
-            fork_seed: None,
-            structured: false,
-        })?;
+        self.launch_tailored_pi(TailoredStart::Capture(request))
+    }
+
+    fn launch_tailored_pi(&mut self, start: TailoredStart) -> anyhow::Result<String> {
+        let profile = self
+            .tailored_window
+            .as_ref()
+            .expect("Tailored owner")
+            .profile
+            .clone();
+        let id = self.create_session(start.data(profile)?)?;
         self.try_mutate_instance_writeback_on_err(&id, |instance| {
             instance.ensure_pane_ready().map_err(Into::into)
         })?;
@@ -1284,6 +1403,72 @@ mod tests {
     use super::*;
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn quick_start_uses_knowledge_without_repurposing_capture_or_storage_account() {
+        for preset in [QuickPreset::Work, QuickPreset::Personal] {
+            let data =
+                TailoredStart::Quick(preset.plan(std::path::Path::new("/home/test")).unwrap())
+                    .data("aoe-storage-owner".into())
+                    .unwrap();
+            assert_eq!(data.profile, "aoe-storage-owner");
+            assert_eq!(data.path, "/home/test/knowledge");
+            assert_eq!(data.title, preset.title());
+            assert!(!data.scratch && !data.workspace && !data.worktree_enabled && !data.sandbox);
+            assert!(data.extra_repo_paths.is_empty());
+            assert_eq!(
+                crate::session::ledger_pi::profile(&data.tool, &data.command_override).as_deref(),
+                Some(preset.profile())
+            );
+        }
+        let data = TailoredStart::Capture(TailoredRequest {
+            preset: "capture-idea".into(),
+            account: CaptureAccount::Personal,
+            idea: "an idea".into(),
+            immediately: false,
+            document: None,
+        })
+        .data("aoe-storage-owner".into())
+        .unwrap();
+        assert!(data.scratch);
+        assert!(data.path.is_empty());
+        assert!(data.command_override.contains("aoe-capture-personal"));
+    }
+
+    #[test]
+    fn quick_selection_preserves_capture_draft_and_defers_preflight() {
+        let mut window = TailoredWindow::new(CaptureAccount::Personal);
+        window.idea.insert_str("capture draft");
+        window.immediately = true;
+        for preset in [QuickPreset::Work, QuickPreset::Personal] {
+            assert!(
+                matches!(window.picker_action(HistoryAction::Quick(preset)), WindowAction::Quick(selected) if selected == preset)
+            );
+            assert_eq!(window.idea.lines().join("\n"), "capture draft");
+            assert_eq!(window.account, CaptureAccount::Personal);
+            assert!(window.immediately);
+            assert!(window.checking.is_none() && window.checking_quick.is_none());
+        }
+    }
+
+    #[test]
+    fn quick_preflight_blocks_duplicate_input_without_consuming_capture_draft() {
+        let mut window = TailoredWindow::new(CaptureAccount::Work);
+        window.idea.insert_str("capture draft");
+        let (_sender, receiver) = mpsc::channel();
+        window.checking_quick = Some(receiver);
+        for key in [key(KeyCode::Enter), key(KeyCode::F(2)), key(KeyCode::Tab)] {
+            assert!(matches!(window.handle_key(key), WindowAction::Continue));
+        }
+        window.handle_paste("extra");
+        assert!(matches!(window.handle_click(1, 1), WindowAction::Continue));
+        assert_eq!(window.idea.lines().join("\n"), "capture draft");
+        assert!(window.checking_quick.is_some());
+        assert!(matches!(
+            window.handle_key(key(KeyCode::Esc)),
+            WindowAction::Close
+        ));
     }
 
     #[test]
