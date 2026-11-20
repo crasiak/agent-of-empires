@@ -2,6 +2,7 @@
 
 pub mod document;
 pub mod history;
+pub mod quick;
 pub mod research;
 pub mod workshop;
 
