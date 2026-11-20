@@ -1795,6 +1795,33 @@ Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>"
 
 ---
 
+### Task 6b: Breakout presence: row marker, close with the Session, orphan sweep
+
+Added on 2026-11-20 at the owner's request, after the spike. Runs after Task 6.
+
+**Files:**
+- Modify: `src/breakout/ghostty.rs`, `src/breakout/mod.rs` (sweep script and `sweep_local`)
+- Modify: `src/tui/home/breakout.rs`, the sidebar row renderer and the preview header in `src/tui/home/`
+- Test: unit tests beside each
+
+**Interfaces:**
+- Consumes: Task 4's `close_local`, the window title format `aoe breakout · <title> · <first 8 id chars>` from `surfaces()`; Task 6's `breakout_titles`.
+- Produces: `crate::breakout::TITLE_PREFIX: &str = "aoe breakout \u{b7} "` (used by `surfaces()` too, one definition); `crate::breakout::sweep_local(keep_id_prefixes: &[String]) -> Result<usize, String>` (closes every Ghostty window whose name starts with `TITLE_PREFIX` and whose trailing 8-character id is not in `keep_id_prefixes`; returns how many it closed); `HomeView::is_broken_out(&self, session_id: &str) -> bool`.
+
+**Behaviour:**
+
+1. **The tag is the title prefix.** Every Breakout window title starts with `TITLE_PREFIX`. No other marker is added. The sweep finds windows by that prefix, so it also finds windows the TUI no longer tracks (opened by a TUI that has since quit, or left by a failed open).
+2. **Sweep.** `sweep_local` collects the ids and names of matching windows first, then closes by id, one `try` per id, inside `with timeout of 10 seconds` (same rules as Task 4's close). It runs in two places only, both started by the user, so aoe never sends Apple events on its own:
+   - "Close breakout windows" calls `sweep_local(&[])`: it closes every tagged window, tracked or not. The menu entry and palette action are therefore always offered on a supported platform, not only when `breakout_titles` is non-empty.
+   - Before a new Breakout opens, `sweep_local(<8-char id prefixes of every Session that still exists in any loaded profile>)` closes tagged windows whose Session is gone. A sweep failure is logged and does not stop the Breakout.
+3. **Close with the Session.** When a Session that `is_broken_out` is stopped, trashed or deleted from the sidebar (single or bulk), its Breakout window is closed with `close_local(&[its title])` on the same background-job path Task 6 uses, and its title leaves `breakout_titles`. The window usually closes by itself when the tmux session ends; this covers the cases where it does not (Ghostty `wait-after-command`, a trashed Session whose tmux session lives on).
+4. **Row marker and preview line.** A Session that `is_broken_out` shows `ICON_BREAKOUT` (`⧉`, with the ASCII fallback the icon table uses) in the sidebar row, after the Mark gutter, and the preview pane's header shows `In a Breakout window` for it. `is_broken_out` reads `breakout_titles`, so the marker is what this TUI opened and has not closed; it is not re-derived from Ghostty after a TUI restart. The marker clears when the windows are closed through aoe; a window closed by hand keeps its marker until the next "Close breakout windows" or Breakout (documented in the guide).
+5. **Remote Breakout (Task 8)** uses the same title prefix; the agent gains the sweep with the close request. The remote TUI tracks titles the same way.
+
+**Tests (unit, strings and state only; no `osascript`):** the sweep script closes by id and skips kept prefixes; `TITLE_PREFIX` is what `surfaces()` emits; `is_broken_out` is true after a finished Breakout and false after close; deleting a broken-out Session queues a close for exactly its title; the row renders the marker and the preview header renders the line; "Close breakout windows" is offered with an empty `breakout_titles`.
+
+**Manual checks added to Task 9:** a window left by a killed TUI is closed by "Close breakout windows"; deleting a Session closes its window; the marker appears and clears.
+
 ### Task 7: The splits layout
 
 **Files:**
@@ -2619,7 +2646,7 @@ Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>"
 | Breakout request value | 3 |
 | Grid | 3 |
 | Driver: script generation and runner | 4 |
-| Tracking and "Close breakout windows" | 6 |
+| Tracking and "Close breakout windows" | 6, 6b |
 | Availability | 4 (`supported_here`), 8 (`transport`) |
 | `[breakout]` setting on the Interaction tab | 5 |
 | Platform gate | 4 |
