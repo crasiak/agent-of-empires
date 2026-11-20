@@ -350,9 +350,21 @@ end tell'
 
 Record whether this closes both without a "process still running" confirmation. If Ghostty asks for confirmation, record the wording and whether `perform action "close_window"` or a Ghostty config key avoids it.
 
+- [ ] **Step 4b: Find out what runs a window's command**
+
+Added after the Task 3 review: the surface command is quoted for POSIX `sh`, and the login shell on the target Mac is fish, which reads quotes and backslashes differently.
+
+Run: `osascript /tmp/breakout-spike/shellprobe.applescript`
+
+The new window prints `parent: <process>` and the arguments it received. Record:
+
+7. The parent process name. `login` or `ghostty` means Ghostty runs the command directly. `fish` (or another shell) means Ghostty wraps the command in the login shell; then Tasks 4 and 7 must pass every surface command as `/bin/sh -c '<command>'` with quoting that also survives that shell, or use a Ghostty option that bypasses it.
+
+Close the window with `/tmp/breakout-spike/close.sh`.
+
 - [ ] **Step 5: Write the results into this plan and stop**
 
-Fill in "Spike results" at the end of this file with the five answers and the corrected script text. If any script in Tasks 4 or 7 differs from what worked, edit those tasks now. Commit the plan change:
+Fill in "Spike results" at the end of this file with the answers and the corrected script text. If any script in Tasks 4 or 7 differs from what worked, edit those tasks now. Commit the plan change:
 
 ```bash
 git add docs/superpowers/plans/2026-11-19-breakout-windows.md
@@ -2627,3 +2639,4 @@ To be filled in by Task 1:
 4. Accessibility: error text, application named in the prompt, placement result:
 5. Cell snapping and gaps:
 6. Closing windows with a running process:
+7. What runs a window's command (parent process), and the quoting rule that follows:
