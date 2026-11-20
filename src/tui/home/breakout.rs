@@ -49,7 +49,7 @@ impl HomeView {
             self.confirm_dialog = Some(
                 ConfirmDialog::new(
                     "Break Out",
-                    &format!("Open {count} sessions in separate windows?"),
+                    &format!("Break out {count} sessions?"),
                     "breakout",
                 )
                 .neutral()
@@ -98,10 +98,7 @@ impl HomeView {
             .keys()
             .map(|id| crate::breakout::id_prefix(id))
             .collect();
-        self.breakout_opening_titles = crate::breakout::request::surfaces(&request, "")
-            .into_iter()
-            .map(|surface| surface.title)
-            .collect();
+        self.breakout_opening_titles = crate::breakout::window_titles(&request);
         self.breakout_job = Some(spawn_open(request, keep));
         self.flash_status("Opening breakout windows...");
     }
@@ -121,17 +118,23 @@ impl HomeView {
     }
 
     /// Close the Breakout window of a Session that is going away. Its titles leave
-    /// `breakout_titles` now; the close waits behind any running job.
+    /// `breakout_titles` now; the close waits behind any running job. A splits
+    /// window holds other Sessions too, so it stays: the Session's pane ends when
+    /// its attach exits, and the window keeps its title until it is closed.
     pub(super) fn close_breakout_of(&mut self, session_id: &str) {
+        let own_window = |title: &String| {
+            crate::breakout::title_is_for(title, session_id)
+                && !crate::breakout::is_splits_title(title)
+        };
         let (gone, kept): (Vec<String>, Vec<String>) = std::mem::take(&mut self.breakout_titles)
             .into_iter()
-            .partition(|title| crate::breakout::title_is_for(title, session_id));
+            .partition(own_window);
         self.breakout_titles = kept;
         // A window still being opened closes once the open job lands.
         let opening = self
             .breakout_opening_titles
             .iter()
-            .filter(|title| crate::breakout::title_is_for(title, session_id))
+            .filter(|title| own_window(title))
             .filter(|title| !gone.contains(title))
             .cloned()
             .collect::<Vec<_>>();
@@ -194,7 +197,7 @@ impl HomeView {
                     Some(note) => {
                         self.info_dialog = Some(InfoDialog::sized_to_fit("Breakout", &note));
                     }
-                    None => self.flash_status(format!("Opened {} windows", outcome.opened)),
+                    None => self.flash_status(format!("Opened {} sessions", outcome.opened)),
                 }
             }
             Err(error) => {
@@ -294,12 +297,9 @@ fn spawn_open(request: BreakoutRequest, keep: Vec<String>) -> OpenJob {
 #[cfg(test)]
 fn spawn_open(request: BreakoutRequest, _keep: Vec<String>) -> OpenJob {
     let (tx, rx) = std::sync::mpsc::channel();
-    let titles: Vec<String> = crate::breakout::request::surfaces(&request, "aoe")
-        .into_iter()
-        .map(|s| s.title)
-        .collect();
+    let titles = crate::breakout::window_titles(&request);
     let _ = tx.send(Ok(crate::breakout::BreakoutOutcome {
-        opened: titles.len(),
+        opened: request.sessions.len(),
         tiled: true,
         titles,
         note: None,

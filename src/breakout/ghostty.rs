@@ -73,6 +73,75 @@ pub fn open_windows_script(surfaces: &[Surface]) -> String {
     with_timeout(&script)
 }
 
+/// One window split into the grid: each row's head split down from the row above,
+/// then each row's columns split right from the previous cell, then equalized.
+/// Every pane gets `window_title`, so the window keeps it whichever pane has focus.
+/// On error the script closes the window it created, by id, and re-raises.
+pub fn splits_script(surfaces: &[Surface], window_title: &str) -> String {
+    let Some((cols, _)) = super::grid::grid_dims(surfaces.len()) else {
+        return String::new();
+    };
+    let rows: Vec<&[Surface]> = surfaces.chunks(cols).collect();
+    let title = as_literal(window_title);
+    let configure = |script: &mut String, surface: &Surface| {
+        script.push_str("        set cfg to new surface configuration\n");
+        script.push_str(&format!(
+            "        set command of cfg to {}\n",
+            as_literal(&surface.command)
+        ));
+    };
+    let mut script = String::from(concat!(
+        "tell application \"Ghostty\"\n",
+        "    set winId to missing value\n",
+        "    try\n",
+    ));
+    configure(&mut script, &rows[0][0]);
+    script.push_str("        set win to new window with configuration cfg\n");
+    script.push_str("        set winId to id of win\n");
+    script.push_str("        set row1 to focused terminal of selected tab of win\n");
+    script.push_str(&format!("        set name override of row1 to {title}\n"));
+    for (index, row) in rows.iter().enumerate().skip(1) {
+        configure(&mut script, &row[0]);
+        script.push_str(&format!(
+            "        set row{} to split row{index} direction down with configuration cfg\n",
+            index + 1
+        ));
+        script.push_str(&format!(
+            "        set name override of row{} to {title}\n",
+            index + 1
+        ));
+    }
+    for (index, row) in rows.iter().enumerate() {
+        if row.len() < 2 {
+            continue;
+        }
+        script.push_str(&format!("        set cell to row{}\n", index + 1));
+        for surface in &row[1..] {
+            configure(&mut script, surface);
+            script.push_str(
+                "        set cell to split cell direction right with configuration cfg\n",
+            );
+            script.push_str(&format!("        set name override of cell to {title}\n"));
+        }
+    }
+    if surfaces.len() > 1 {
+        // Each split halves the pane it splits, so a row of three is 50/25/25 until now.
+        script.push_str("        perform action \"equalize_splits\" on row1\n");
+    }
+    script.push_str(concat!(
+        "    on error errMsg number errNum\n",
+        "        if winId is not missing value then\n",
+        "            try\n",
+        "                close window (first window whose id is winId)\n",
+        "            end try\n",
+        "        end if\n",
+        "        error errMsg number errNum\n",
+        "    end try\n",
+        "end tell\n",
+    ));
+    with_timeout(&script)
+}
+
 /// Move, size and raise windows through Accessibility, found by their titles.
 /// Titles use the first 8 id characters, so two Sessions sharing a title and id
 /// prefix would resolve to the same window.
@@ -146,11 +215,16 @@ pub fn sweep_script(keep_id_prefixes: &[String]) -> String {
         keep.join(", ")
     ));
     script.push_str(&format!(
+        "    set splitsHead to {}\n",
+        as_literal(&super::splits_head())
+    ));
+    script.push_str(&format!(
         "    set winIds to id of every window whose name starts with {}\n",
         as_literal(super::TITLE_PREFIX)
     ));
+    let separator = as_literal(super::TITLE_SEPARATOR);
+    script.push_str("    set closeIds to {}\n");
     script.push_str(concat!(
-        "    set closeIds to {}\n",
         "    repeat with i in winIds\n",
         "        try\n",
         "            set winName to name of (first window whose id is (contents of i))\n",
@@ -158,6 +232,13 @@ pub fn sweep_script(keep_id_prefixes: &[String]) -> String {
         "            considering case\n",
         "                repeat with s in keepSuffixes\n",
         "                    if winName ends with (contents of s) then set keep to true\n",
+    ));
+    // A splits window lists every Session's id; it stays while any of them exists.
+    script.push_str(&format!(
+        "                    if winName starts with splitsHead and ((winName & {separator}) \
+         contains ((contents of s) & {separator})) then set keep to true\n"
+    ));
+    script.push_str(concat!(
         "                end repeat\n",
         "            end considering\n",
         "            if not keep then set end of closeIds to (contents of i)\n",
@@ -315,18 +396,41 @@ pub fn run_windows(surfaces: &[Surface]) -> Result<super::BreakoutOutcome, Strin
     ) {
         return Err(format!("{error} ({})", open_failure_note(&error)));
     }
-    let placed = osascript(&["-l", "JavaScript"], FRAME_SCRIPT, wait_for(0))
+    let placed = tile_windows(&titles);
+    Ok(outcome_after_placement(titles, placed))
+}
+
+/// Tile the windows with these titles across the usable frame of the focused screen.
+fn tile_windows(titles: &[String]) -> Result<(), String> {
+    osascript(&["-l", "JavaScript"], FRAME_SCRIPT, wait_for(0))
         .and_then(|json| {
             serde_json::from_str::<Rect>(&json).map_err(|e| format!("screen frame: {e}"))
         })
         .and_then(|screen| {
-            super::grid::tile(surfaces.len(), screen).ok_or_else(|| "no grid".to_string())
+            super::grid::tile(titles.len(), screen).ok_or_else(|| "no grid".to_string())
         })
         .and_then(|cells| {
             let placements: Vec<(String, Rect)> = titles.iter().cloned().zip(cells).collect();
             osascript(&[], &place_script(&placements), wait_for(placements.len())).map(|_| ())
-        });
-    Ok(outcome_after_placement(titles, placed))
+        })
+}
+
+/// Open the surfaces as panes of one window titled `title` and fill the screen
+/// with it. Errors follow `run_windows`.
+pub fn run_splits(surfaces: &[Surface], title: &str) -> Result<super::BreakoutOutcome, String> {
+    if let Err(error) = osascript(
+        &[],
+        &splits_script(surfaces, title),
+        wait_for(surfaces.len()),
+    ) {
+        return Err(format!("{error} ({})", open_failure_note(&error)));
+    }
+    let titles = vec![title.to_string()];
+    let placed = tile_windows(&titles);
+    Ok(super::BreakoutOutcome {
+        opened: surfaces.len(),
+        ..outcome_after_placement(titles, placed)
+    })
 }
 
 pub fn close(titles: &[String]) -> Result<(), String> {
@@ -574,5 +678,91 @@ mod tests {
         let killed = open_failure_note(&format!("{KILLED_PREFIX} 25s"));
         assert!(killed.contains("some windows may still be open"));
         assert!(killed.contains("Close breakout windows"));
+    }
+
+    #[test]
+    fn splits_script_builds_rows_then_columns() {
+        let surfaces: Vec<Surface> = (1..=5)
+            .map(|i| surface(&format!("t{i}"), &format!("cmd{i}")))
+            .collect();
+        let title = "aoe breakout \u{b7} splits \u{b7} a \u{b7} b";
+        let script = splits_script(&surfaces, title);
+        assert_eq!(script.matches("new window with configuration").count(), 1);
+        assert_eq!(script.matches("direction down").count(), 1, "two rows");
+        assert_eq!(
+            script.matches("direction right").count(),
+            3,
+            "3 + 2 columns"
+        );
+        for i in 1..=5 {
+            assert!(
+                script.contains(&format!("set command of cfg to \"cmd{i}\"")),
+                "cmd{i}"
+            );
+        }
+        assert!(script.contains("set row2 to split row1 direction down with configuration cfg"));
+        assert!(script.contains("set cell to split cell direction right with configuration cfg"));
+        assert_eq!(
+            script
+                .matches(&format!("to {}\n", as_literal(title)))
+                .count(),
+            5,
+            "every pane carries the window title, so focus never changes it"
+        );
+        let equalize = script
+            .find("perform action \"equalize_splits\" on row1")
+            .expect("equalized");
+        assert!(equalize > script.rfind("split cell").unwrap());
+        assert!(script.starts_with("with timeout of 10 seconds\n"));
+    }
+
+    #[test]
+    fn splits_script_fills_rows_in_surface_order() {
+        let surfaces: Vec<Surface> = (1..=4).map(|i| surface("t", &format!("cmd{i}"))).collect();
+        let script = splits_script(&surfaces, "w");
+        let at = |needle: &str| script.find(needle).unwrap();
+        // 2x2: cmd1 cmd2 on row 1, cmd3 cmd4 on row 2.
+        assert!(at("\"cmd1\"") < at("set win to new window"));
+        assert!(at("\"cmd3\"") < at("set row2 to split row1"));
+        assert!(at("set cell to row1") < at("\"cmd2\""));
+        assert!(at("\"cmd2\"") < at("set cell to row2"));
+        assert!(at("set cell to row2") < at("\"cmd4\""));
+    }
+
+    #[test]
+    fn a_single_surface_needs_no_split() {
+        let script = splits_script(&[surface("t", "cmd")], "w");
+        assert!(!script.contains(" split "), "{script}");
+        assert!(!script.contains("equalize_splits"));
+        assert!(script.contains("new window with configuration cfg"));
+    }
+
+    #[test]
+    fn splits_script_escapes_and_closes_only_its_window_on_error() {
+        let script = splits_script(&[surface("t", "a\"b"), surface("t", "c")], "w\"x");
+        assert!(
+            script.contains(r#"set command of cfg to "a\"b""#),
+            "{script}"
+        );
+        assert!(script.contains(r#"to "w\"x""#), "{script}");
+        let created = script.find("set winId to id of win").unwrap();
+        assert!(created < script.find("set name override").unwrap());
+        let handler = script
+            .split("on error errMsg number errNum")
+            .nth(1)
+            .expect("handler");
+        assert!(handler.contains("close window (first window whose id is winId)"));
+        assert!(handler.contains("error errMsg number errNum"));
+        assert!(!script.contains("whose name"), "never by title");
+    }
+
+    #[test]
+    fn sweep_keeps_a_splits_window_while_any_of_its_sessions_exists() {
+        let script = sweep_script(&["b2".to_string()]);
+        assert!(script.contains("set splitsHead to \"aoe breakout \u{b7} splits \u{b7} \""));
+        assert!(script.contains(concat!(
+            "if winName starts with splitsHead and ((winName & \" \u{b7} \") ",
+            "contains ((contents of s) & \" \u{b7} \")) then set keep to true"
+        )));
     }
 }

@@ -5,16 +5,14 @@ pub mod ghostty;
 pub mod grid;
 pub mod request;
 
-#[cfg(target_os = "macos")]
-use request::BreakoutLayout;
-use request::BreakoutRequest;
+use request::{BreakoutLayout, BreakoutRequest};
 
 /// Every Breakout window title starts with this. It is the only tag: the sweep
 /// finds windows by it, including ones no running TUI tracks.
 pub const TITLE_PREFIX: &str = "aoe breakout \u{b7} ";
 
 /// Separates a window title's display text from its trailing id characters.
-const TITLE_SEPARATOR: &str = " \u{b7} ";
+pub(crate) const TITLE_SEPARATOR: &str = " \u{b7} ";
 
 /// The id characters a window title ends with.
 pub fn id_prefix(id: &str) -> String {
@@ -35,9 +33,47 @@ pub(crate) fn title_suffix(id_prefix: &str) -> String {
     format!("{TITLE_SEPARATOR}{id_prefix}")
 }
 
+/// Follows `TITLE_PREFIX` in the title of a splits window, before its ids.
+const SPLITS_TAG: &str = "splits";
+
+/// How every splits window title starts.
+pub(crate) fn splits_head() -> String {
+    format!("{TITLE_PREFIX}{SPLITS_TAG}{TITLE_SEPARATOR}")
+}
+
+/// The title of one window holding several Sessions: the splits head, then each
+/// Session's id characters, separated like the end of a window title.
+pub(crate) fn splits_title<'a>(ids: impl IntoIterator<Item = &'a str>) -> String {
+    let prefixes: Vec<String> = ids.into_iter().map(id_prefix).collect();
+    format!("{}{}", splits_head(), prefixes.join(TITLE_SEPARATOR))
+}
+
+/// Whether `title` is a splits window, which other Sessions may share.
+pub fn is_splits_title(title: &str) -> bool {
+    title.starts_with(&splits_head())
+}
+
 /// Whether `title` is a Breakout window title of the Session `id`.
 pub fn title_is_for(title: &str, id: &str) -> bool {
+    if let Some(ids) = title.strip_prefix(&splits_head()) {
+        let prefix = id_prefix(id);
+        return ids.split(TITLE_SEPARATOR).any(|part| part == prefix);
+    }
     title.starts_with(TITLE_PREFIX) && title.ends_with(&title_suffix(&id_prefix(id)))
+}
+
+/// The titles of the windows a validated request opens: one per Session, or one
+/// splits window for all of them.
+pub fn window_titles(request: &BreakoutRequest) -> Vec<String> {
+    match request.layout {
+        BreakoutLayout::Windows => request::surfaces(request, "")
+            .into_iter()
+            .map(|surface| surface.title)
+            .collect(),
+        BreakoutLayout::Splits => vec![splits_title(
+            request.sessions.iter().map(|session| session.id.as_str()),
+        )],
+    }
 }
 
 /// What a Breakout did.
@@ -76,8 +112,13 @@ pub fn run_local(request: &BreakoutRequest) -> Result<BreakoutOutcome, String> {
             std::env::current_exe().map_err(|e| format!("cannot find the aoe binary: {e}"))?;
         let surfaces = request::surfaces(request, &exe.to_string_lossy());
         match request.layout {
-            // Splits falls back to windows until the splits driver replaces this arm.
-            BreakoutLayout::Windows | BreakoutLayout::Splits => ghostty::run_windows(&surfaces),
+            BreakoutLayout::Windows => ghostty::run_windows(&surfaces),
+            BreakoutLayout::Splits => {
+                let [title] = window_titles(request)
+                    .try_into()
+                    .map_err(|_| "a splits Breakout has one window".to_string())?;
+                ghostty::run_splits(&surfaces, &title)
+            }
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -125,7 +166,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::request::{BreakoutLayout, BreakoutSession, PROTOCOL};
+    use super::request::{BreakoutSession, PROTOCOL};
     use super::*;
 
     #[test]
@@ -159,5 +200,50 @@ mod tests {
         assert!(title_is_for(&short, "ffff"));
         assert!(!title_is_for(&short, "ffffabcd"));
         assert!(!title_is_for("Vikings \u{b7} a1b2c3d4", "a1b2c3d4"));
+    }
+
+    fn request(layout: BreakoutLayout, ids: &[&str]) -> BreakoutRequest {
+        BreakoutRequest {
+            protocol: PROTOCOL,
+            nonce: "abcdef12".to_string(),
+            host: None,
+            layout,
+            sessions: ids
+                .iter()
+                .map(|id| BreakoutSession {
+                    id: id.to_string(),
+                    title: format!("T{id}"),
+                    profile: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_splits_title_belongs_to_every_session_in_it() {
+        let title = splits_title(["a1b2c3d4e5", "ffff", "0011223344"]);
+        assert_eq!(
+            title,
+            "aoe breakout \u{b7} splits \u{b7} a1b2c3d4 \u{b7} ffff \u{b7} 00112233"
+        );
+        assert!(title.starts_with(TITLE_PREFIX));
+        assert!(is_splits_title(&title));
+        for id in ["a1b2c3d4", "ffff", "00112233aa"] {
+            assert!(title_is_for(&title, id), "{id}");
+        }
+        assert!(!title_is_for(&title, "fff"));
+        assert!(!title_is_for(&title, "ffffa"));
+        assert!(!title_is_for(&title, "splits"));
+        assert!(!is_splits_title(&window_title("Vikings", "a1b2c3d4")));
+    }
+
+    #[test]
+    fn window_titles_follow_the_layout() {
+        let ids = ["a1b2c3d4", "b2c3d4e5", "c3d4e5f6"];
+        let windows = window_titles(&request(BreakoutLayout::Windows, &ids));
+        assert_eq!(windows.len(), 3);
+        assert!(windows.iter().zip(ids).all(|(t, id)| title_is_for(t, id)));
+        let splits = window_titles(&request(BreakoutLayout::Splits, &ids));
+        assert_eq!(splits, [splits_title(ids)]);
     }
 }

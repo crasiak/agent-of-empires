@@ -1224,3 +1224,43 @@ fn a_finished_open_skips_titles_already_queued_to_close() {
     assert!(env.view.tick_breakout());
     assert_eq!(env.view.breakout_titles, ["t1"]);
 }
+
+#[test]
+#[serial]
+fn a_splits_window_marks_every_session_and_outlives_one_of_them() {
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(3);
+    let ids: Vec<String> = (0..3).map(|i| env.view.instance_at(i).id.clone()).collect();
+    let title = crate::breakout::splits_title(ids.iter().map(String::as_str));
+    env.view.breakout_titles = vec![title.clone()];
+    for id in &ids {
+        assert!(env.view.is_broken_out(id));
+    }
+
+    // Stopping one Session ends its pane by itself; the window holds the others.
+    let _respond = env.view.session_feed.command_driver_for_test();
+    assert!(env.view.submit_daemon_stop(&ids[1]).unwrap());
+    assert!(env.view.breakout_session_close_job.is_none());
+    assert!(env.view.breakout_close_queue.is_empty());
+    assert_eq!(env.view.breakout_titles, [title]);
+    assert!(env.view.is_broken_out(&ids[0]));
+
+    env.view.close_breakout();
+    assert!(env.view.tick_breakout());
+    assert!(env.view.breakout_titles.is_empty());
+}
+
+#[test]
+#[serial]
+fn a_session_stopped_while_its_splits_window_opens_closes_nothing() {
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(2);
+    let ids: Vec<String> = (0..2).map(|i| env.view.instance_at(i).id.clone()).collect();
+    env.view.breakout_opening_titles = vec![crate::breakout::splits_title(
+        ids.iter().map(String::as_str),
+    )];
+    let _respond = env.view.session_feed.command_driver_for_test();
+    assert!(env.view.submit_daemon_stop(&ids[0]).unwrap());
+    assert!(env.view.breakout_close_queue.is_empty());
+    assert!(env.view.breakout_session_close_job.is_none());
+}
