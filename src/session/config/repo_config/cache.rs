@@ -304,12 +304,13 @@ mod tests {
 
         cache.resolve_or_warn("default", stale.path());
         cache.resolve_or_warn("default", fresh.path());
+        let stale_source = cache.source_path(stale.path());
         let expired = Instant::now() - Duration::from_secs(60);
         cache
             .entries
             .lock()
             .unwrap()
-            .get_mut(&("default".into(), stale.path().to_path_buf()))
+            .get_mut(&("default".into(), stale_source))
             .unwrap()
             .last_used = expired;
         cache
