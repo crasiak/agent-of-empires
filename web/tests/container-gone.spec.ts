@@ -4,6 +4,7 @@ import type { Page } from "@playwright/test";
 
 import { test, expect } from "./helpers/mockedTest";
 import { mockAcpSession, openStructuredSession } from "./helpers/acpMock";
+import { mockRepoAppearances } from "./helpers/apiMocks";
 import { wizard } from "./helpers/wizard";
 
 const TITLE = "story-container-gone";
@@ -207,11 +208,11 @@ test.describe("at 375px, where Recreate isn't offered", () => {
 });
 
 test("New Session names the Project as its sidebar header does", async ({ page }) => {
-  await page.addInitScript((path) => {
-    window.localStorage.setItem("aoe-repo-appearance-v1", JSON.stringify({ [path]: { alias: "Infra stack" } }));
-  }, `/tmp/${TITLE}`);
+  await mockRepoAppearances(page, { [`/tmp/${TITLE}`]: { alias: "Infra stack" } });
   const { banner } = await openGoneSession(page);
-  await expect(banner.getByRole("button", { name: "New Session in Infra stack" })).toBeVisible();
+  const projectHeader = page.locator(`[data-testid="sidebar-group-header"][data-group-id="/tmp/${TITLE}"]`);
+  await expect(projectHeader.getByText("Infra stack", { exact: true })).toBeVisible();
+  await expect(banner.getByRole("button", { name: "New Session in Infra stack", exact: true })).toBeVisible();
 });
 
 test("a queued message can't start the Session either", async ({ page }) => {
