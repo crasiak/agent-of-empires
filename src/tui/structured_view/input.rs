@@ -63,6 +63,8 @@ pub enum Intent {
     RecallCancel,
     /// Open the daemon URL for this session in the user's browser.
     OpenInBrowser,
+    /// Fold every tool card to one line, or expand them all (transcript `z`).
+    ToggleToolFold,
     /// Move focus to the named region.
     SetFocus(Focus),
     /// Move the slash-picker highlight by one row (positive = down).
@@ -407,6 +409,8 @@ fn transcript_keys(key: &KeyEvent, ctx: InputContext) -> Intent {
         // Plain 'p' opens the plugin pane panel. Transcript-only (like 'o'),
         // so typing 'p' in the composer never opens it.
         (m, KeyCode::Char('p')) if m.is_empty() => Intent::SetFocus(Focus::Pane),
+        // Vim's fold prefix.
+        (m, KeyCode::Char('z')) if m.is_empty() => Intent::ToggleToolFold,
         _ => Intent::Ignore,
     }
 }
@@ -647,6 +651,15 @@ mod tests {
                 Is(Intent::SetFocus(Focus::Pane)),
             ),
             (Focus::Composer, Char('p'), NONE, ctx(), Composes),
+            (
+                Focus::Transcript,
+                Char('z'),
+                NONE,
+                ctx(),
+                Is(Intent::ToggleToolFold),
+            ),
+            (Focus::Composer, Char('z'), NONE, ctx(), Composes),
+            (Focus::Pane, Char('z'), NONE, ctx(), Is(Intent::Ignore)),
             (
                 Focus::Transcript,
                 Char('j'),

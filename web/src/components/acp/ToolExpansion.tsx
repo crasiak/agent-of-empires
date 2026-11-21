@@ -4,11 +4,9 @@
 
 import { createContext, useContext, useState, type ReactNode } from "react";
 
-import type { ToolDensity } from "./ToolDisplayMode";
-
-/** A user toggle, valid only for the density it was made in. */
+/** A user toggle, valid only under the expansion mode it was made in. */
 export interface ExpansionOverride {
-  density: ToolDensity;
+  mode: string;
   open: boolean;
 }
 
@@ -30,10 +28,10 @@ export class ToolExpansionStore {
     for (const listener of this.listeners) listener();
   }
 
-  /** Whether the call shows open under `density`: the reader's toggle, else `baseline`. */
-  isOpen(id: string, density: ToolDensity, baseline: boolean) {
+  /** Whether the call shows open under `mode`: the reader's toggle, else `baseline`. */
+  isOpen(id: string, mode: string, baseline: boolean) {
     const o = this.get(id);
-    return o?.density === density ? o.open : baseline;
+    return o?.mode === mode ? o.open : baseline;
   }
 }
 

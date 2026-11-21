@@ -801,6 +801,10 @@ async fn handle_terminal_event(
             send_prompt_now(state, toast_deadline, &text).await;
             Ok(false)
         }
+        Intent::ToggleToolFold => {
+            state.toggle_tool_fold();
+            Ok(false)
+        }
         Intent::DismissNotice(id) => {
             let id = id.or_else(|| state.visible_notices().next().map(|n| n.id.clone()));
             if let Some(id) = id {

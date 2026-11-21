@@ -4277,6 +4277,20 @@
       "components": ["web/src/components/acp/ToolDisplayMode.tsx"]
     },
     {
+      "id": "acp.tool-fold-all",
+      "kind": "mocked-playwright",
+      "risk": "medium",
+      "specs": ["src/components/acp/ToolDisplayMode.test.tsx", "tests/acp-tool-fold-all.spec.ts"],
+      "components": [
+        "web/src/components/acp/ToolDisplayMode.tsx",
+        "web/src/components/acp/StructuredView.tsx",
+        "web/src/components/acp/ToolCardChrome.tsx",
+        "web/src/components/acp/GroupToolCards.tsx",
+        "web/src/components/acp/TodoCards.tsx"
+      ],
+      "notes": "Fold all folds every tool card to its header, failed ones included; unfold all opens every card. Each press overrides earlier per-card toggles, later toggles still work, and a Compact tools change ends the override (CRA-1813)."
+    },
+    {
       "id": "acp.tool-output-wrap",
       "kind": "mocked-playwright",
       "risk": "medium",

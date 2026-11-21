@@ -18,7 +18,9 @@ use super::input::{Focus, Intent};
 use super::reducer::{
     AcpTranscript, NoteKind, PendingApproval, ToolCallRow, ToolCompletion, ToolOutcome,
 };
-use super::state::{FileIndex, PickerKind, PickerTarget, StructuredViewState, ViewLayout};
+use super::state::{
+    FileIndex, PickerKind, PickerTarget, StructuredViewState, ToolFold, ViewLayout,
+};
 use crate::acp::approvals::{tool_target, ToolTarget, CMD_KEYS, PATH_KEYS};
 use crate::acp::session_paths::{relative_display_path, SessionPathRoots};
 use crate::acp::state::{
@@ -894,6 +896,7 @@ pub(super) fn wrapped_transcript(
         theme,
         state.path_roots.as_ref(),
         tool_output,
+        state.tool_fold,
     );
     let mut wrapped: Vec<Line<'static>> = Vec::with_capacity(lines.len());
     for line in lines {
@@ -1526,6 +1529,7 @@ fn transcript_lines(
     theme: &Theme,
     path_roots: Option<&SessionPathRoots>,
     tool_output: ToolOutputMode,
+    fold: Option<ToolFold>,
 ) -> Vec<Line<'static>> {
     let rows = &transcript.server_rows;
     // One card per tool call at its start row; the last terminal row wins.
@@ -1561,6 +1565,7 @@ fn transcript_lines(
         theme,
         path_roots,
         tool_output,
+        fold,
     };
 
     let mut out: Vec<Line<'static>> = Vec::new();
@@ -1703,6 +1708,7 @@ struct ToolBlocks<'a> {
     theme: &'a Theme,
     path_roots: Option<&'a SessionPathRoots>,
     tool_output: ToolOutputMode<'a>,
+    fold: Option<ToolFold>,
 }
 
 impl ToolBlocks<'_> {
@@ -1750,7 +1756,7 @@ impl ToolBlocks<'_> {
             {
                 card.name = title.clone();
             }
-            render_tool_lines(&card, self.theme, self.path_roots)
+            render_tool_lines(&card, self.theme, self.path_roots, self.fold)
         };
         if let (Some(record), Some(header)) = (record, lines.first_mut()) {
             header.spans.push(subagent_badge(record.state, self.theme));
@@ -1947,18 +1953,24 @@ const NEW_KEYS: &[&str] = &["new_string", "newString", "new_str", "content"];
 const TOOL_DIFF_MAX_LINES: usize = 20;
 const TOOL_PREVIEW_MAX_LINES: usize = 12;
 
-/// Successful tools collapse to one line; others get a per-kind body, or the
-/// generic fallback for unknown kinds and unparsable args.
+/// Successful tools collapse to one line unless `fold` says otherwise; others
+/// get a per-kind body, or the generic fallback for unknown kinds and
+/// unparsable args.
 fn render_tool_lines(
     tool: &ToolCallRow,
     theme: &Theme,
     path_roots: Option<&SessionPathRoots>,
+    fold: Option<ToolFold>,
 ) -> Vec<Line<'static>> {
-    if tool
-        .completed
-        .as_ref()
-        .is_some_and(|completion| completion.outcome == ToolOutcome::Ok)
-    {
+    let compact = match fold {
+        Some(ToolFold::Folded) => true,
+        Some(ToolFold::Expanded) => false,
+        None => tool
+            .completed
+            .as_ref()
+            .is_some_and(|completion| completion.outcome == ToolOutcome::Ok),
+    };
+    if compact {
         return vec![compact_tool_line(tool, theme, path_roots)];
     }
     let mut lines = Vec::new();
@@ -2008,8 +2020,14 @@ fn compact_tool_line(
     } else {
         display_tool_target(&tool.kind, args.as_ref(), path_roots)
     };
+    let (marker, color) = match tool.completed.as_ref().map(|c| c.outcome) {
+        None => ("▶ ", theme.title),
+        Some(ToolOutcome::Ok) => ("✓ ", theme.running),
+        Some(ToolOutcome::Stopped) => ("◼ ", theme.hint),
+        Some(ToolOutcome::Error) => ("✗ ", theme.error),
+    };
     let mut spans = vec![
-        Span::styled("✓ ", Style::default().fg(theme.running)),
+        Span::styled(marker, Style::default().fg(color)),
         Span::styled(
             tool.name.clone(),
             Style::default().add_modifier(Modifier::BOLD),
@@ -2287,8 +2305,8 @@ fn help_hint(focus: Focus, approval_is_choice: bool, has_notices: bool) -> &'sta
         Focus::Composer => " Enter to send · Ctrl+Q to exit ",
         // `render_status` drops the hint unless it has `len + 24` spare columns,
         // so keep these short.
-        Focus::Transcript if has_notices => " x dismiss · scroll · p pane · Ctrl+Q exit ",
-        Focus::Transcript => " scroll · p pane · Ctrl+Q exit ",
+        Focus::Transcript if has_notices => " x dismiss · z fold · p pane · Ctrl+Q exit ",
+        Focus::Transcript => " z fold · p pane · Ctrl+Q exit ",
         Focus::Approval if approval_is_choice => " a answer · d deny · Esc stop ",
         Focus::Approval => " a allow · A always · d deny · Esc stop ",
         Focus::Pane => " scroll to read · Esc to close ",
@@ -2942,6 +2960,7 @@ mod tests {
             &Theme::default(),
             None,
             ToolOutputMode::Compact,
+            None,
         ));
         assert!(!out.contains("#4656.The waiter"), "{out:?}");
         assert!(
@@ -2966,7 +2985,7 @@ mod tests {
             thought(&long, "t-b"),
         ]);
         let lines: Vec<String> =
-            transcript_lines(&t, &Theme::default(), None, ToolOutputMode::Compact)
+            transcript_lines(&t, &Theme::default(), None, ToolOutputMode::Compact, None)
                 .iter()
                 .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
                 .filter(|line: &String| !line.is_empty())
@@ -3024,6 +3043,7 @@ mod tests {
             &Theme::default(),
             None,
             ToolOutputMode::Compact,
+            None,
         ));
         assert_eq!(out.matches("Compaction summary").count(), 1, "{out:?}");
         for want in [
@@ -3059,7 +3079,7 @@ mod tests {
     }
 
     fn tool_text(row: &ToolCallRow, roots: Option<&SessionPathRoots>) -> String {
-        joined(&render_tool_lines(row, &Theme::default(), roots))
+        joined(&render_tool_lines(row, &Theme::default(), roots, None))
     }
 
     fn tool_event(id: &str, name: &str, parent: Option<&str>) -> Event {
@@ -3079,7 +3099,7 @@ mod tests {
     }
 
     fn tool_lines(t: &AcpTranscript) -> Vec<String> {
-        transcript_lines(t, &Theme::default(), None, ToolOutputMode::Compact)
+        transcript_lines(t, &Theme::default(), None, ToolOutputMode::Compact, None)
             .iter()
             .map(line_text)
             .filter(|line| !line.is_empty())
@@ -3248,6 +3268,7 @@ mod tests {
             &tool_row("edit", &args.to_string(), None),
             &Theme::default(),
             None,
+            None,
         );
         let plus = lines
             .iter()
@@ -3384,12 +3405,75 @@ mod tests {
             r#"{"command":"cargo test"}"#,
             Some((false, "test result: \u{1b}[31mFAILED\u{1b}[0m. 1 failed")),
         );
-        let lines = render_tool_lines(&row, &Theme::default(), None);
+        let lines = render_tool_lines(&row, &Theme::default(), None, None);
         assert!(!joined(&lines).contains('\u{1b}'));
         assert!(lines.iter().flat_map(|l| &l.spans).any(|s| {
             s.content.contains("FAILED") && s.style.fg == Some(ratatui::style::Color::Red)
         }));
         assert_eq!(joined(&styled_output_lines("plain\ntext")), "plain\ntext");
+    }
+
+    /// CRA-1813: the fold toggle folds every card to one line, failed and
+    /// running calls included, then expands every card, successes included.
+    #[test]
+    fn tool_fold_toggle_overrides_the_per_outcome_default() {
+        use crate::acp::state::ToolCall;
+        let started = |id: &str, command: &str| Event::ToolCallStarted {
+            tool_call: ToolCall {
+                id: id.into(),
+                name: "Bash".into(),
+                kind: "execute".into(),
+                args_preview: serde_json::json!({ "command": command }).to_string(),
+                prompt: None,
+                started_at: chrono::Utc::now(),
+                parent_tool_call_id: None,
+                memory_recall: None,
+                diffs: Vec::new(),
+            },
+        };
+        let completed = |id: &str, is_error: bool, content: &str| Event::ToolCallCompleted {
+            tool_call_id: id.into(),
+            is_error,
+            content: content.into(),
+            output: Vec::new(),
+            completed_at: chrono::Utc::now(),
+            async_subagent: false,
+        };
+        let mut state = test_state();
+        state.transcript.server_rows = server_rows(&[
+            started("t-ok", "ls"),
+            completed("t-ok", false, "listing-output"),
+            started("t-err", "make"),
+            completed("t-err", true, "build-error"),
+            started("t-run", "sleep 9"),
+        ]);
+        let lines = |state: &StructuredViewState| -> Vec<String> {
+            wrapped_transcript(state, &Theme::default(), 200, ToolOutputMode::Compact)
+                .lines
+                .iter()
+                .map(line_text)
+                .filter(|line| !line.is_empty())
+                .collect()
+        };
+        let shows = |lines: &[String], text: &str| lines.iter().any(|l| l.contains(text));
+
+        let default = lines(&state);
+        assert!(shows(&default, "✓ Bash · ls"), "{default:?}");
+        assert!(!shows(&default, "listing-output"), "{default:?}");
+        assert!(shows(&default, "build-error"), "{default:?}");
+
+        state.toggle_tool_fold();
+        let folded = ["✓ Bash · ls", "✗ Bash · make", "▶ Bash · sleep 9"];
+        assert_eq!(lines(&state), folded);
+
+        state.toggle_tool_fold();
+        let expanded = lines(&state);
+        assert!(shows(&expanded, "tool ✓ · Bash"), "{expanded:?}");
+        assert!(shows(&expanded, "listing-output"), "{expanded:?}");
+        assert!(shows(&expanded, "build-error"), "{expanded:?}");
+
+        state.toggle_tool_fold();
+        assert_eq!(lines(&state), folded);
     }
 
     #[test]
