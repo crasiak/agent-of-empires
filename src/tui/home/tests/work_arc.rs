@@ -1258,7 +1258,7 @@ fn steno_arc_survives_a_reload_from_disk() {
     let id = claude.id.clone();
     let mut env = seeded_env(test_home(), &[claude], true);
     let steno = arc::StenoArc {
-        lines: arc::ArcLines {
+        lines: arc::steno::ArcLines {
             goal: "Goal [w1]".into(),
             recent: "Recent [w2]".into(),
             pending: "Next [w2]".into(),
