@@ -571,6 +571,7 @@ impl HomeView {
         {
             next.shift_remove(id);
         }
+        self.keep_steno_arcs(&mut next);
         self.instances = next;
         self.badge_identities
             .retain(|id, _| self.instances.contains_key(id));

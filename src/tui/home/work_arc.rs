@@ -632,6 +632,15 @@ impl HomeView {
         );
     }
 
+    /// Reloads rebuild every row from disk, which drops the arc read for it.
+    pub(super) fn keep_steno_arcs(&self, next: &mut indexmap::IndexMap<String, Instance>) {
+        for row in next.values_mut() {
+            if let Some(previous) = self.instances.get(&row.id) {
+                row.steno_arc.clone_from(&previous.steno_arc);
+            }
+        }
+    }
+
     /// Re-reads the selected session's stenographer arc, at most every two seconds.
     fn tick_steno_arc(&mut self) -> bool {
         let Some(row) = self
