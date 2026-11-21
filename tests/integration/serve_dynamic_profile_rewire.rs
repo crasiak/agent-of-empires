@@ -406,22 +406,23 @@ struct ServeDaemon {
 }
 
 impl ServeDaemon {
-    /// Spawn `aoe serve --no-auth --host 127.0.0.1 --port <free>` against
-    /// a fresh `HOME`. Panics on startup failure so the test gives a
-    /// useful diagnostic.
+    /// Spawn a private loopback daemon, or panic on startup failure.
     fn spawn() -> Self {
         Self::spawn_with_scopes(false).expect("unscoped fixture")
     }
 
     fn spawn_with_scopes(scoped: bool) -> Option<Self> {
         let aoe = env!("CARGO_BIN_EXE_aoe");
-        let home = tempfile::tempdir().expect("home tempdir");
-        let runtime = if cfg!(unix) {
-            tempfile::tempdir_in("/tmp")
-        } else {
-            tempfile::tempdir()
-        }
-        .expect("short private runtime");
+        // ACP control sockets live below HOME and must fit sockaddr_un.
+        let private_dir = || {
+            if cfg!(unix) {
+                tempfile::tempdir_in("/tmp")
+            } else {
+                tempfile::tempdir()
+            }
+        };
+        let home = private_dir().expect("short private home");
+        let runtime = private_dir().expect("short private runtime");
         let port = pick_free_port();
         let app = if cfg!(any(target_os = "linux", target_os = "macos")) {
             home.path()
