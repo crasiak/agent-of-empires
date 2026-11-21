@@ -37,8 +37,8 @@ impl<'a> CachedPreview<'a> {
 
 /// Resource traces under the metadata: CPU and memory.
 pub(crate) const RESOURCE_ROWS: u16 = 2;
-/// Profile, tool, status and notification; launch; path; branch and sandbox.
-const AGENT_METADATA_ROWS: u16 = 4;
+/// Status and notification; profile and tool; launch; path; branch and sandbox.
+const AGENT_METADATA_ROWS: u16 = 5;
 /// Wrapped rows given to each of the arc's four lines.
 const ARC_LINE_ROWS: u16 = 2;
 const ARC_LABEL_WIDTH: u16 = 10;
@@ -484,27 +484,27 @@ impl Preview {
                 },
             )
         };
-        let mut first = Vec::new();
-        if !instance.source_profile.is_empty() {
-            first.push(Span::styled("Profile ", dim));
-            first.push(Span::styled(
-                &instance.source_profile,
-                Style::default().fg(theme.accent),
-            ));
-            first.push(sep());
-        }
-        first.extend([
-            Span::styled("Tool ", dim),
-            Span::styled(&instance.tool, Style::default().fg(theme.accent)),
-            sep(),
-            Span::styled("Status ", dim),
+        let status_row = vec![
+            Span::styled("Status: ", dim),
             Span::styled(status, Style::default().fg(status_color)),
             sep(),
             notification(instance, theme),
+        ];
+        let mut tool_row = Vec::new();
+        if !instance.source_profile.is_empty() {
+            tool_row.extend([
+                Span::styled("Profile: ", dim),
+                Span::styled(&instance.source_profile, Style::default().fg(theme.accent)),
+                sep(),
+            ]);
+        }
+        tool_row.extend([
+            Span::styled("Tool: ", dim),
+            Span::styled(&instance.tool, Style::default().fg(theme.accent)),
         ]);
 
         let mut path = vec![
-            Span::styled("Path    ", dim),
+            Span::styled("Path:    ", dim),
             Span::styled(
                 shorten_path(&instance.project_path),
                 Style::default().fg(theme.text),
@@ -515,14 +515,14 @@ impl Preview {
             Some(wt) => {
                 path.extend([
                     sep(),
-                    Span::styled("Main ", dim),
+                    Span::styled("Main: ", dim),
                     Span::styled(
                         shorten_path(&wt.main_repo_path),
                         Style::default().fg(theme.text),
                     ),
                 ]);
                 branch.extend([
-                    Span::styled("Branch  ", dim),
+                    Span::styled("Branch:  ", dim),
                     Span::styled(&wt.branch, Style::default().fg(theme.branch)),
                 ]);
                 if let Some(base) = wt.base_branch.as_deref() {
@@ -532,25 +532,26 @@ impl Preview {
                     ]);
                 }
             }
-            None => branch.push(Span::styled("Branch  none", dim)),
+            None => branch.push(Span::styled("Branch:  none", dim)),
         }
         branch.push(sep());
         match instance.sandbox_info.as_ref().filter(|s| s.enabled) {
             Some(sandbox) => branch.extend([
-                Span::styled("Sandbox ", dim),
+                Span::styled("Sandbox: ", dim),
                 Span::styled(&sandbox.container_name, Style::default().fg(theme.sandbox)),
             ]),
-            None => branch.push(Span::styled("Sandbox host", dim)),
+            None => branch.push(Span::styled("Sandbox: host", dim)),
         }
 
         let info_lines = vec![
-            Line::from(first),
+            Line::from(status_row),
+            Line::from(tool_row),
             match instance.current_launch_identity() {
                 Some(identity) => Line::from(vec![
-                    Span::styled("Launch  ", dim),
+                    Span::styled("Launch:  ", dim),
                     Span::styled(identity.description(), Style::default().fg(theme.text)),
                 ]),
-                None => Line::styled("Launch  unknown", dim),
+                None => Line::styled("Launch:  unknown", dim),
             },
             Line::from(path),
             Line::from(branch),
@@ -571,19 +572,28 @@ impl Preview {
             (false, true) => " · menu: expand",
             _ => "",
         };
-        let title = clip_info_text(
-            &format!(" Arc: {status}{hint} "),
-            area.width.saturating_sub(2),
-        );
-        let used = 1 + unicode_width::UnicodeWidthStr::width(title.as_str()) as u16;
-        let mut rows = vec![Line::from(vec![
-            Span::styled("─", Style::default().fg(theme.border)),
-            Span::styled(title, dim),
-            Span::styled(
-                "─".repeat(usize::from(area.width.saturating_sub(used))),
-                Style::default().fg(theme.border),
-            ),
-        ])];
+        // A rule only heads the lines; alone above the output banner it would read as a
+        // doubled border.
+        let mut rows = if instance.work_arc_enabled {
+            let title = clip_info_text(
+                &format!(" Arc: {status}{hint} "),
+                area.width.saturating_sub(2),
+            );
+            let used = 1 + unicode_width::UnicodeWidthStr::width(title.as_str()) as u16;
+            vec![Line::from(vec![
+                Span::styled("─", Style::default().fg(theme.border)),
+                Span::styled(title, dim),
+                Span::styled(
+                    "─".repeat(usize::from(area.width.saturating_sub(used))),
+                    Style::default().fg(theme.border),
+                ),
+            ])]
+        } else {
+            vec![Line::styled(
+                clip_info_text(&format!("Arc: {status}{hint}"), area.width),
+                dim,
+            )]
+        };
         if instance.work_arc_enabled {
             let width = area.width.saturating_sub(ARC_LABEL_WIDTH);
             let labels = ["Goal", "Recent", "Pending", "Notes"];
