@@ -101,6 +101,10 @@ export interface SessionResponse {
   rate_limit_auto_resume?: boolean;
   /** Account tool name the daemon is about to fail this parked session over to; absent when none. */
   rate_limit_failover_to?: string;
+  /** Messages on the Daemon's queue; absent when none. */
+  queued_count?: number;
+  /** What the Daemon's queue waits on, as a prompt sent now would be told. Only the list sets it. */
+  queue_reason?: QueueReasonWire;
   smart_rename?: "inactive" | "pending" | "running";
   /** Still carries its auto-generated name (more reliable than `smart_rename`). */
   default_name?: boolean;
@@ -480,6 +484,8 @@ export interface CreateSessionRequest {
   trust_review?: CreationTrustFingerprint;
   /** Skip every `on_create` hook; the session is tagged `created_without_setup` when there were any. */
   skip_on_create?: boolean;
+  /** Force-pull the Sandbox image before the create; needs `sandbox`. */
+  pull_latest_image?: boolean;
   /** Claude Code session id to import; `path` must be its original cwd. */
   import_acp_session_id?: string;
   /** Agent or ACP session id to fork from. */
@@ -491,7 +497,7 @@ export interface CreateSessionRequest {
   retry_origin?: string;
 }
 
-export type CreateStage = "preparing" | "starting_container" | "running_hooks" | "starting";
+export type CreateStage = "preparing" | "pulling_image" | "starting_container" | "running_hooks" | "starting";
 
 export interface CreateProgress {
   stage: CreateStage;
@@ -519,6 +525,9 @@ export interface ImportableSession {
 }
 
 export type AcpWorkerState = "absent" | "resuming" | "running" | "stopping";
+
+/** Why a session's server queue is waiting (the Daemon's `QueueReason`). */
+export type QueueReasonWire = "turn_active" | "cancelling" | "compacting" | "worker_down" | "integration_lost";
 
 // Settings schema mirrors `crate::session::config::settings_schema` (`GET /api/settings/schema`).
 
@@ -616,8 +625,14 @@ export interface SettingsFieldDescriptor {
   profile_overridable: boolean;
   validation: SettingsValidation;
   advanced: boolean;
+  /** One plain line for users; absent on fields without one and on plugin fields. */
+  summary?: string;
   /** Read only by the TUI; folded apart from the dashboard's own settings. */
   tui_only?: boolean;
+  /** Read only by the dashboard; sent only when set. */
+  web_only?: boolean;
+  /** Read once when an AoE process starts; sent only when set. */
+  restart?: boolean;
   /** Present only on plugin fields, which have no stored value until saved. */
   default?: unknown;
   /** Plugin field that can also be set per registered project. */

@@ -127,12 +127,12 @@ template, and [MAINTAINERS.md](MAINTAINERS.md) for review and merge rules.
   three on Bender.
 - For `web/` changes also run its format, lint, type, and applicable test checks
   from `web/AGENTS.md`, including the coverage matrix requirement.
-- Do not request reviewers; CODEOWNERS routes each PR.
+- Do not add reviewers; CODEOWNERS routes each PR. When a review asks for
+  changes on a head you have since fixed, dismiss that stale review and
+  re-request the same reviewer, leaving the CODEOWNERS request in place.
 - Keep a PR within one owner area where possible; split changes that cross
   areas.
-- When reviewing, tag each requested change P1, P2 or P3 per the
-  [rubric](CONTRIBUTING.md#review-rubric), say what would satisfy it, and file
-  P3s as issues.
+- When reviewing, follow the [rubric](CONTRIBUTING.md#review-rubric).
 
 Codecov gates web changes at 75% patch coverage and prevents a project drop
 beyond its threshold. Do not add tautological tests merely to move coverage.

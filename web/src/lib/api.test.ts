@@ -148,6 +148,19 @@ const requestCases: RequestCase[] = [
   ["GET /api/sessions/s1/diff/file?path=src%2Fa+b.ts", () => api.getSessionFileContents("s1", "src/a b.ts")],
   ["GET /api/sessions/s1/diff/file?path=a.ts&repo=myrepo", () => api.getSessionFileContents("s1", "a.ts", "myrepo")],
   ["GET /api/sessions/s1/file?path=a+b.ts", () => api.getSessionFile("s1", "a b.ts")],
+  [
+    "GET /api/sessions/s1/file?path=a+b.ts&version_only=true",
+    () => api.getSessionFile("s1", "a b.ts", { versionOnly: true }),
+  ],
+  [
+    "PUT /api/sessions/s1/file",
+    () => api.saveSessionFile("s1", "a.ts", "v1", "updated"),
+    {
+      body: { path: "a.ts", version: "v1", content: "updated" },
+      respond: new Response(null, { status: 204 }),
+      result: { ok: true, status: 204, error: undefined },
+    },
+  ],
   ["GET /api/settings", () => api.fetchSettings()],
   ["GET /api/settings?profile=my%20profile", () => api.fetchSettings("my profile")],
   ["GET /api/settings?layer=machine", () => api.fetchMachineSettings()],
@@ -825,7 +838,7 @@ const failureCases: [string, () => Promise<unknown>, unknown][] = [
   ],
   ["verifyToken", () => api.verifyToken(), false],
   ["enqueueServerPrompt", () => api.enqueueServerPrompt("s1", { id: "q", text: "t" }), null],
-  ["listServerQueue", () => api.listServerQueue("s1"), []],
+  ["listServerQueue", () => api.listServerQueue("s1"), null],
   ["renameSession", () => api.renameSession("s1", "x"), { ok: false }],
   ["smartRenameSession", () => api.smartRenameSession("s1"), { ok: false }],
   ["attachSessionProject", () => api.attachSessionProject("s1", "p", { epoch: "boot" }), { ok: false }],

@@ -109,6 +109,7 @@ impl HomeView {
             show_activity_age: resolved.session.show_activity_age,
             show_structured_badge: resolved.session.show_structured_badge,
             sidebar_position: resolved.session.sidebar_position,
+            narrow_layout: resolved.session.narrow_layout,
             agent_clipboard_forward: resolved.tmux.clipboard
                 != crate::session::config::TmuxSettingMode::Disabled,
             hyperlink_cells: crate::tui::hyperlink::SharedHyperlinks::default(),
@@ -171,6 +172,7 @@ impl HomeView {
             pending_repo_trust_data: None,
             pending_repo_trust_fingerprint: None,
             pending_repo_trust_skip_on_create: false,
+            pending_repo_trust_recovery: None,
             hooks_install_dialog: None,
             pending_hooks_install_data: None,
             volume_ignores_glob_dialog: None,

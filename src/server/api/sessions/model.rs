@@ -439,10 +439,12 @@ impl<'a> SessionCfgCache<'a> {
             return source.clone();
         }
         #[cfg(test)]
-        {
-            self.discoveries += 1;
-        }
+        let before = self.shared.source_discoveries.load(std::sync::atomic::Ordering::Relaxed);
         let source = self.shared.source_path(std::path::Path::new(project_path));
+        #[cfg(test)]
+        {
+            self.discoveries += self.shared.source_discoveries.load(std::sync::atomic::Ordering::Relaxed) - before;
+        }
         self.sources
             .insert(project_path.to_string(), source.clone());
         source
@@ -451,6 +453,8 @@ impl<'a> SessionCfgCache<'a> {
     /// Resolve `(profile, project_path)`, reading from disk only when the
     /// shared cache has no fresh entry.
     fn entry(&mut self, profile: &str, project_path: &str) -> &crate::session::config::Config {
+        let profile = crate::session::config::effective_profile(profile);
+        let profile = profile.as_str();
         let (misses, shared) = (self.misses, self.shared);
         let source = self.source(project_path);
         self.entries
@@ -466,6 +470,15 @@ impl<'a> SessionCfgCache<'a> {
 
     pub(super) fn resolve(&mut self, profile: &str, project_path: &str) -> &SessionConfig {
         &self.entry(profile, project_path).session
+    }
+
+    pub(super) fn profile_config(
+        &mut self,
+        profile: &str,
+        project_path: &str,
+    ) -> (&SessionConfig, &str) {
+        let config = self.entry(profile, project_path);
+        (&config.session, config.acp.resolved_default_agent())
     }
 
     pub(super) fn structured_view(&mut self, profile: &str, project_path: &str) -> StructuredView {

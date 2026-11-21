@@ -1,92 +1,29 @@
-//! Cross-request cache for [`resolve_config_with_repo_or_warn`].
-//!
-//! The daemon re-projects every session on each publication (every 500 ms
-//! while a TUI subscribes). Resolving one `(profile, project_path)` pair from
-//! scratch parses the global and profile TOML, type-checks the overrides
-//! against a full `Config`, and opens the repository with libgit2 to find the
-//! main worktree. At ~100 unique pairs that is seconds per publication, so the
-//! publish lane never idles and every mutation queues behind it until the TUI
-//! quarantines the row as an unknown outcome.
-//!
-//! An entry is revalidated on every hit by `stat`-ing the files it was derived
-//! from, so a config edit still lands on the next publication while an
-//! unchanged pair costs a handful of `metadata` calls instead of a resolve.
+//! Shared config resolutions with byte-exact input and repository-source validation.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
-use super::{
-    repo_config_source_path, resolve_config_with_repo_source_or_warn, LEGACY_REPO_CONFIG_PATH,
-    REPO_CONFIG_PATH,
-};
-use crate::session::config::Config;
+use super::{discover_repo_config_source, resolve_config_with_repo_source_or_warn};
+use crate::session::config::{read_file, Config, FileRead};
 
-/// Modification time and length of one input; `None` when absent or unreadable.
-type Stamp = Option<(Option<SystemTime>, u64)>;
-
-fn stamp(path: &Path) -> Stamp {
-    std::fs::metadata(path)
-        .ok()
-        .map(|meta| (meta.modified().ok(), meta.len()))
-}
-
-/// Every file a resolved pair was read from, or probed and found absent.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Fingerprint {
-    global: Stamp,
-    profile: Stamp,
-    /// `<project>/.git`: the repo layout decides where the repo config is read
-    /// from, so a layout change re-resolves the source path.
-    git_marker: Stamp,
-    repo: Stamp,
-    legacy_repo: Stamp,
-}
-
-impl Fingerprint {
-    /// Taken before the resolve reads anything, so a write that races the
-    /// resolve shows up as a change on the next hit rather than being lost.
-    fn take(profile: &str, project_path: &Path, source: &Path) -> Self {
-        let global = crate::session::get_app_dir_path()
-            .ok()
-            .map(|dir| dir.join("config.toml"))
-            .as_deref()
-            .and_then(stamp);
-        let profile = crate::session::get_profile_dir_path(profile)
-            .ok()
-            .map(|dir| dir.join("config.toml"))
-            .as_deref()
-            .and_then(stamp);
-        let git_marker = (!project_path.as_os_str().is_empty())
-            .then(|| stamp(&project_path.join(".git")))
-            .flatten();
-        let (repo, legacy_repo) = if source.as_os_str().is_empty() {
-            (None, None)
-        } else {
-            (
-                stamp(&source.join(REPO_CONFIG_PATH)),
-                stamp(&source.join(LEGACY_REPO_CONFIG_PATH)),
-            )
-        };
-        Self {
-            global,
-            profile,
-            git_marker,
-            repo,
-            legacy_repo,
-        }
-    }
+#[derive(PartialEq, Eq)]
+struct SourceFingerprint {
+    git: FileRead,
+    gitdir: Option<PathBuf>,
+    config: FileRead,
+    main_repo: Option<PathBuf>,
 }
 
 struct Entry {
-    fingerprint: Fingerprint,
+    inputs: Vec<(PathBuf, FileRead)>,
     config: Arc<Config>,
     last_used: Instant,
 }
 
 struct SourceEntry {
-    git_marker: Stamp,
+    fingerprint: SourceFingerprint,
     source: PathBuf,
     last_used: Instant,
 }
@@ -103,7 +40,6 @@ pub struct ResolvedConfigCache {
 /// One lookup's outcome: the config and whether it came from disk.
 pub struct Resolved {
     pub config: Arc<Config>,
-    /// `true` when this call read and merged the config files.
     pub miss: bool,
 }
 
@@ -112,103 +48,99 @@ impl ResolvedConfigCache {
         Self::default()
     }
 
-    /// Resolve the pair, reading from disk only when no entry exists or one
-    /// of its input files changed since it was resolved. The lock is never
-    /// held across the disk read, so a miss does not stall concurrent hits.
     pub fn resolve_or_warn(&self, profile: &str, project_path: &Path) -> Resolved {
         let source = self.source_path(project_path);
         self.resolve_source_or_warn(profile, &source)
     }
 
-    pub fn source_path(&self, project_path: &Path) -> PathBuf {
-        let git_marker = (!project_path.as_os_str().is_empty())
-            .then(|| stamp(&project_path.join(".git")))
-            .flatten();
+    pub fn source_path(&self, project: &Path) -> PathBuf {
+        if project.as_os_str().is_empty() {
+            return PathBuf::new();
+        }
+        let git = read_file(&project.join(".git"));
+        let gitdir = git
+            .content
+            .as_ref()
+            .ok()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(|content| crate::git::GitWorktree::gitfile_target(project, content));
+        // Canonicalizing the gitdir on every lookup also detects retargeted ancestor links.
+        let main_repo = gitdir
+            .as_deref()
+            .and_then(crate::git::GitWorktree::find_main_repo_from_worktree_gitdir);
+        if main_repo.is_none()
+            && git.content.as_ref().is_ok_and(|bytes| std::str::from_utf8(bytes).is_ok())
+            && gitdir.is_none()
         {
-            let mut sources = self
-                .sources
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(entry) = sources.get_mut(project_path) {
-                if entry.git_marker == git_marker {
+            return project.to_path_buf();
+        }
+        let config = read_file(
+            &gitdir.clone().unwrap_or_else(|| project.join(".git")).join("config"),
+        );
+        let fingerprint = SourceFingerprint { git, gitdir, config, main_repo };
+        {
+            let mut sources = self.sources.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(entry) = sources.get_mut(project) {
+                if entry.fingerprint == fingerprint {
                     entry.last_used = Instant::now();
                     return entry.source.clone();
                 }
             }
         }
         #[cfg(test)]
-        self.source_discoveries
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let source = repo_config_source_path(project_path);
-        self.sources
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                project_path.to_path_buf(),
-                SourceEntry {
-                    git_marker,
-                    source: source.clone(),
-                    last_used: Instant::now(),
-                },
-            );
+        self.source_discoveries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let Some(source) = fingerprint.main_repo.clone().or_else(|| discover_repo_config_source(project)) else {
+            // Failed discovery is retried next time, not cached as a successful source.
+            return project.to_path_buf();
+        };
+        self.sources.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(
+            project.to_path_buf(),
+            SourceEntry { fingerprint, source: source.clone(), last_used: Instant::now() },
+        );
         source
     }
 
-    /// Resolve an already discovered source, shared by linked worktrees.
+    /// Resolve from the same bytes that validate the entry, without holding a lock over I/O.
     pub fn resolve_source_or_warn(&self, profile: &str, source: &Path) -> Resolved {
-        let key = (profile.to_string(), source.to_path_buf());
-        {
-            let mut entries = self
-                .entries
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(entry) = entries.get_mut(&key) {
-                if entry.fingerprint == Fingerprint::take(profile, source, source) {
+        let profile = crate::session::config::effective_profile(profile);
+        let key = (profile.clone(), source.to_path_buf());
+        let previous = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key).map(|entry| (entry.inputs.clone(), entry.config.clone()));
+        let mut seen = HashMap::new();
+        if let Some((inputs, config)) = previous {
+            let current = inputs.iter().all(|(path, expected)| {
+                seen.entry(path.clone()).or_insert_with(|| read_file(path)) == expected
+            });
+            if current {
+                if let Some(entry) = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&key) {
                     entry.last_used = Instant::now();
-                    return Resolved {
-                        config: entry.config.clone(),
-                        miss: false,
-                    };
                 }
+                return Resolved { config, miss: false };
             }
         }
-
-        let fingerprint = Fingerprint::take(profile, source, source);
-        let config = Arc::new(resolve_config_with_repo_source_or_warn(profile, source));
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        entries.insert(
-            key,
-            Entry {
-                fingerprint,
-                config: config.clone(),
-                last_used: Instant::now(),
-            },
+        let seen = std::cell::RefCell::new(seen);
+        let inputs = std::cell::RefCell::new(Vec::new());
+        let read = |path: &Path| {
+            let bytes = seen.borrow_mut().entry(path.to_path_buf()).or_insert_with(|| read_file(path)).clone();
+            inputs.borrow_mut().push((path.to_path_buf(), bytes.clone()));
+            bytes
+        };
+        let config = Arc::new(resolve_config_with_repo_source_or_warn(&profile, source, &read));
+        self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(
+            key, Entry { inputs: inputs.into_inner(), config: config.clone(), last_used: Instant::now() },
         );
         Resolved { config, miss: true }
     }
 
-    /// Drop entries no request has used for `idle`, so pairs of deleted
-    /// sessions do not accumulate over a long daemon uptime.
     pub fn evict_idle(&self, idle: Duration) {
-        let mut entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        entries.retain(|_, entry| entry.last_used.elapsed() < idle);
-        self.sources
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, entry| entry.last_used.elapsed() < idle);
+        self.sources.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|_, entry| entry.last_used.elapsed() < idle);
     }
 
     pub fn len(&self) -> usize {
-        self.entries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -219,6 +151,7 @@ impl ResolvedConfigCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::REPO_CONFIG_PATH;
 
     fn write(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -304,6 +237,9 @@ mod tests {
         let stale = tempfile::tempdir().unwrap();
         let fresh = tempfile::tempdir().unwrap();
         let cache = ResolvedConfigCache::new();
+        for repo in [&stale, &fresh] {
+            git2::Repository::init(repo.path()).unwrap();
+        }
 
         cache.resolve_or_warn("default", stale.path());
         cache.resolve_or_warn("default", fresh.path());

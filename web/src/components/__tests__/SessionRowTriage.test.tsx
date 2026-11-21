@@ -84,6 +84,27 @@ describe("SessionRow chips", () => {
 });
 
 describe("SessionRow row tags", () => {
+  it("titles the queued chip with what the queue waits on, when every session with messages agrees", () => {
+    const chip = () => screen.queryByLabelText(/queued/);
+    renderRow(ws({ view: "structured", queued_count: 1, queue_reason: "compacting" }));
+    expect(chip()?.getAttribute("aria-label")).toBe("1 queued · sends after compacting");
+    expect(chip()?.getAttribute("title")).toBe("1 queued message · sends after compacting");
+    cleanup();
+    renderRow(ws({ view: "structured", queued_count: 2 }));
+    expect(chip()?.getAttribute("title")).toBe("2 queued messages");
+    cleanup();
+    const mixed = [
+      makeSession({ id: "a", view: "structured", queued_count: 1, queue_reason: "compacting" }),
+      makeSession({ id: "b", view: "structured", queued_count: 1, queue_reason: "cancelling" }),
+    ];
+    renderRow(makeWorkspace("w", mixed));
+    expect(chip()?.getAttribute("title")).toBe("2 queued messages");
+    cleanup();
+    // A reason with nothing queued shows no chip.
+    renderRow(ws({ view: "structured", queue_reason: "compacting" }));
+    expect(chip()).toBeNull();
+  });
+
   it("renders a compact branch tag instead of the branch subtitle, and nothing for none", () => {
     const branched = makeWorkspace("w", [makeSession({ branch: "feature/web-row-tag" })], {
       branch: "feature/web-row-tag",
@@ -585,5 +606,44 @@ describe("SessionRow mark tooltips", () => {
       fireEvent.pointerEnter(testId("sidebar-status-glyph")!, { pointerType: "mouse" });
       expect(screen.getByRole("tooltip").textContent, JSON.stringify(over)).toContain(tip);
     }
+  });
+
+  // An Error Session second in its row: the row reads the Session whose status it shows.
+  const pair = (over: Partial<SessionResponse>) =>
+    over.status === "Error"
+      ? makeWorkspace("w", [
+          makeSession({ id: "a", status: "Stopped", last_error: "stale" }),
+          makeSession({ id: "b", ...over }),
+        ])
+      : ws(over);
+  it.each<[string, Partial<SessionResponse>, string, string | null]>([
+    [
+      "a recorded error",
+      { status: "Error", last_error: "\nresume failed\nsecond" },
+      "Errorresume failed",
+      "resume failed",
+    ],
+    ["no recorded error", { status: "Error", last_error: null }, "Error · no details recorded", null],
+    [
+      "a Structured view error",
+      { status: "Error", last_error: "resume failed", view: "structured" },
+      "Error: the Session failed; also shown while deleting",
+      null,
+    ],
+    ["Deleting", { status: "Deleting", last_error: "resume failed" }, "Deleting…", null],
+  ])("glyph tooltip and description: %s", (_name, over, tip, described) => {
+    renderRow(pair(over));
+    const glyph = testId("sidebar-status-glyph")!;
+    fireEvent.pointerEnter(glyph, { pointerType: "mouse" });
+    expect(screen.getByRole("tooltip").textContent).toBe(tip);
+    // Only a recorded error's line wraps, at a space or else mid-word.
+    const bubble = screen.getByRole("tooltip").classList;
+    expect([bubble.contains("whitespace-normal"), bubble.contains("break-words")]).toEqual([
+      described !== null,
+      described !== null,
+    ]);
+    const describedBy = glyph.getAttribute("aria-describedby");
+    expect(describedBy ? document.getElementById(describedBy)?.textContent : null).toBe(described);
+    if (over.status === "Error") expect(glyph.getAttribute("aria-label")).toBe("Error · needs attention (error)");
   });
 });

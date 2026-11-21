@@ -77,6 +77,7 @@
                 ./src/session_search/testdata
                 ./tests/fixtures/cli-read
                 ./tests/fixtures/workshop
+                ./tests/fixtures/pull-stderr
                 ./web/tests/helpers/fakeAcpAgent.mjs
               ];
             };

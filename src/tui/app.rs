@@ -638,8 +638,6 @@ impl App {
         crate::tmux::spawn_snapshot_poller();
 
         crate::tui::clear_terminal(terminal)?;
-        // This clear satisfies any pending redraw; honoring it on the first tick
-        // would blank the first frame until the next paint.
         self.needs_redraw = false;
         self.sync_mouse_capture(terminal)?;
         self.draw(terminal)?;
@@ -730,9 +728,12 @@ impl App {
         let mut last_telemetry_snapshot = std::time::Instant::now();
 
         loop {
+            // Paint the redraw now: clearing alone leaves a blank screen until the
+            // next event arrives, which never comes while the loop is parked.
             if self.needs_redraw {
                 crate::tui::clear_terminal(terminal)?;
                 self.needs_redraw = false;
+                self.draw(terminal)?;
             }
 
             let post_key_deadline = last_live_key_at.map(|t| t + POST_KEY_WAKE_DELAY);
@@ -4074,6 +4075,7 @@ mod tests {
             (SigHandler::SigDfl, SigHandler::SigDfl) => true,
             (SigHandler::SigIgn, SigHandler::SigIgn) => true,
             (SigHandler::Handler(f1), SigHandler::Handler(f2)) => f1 as usize == f2 as usize,
+            (SigHandler::SigAction(f1), SigHandler::SigAction(f2)) => f1 as usize == f2 as usize,
             _ => false,
         }
     }
@@ -4540,6 +4542,13 @@ mod tests {
     #[serial_test::serial]
     fn ignore_signals_guard_installs_sig_ign_and_restores_prior_disposition() {
         use nix::sys::signal::{SigHandler, Signal};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let _interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
 
         let baseline_sigint = current_disposition(Signal::SIGINT);
         let baseline_sigquit = current_disposition(Signal::SIGQUIT);
@@ -5782,24 +5791,30 @@ mod tests {
                         .unwrap(),
                 )
             };
-            let view = if context == "preparation" {
-                let mut view = crate::tui::dialogs::ServeView::settled(&mut app.home.serve_jobs);
-                view.handle_key(KeyEvent::from(KeyCode::Left));
-                view.handle_key(KeyEvent::from(KeyCode::Enter));
-                view
-            } else {
-                crate::tui::dialogs::ServeView::for_launch(
-                    crate::tui::dialogs::DashboardLaunch::Failed {
-                        target,
-                        failure: crate::tui::dialogs::ServeLaunchFailure::capture(
-                            "tailscale funnel failed".to_owned(),
-                        ),
-                    },
-                    &mut app.home.serve_jobs,
-                )
+            let failed = || crate::tui::dialogs::DashboardLaunch::Failed {
+                target,
+                failure: crate::tui::dialogs::ServeLaunchFailure::capture(
+                    "tailscale funnel failed".to_owned(),
+                ),
+            };
+            let mut view = match context {
+                "preparation" => {
+                    let mut view =
+                        crate::tui::dialogs::ServeView::settled(&mut app.home.serve_jobs);
+                    view.handle_key(KeyEvent::from(KeyCode::Left));
+                    view.handle_key(KeyEvent::from(KeyCode::Enter));
+                    view
+                }
+                // A live worker could finish the context job before `S`, which verifies a target.
+                "closed" => crate::tui::dialogs::ServeView::for_launch_with_closed_worker(failed()),
+                _ => crate::tui::dialogs::ServeView::for_launch(failed(), &mut app.home.serve_jobs),
             };
             if context == "closed" {
-                app.home.serve_jobs.shutdown();
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !view.tick() {
+                    assert!(std::time::Instant::now() < deadline);
+                    tokio::task::yield_now().await;
+                }
             }
             app.home.serve_view = Some(view);
             if stale_owner {
@@ -5832,12 +5847,12 @@ mod tests {
             app.request_dashboard_stop();
             assert!(
                 app.home.session_feed.mutations_available(),
-                "empty handoff replayed Stop"
+                "{context} stale_owner={stale_owner}: empty handoff replayed Stop"
             );
             app.home.handle_key(KeyEvent::from(KeyCode::Enter), None);
             assert!(
                 app.home.serve_view.is_none(),
-                "refusal left a preparation permanently pending"
+                "{context} stale_owner={stale_owner}: refusal left a preparation permanently pending"
             );
             app.home.tick_dialog();
             assert!(app.home.pending_dashboard_launch.is_none());
