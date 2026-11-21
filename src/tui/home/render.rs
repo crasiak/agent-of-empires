@@ -3414,22 +3414,9 @@ impl HomeView {
         let Some(instance) = self.get_instance(selected) else {
             return;
         };
-        let metadata_height = match self.view_mode {
-            ViewMode::Structured => preview::agent_info_height(instance),
-            _ => preview::terminal_info_height(instance),
-        };
-        let layout = preview::PreviewLayout::compute(
-            self.preview_area,
-            self.preview_outer_area.width < responsive::STACKED_BREAKPOINT,
-            self.show_preview_info,
-            metadata_height,
-        );
-        let Some(info) = layout.info else { return };
-        // Placeholder and health views do not render an info header.
-        if layout.output != self.preview_pane_area {
+        let Some(areas) = self.info_areas(instance) else {
             return;
-        }
-        let areas = preview::InfoAreas::compute(info, metadata_height);
+        };
         self.resource_history
             .render(frame, areas.resources, instance, theme);
         let now = chrono::Utc::now();
@@ -3457,6 +3444,76 @@ impl HomeView {
             }
         }
         usage_overlay::render_info_sections(frame, areas.badges, &sections);
+        self.render_arc_tooltip(frame, areas.arc, instance, theme);
+    }
+
+    /// The selected session's info header as the preview lays it out; None when no
+    /// header is drawn (hidden, compact, placeholder and health views).
+    pub(super) fn info_areas(
+        &self,
+        instance: &crate::session::Instance,
+    ) -> Option<preview::InfoAreas> {
+        let (metadata, arc) = match self.view_mode {
+            ViewMode::Structured => preview::agent_info_rows(instance),
+            _ => (preview::terminal_info_height(instance), 0),
+        };
+        let layout = preview::PreviewLayout::compute(
+            self.preview_area,
+            self.preview_outer_area.width < responsive::STACKED_BREAKPOINT,
+            self.show_preview_info,
+            metadata + arc,
+        );
+        let info = layout.info?;
+        (layout.output == self.preview_pane_area)
+            .then(|| preview::InfoAreas::compute(info, metadata, arc))
+    }
+
+    /// The hovered arc line's full text in a box under it, or above it near the bottom.
+    fn render_arc_tooltip(
+        &self,
+        frame: &mut Frame,
+        band: Rect,
+        instance: &crate::session::Instance,
+        theme: &Theme,
+    ) {
+        let Some((id, index)) = self.arc_hover.as_ref() else {
+            return;
+        };
+        let (_, Some(lines)) = preview::arc_view(instance) else {
+            return;
+        };
+        if *id != instance.id || band.height == 0 {
+            return;
+        }
+        let (label, text) = lines[*index];
+        let screen = frame.area();
+        let width = band.width.min(100);
+        let wrapped = preview::wrap_rows(text, width.saturating_sub(4), 12);
+        let height = (wrapped.len() as u16 + 2).min(screen.height);
+        let row = band.y + 1 + 2 * (*index as u16);
+        let y = if row + 2 + height <= screen.bottom() {
+            row + 2
+        } else {
+            row.saturating_sub(height)
+        };
+        let area = Rect::new(band.x, y, width, height).intersection(screen);
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(
+                wrapped
+                    .into_iter()
+                    .map(|line| Line::styled(line, Style::default().fg(theme.text)))
+                    .collect::<Vec<_>>(),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.accent))
+                    .title(format!(" {label} "))
+                    .padding(Padding::horizontal(1)),
+            ),
+            area,
+        );
     }
 
     /// Paint the preview and refresh geometry used by selection and live-send.

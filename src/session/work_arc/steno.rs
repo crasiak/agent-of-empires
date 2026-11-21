@@ -1,16 +1,56 @@
 //! The stenographer's derived arc: `<live>/<profile>/<harness>/<session>/derive/arc.json`,
 //! written beside the session's record without a model call (attic CRA-1821).
 
-use super::WorkArc;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 const MAX_FILE_BYTES: u64 = 64 * 1024;
+const ARC_VERSION: u32 = 2;
+const MAX_LINES_BYTES: usize = 2048;
+const MAX_LINES_WORDS: usize = 120;
+
+/// The four lines in display order; each is cited statements or "Unknown".
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ArcLines {
+    pub goal: String,
+    pub recent: String,
+    pub pending: String,
+    pub notes: String,
+}
+
+impl ArcLines {
+    fn validate(raw: serde_json::Value) -> Option<Self> {
+        if raw.to_string().len() > MAX_LINES_BYTES {
+            return None;
+        }
+        let lines: Self = serde_json::from_value(raw).ok()?;
+        let fields = lines.labelled();
+        let words: usize = fields
+            .iter()
+            .map(|(_, v)| v.split_whitespace().count())
+            .sum();
+        (words <= MAX_LINES_WORDS
+            && fields
+                .iter()
+                .all(|(_, v)| !v.trim().is_empty() && !v.chars().any(|c| c.is_control())))
+        .then_some(lines)
+    }
+
+    pub(crate) fn labelled(&self) -> [(&'static str, &str); 4] {
+        [
+            ("Goal", self.goal.as_str()),
+            ("Recent", self.recent.as_str()),
+            ("Pending", self.pending.as_str()),
+            ("Notes", self.notes.as_str()),
+        ]
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StenoArc {
-    pub arc: WorkArc,
+    pub lines: ArcLines,
     /// The record's own stamp, for example "covered through w31 (turns 301-310); reduced w1-w31".
     pub covered: String,
     /// When the file was written.
@@ -105,7 +145,7 @@ fn load(record: &Path, session_id: &str, at: DateTime<Utc>) -> Option<StenoArc> 
         return None;
     }
     let doc: ArcFile = serde_json::from_reader(std::io::BufReader::new(file)).ok()?;
-    if doc.arc_version != 1
+    if doc.arc_version != ARC_VERSION
         || doc
             .covered
             .session_id
@@ -114,7 +154,7 @@ fn load(record: &Path, session_id: &str, at: DateTime<Utc>) -> Option<StenoArc> 
     {
         return None;
     }
-    let arc = WorkArc::from_json(&doc.arc.to_string()).ok()?;
+    let lines = ArcLines::validate(doc.arc)?;
     let transcript_changed = std::fs::read(record.join("state.json"))
         .ok()
         .and_then(|raw| serde_json::from_slice::<RecordState>(&raw).ok())
@@ -122,7 +162,7 @@ fn load(record: &Path, session_id: &str, at: DateTime<Utc>) -> Option<StenoArc> 
         .and_then(|transcript| std::fs::metadata(transcript).ok()?.modified().ok())
         .map(DateTime::<Utc>::from);
     Some(StenoArc {
-        arc,
+        lines,
         covered: doc.covered.text,
         at,
         current: transcript_changed.is_some_and(|changed| at >= changed),
@@ -135,7 +175,7 @@ mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};
 
-    const ARC: &str = r#"{"goal":"Ship the reducer [w5]","now":"Ran the suite [w6]","remaining":"Unknown","next":"Deploy [w6]"}"#;
+    const ARC: &str = r#"{"goal":"Ship the reducer [w5]","recent":"Ran the suite [w6]","pending":"Deploy [w6]","notes":"Unknown"}"#;
 
     fn record(root: &Path, profile: &str, harness: &str, sid: &str, transcript: &Path) -> PathBuf {
         let record = root.join(profile).join(harness).join(sid);
@@ -161,7 +201,7 @@ mod tests {
 
     fn doc(sid: &str, arc: &str) -> String {
         format!(
-            r#"{{"arc_version":1,"arc":{arc},"covered":{{"session_id":"{sid}","text":"covered through w6 (turns 51-53, partial); reduced w1-w6","window":6}},"words":11}}"#
+            r#"{{"arc_version":2,"arc":{arc},"covered":{{"session_id":"{sid}","text":"covered through w6 (turns 51-53, partial); reduced w1-w6","window":6}},"words":11}}"#
         )
     }
 
@@ -182,7 +222,7 @@ mod tests {
         );
 
         let stale = read(root, "pi-hr", "s1").unwrap();
-        assert_eq!(stale.arc.goal, "Land the reducer [w5]");
+        assert_eq!(stale.lines.goal, "Land the reducer [w5]");
         assert_eq!(stale.path, new.join("derive/arc.json"));
         assert!(stale.covered.starts_with("covered through w6"));
         assert!(!stale.current, "written before the last turn");
@@ -198,18 +238,19 @@ mod tests {
         let transcript = root.join("t.jsonl");
         let record = record(root, "personal", "claude", "s1", &transcript);
         let now = SystemTime::now();
-        let words = vec!["word"; 81].join(" ");
+        let words = vec!["word"; 121].join(" ");
         for (case, body) in [
             (
                 "version",
-                doc("s1", ARC).replace(r#""arc_version":1"#, r#""arc_version":2"#),
+                doc("s1", ARC).replace(r#""arc_version":2"#, r#""arc_version":1"#),
             ),
             ("foreign session", doc("s2", ARC)),
             (
                 "extra field",
                 doc("s1", &ARC.replace('}', r#","model":"x"}"#)),
             ),
-            ("over 80 words", doc("s1", &ARC.replace("Unknown", &words))),
+            ("over 120 words", doc("s1", &ARC.replace("Unknown", &words))),
+            ("blank line", doc("s1", &ARC.replace("Unknown", " "))),
             ("not json", "{".into()),
         ] {
             write_arc(&record, &body, now);

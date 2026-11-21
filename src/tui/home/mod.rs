@@ -434,6 +434,8 @@ pub struct HomeView {
     pub(super) system_health_scroll: usize,
     pub(super) diagnostics_area: Rect,
     pub(super) diagnostics_hovered: bool,
+    /// The selected session and the arc line under the pointer, for its tooltip.
+    pub(super) arc_hover: Option<(String, usize)>,
     pub(super) system_health_tip_high_samples: u8,
     pub(super) system_health_tip_earned: bool,
     pub(super) system_health_discovered: bool,

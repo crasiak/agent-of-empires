@@ -926,6 +926,32 @@ impl HomeView {
         }
     }
 
+    /// The selected session's arc line under the pointer, when no overlay covers it.
+    fn arc_line_under(&self, col: u16, row: u16) -> Option<(String, usize)> {
+        if self.has_non_live_send_overlay() {
+            return None;
+        }
+        let instance = self.get_instance(self.selected_session.as_deref()?)?;
+        let band = self.info_areas(instance)?.arc;
+        crate::tui::components::preview::arc_line_at(band, instance, col, row)
+            .filter(|_| {
+                crate::tui::components::preview::arc_view(instance)
+                    .1
+                    .is_some()
+            })
+            .map(|index| (instance.id.clone(), index))
+    }
+
+    /// Click on an arc line: open the full work arc, returning true when the click was on it.
+    pub fn handle_arc_click(&mut self, col: u16, row: u16) -> bool {
+        let hit = self.arc_line_under(col, row).is_some();
+        if hit {
+            self.arc_hover = None;
+            self.expand_work_arc();
+        }
+        hit
+    }
+
     /// Click on the footer tips badge: open the tips overlay, returning true when the
     /// click was on it. Gated on no overlay being open, since the badge rect is captured
     /// behind a modal and a corner click must not punch through.
@@ -6865,6 +6891,10 @@ impl HomeView {
         let diagnostics_changed = diagnostics_hovered != self.diagnostics_hovered;
         self.diagnostics_hovered = diagnostics_hovered;
 
+        let arc_hover = self.arc_line_under(col, row);
+        let arc_changed = arc_hover != self.arc_hover;
+        self.arc_hover = arc_hover;
+
         // Hover is live over both the scrolling list and the pinned shelf, so a shelf row
         // highlights like a list row; `resolve_row_to_index` maps either region.
         let over_sidebar = self.list_inner_area.contains(Position::from((col, row)))
@@ -6886,6 +6916,7 @@ impl HomeView {
         overlay_changed
             || footer_changed
             || diagnostics_changed
+            || arc_changed
             || badge_changed
             || prev_idx != new_idx
     }

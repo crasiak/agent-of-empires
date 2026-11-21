@@ -527,8 +527,8 @@ impl HomeView {
             return;
         };
         if let Some(steno) = row.steno_arc.as_deref() {
-            let text = format!(
-                "Work arc: {}, {}\nFrom the stenographer's record, no model call; checked statements, not independent verification.\nWritten: {}\nFile: {}\n\nGoal: {}\n\nNow: {}\n\nRemaining: {}\n\nNext: {}",
+            let mut text = format!(
+                "Work arc: {}, {}\nFrom the stenographer's record, no model call; checked statements, not independent verification.\nWritten: {}\nFile: {}\n",
                 steno.status().label(),
                 steno.covered,
                 steno
@@ -536,11 +536,10 @@ impl HomeView {
                     .with_timezone(&chrono::Local)
                     .format("%Y-%m-%d %H:%M:%S %:z"),
                 steno.path.display(),
-                steno.arc.goal,
-                steno.arc.now,
-                steno.arc.remaining,
-                steno.arc.next
             );
+            for (label, value) in steno.lines.labelled() {
+                text.push_str(&format!("\n{label}: {value}\n"));
+            }
             self.info_dialog = Some(
                 InfoDialog::new("Work arc (Up/Down to scroll)", &text)
                     .with_size(90, 30)
