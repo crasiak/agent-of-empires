@@ -766,6 +766,7 @@ impl HomeView {
                 }
             }
         }
+        self.keep_steno_arcs(&mut next);
         self.instances = next;
         self.group_trees = trees;
         self.storages.extend(opened_storages);

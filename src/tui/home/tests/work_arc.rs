@@ -1249,3 +1249,28 @@ async fn work_arc_loading_survives_production_reload_only_with_unchanged_provena
         );
     }
 }
+
+#[test]
+#[serial]
+fn steno_arc_survives_a_reload_from_disk() {
+    let mut claude = observed_fork_parent("claude");
+    claude.source_profile = "test".into();
+    let id = claude.id.clone();
+    let mut env = seeded_env(test_home(), &[claude], true);
+    let steno = arc::StenoArc {
+        arc: arc::WorkArc::from_json(
+            r#"{"goal":"Goal [w1]","now":"Now [w2]","remaining":"Unknown","next":"Next [w2]"}"#,
+        )
+        .unwrap(),
+        covered: "covered through w2 (turns 11-20); reduced w1-w2".into(),
+        at: chrono::Utc::now(),
+        current: false,
+        path: "/tmp/arc.json".into(),
+    };
+    env.view.instances.get_mut(&id).unwrap().steno_arc = Some(Box::new(steno.clone()));
+    env.view.reload().unwrap();
+    assert_eq!(
+        env.view.get_instance(&id).unwrap().steno_arc.as_deref(),
+        Some(&steno)
+    );
+}
