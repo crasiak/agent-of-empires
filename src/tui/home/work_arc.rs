@@ -11,6 +11,7 @@ pub(super) struct ArcRefresh {
     sender: mpsc::Sender<ArcUpdate>,
     pub(super) checked: Option<(String, Instant)>,
     pub consent: Option<Instance>,
+    steno_checked: Option<(String, Instant)>,
 }
 
 struct ArcUpdate {
@@ -30,6 +31,7 @@ impl Default for ArcRefresh {
             sender,
             checked: None,
             consent: None,
+            steno_checked: None,
         }
     }
 }
@@ -442,7 +444,7 @@ impl HomeView {
         else {
             return;
         };
-        if !arc::supported(&before) {
+        if !arc::supported(&before) && !arc::steno::readable(&before) {
             return;
         }
         if before.work_arc_enabled {
@@ -455,6 +457,17 @@ impl HomeView {
                 self.info_dialog = Some(InfoDialog::new(
                     "Work arc",
                     &format!("Could not pause: {error}"),
+                ));
+            }
+        } else if before.steno_arc.is_some() || !arc::supported(&before) {
+            // Shown from the stenographer's record: nothing is generated, so nothing to consent to.
+            if let Err(error) = self.apply_user_action(&before.id, |row| {
+                row.work_arc_enabled = true;
+                row.work_arc_status = None;
+            }) {
+                self.info_dialog = Some(InfoDialog::new(
+                    "Work arc",
+                    &format!("Could not enable: {error}"),
                 ));
             }
         } else {
@@ -513,6 +526,28 @@ impl HomeView {
         else {
             return;
         };
+        if let Some(steno) = row.steno_arc.as_deref() {
+            let text = format!(
+                "Work arc: {}, {}\nFrom the stenographer's record, no model call; checked statements, not independent verification.\nWritten: {}\nFile: {}\n\nGoal: {}\n\nNow: {}\n\nRemaining: {}\n\nNext: {}",
+                steno.status().label(),
+                steno.covered,
+                steno
+                    .at
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M:%S %:z"),
+                steno.path.display(),
+                steno.arc.goal,
+                steno.arc.now,
+                steno.arc.remaining,
+                steno.arc.next
+            );
+            self.info_dialog = Some(
+                InfoDialog::new("Work arc (Up/Down to scroll)", &text)
+                    .with_size(90, 30)
+                    .scrollable(),
+            );
+            return;
+        }
         let mut text = format!(
             "Work arc: {}\nDerived orientation, not independent verification.\nLast attempt: {}\n",
             arc::projection(row).label(),
@@ -597,6 +632,41 @@ impl HomeView {
         );
     }
 
+    /// Re-reads the selected session's stenographer arc, at most every two seconds.
+    fn tick_steno_arc(&mut self) -> bool {
+        let Some(row) = self
+            .selected_session
+            .as_ref()
+            .and_then(|id| self.get_instance(id))
+        else {
+            return false;
+        };
+        if self
+            .work_arc_refresh
+            .steno_checked
+            .as_ref()
+            .is_some_and(|(id, at)| id == &row.id && at.elapsed() < Duration::from_secs(2))
+        {
+            return false;
+        }
+        let found = row
+            .agent_session_id
+            .as_deref()
+            .filter(|_| arc::steno::readable(row))
+            .zip(arc::steno::live_root())
+            .and_then(|(sid, root)| arc::steno::read(&root, &row.tool, sid))
+            .map(Box::new);
+        let id = row.id.clone();
+        self.work_arc_refresh.steno_checked = Some((id.clone(), Instant::now()));
+        match self.instances.get_mut(&id) {
+            Some(row) if row.steno_arc != found => {
+                row.steno_arc = found;
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn tick_work_arc(&mut self) -> bool {
         let invalidated = self.work_arc_refresh.target.as_ref().is_some_and(|before| {
             self.selected_session.as_deref() != Some(&before.id)
@@ -607,7 +677,7 @@ impl HomeView {
         if invalidated {
             self.invalidate_work_arc_selection();
         }
-        let mut changed = invalidated;
+        let mut changed = self.tick_steno_arc() | invalidated;
         while let Ok(update) = self.work_arc_refresh.updates.try_recv() {
             if let Some(row) = self.instances.get_mut(&update.before.id).filter(|row| {
                 unchanged(row, &update.before)
@@ -648,7 +718,8 @@ impl HomeView {
         else {
             return changed;
         };
-        if !row.work_arc_enabled
+        if row.steno_arc.is_some()
+            || !row.work_arc_enabled
             || row.work_arc.consent_version != arc::CONSENT_VERSION
             || !arc::supported(row)
         {
