@@ -439,11 +439,18 @@ impl<'a> SessionCfgCache<'a> {
             return source.clone();
         }
         #[cfg(test)]
-        let before = self.shared.source_discoveries.load(std::sync::atomic::Ordering::Relaxed);
+        let before = self
+            .shared
+            .source_discoveries
+            .load(std::sync::atomic::Ordering::Relaxed);
         let source = self.shared.source_path(std::path::Path::new(project_path));
         #[cfg(test)]
         {
-            self.discoveries += self.shared.source_discoveries.load(std::sync::atomic::Ordering::Relaxed) - before;
+            self.discoveries += self
+                .shared
+                .source_discoveries
+                .load(std::sync::atomic::Ordering::Relaxed)
+                - before;
         }
         self.sources
             .insert(project_path.to_string(), source.clone());

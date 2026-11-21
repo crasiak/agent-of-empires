@@ -98,8 +98,9 @@ pub(crate) use instance::test_helpers::publish_host_pi_transcript;
 pub(crate) use instance::ActiveExecution;
 pub(crate) use instance::CAPTURE_FAILED_RULE;
 pub(crate) use instance::{
-    duplicate_session_error, is_duplicate_session, persist_session_with_storage, HostHookApprovalRequired, PassiveStatusPatch,
-    ResumeIntent, SessionSidecarSource, SidWrite, ToolLaunchUnavailable,
+    duplicate_session_error, is_duplicate_session, persist_session_with_storage,
+    HostHookApprovalRequired, PassiveStatusPatch, ResumeIntent, SessionSidecarSource, SidWrite,
+    ToolLaunchUnavailable,
 };
 pub(crate) use instance::{
     forget_before_start_resolution, BeforeStartHook, BeforeStartHookError, Releasing,

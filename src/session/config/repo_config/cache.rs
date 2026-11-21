@@ -69,17 +69,31 @@ impl ResolvedConfigCache {
             .as_deref()
             .and_then(crate::git::GitWorktree::find_main_repo_from_worktree_gitdir);
         if main_repo.is_none()
-            && git.content.as_ref().is_ok_and(|bytes| std::str::from_utf8(bytes).is_ok())
+            && git
+                .content
+                .as_ref()
+                .is_ok_and(|bytes| std::str::from_utf8(bytes).is_ok())
             && gitdir.is_none()
         {
             return project.to_path_buf();
         }
         let config = read_file(
-            &gitdir.clone().unwrap_or_else(|| project.join(".git")).join("config"),
+            &gitdir
+                .clone()
+                .unwrap_or_else(|| project.join(".git"))
+                .join("config"),
         );
-        let fingerprint = SourceFingerprint { git, gitdir, config, main_repo };
+        let fingerprint = SourceFingerprint {
+            git,
+            gitdir,
+            config,
+            main_repo,
+        };
         {
-            let mut sources = self.sources.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut sources = self
+                .sources
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(entry) = sources.get_mut(project) {
                 if entry.fingerprint == fingerprint {
                     entry.last_used = Instant::now();
@@ -88,15 +102,27 @@ impl ResolvedConfigCache {
             }
         }
         #[cfg(test)]
-        self.source_discoveries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let Some(source) = fingerprint.main_repo.clone().or_else(|| discover_repo_config_source(project)) else {
+        self.source_discoveries
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let Some(source) = fingerprint
+            .main_repo
+            .clone()
+            .or_else(|| discover_repo_config_source(project))
+        else {
             // Failed discovery is retried next time, not cached as a successful source.
             return project.to_path_buf();
         };
-        self.sources.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(
-            project.to_path_buf(),
-            SourceEntry { fingerprint, source: source.clone(), last_used: Instant::now() },
-        );
+        self.sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project.to_path_buf(),
+                SourceEntry {
+                    fingerprint,
+                    source: source.clone(),
+                    last_used: Instant::now(),
+                },
+            );
         source
     }
 
@@ -104,43 +130,78 @@ impl ResolvedConfigCache {
     pub fn resolve_source_or_warn(&self, profile: &str, source: &Path) -> Resolved {
         let profile = crate::session::config::effective_profile(profile);
         let key = (profile.clone(), source.to_path_buf());
-        let previous = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&key).map(|entry| (entry.inputs.clone(), entry.config.clone()));
+        let previous = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .map(|entry| (entry.inputs.clone(), entry.config.clone()));
         let mut seen = HashMap::new();
         if let Some((inputs, config)) = previous {
             let current = inputs.iter().all(|(path, expected)| {
                 seen.entry(path.clone()).or_insert_with(|| read_file(path)) == expected
             });
             if current {
-                if let Some(entry) = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&key) {
+                if let Some(entry) = self
+                    .entries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_mut(&key)
+                {
                     entry.last_used = Instant::now();
                 }
-                return Resolved { config, miss: false };
+                return Resolved {
+                    config,
+                    miss: false,
+                };
             }
         }
         let seen = std::cell::RefCell::new(seen);
         let inputs = std::cell::RefCell::new(Vec::new());
         let read = |path: &Path| {
-            let bytes = seen.borrow_mut().entry(path.to_path_buf()).or_insert_with(|| read_file(path)).clone();
-            inputs.borrow_mut().push((path.to_path_buf(), bytes.clone()));
+            let bytes = seen
+                .borrow_mut()
+                .entry(path.to_path_buf())
+                .or_insert_with(|| read_file(path))
+                .clone();
+            inputs
+                .borrow_mut()
+                .push((path.to_path_buf(), bytes.clone()));
             bytes
         };
-        let config = Arc::new(resolve_config_with_repo_source_or_warn(&profile, source, &read));
-        self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(
-            key, Entry { inputs: inputs.into_inner(), config: config.clone(), last_used: Instant::now() },
-        );
+        let config = Arc::new(resolve_config_with_repo_source_or_warn(
+            &profile, source, &read,
+        ));
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                key,
+                Entry {
+                    inputs: inputs.into_inner(),
+                    config: config.clone(),
+                    last_used: Instant::now(),
+                },
+            );
         Resolved { config, miss: true }
     }
 
     pub fn evict_idle(&self, idle: Duration) {
-        self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|_, entry| entry.last_used.elapsed() < idle);
-        self.sources.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.sources
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|_, entry| entry.last_used.elapsed() < idle);
     }
 
     pub fn len(&self) -> usize {
-        self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -150,8 +211,8 @@ impl ResolvedConfigCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::REPO_CONFIG_PATH;
+    use super::*;
 
     fn write(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

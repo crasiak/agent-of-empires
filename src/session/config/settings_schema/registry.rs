@@ -348,7 +348,9 @@ mod tests {
         let flagged = served_row("logging.output");
         assert_eq!(flagged["restart"], true, "{flagged}");
         assert_eq!(flagged["label"], "Write to");
-        assert!(served_row("session.show_session_colors").get("web_only").is_none());
+        assert!(served_row("session.show_session_colors")
+            .get("web_only")
+            .is_none());
         let plain = served_row("session.delete_to_trash");
         let obj = plain.as_object().unwrap();
         assert!(
