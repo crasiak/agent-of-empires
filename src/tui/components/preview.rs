@@ -1041,22 +1041,22 @@ mod tests {
             }
             session.steno_arc = Some(Box::new(steno(false)));
             let rows = info_rows(&session, 120);
-            // metadata 0-3, resources 4-5, arc rule 6, then two rows per line
+            // metadata 0-4, resources 5-6, arc rule 7, then two rows per line
             assert!(
-                rows[6].contains("Arc: stale, covered through w6 (turns 51-53, partial)"),
+                rows[7].contains("Arc: stale, covered through w6 (turns 51-53, partial)"),
                 "{rows:#?}"
             );
-            assert!(rows[6].contains("click to expand"), "{rows:#?}");
+            assert!(rows[7].contains("click to expand"), "{rows:#?}");
             for (row, line) in [
-                (7, "Goal      Ship the arc panel [w5]"),
-                (9, "Recent    Ran the suite [w6]"),
-                (11, "Pending   Open the PR [w6]"),
-                (13, "Notes     Unknown"),
+                (8, "Goal      Ship the arc panel [w5]"),
+                (10, "Recent    Ran the suite [w6]"),
+                (12, "Pending   Open the PR [w6]"),
+                (14, "Notes     Unknown"),
             ] {
                 assert!(rows[row].starts_with(line), "{tool} {row}: {rows:#?}");
             }
             session.steno_arc = Some(Box::new(steno(true)));
-            assert!(info_rows(&session, 120)[6].contains("Arc: current, covered"));
+            assert!(info_rows(&session, 120)[7].contains("Arc: current, covered"));
         }
     }
 
@@ -1082,15 +1082,15 @@ mod tests {
         }));
         let rows = info_rows(&session, 80);
         // Full width: the arc rows use columns the badge column takes above them.
-        assert!(rows[7].trim_end().chars().count() > 70, "{rows:#?}");
-        assert!(rows[8].starts_with("          word"), "{rows:#?}");
-        assert!(rows[8].trim_end().ends_with('…'), "{rows:#?}");
-        assert!(rows[9].starts_with("Recent    Short [w2]"), "{rows:#?}");
-        assert_eq!(rows.len(), 15);
+        assert!(rows[8].trim_end().chars().count() > 70, "{rows:#?}");
+        assert!(rows[9].starts_with("          word"), "{rows:#?}");
+        assert!(rows[9].trim_end().ends_with('…'), "{rows:#?}");
+        assert!(rows[10].starts_with("Recent    Short [w2]"), "{rows:#?}");
+        assert_eq!(rows.len(), 16);
     }
 
     #[test]
-    fn metadata_packs_into_four_rows_with_the_notification_bell() {
+    fn metadata_packs_into_five_rows_with_the_notification_bell() {
         use crate::session::{Status, WorktreeInfo};
         let mut session = Instance::new("synthetic", "/tmp/synthetic");
         session.tool = "claude".into();
@@ -1103,11 +1103,19 @@ mod tests {
             base_branch: Some("main".into()),
         });
         let rows = info_rows(&session, 140);
-        assert!(rows[0].contains("Profile personal"), "{rows:#?}");
-        assert!(rows[0].contains("Tool claude"), "{rows:#?}");
-        assert!(rows[2].contains("Main /repo"), "{rows:#?}");
-        assert!(rows[3].contains("Branch  feature/x → main"), "{rows:#?}");
-        assert!(rows[3].contains("Sandbox host"), "{rows:#?}");
+        assert!(rows[0].starts_with("Status: "), "{rows:#?}");
+        assert!(rows[1].contains("Profile: personal"), "{rows:#?}");
+        assert!(rows[1].contains("Tool: claude"), "{rows:#?}");
+        assert!(rows[3].contains("Main: /repo"), "{rows:#?}");
+        assert!(rows[4].contains("Branch:  feature/x → main"), "{rows:#?}");
+        assert!(rows[4].contains("Sandbox: host"), "{rows:#?}");
+        // The bell is two cells wide, so compare words rather than columns.
+        let first_row = |session: &Instance| {
+            info_rows(session, 140)[0]
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         for (status, unread, bell) in [
             (Status::Error, true, "🔔 error"),
             (Status::Waiting, true, "🔔 waiting"),
@@ -1115,11 +1123,14 @@ mod tests {
         ] {
             session.status = status;
             session.unread = unread;
-            assert!(info_rows(&session, 140)[0].contains(bell), "{status:?}");
+            assert!(first_row(&session).contains(bell), "{status:?}");
         }
         session.unread = false;
-        let quiet = info_rows(&session, 140);
-        assert!(quiet[0].contains('🔔') && !quiet[0].contains("message"));
+        let quiet = first_row(&session);
+        assert!(
+            quiet.contains('🔔') && !quiet.contains("message"),
+            "{quiet}"
+        );
     }
 
     #[test]
@@ -1193,15 +1204,15 @@ mod tests {
                 text.contains(status.label().split_whitespace().next().unwrap()),
                 "{text}"
             );
-            for (row, label) in [(7, "Goal"), (9, "Recent"), (11, "Pending"), (13, "Notes")] {
+            for (row, label) in [(8, "Goal"), (10, "Recent"), (12, "Pending"), (14, "Notes")] {
                 assert!(rows[row].starts_with(label), "{text}");
             }
             if status == ArcStatus::Stale {
                 assert!(
-                    rows[8].trim_end().ends_with('…'),
+                    rows[9].trim_end().ends_with('…'),
                     "clipped Goal has a cue: {text}"
                 );
-                assert!(rows[6].contains("click to expand"), "{text}");
+                assert!(rows[7].contains("click to expand"), "{text}");
                 let covered = session
                     .work_arc
                     .record
@@ -1226,7 +1237,7 @@ mod tests {
                 }
             }
             assert!(
-                rows[4].trim().is_empty() && rows[5].trim().is_empty(),
+                rows[5].trim().is_empty() && rows[6].trim().is_empty(),
                 "arc cannot spill into resources: {text}"
             );
         }
@@ -1240,7 +1251,7 @@ mod tests {
         for (width, height) in [(140, 40), (55, 30), (30, 8)] {
             let area = Rect::new(0, 0, width, height);
             let metadata = agent_info_height(&session);
-            assert_eq!(metadata, 13);
+            assert_eq!(metadata, 14);
             let layout = PreviewLayout::compute(area, false, true, metadata);
             if height == 8 {
                 assert_eq!(layout.output, area);
@@ -1324,8 +1335,8 @@ mod tests {
             }
         }
 
-        /// Profile/Tool/Status/bell, Launch, Path, Branch/Sandbox, then the arc rule.
-        const FIXED: u16 = 4 + 1;
+        /// Status/bell, Profile/Tool, Launch, Path, Branch/Sandbox, then the arc row.
+        const FIXED: u16 = 5 + 1;
 
         fn variants() -> Vec<(&'static str, Instance)> {
             let mut out = Vec::new();
