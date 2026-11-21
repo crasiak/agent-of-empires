@@ -9,7 +9,7 @@ pub(crate) const CONSENT_VERSION: u32 = 2;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) use state::*;
-pub(crate) use steno::StenoArc;
+pub(crate) use steno::{ArcLines, StenoArc};
 
 use std::collections::{HashMap, HashSet};
 

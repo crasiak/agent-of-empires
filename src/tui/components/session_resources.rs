@@ -102,13 +102,7 @@ impl ResourceHistory {
             .map(|s| s.memory.map(|v| v as f64))
             .collect();
         let memory_max = memory_values.iter().flatten().copied().fold(1.0, f64::max);
-        let heading = if sandboxed {
-            "Container · CPU % host / Mem auto"
-        } else {
-            "Agent tree · CPU % host / RSS auto"
-        };
         let lines = vec![
-            Line::styled(heading, Style::default().fg(theme.dimmed)),
             resource_line(
                 "CPU",
                 &cpu,

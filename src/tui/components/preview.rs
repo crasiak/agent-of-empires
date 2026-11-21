@@ -35,18 +35,31 @@ impl<'a> CachedPreview<'a> {
     }
 }
 
-/// Metadata rows before resources. `PreviewLayout` adds the shared info chrome.
+/// Resource traces under the metadata: CPU and memory.
+pub(crate) const RESOURCE_ROWS: u16 = 2;
+/// Profile, tool, status and notification; launch; path; branch and sandbox.
+const AGENT_METADATA_ROWS: u16 = 4;
+/// Wrapped rows given to each of the arc's four lines.
+const ARC_LINE_ROWS: u16 = 2;
+const ARC_LABEL_WIDTH: u16 = 10;
+
+/// Rows of the agent info header: metadata beside the badges, then the arc band
+/// across the full width (its status row, plus the four lines when turned on).
 ///
 /// The height is deliberately independent of the instance's data: launch
 /// identity, worktree, sandbox and tool all reserve their rows (drawn as dim
 /// placeholders when absent). Otherwise moving between sessions, or a runtime
 /// field appearing, would shift the output banner and resize the previewed
 /// tmux window. The only variation is the user's work-arc toggle.
+pub(crate) fn agent_info_rows(instance: &Instance) -> (u16, u16) {
+    let lines = 4 * ARC_LINE_ROWS * u16::from(instance.work_arc_enabled);
+    (AGENT_METADATA_ROWS, 1 + lines)
+}
+
+/// Metadata and arc rows before resources. `PreviewLayout` adds the shared info chrome.
 pub fn agent_info_height(instance: &Instance) -> u16 {
-    // Tool/Path/Status + Launch + Sandbox + Arc, then the Worktree block:
-    // blank, header, Branch, Main, Base.
-    const FIXED: u16 = 3 + 1 + 1 + 1 + 5;
-    FIXED + 4 * u16::from(instance.work_arc_enabled)
+    let (metadata, arc) = agent_info_rows(instance);
+    metadata + arc
 }
 
 /// Metadata rows for Terminal and Tool views, before resources.
@@ -86,7 +99,7 @@ impl PreviewLayout {
     /// Split metadata, resources and badges from output. Collapse optional info
     /// when hidden, compact, or too short to leave an output row.
     pub(crate) fn compute(area: Rect, compact: bool, show_info: bool, info_height: u16) -> Self {
-        let info_height = info_height.saturating_add(3).max(8);
+        let info_height = info_height.saturating_add(RESOURCE_ROWS).max(8);
         if compact || !show_info || area.height <= info_height.saturating_add(1) {
             return Self {
                 info: None,
@@ -127,29 +140,137 @@ impl PreviewLayout {
     }
 }
 
-/// Metadata and its resource traces sit beside the usage/Ledger badge column.
+/// Metadata and its resource traces sit beside the usage/Ledger badge column;
+/// the arc band runs under all three at full width.
 pub(crate) struct InfoAreas {
     pub metadata: Rect,
     pub resources: Rect,
     pub badges: Rect,
+    pub arc: Rect,
 }
 
 impl InfoAreas {
-    pub(crate) fn compute(area: Rect, metadata_height: u16) -> Self {
-        let badge_width = (area.width / 2).min(48);
-        let left_width = area.width.saturating_sub(badge_width + 2);
-        let metadata_height = metadata_height.min(area.height);
+    pub(crate) fn compute(area: Rect, metadata_height: u16, arc_height: u16) -> Self {
+        let arc_height = arc_height.min(area.height);
+        let top = Rect::new(area.x, area.y, area.width, area.height - arc_height);
+        let badge_width = (top.width / 2).min(48);
+        let left_width = top.width.saturating_sub(badge_width + 2);
+        let metadata_height = metadata_height.min(top.height);
         Self {
-            metadata: Rect::new(area.x, area.y, left_width, metadata_height),
+            metadata: Rect::new(top.x, top.y, left_width, metadata_height),
             resources: Rect::new(
-                area.x,
-                area.y + metadata_height,
+                top.x,
+                top.y + metadata_height,
                 left_width,
-                area.height.saturating_sub(metadata_height).min(3),
+                top.height
+                    .saturating_sub(metadata_height)
+                    .min(RESOURCE_ROWS),
             ),
-            badges: Rect::new(area.right() - badge_width, area.y, badge_width, area.height),
+            badges: Rect::new(top.right() - badge_width, top.y, badge_width, top.height),
+            arc: Rect::new(area.x, top.bottom(), area.width, arc_height),
         }
     }
+}
+
+/// `text` word-wrapped into at most `rows` rows of `width` columns; a cut ends in "…".
+pub(crate) fn wrap_rows(text: &str, width: u16, rows: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+    let width = usize::from(width);
+    let mut out = Vec::new();
+    let mut rest = text.trim();
+    while !rest.is_empty() && out.len() < rows && width > 0 {
+        if out.len() + 1 == rows || rest.width() <= width {
+            out.push(clip_info_text(rest, width as u16));
+            break;
+        }
+        // The longest prefix ending at a space that fits; a lone long word is clipped.
+        let mut cut = 0;
+        for (i, _) in rest.match_indices(' ') {
+            if rest[..i].width() > width {
+                break;
+            }
+            cut = i;
+        }
+        if cut == 0 {
+            out.push(clip_info_text(rest, width as u16));
+            break;
+        }
+        out.push(rest[..cut].to_string());
+        rest = rest[cut..].trim_start();
+    }
+    out
+}
+
+/// The session's notification: an error, a wait on the user, or a finished turn not yet seen.
+pub(crate) fn notification(instance: &Instance, theme: &Theme) -> Span<'static> {
+    let (text, color) = match instance.status {
+        crate::session::Status::Error => ("🔔 error", theme.error),
+        crate::session::Status::Waiting => ("🔔 waiting", theme.waiting),
+        _ if instance.unread => ("🔔 message", theme.unread),
+        _ => return Span::styled("🔔", Style::default().fg(theme.dimmed)),
+    };
+    Span::styled(text, Style::default().fg(color).bold())
+}
+
+/// The arc band's status text and, when the session has one, its four labelled lines.
+pub(crate) fn arc_view(instance: &Instance) -> (String, Option<[(&'static str, &str); 4]>) {
+    use crate::session::work_arc::{self as arc, ArcStatus};
+    if let Some(steno) = instance.steno_arc.as_deref() {
+        return (
+            format!("{}, {}", steno.status().label(), steno.covered),
+            Some(steno.lines.labelled()),
+        );
+    }
+    if arc::supported(instance) {
+        let record = arc::visible_record(instance);
+        let status = arc::projection(instance);
+        let prior = if record
+            .is_some_and(|r| instance.agent_session_id.as_deref() != Some(&r.identity.pi_id))
+        {
+            " (carried forward)"
+        } else if record.is_some() && status != ArcStatus::Current {
+            " (prior stale)"
+        } else {
+            ""
+        };
+        let covered = record
+            .map(|r| {
+                format!(
+                    ", covered {}",
+                    r.at.with_timezone(&chrono::Local).format("%m-%d %H:%M %:z")
+                )
+            })
+            .unwrap_or_default();
+        return (
+            format!("{}{prior}{covered}", status.label()),
+            record.map(|r| {
+                [
+                    ("Goal", r.arc.goal.as_str()),
+                    ("Recent", r.arc.now.as_str()),
+                    ("Pending", r.arc.next.as_str()),
+                    ("Notes", r.arc.remaining.as_str()),
+                ]
+            }),
+        );
+    }
+    if arc::steno::readable(instance) {
+        let status = if instance.work_arc_enabled {
+            ArcStatus::Missing
+        } else {
+            ArcStatus::Off
+        };
+        return (status.label().to_string(), None);
+    }
+    ("n/a".to_string(), None)
+}
+
+/// The arc line under `row` in a band laid out by `InfoAreas`, as an index into its four lines.
+pub(crate) fn arc_line_at(band: Rect, instance: &Instance, col: u16, row: u16) -> Option<usize> {
+    if !instance.work_arc_enabled || !band.contains(Position::from((col, row))) || row == band.y {
+        return None;
+    }
+    let index = usize::from((row - band.y - 1) / ARC_LINE_ROWS);
+    (index < 4).then_some(index)
 }
 
 fn clip_info_text(text: &str, width: u16) -> String {
@@ -197,7 +318,8 @@ impl Preview {
             PreviewLayout::compute(area, compact, show_info, terminal_info_height(instance));
 
         if let Some(info_area) = layout.info {
-            let info_area = InfoAreas::compute(info_area, terminal_info_height(instance)).metadata;
+            let info_area =
+                InfoAreas::compute(info_area, terminal_info_height(instance), 0).metadata;
             let mut info_lines = vec![
                 Line::from(vec![
                     Span::styled("Title:   ", Style::default().fg(theme.dimmed)),
@@ -335,199 +457,153 @@ impl Preview {
         theme: &Theme,
         idle_decay_window: Duration,
     ) {
-        let area = InfoAreas::compute(area, agent_info_height(instance)).metadata;
-        let mut info_lines = Vec::new();
+        let (metadata_rows, arc_rows) = agent_info_rows(instance);
+        let areas = InfoAreas::compute(area, metadata_rows, arc_rows);
+        let dim = Style::default().fg(theme.dimmed);
+        let sep = || Span::styled("  ·  ", Style::default().fg(theme.border));
 
-        // Profile and Tool on the same row to save vertical space
-        let mut profile_tool_spans = Vec::new();
+        // A dormant (idle-reaped, resumable) structured worker reads "Dormant" in
+        // dim amber, distinct from a deliberate Stop or a live Idle. See #2250.
+        let (status, status_color) = if instance.is_shown_dormant() {
+            ("Dormant".to_string(), theme.dormant())
+        } else {
+            (
+                format!("{:?}", instance.status),
+                match instance.status {
+                    crate::session::Status::Running => theme.running,
+                    crate::session::Status::Waiting => theme.waiting,
+                    crate::session::Status::Idle => {
+                        theme.idle_color_at_age(instance.idle_age(), idle_decay_window)
+                    }
+                    crate::session::Status::Unknown => theme.waiting,
+                    crate::session::Status::Stopped => theme.dimmed,
+                    crate::session::Status::Error => theme.error,
+                    crate::session::Status::Starting => theme.dimmed,
+                    crate::session::Status::Deleting => theme.waiting,
+                    crate::session::Status::Creating => theme.accent,
+                },
+            )
+        };
+        let mut first = Vec::new();
         if !instance.source_profile.is_empty() {
-            profile_tool_spans.push(Span::styled("Profile: ", Style::default().fg(theme.dimmed)));
-            profile_tool_spans.push(Span::styled(
+            first.push(Span::styled("Profile ", dim));
+            first.push(Span::styled(
                 &instance.source_profile,
                 Style::default().fg(theme.accent),
             ));
-            profile_tool_spans.push(Span::raw("  "));
+            first.push(sep());
         }
-        profile_tool_spans.push(Span::styled("Tool: ", Style::default().fg(theme.dimmed)));
-        profile_tool_spans.push(Span::styled(
-            &instance.tool,
-            Style::default().fg(theme.accent),
-        ));
-        info_lines.push(Line::from(profile_tool_spans));
-        info_lines.push(match instance.current_launch_identity() {
-            Some(identity) => Line::from(vec![
-                Span::styled("Launch:  ", Style::default().fg(theme.dimmed)),
-                Span::styled(identity.description(), Style::default().fg(theme.text)),
-            ]),
-            None => Line::styled("Launch:  unknown", Style::default().fg(theme.dimmed)),
-        });
-
-        info_lines.extend([
-            Line::from(vec![
-                Span::styled("Path:    ", Style::default().fg(theme.dimmed)),
-                Span::styled(
-                    shorten_path(&instance.project_path),
-                    Style::default().fg(theme.text),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("Status:  ", Style::default().fg(theme.dimmed)),
-                {
-                    // A dormant (idle-reaped, resumable) structured worker
-                    // reads "Dormant" in dim amber, distinct from a deliberate
-                    // Stop or a live Idle. See #2250.
-                    let (label, color) = if instance.is_shown_dormant() {
-                        ("Dormant".to_string(), theme.dormant())
-                    } else {
-                        (
-                            format!("{:?}", instance.status),
-                            match instance.status {
-                                crate::session::Status::Running => theme.running,
-                                crate::session::Status::Waiting => theme.waiting,
-                                crate::session::Status::Idle => {
-                                    theme.idle_color_at_age(instance.idle_age(), idle_decay_window)
-                                }
-                                crate::session::Status::Unknown => theme.waiting,
-                                crate::session::Status::Stopped => theme.dimmed,
-                                crate::session::Status::Error => theme.error,
-                                crate::session::Status::Starting => theme.dimmed,
-                                crate::session::Status::Deleting => theme.waiting,
-                                crate::session::Status::Creating => theme.accent,
-                            },
-                        )
-                    };
-                    Span::styled(label, Style::default().fg(color))
-                },
-            ]),
+        first.extend([
+            Span::styled("Tool ", dim),
+            Span::styled(&instance.tool, Style::default().fg(theme.accent)),
+            sep(),
+            Span::styled("Status ", dim),
+            Span::styled(status, Style::default().fg(status_color)),
+            sep(),
+            notification(instance, theme),
         ]);
 
-        // Sandbox and worktree rows are always reserved; see `agent_info_height`.
+        let mut path = vec![
+            Span::styled("Path    ", dim),
+            Span::styled(
+                shorten_path(&instance.project_path),
+                Style::default().fg(theme.text),
+            ),
+        ];
+        let mut branch = Vec::new();
+        match &instance.worktree_info {
+            Some(wt) => {
+                path.extend([
+                    sep(),
+                    Span::styled("Main ", dim),
+                    Span::styled(
+                        shorten_path(&wt.main_repo_path),
+                        Style::default().fg(theme.text),
+                    ),
+                ]);
+                branch.extend([
+                    Span::styled("Branch  ", dim),
+                    Span::styled(&wt.branch, Style::default().fg(theme.branch)),
+                ]);
+                if let Some(base) = wt.base_branch.as_deref() {
+                    branch.extend([
+                        Span::styled(" → ", dim),
+                        Span::styled(base, Style::default().fg(theme.branch)),
+                    ]);
+                }
+            }
+            None => branch.push(Span::styled("Branch  none", dim)),
+        }
+        branch.push(sep());
         match instance.sandbox_info.as_ref().filter(|s| s.enabled) {
-            Some(sandbox) => info_lines.push(Line::from(vec![
-                Span::styled("Sandbox: ", Style::default().fg(theme.dimmed)),
+            Some(sandbox) => branch.extend([
+                Span::styled("Sandbox ", dim),
                 Span::styled(&sandbox.container_name, Style::default().fg(theme.sandbox)),
-            ])),
-            None => info_lines.push(Line::styled(
-                "Sandbox: host",
-                Style::default().fg(theme.dimmed),
-            )),
+            ]),
+            None => branch.push(Span::styled("Sandbox host", dim)),
         }
 
-        info_lines.push(Line::from(""));
-        info_lines.push(Line::from(vec![
-            Span::styled("─", Style::default().fg(theme.border)),
-            Span::styled(" Worktree ", Style::default().fg(theme.dimmed)),
-            Span::styled("─", Style::default().fg(theme.border)),
-        ]));
-        if let Some(wt_info) = &instance.worktree_info {
-            info_lines.push(Line::from(vec![
-                Span::styled("Branch:  ", Style::default().fg(theme.dimmed)),
-                Span::styled(&wt_info.branch, Style::default().fg(theme.branch)),
-            ]));
-            info_lines.push(Line::from(vec![
-                Span::styled("Main:    ", Style::default().fg(theme.dimmed)),
-                Span::styled(
-                    shorten_path(&wt_info.main_repo_path),
-                    Style::default().fg(theme.text),
-                ),
-            ]));
-            info_lines.push(match wt_info.base_branch.as_deref() {
-                Some(base) => Line::from(vec![
-                    Span::styled("Base:    ", Style::default().fg(theme.dimmed)),
-                    Span::styled(base, Style::default().fg(theme.branch)),
+        let info_lines = vec![
+            Line::from(first),
+            match instance.current_launch_identity() {
+                Some(identity) => Line::from(vec![
+                    Span::styled("Launch  ", dim),
+                    Span::styled(identity.description(), Style::default().fg(theme.text)),
                 ]),
-                None => Line::from(""),
-            });
-        } else {
-            info_lines.push(Line::styled(
-                "Branch:  none",
-                Style::default().fg(theme.dimmed),
-            ));
-            info_lines.push(Line::from(""));
-            info_lines.push(Line::from(""));
-        }
+                None => Line::styled("Launch  unknown", dim),
+            },
+            Line::from(path),
+            Line::from(branch),
+        ];
+        frame.render_widget(Paragraph::new(info_lines), areas.metadata);
+        Self::render_arc_band(frame, areas.arc, instance, theme);
+    }
 
-        let arc_view = if let Some(steno) = instance.steno_arc.as_deref() {
-            let expand = if instance.work_arc_enabled {
-                " [menu: expand]"
-            } else {
-                ""
-            };
-            Some((
-                format!("Arc: {}, {}{expand}", steno.status().label(), steno.covered),
-                Some(&steno.arc),
-            ))
-        } else if crate::session::work_arc::supported(instance) {
-            let record = crate::session::work_arc::visible_record(instance);
-            let covered = record
-                .map(|r| {
-                    format!(
-                        ", covered {}",
-                        r.at.with_timezone(&chrono::Local).format("%m-%d %H:%M %:z")
-                    )
-                })
-                .unwrap_or_default();
-            let status = crate::session::work_arc::projection(instance);
-            let prior = if record
-                .is_some_and(|r| instance.agent_session_id.as_deref() != Some(&r.identity.pi_id))
-            {
-                " (carried forward)"
-            } else if record.is_some() && status != crate::session::work_arc::ArcStatus::Current {
-                " (prior stale)"
-            } else {
-                ""
-            };
-            let expand = if instance.work_arc_enabled || record.is_some() {
-                " [menu: expand]"
-            } else {
-                ""
-            };
-            Some((
-                format!("Arc: {}{prior}{covered}{expand}", status.label()),
-                record.map(|r| &r.arc),
-            ))
-        } else if crate::session::work_arc::steno::readable(instance) {
-            let status = if instance.work_arc_enabled {
-                crate::session::work_arc::ArcStatus::Missing
-            } else {
-                crate::session::work_arc::ArcStatus::Off
-            };
-            Some((format!("Arc: {}", status.label()), None))
-        } else {
-            None
+    /// A rule with the arc's status and coverage, then each line wrapped into its rows.
+    fn render_arc_band(frame: &mut Frame, area: Rect, instance: &Instance, theme: &Theme) {
+        if area.height == 0 {
+            return;
+        }
+        let dim = Style::default().fg(theme.dimmed);
+        let (status, lines) = arc_view(instance);
+        let hint = match (instance.work_arc_enabled, lines.is_some()) {
+            (true, true) => " · hover a line, click to expand",
+            (false, true) => " · menu: expand",
+            _ => "",
         };
-        if let Some((status_line, arc)) = arc_view {
-            info_lines.push(Line::styled(status_line, Style::default().fg(theme.dimmed)));
-            if instance.work_arc_enabled {
-                for (label, value) in [
-                    ("Goal: ", arc.map(|a| a.goal.as_str())),
-                    ("Now: ", arc.map(|a| a.now.as_str())),
-                    ("Remaining: ", arc.map(|a| a.remaining.as_str())),
-                    ("Next: ", arc.map(|a| a.next.as_str())),
-                ] {
-                    let label_width = unicode_width::UnicodeWidthStr::width(label) as u16;
-                    info_lines.push(Line::from(vec![
+        let title = clip_info_text(
+            &format!(" Arc: {status}{hint} "),
+            area.width.saturating_sub(2),
+        );
+        let used = 1 + unicode_width::UnicodeWidthStr::width(title.as_str()) as u16;
+        let mut rows = vec![Line::from(vec![
+            Span::styled("─", Style::default().fg(theme.border)),
+            Span::styled(title, dim),
+            Span::styled(
+                "─".repeat(usize::from(area.width.saturating_sub(used))),
+                Style::default().fg(theme.border),
+            ),
+        ])];
+        if instance.work_arc_enabled {
+            let width = area.width.saturating_sub(ARC_LABEL_WIDTH);
+            let labels = ["Goal", "Recent", "Pending", "Notes"];
+            for (index, label) in labels.into_iter().enumerate() {
+                let value = lines.map_or("Unknown", |lines| lines[index].1);
+                let mut wrapped = wrap_rows(value, width, usize::from(ARC_LINE_ROWS));
+                wrapped.resize(usize::from(ARC_LINE_ROWS), String::new());
+                for (row, text) in wrapped.into_iter().enumerate() {
+                    let label = if row == 0 { label } else { "" };
+                    rows.push(Line::from(vec![
                         Span::styled(
-                            clip_info_text(label, area.width),
-                            Style::default().fg(theme.dimmed),
+                            format!("{label:<width$}", width = usize::from(ARC_LABEL_WIDTH)),
+                            dim,
                         ),
-                        Span::styled(
-                            clip_info_text(
-                                value.unwrap_or("Unknown"),
-                                area.width.saturating_sub(label_width),
-                            ),
-                            Style::default().fg(theme.text),
-                        ),
+                        Span::styled(text, Style::default().fg(theme.text)),
                     ]));
                 }
             }
-        } else {
-            // Tools without work arcs keep the row so the panel height is the
-            // same for every tool.
-            info_lines.push(Line::styled("Arc: n/a", Style::default().fg(theme.dimmed)));
         }
-        let paragraph = Paragraph::new(info_lines);
-        frame.render_widget(paragraph, area);
+        frame.render_widget(Paragraph::new(rows), area);
     }
 
     fn render_output_cached(
@@ -793,15 +869,17 @@ mod tests {
     fn layout_shown_info_carves_header_plus_banner_once() {
         let area = rect(2, 3, 80, 40);
         let l = PreviewLayout::compute(area, false, true, 7);
-        assert_eq!(l.info, Some(rect(2, 3, 80, 10)));
-        assert_eq!(l.banner, Some(rect(2, 13, 80, 1)));
-        assert_eq!(l.output, rect(2, 14, 80, 29));
+        assert_eq!(l.info, Some(rect(2, 3, 80, 9)));
+        assert_eq!(l.banner, Some(rect(2, 12, 80, 1)));
+        assert_eq!(l.output, rect(2, 13, 80, 30));
         let block_area = banner_block_area(l.output, l.banner.unwrap());
-        assert_eq!(block_area, rect(2, 13, 80, 30));
-        let info = InfoAreas::compute(l.info.unwrap(), 7);
-        assert_eq!(info.metadata, rect(2, 3, 38, 7));
-        assert_eq!(info.resources, rect(2, 10, 38, 3));
-        assert_eq!(info.badges, rect(42, 3, 40, 10));
+        assert_eq!(block_area, rect(2, 12, 80, 31));
+        // Metadata and resources beside the badges, the arc band under all three.
+        let info = InfoAreas::compute(l.info.unwrap(), 4, 3);
+        assert_eq!(info.metadata, rect(2, 3, 38, 4));
+        assert_eq!(info.resources, rect(2, 7, 38, 2));
+        assert_eq!(info.badges, rect(42, 3, 40, 6));
+        assert_eq!(info.arc, rect(2, 9, 80, 3));
     }
 
     #[test]
@@ -907,34 +985,32 @@ mod tests {
         assert!(!text.contains("Arc: off"), "{text}");
     }
 
-    #[test]
-    fn info_panel_shows_the_stenographer_arc_for_claude_and_pi() {
-        use crate::session::work_arc::{StenoArc, WorkArc};
+    /// The info header as `render_preview` sizes it: metadata, resources, arc band.
+    fn info_rows(session: &Instance, width: u16) -> Vec<String> {
         use ratatui::{backend::TestBackend, Terminal};
         let theme = crate::tui::styles::load_theme("empire");
-        let render = |session: &Instance| {
-            let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
-            terminal
-                .draw(|frame| {
-                    Preview::render_info(frame, frame.area(), session, &theme, Duration::ZERO)
-                })
-                .unwrap();
-            let buffer = terminal.backend().buffer();
-            (0..buffer.area.height)
-                .map(|y| {
-                    (0..120)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+        let height = agent_info_height(session) + RESOURCE_ROWS;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                Preview::render_info(frame, frame.area(), session, &theme, Duration::ZERO)
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn info_panel_shows_the_stenographer_arc_for_claude_and_pi() {
+        use crate::session::work_arc::{ArcLines, StenoArc};
         let steno = |current| StenoArc {
-            arc: WorkArc {
+            lines: ArcLines {
                 goal: "Ship the arc panel [w5]".into(),
-                now: "Ran the suite [w6]".into(),
-                remaining: "Unknown".into(),
-                next: "Open the PR [w6]".into(),
+                recent: "Ran the suite [w6]".into(),
+                pending: "Open the PR [w6]".into(),
+                notes: "Unknown".into(),
             },
             covered: "covered through w6 (turns 51-53, partial); reduced w1-w6".into(),
             at: chrono::Utc::now(),
@@ -945,30 +1021,124 @@ mod tests {
             let mut session = Instance::new("synthetic", "/tmp/synthetic");
             session.tool = tool.into();
             session.agent_session_id = Some("native-id".into());
-            assert!(render(&session).contains("Arc: off"), "{tool}");
+            assert!(
+                info_rows(&session, 120).join("\n").contains("Arc: off"),
+                "{tool}"
+            );
             session.work_arc_enabled = true;
             if tool == "claude" {
-                assert!(render(&session).contains("Arc: missing"), "{tool}");
+                assert!(info_rows(&session, 120).join("\n").contains("Arc: missing"));
             }
             session.steno_arc = Some(Box::new(steno(false)));
-            let text = render(&session);
+            let rows = info_rows(&session, 120);
+            // metadata 0-3, resources 4-5, arc rule 6, then two rows per line
             assert!(
-                text.contains("Arc: stale, covered through w6 (turns 51-53, partial)"),
-                "{text}"
+                rows[6].contains("Arc: stale, covered through w6 (turns 51-53, partial)"),
+                "{rows:#?}"
             );
-            for line in ["Goal: Ship the arc panel [w5]", "Next: Open the PR [w6]"] {
-                assert!(text.contains(line), "{text}");
+            assert!(rows[6].contains("click to expand"), "{rows:#?}");
+            for (row, line) in [
+                (7, "Goal      Ship the arc panel [w5]"),
+                (9, "Recent    Ran the suite [w6]"),
+                (11, "Pending   Open the PR [w6]"),
+                (13, "Notes     Unknown"),
+            ] {
+                assert!(rows[row].starts_with(line), "{tool} {row}: {rows:#?}");
             }
             session.steno_arc = Some(Box::new(steno(true)));
-            assert!(render(&session).contains("Arc: current, covered"), "{tool}");
+            assert!(info_rows(&session, 120)[6].contains("Arc: current, covered"));
         }
+    }
+
+    #[test]
+    fn arc_lines_wrap_into_two_full_width_rows_and_clip_with_a_cue() {
+        use crate::session::work_arc::{ArcLines, StenoArc};
+        let mut session = Instance::new("synthetic", "/tmp/synthetic");
+        session.tool = "claude".into();
+        session.agent_session_id = Some("native-id".into());
+        session.work_arc_enabled = true;
+        let long = "word ".repeat(60);
+        session.steno_arc = Some(Box::new(StenoArc {
+            lines: ArcLines {
+                goal: long.clone(),
+                recent: "Short [w2]".into(),
+                pending: "Unknown".into(),
+                notes: "Unknown".into(),
+            },
+            covered: "covered through w2; reduced w1-w2".into(),
+            at: chrono::Utc::now(),
+            current: true,
+            path: "/tmp/arc.json".into(),
+        }));
+        let rows = info_rows(&session, 80);
+        // Full width: the arc rows use columns the badge column takes above them.
+        assert!(rows[7].trim_end().chars().count() > 70, "{rows:#?}");
+        assert!(rows[8].starts_with("          word"), "{rows:#?}");
+        assert!(rows[8].trim_end().ends_with('…'), "{rows:#?}");
+        assert!(rows[9].starts_with("Recent    Short [w2]"), "{rows:#?}");
+        assert_eq!(rows.len(), 15);
+    }
+
+    #[test]
+    fn metadata_packs_into_four_rows_with_the_notification_bell() {
+        use crate::session::{Status, WorktreeInfo};
+        let mut session = Instance::new("synthetic", "/tmp/synthetic");
+        session.tool = "claude".into();
+        session.source_profile = "personal".into();
+        session.worktree_info = Some(WorktreeInfo {
+            branch: "feature/x".into(),
+            main_repo_path: "/repo".into(),
+            managed_by_aoe: true,
+            created_at: chrono::Utc::now(),
+            base_branch: Some("main".into()),
+        });
+        let rows = info_rows(&session, 140);
+        assert!(rows[0].contains("Profile personal"), "{rows:#?}");
+        assert!(rows[0].contains("Tool claude"), "{rows:#?}");
+        assert!(rows[2].contains("Main /repo"), "{rows:#?}");
+        assert!(rows[3].contains("Branch  feature/x → main"), "{rows:#?}");
+        assert!(rows[3].contains("Sandbox host"), "{rows:#?}");
+        for (status, unread, bell) in [
+            (Status::Error, true, "🔔 error"),
+            (Status::Waiting, true, "🔔 waiting"),
+            (Status::Idle, true, "🔔 message"),
+        ] {
+            session.status = status;
+            session.unread = unread;
+            assert!(info_rows(&session, 140)[0].contains(bell), "{status:?}");
+        }
+        session.unread = false;
+        let quiet = info_rows(&session, 140);
+        assert!(quiet[0].contains('🔔') && !quiet[0].contains("message"));
+    }
+
+    #[test]
+    fn arc_line_at_maps_rows_to_lines_only_while_shown() {
+        let mut session = Instance::new("synthetic", "/tmp/synthetic");
+        let band = Rect::new(0, 10, 80, 9);
+        assert_eq!(arc_line_at(band, &session, 5, 12), None, "arc off");
+        session.work_arc_enabled = true;
+        assert_eq!(arc_line_at(band, &session, 5, 10), None, "the rule row");
+        for (row, line) in [(11, 0), (12, 0), (13, 1), (16, 2), (18, 3)] {
+            assert_eq!(arc_line_at(band, &session, 5, row), Some(line), "row {row}");
+        }
+        assert_eq!(arc_line_at(band, &session, 5, 19), None, "below the band");
+    }
+
+    #[test]
+    fn wrap_rows_breaks_at_spaces_and_marks_a_cut() {
+        assert_eq!(wrap_rows("one two three", 7, 3), ["one two", "three"]);
+        assert_eq!(
+            wrap_rows("one two three four", 7, 2),
+            ["one two", "three …"]
+        );
+        assert_eq!(wrap_rows("abcdefghij", 5, 2), ["abcd…"]);
+        assert!(wrap_rows("", 5, 2).is_empty());
     }
 
     #[test]
     fn work_arc_info_buffer_shows_four_bounded_fields_states_and_expand_hint() {
         use crate::session::work_arc::{ArcIdentity, ArcStatus, StoredArc, WorkArc};
-        use ratatui::{backend::TestBackend, Terminal};
-        let theme = crate::tui::styles::load_theme("empire");
         let mut session = Instance::new("synthetic", "/tmp/synthetic");
         session.tool = "pi".into();
         session.agent_session_id = Some("synthetic-pi".into());
@@ -993,7 +1163,7 @@ mod tests {
                     },
                     at: chrono::Utc::now(),
                     arc: WorkArc {
-                        goal: "Goal evidence ".repeat(8),
+                        goal: "Goal evidence ".repeat(20),
                         now: "Reported progress".into(),
                         remaining: "Unknown".into(),
                         next: "Review".into(),
@@ -1007,27 +1177,21 @@ mod tests {
             if status == ArcStatus::Failed {
                 session.agent_session_id = Some("successor-pi".into());
             }
-            let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
-            terminal
-                .draw(|frame| {
-                    Preview::render_info(frame, frame.area(), &session, &theme, Duration::ZERO)
-                })
-                .unwrap();
-            let buffer = terminal.backend().buffer();
-            let rows: Vec<String> = (0..buffer.area.height)
-                .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
-                .collect();
+            let rows = info_rows(&session, width);
             let text = rows.join("\n");
             assert!(
                 text.contains(status.label().split_whitespace().next().unwrap()),
                 "{text}"
             );
-            for field in ["Goal:", "Now:", "Remaining:", "Next:"] {
-                assert!(text.contains(field), "{text}");
+            for (row, label) in [(7, "Goal"), (9, "Recent"), (11, "Pending"), (13, "Notes")] {
+                assert!(rows[row].starts_with(label), "{text}");
             }
             if status == ArcStatus::Stale {
-                assert!(rows[11].contains('…'), "clipped Goal has a cue: {text}");
-                assert!(text.contains("menu: expand"), "{text}");
+                assert!(
+                    rows[8].trim_end().ends_with('…'),
+                    "clipped Goal has a cue: {text}"
+                );
+                assert!(rows[6].contains("click to expand"), "{text}");
                 let covered = session
                     .work_arc
                     .record
@@ -1052,8 +1216,8 @@ mod tests {
                 }
             }
             assert!(
-                rows[15].trim().is_empty(),
-                "arc cannot spill into resources"
+                rows[4].trim().is_empty() && rows[5].trim().is_empty(),
+                "arc cannot spill into resources: {text}"
             );
         }
     }
@@ -1066,17 +1230,21 @@ mod tests {
         for (width, height) in [(140, 40), (55, 30), (30, 8)] {
             let area = Rect::new(0, 0, width, height);
             let metadata = agent_info_height(&session);
-            assert_eq!(metadata, 15);
+            assert_eq!(metadata, 13);
             let layout = PreviewLayout::compute(area, false, true, metadata);
             if height == 8 {
                 assert_eq!(layout.output, area);
             }
             if let Some(info) = layout.info {
-                let areas = InfoAreas::compute(info, metadata);
+                let (rows, arc) = agent_info_rows(&session);
+                let areas = InfoAreas::compute(info, rows, arc);
                 assert_eq!(areas.resources.y, areas.metadata.bottom());
-                assert_eq!(areas.resources.height, 3);
+                assert_eq!(areas.resources.height, RESOURCE_ROWS);
                 assert!(areas.badges.x > areas.metadata.right());
-                assert!(layout.output.y > areas.resources.bottom());
+                assert_eq!(areas.badges.bottom(), areas.arc.y);
+                assert_eq!(areas.arc.y, areas.resources.bottom());
+                assert_eq!((areas.arc.x, areas.arc.width), (info.x, info.width));
+                assert!(layout.output.y > areas.arc.bottom());
             }
             assert_eq!(
                 PreviewLayout::compute(area, true, true, metadata).output,
@@ -1146,9 +1314,8 @@ mod tests {
             }
         }
 
-        /// Title/Path/Status + Launch + Arc + Worktree block (blank, header,
-        /// Branch, Main, Base) + Sandbox.
-        const FIXED: u16 = 3 + 1 + 1 + 5 + 1;
+        /// Profile/Tool/Status/bell, Launch, Path, Branch/Sandbox, then the arc rule.
+        const FIXED: u16 = 4 + 1;
 
         fn variants() -> Vec<(&'static str, Instance)> {
             let mut out = Vec::new();
@@ -1181,10 +1348,10 @@ mod tests {
         }
 
         #[test]
-        fn arc_enabled_adds_only_the_four_field_rows() {
+        fn arc_enabled_adds_two_rows_per_line() {
             for (name, mut inst) in variants() {
                 inst.work_arc_enabled = true;
-                assert_eq!(agent_info_height(&inst), FIXED + 4, "{name}");
+                assert_eq!(agent_info_height(&inst), FIXED + 8, "{name}");
             }
         }
     }

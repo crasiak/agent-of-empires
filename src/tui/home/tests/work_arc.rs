@@ -1258,10 +1258,12 @@ fn steno_arc_survives_a_reload_from_disk() {
     let id = claude.id.clone();
     let mut env = seeded_env(test_home(), &[claude], true);
     let steno = arc::StenoArc {
-        arc: arc::WorkArc::from_json(
-            r#"{"goal":"Goal [w1]","now":"Now [w2]","remaining":"Unknown","next":"Next [w2]"}"#,
-        )
-        .unwrap(),
+        lines: arc::ArcLines {
+            goal: "Goal [w1]".into(),
+            recent: "Recent [w2]".into(),
+            pending: "Next [w2]".into(),
+            notes: "Unknown".into(),
+        },
         covered: "covered through w2 (turns 11-20); reduced w1-w2".into(),
         at: chrono::Utc::now(),
         current: false,
