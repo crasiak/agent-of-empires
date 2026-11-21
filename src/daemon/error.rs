@@ -41,6 +41,7 @@ pub enum ApiErrorCode {
     SmartRenameTimeout,
     GroupNotEmpty,
     SessionNotRunning,
+    VerifiedIdleUnavailable,
     SessionArchived,
     SessionTrashed,
     AccountSwapUnavailable,
@@ -82,6 +83,7 @@ impl ApiErrorCode {
             Self::SmartRenameTimeout => "smart_rename_timeout",
             Self::GroupNotEmpty => "group_not_empty",
             Self::SessionNotRunning => "session_not_running",
+            Self::VerifiedIdleUnavailable => "verified_idle_unavailable",
             Self::SessionArchived => "session_archived",
             Self::SessionTrashed => "session_trashed",
             Self::AccountSwapUnavailable => "account_swap_unavailable",
@@ -114,6 +116,7 @@ impl ApiErrorCode {
             | Self::PluginAlreadyInstalled
             | Self::GroupNotEmpty
             | Self::SessionNotRunning
+            | Self::VerifiedIdleUnavailable
             | Self::SessionArchived
             | Self::SessionTrashed
             | Self::AccountSwapUnavailable => StatusCode::CONFLICT,
@@ -191,6 +194,7 @@ impl ApiErrorCode {
             b"smart_rename_timeout" => Self::SmartRenameTimeout,
             b"group_not_empty" => Self::GroupNotEmpty,
             b"session_not_running" => Self::SessionNotRunning,
+            b"verified_idle_unavailable" => Self::VerifiedIdleUnavailable,
             b"session_archived" => Self::SessionArchived,
             b"session_trashed" => Self::SessionTrashed,
             b"account_swap_unavailable" => Self::AccountSwapUnavailable,

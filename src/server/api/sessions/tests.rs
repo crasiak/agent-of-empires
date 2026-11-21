@@ -7420,6 +7420,7 @@ async fn handlers_take_instance_lock_before_snapshot() {
                     Ok(Json(SendMessageRequest {
                         message: "hello".into(),
                         revive: false,
+                        require_idle: false,
                     })),
                 )
                 .await
@@ -7834,6 +7835,7 @@ async fn send_message_refreshes_instance_after_instance_lock() {
         Ok(Json(SendMessageRequest {
             message: "hello".into(),
             revive: false,
+            require_idle: false,
         })),
     );
     tokio::pin!(handler);
@@ -7948,6 +7950,7 @@ async fn start_paths_refuse_archived_and_trashed_sessions() {
                     Ok(Json(SendMessageRequest {
                         message: "hello".into(),
                         revive: true,
+                        require_idle: false,
                     })),
                 )
                 .await
@@ -8225,6 +8228,7 @@ async fn send_strips_bracketed_paste_escape_from_captured_snippet() {
         Ok(Json(SendMessageRequest {
             message: "Captured snippet: prefix\x1b[200~code 雪\x1b[201~following text".to_string(),
             revive: false,
+            require_idle: false,
         })),
     )
     .await
@@ -8296,6 +8300,7 @@ async fn send_refuses_a_live_pane_a_peer_shelved() {
             Ok(Json(SendMessageRequest {
                 message: "hello".into(),
                 revive: false,
+                require_idle: false,
             })),
         )
         .await
@@ -15985,5 +15990,46 @@ async fn the_list_projects_each_queues_count_and_what_it_waits_on() {
             "{}",
             row.id
         );
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn send_router_accepts_worst_case_stdin_json_without_raising_its_wire_limit() {
+    use tower::ServiceExt;
+    let _home = crate::session::test_support::isolate_app_dir();
+    let state = crate::server::test_support::build_test_app_state_with_policy(
+        Vec::new(),
+        vec!["localhost".into()],
+        Vec::new(),
+        Some("secret".into()),
+    );
+    let app = crate::server::test_support::build_router_for_test(state);
+    for (message, expected) in [
+        (
+            "\u{1}".repeat(crate::cli::send::MAX_FEEDBACK_BYTES),
+            StatusCode::NOT_FOUND,
+        ),
+        ("x".repeat(1024 * 1024), StatusCode::PAYLOAD_TOO_LARGE),
+    ] {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "message": message, "revive": false, "require_idle": true,
+        }))
+        .unwrap();
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/sessions/missing-full-id/send")
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer secret")
+            .extension(axum::extract::ConnectInfo(
+                crate::server::peer::ConnectionPeer::UnixOwner {
+                    uid: nix::unistd::geteuid().as_raw(),
+                },
+            ))
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), expected);
     }
 }
