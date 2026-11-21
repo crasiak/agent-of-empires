@@ -107,24 +107,18 @@ describe("SwitchAccountModal", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("switch-account-confirm")));
   });
 
-  it("restores focus only after a refused restart has re-enabled Confirm", async () => {
+  it("focuses the enabled Confirm even when the animation frame runs immediately", () => {
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       callback(0);
       return 1;
     });
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
-    let respond!: (result: { ok: boolean; message: string }) => void;
-    mockSwitch.mockReturnValue(new Promise((resolve) => (respond = resolve)));
-    renderModal({ targets: ["claude-b"] });
+    const onClose = renderModal({ targets: ["claude-b"] });
     const confirm = screen.getByTestId("switch-account-confirm") as HTMLButtonElement;
     expect(document.activeElement).toBe(confirm);
     fireEvent.click(confirm);
-    expect(confirm.disabled).toBe(true);
-    expect(document.activeElement).toBe(screen.getByRole("dialog"));
-    respond({ ok: false, message: "Nothing changed." });
-    await screen.findByText("Nothing changed.");
-    expect(confirm.disabled).toBe(false);
-    expect(document.activeElement).toBe(confirm);
+    expect(onSwitch).toHaveBeenCalledWith("claude-b");
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("wraps Tab and Shift+Tab inside the dialog", async () => {

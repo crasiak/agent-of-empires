@@ -343,6 +343,11 @@ describe("UsageLimitSection", () => {
     await act(async () => settle({ ok: false, message: "Nothing changed." }));
     expect(screen.queryByTestId(statusId)).toBeNull();
     expect(reportError).toHaveBeenCalledWith("Nothing changed.");
+    expect(screen.queryByTestId("switch-account-modal")).toBeNull();
+    act(() => requestSwitchAccount("s-1"));
+    const confirm = await screen.findByTestId("switch-account-confirm");
+    await waitFor(() => expect(document.activeElement).toBe(confirm));
+    expect((confirm as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("keeps the switch status across an unmount, and blocks a second switch, until the restart settles", async () => {

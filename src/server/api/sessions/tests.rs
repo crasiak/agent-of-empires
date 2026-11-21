@@ -4460,7 +4460,7 @@ fn session_cfg_store_reresolves_only_after_an_input_edit() {
     use crate::session::config::StructuredView::{Auto, Off};
     let detect = |name: &str| format!("[session.agent_detect_as]\n{name} = \"claude\"\n");
     // Misses, discoveries, then the resolved values, so a stale entry fails too.
-    let mut request_at = |at: &str, edit: &dyn Fn()| {
+    let request_at = |at: &str, edit: &dyn Fn()| {
         edit();
         let misses = AtomicUsize::new(0);
         let mut cache = super::model::SessionCfgCache::new(&shared, &misses);

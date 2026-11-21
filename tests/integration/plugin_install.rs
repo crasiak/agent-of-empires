@@ -1074,7 +1074,7 @@ command = ["false"]
     .unwrap();
 
     let UpdatePreview::ConsentRequired { consent, .. } =
-        install::preview_update("acme.upd").await.unwrap()
+        install::preview_update("acme.upd", true).await.unwrap()
     else {
         panic!("changed build must require consent");
     };
@@ -1082,7 +1082,8 @@ command = ["false"]
     let err = install::apply_update(
         "acme.upd",
         Some(consent.fingerprint),
-        &install::OperationLog::Inherit,
+        true,
+        install::OperationLog::Inherit,
     )
     .await
     .unwrap_err()
@@ -1160,13 +1161,13 @@ command = ["cp", "aoe-plugin.toml", "marker-v2"]
     .unwrap();
 
     let UpdatePreview::ConsentRequired { consent, .. } =
-        install::preview_update("acme.recipe").await.unwrap()
+        install::preview_update("acme.recipe", true).await.unwrap()
     else {
         panic!("changed recipe must require a new consent fingerprint");
     };
     assert_eq!(consent.prior_capabilities, consent.new_capabilities);
     assert_eq!(consent.build_steps, ["cp aoe-plugin.toml marker-v2"]);
-    let err = install::apply_update("acme.recipe", None, &install::OperationLog::Inherit)
+    let err = install::apply_update("acme.recipe", None, true, install::OperationLog::Inherit)
         .await
         .unwrap_err()
         .to_string();

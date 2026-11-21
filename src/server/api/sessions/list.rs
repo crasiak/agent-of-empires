@@ -189,7 +189,7 @@ pub(crate) async fn project_sessions(state: &Arc<AppState>) -> Vec<SessionRespon
                 }
                 _ => {
                     let (session_cfg, default_agent) =
-                        session_cfg_cache.profile_config(&inst.source_profile, &inst.project_path);
+                        session_cfg_cache.profile_config(&inst.source_profile, &inst.repo_config_path().to_string_lossy());
                     agent.profile_with(&acp_registry, session_cfg, default_agent)
                 }
             };
