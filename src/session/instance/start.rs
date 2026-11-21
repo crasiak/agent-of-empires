@@ -231,7 +231,7 @@ impl Instance {
         drop(lifecycle_lock);
         drop(title_lock);
         let hook_result =
-            self.run_pre_launch_hooks(skip_on_launch, storage, None, Some(generation));
+            self.run_agent_launch_hooks(skip_on_launch, storage, None, Some(generation));
         let (_title_lock, _lifecycle_lock) =
             self.reacquire_launch_locks_after_hooks(storage, generation, hook_result)?;
         if let Some((key, _)) = handoff {
@@ -940,6 +940,10 @@ impl Instance {
             .as_ref()
             .filter(|execution| execution.inputs.container.is_none())
             .map(|execution| execution.program.clone());
+        self.launch_resolved_executable = self
+            .launch_executable
+            .as_deref()
+            .and_then(|program| std::fs::canonicalize(program).ok());
         if let Some(execution) = prepared.execution.take() {
             let attested = self.attested_claude_store_route(&execution);
             self.active_execution = Some(ActiveExecution {

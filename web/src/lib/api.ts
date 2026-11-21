@@ -463,6 +463,13 @@ export interface SessionFileResponse {
   content: string;
   is_binary: boolean;
   truncated: boolean;
+  version?: string | null;
+  edit_disabled_reason?: string | null;
+}
+
+export async function saveSessionFile(id: string, path: string, version: string, content: string) {
+  const response = await send(`/api/sessions/${id}/file`, jsonInit("PUT", { path, version, content }));
+  return { ok: response.ok, status: response.status, error: stringField(response.payload, "message") };
 }
 
 /**
@@ -470,8 +477,14 @@ export interface SessionFileResponse {
  * or an absolute path the agent touched this session; the server enforces
  * provenance confinement. See `GET /api/sessions/{id}/file`.
  */
-export function getSessionFile(id: string, filePath: string): Promise<SessionFileResponse | null> {
+export function getSessionFile(
+  id: string,
+  filePath: string,
+  options: { editing?: boolean; versionOnly?: boolean } = {},
+): Promise<SessionFileResponse | null> {
   const params = new URLSearchParams({ path: filePath });
+  if (options.editing) params.set("editing", "true");
+  if (options.versionOnly) params.set("version_only", "true");
   return fetchJson<SessionFileResponse>(`/api/sessions/${id}/file?${params.toString()}`);
 }
 
@@ -852,6 +865,7 @@ export interface PluginAgentLaunch {
   container_env?: Record<string, string>;
   install_hint?: string;
   host_only?: boolean;
+  send_keys_enter_delay_ms?: number;
   resume?:
     | { kind: "flag"; flag: string }
     | { kind: "flag_pair"; existing: string; new_session: string }
@@ -1031,6 +1045,7 @@ export interface PluginJob {
     finished_at: number | null;
   };
   log: {
+    path: string;
     exists: boolean;
     tail: string;
     lines_returned: number;
@@ -1153,8 +1168,8 @@ export function fetchPluginSessions(pluginId: string): Promise<{ sessions: Recor
 
 /** The host's aggregated UI-state snapshot. Returns an empty state (not null)
  *  shape on the server when no plugin host is running. */
-export function fetchPluginUiState(): Promise<PluginUiState | null> {
-  return fetchJson<PluginUiState>("/api/plugins/ui-state");
+export function fetchPluginUiState(init?: RequestInit): Promise<PluginUiState | null> {
+  return fetchJson<PluginUiState>("/api/plugins/ui-state", init);
 }
 
 /** Lets the next frame load of a page's `url` authenticate when device binding is on; the ticket rides an HttpOnly cookie. */
@@ -1980,12 +1995,11 @@ export async function enqueueServerPrompt(
   );
 }
 
-/** The session's server queue, ordered by `seq` (GET /queue). Always returns an
- *  array: a non-array body (error page, unexpected shape) yields `[]` so callers
- *  can `.map` without guarding. */
-export async function listServerQueue(sessionId: string): Promise<ServerQueuedPrompt[]> {
+/** The session's server queue, ordered by `seq` (GET /queue), or `null` when the request fails or
+ *  the body isn't an array, so a failure is never mistaken for an empty queue. */
+export async function listServerQueue(sessionId: string): Promise<ServerQueuedPrompt[] | null> {
   const rows = await fetchJson<ServerQueuedPrompt[]>(queuePath(sessionId));
-  return Array.isArray(rows) ? rows : [];
+  return Array.isArray(rows) ? rows : null;
 }
 
 /** Replace a queued prompt's text (PATCH /queue/{id}). */

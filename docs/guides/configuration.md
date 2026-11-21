@@ -90,6 +90,7 @@ name_agent_session = false
 auto_stop_idle_secs = 0   # 0 disables; e.g. 7200 = stop after 2h idle
 row_tag = "branch"        # none | auto | profile | sandbox | agent | branch
 sidebar_position = "left" # left | right; TUI session list
+narrow_layout = "stacked" # stacked | one_pane | big_preview; see below
 ```
 
 After your 31st session creation, a one-time tip explains how to hide the shortcut bar.
@@ -108,7 +109,8 @@ You can browse tips from **Ctrl+K > Show tips** even with the bar hidden.
 | `row_tag` | `"branch"` | Metadata next to a session title in the TUI and web sidebar: `none`, `auto` (profile code in all-profiles view), `profile`, `sandbox`, `agent` ([launch identity](#launch-identity-badges) for Claude/Codex/Pi, agent codes for other tools), or `branch`. |
 | `show_activity_age` | `true` | Show the age column at the right edge of each TUI session row: time since the agent stopped on `Idle` rows, time since last access on `Unknown` rows, and remaining snooze time under the Attention sort. |
 | `show_structured_badge` | `true` | Show the `[structured]` badge on Structured view rows in the TUI session list. Hiding it returns the width to the title and plugin row badges; the row still opens the Structured view. TUI only; the web session list never shows the badge. |
-| `sidebar_position` | `"left"` | Places the TUI session list on the left or right. Narrow terminals keep the list above the preview. Global only. |
+| `sidebar_position` | `"left"` | Places the TUI session list on the left or right. Below 80 columns the layout follows `narrow_layout` instead. Global only. |
+| `narrow_layout` | `"stacked"` | How the TUI lays out the session list and preview once the terminal is too narrow for them side by side (below 80 columns). `stacked` puts the list above the preview; `one_pane` shows only one pane at a time, the list normally and the preview while it is the pane being worked in (live mode relaying keys, an interactive structured transcript, a retained trashed transcript, or System Health), then Esc or Ctrl+Q returns to the list; `big_preview` keeps the stack but squeezes the list to its minimum while the preview is that active pane, giving the preview most of the height. Global only, under Settings > Global > Session. |
 | `split_terminal_height_percent` | `50` | Paired-terminal share of split preview height. Range `1` to `99`. Global only; see [Live mode](live-mode.md). |
 | `split_terminal_min_width` | `100` | Minimum whole-window width in columns for the paired-terminal split. Range `0` to `1000`. Global only. |
 | `split_terminal_min_height` | `30` | Minimum whole-window height in rows for the paired-terminal split. Range `0` to `1000`. Global only. |
@@ -130,6 +132,7 @@ You can browse tips from **Ctrl+K > Show tips** even with the bar hidden.
 | `agent_detect_as` | `{}` | Built-in status detection and ACP adapter inheritance for a custom agent. This does not prove native execution or authorize terminal resume or fork. |
 | `agent_execution_as` | `{}` | Explicit native-agent contract for an opaque terminal wrapper. Requires `agent_config_dir` naming its store. Trusted global/profile configuration only; repository overrides are refused. |
 | `agent_acp_cmd` | `{}` | ACP launch command for a custom agent, enabling it to run in structured view (for example, `{ "oc-superpowers" = "ocp run sp acp" }`). Without one, a custom agent whose `agent_detect_as` base is in the ACP registry runs that base's adapter; otherwise it stays in terminal view. Unlike `custom_agents`, the value is split into argv and run directly, with no shell. |
+| `agent_clear_alias` | `{}` | Conversation-reset slash command for a custom ACP agent, `"/clear"` or `"/new"` (for example, `{ "my-claude" = "/clear" }`). A custom agent has no built-in profile, so without an entry its reset command is sent to the model as an ordinary prompt. With one, AoE drives a fresh `session/new` for it, as it does for a built-in agent. A built-in agent keeps its own command, and an agent without its own `agent_acp_cmd` (one that inherits a built-in adapter through `agent_detect_as`) ignores its entry. Trusted global/profile configuration only; repository overrides are refused. |
 | `agent_config_dir` | `{}` | Agent config directory, keyed by agent name. Host sessions use it directly; sandboxed sessions use a private `sandbox-v2/<instance-id>` child at the canonical container path. Hooks and [native MCP discovery](mcp-servers.md) use it, and it wins over config-dir environment variables and host hooks. A recorded Claude conversation store outranks it; changing accounts or recreating a sandbox follows the [resume store rules](session-resume.md#swapping-the-engine-on-a-restart). Global/profile only. |
 Per-agent structured view defaults live under `[acp]`, not `[session]`:
 
@@ -667,9 +670,12 @@ Checks hit GitHub at most once a day; the dashboard re-polls the cached status h
 ```toml
 [serve]
 port = 8080               # debug builds default to 8081
+funnel_port = "443"       # "443", "8443" or "10000", quoted
 ```
 
 `aoe serve` and runtime autostart take a new daemon's port from `--port`, then `AOE_SERVE_PORT`, then this key. The TUI Serve dialog keeps its own saved port unless `AOE_SERVE_PORT` is set, and does not read this key. A restart keeps the recorded port unless one is requested, so a changed value applies after a stop and start. Global only.
+
+`funnel_port` is the public port of a Tailscale Funnel started by `aoe serve --remote` or the TUI's Remote Access; `--funnel-port` takes precedence. It must be quoted: a bare `funnel_port = 8443` fails to load. A restart keeps the recorded Funnel port while the Daemon stays on Funnel. Global only.
 
 ## Tools
 

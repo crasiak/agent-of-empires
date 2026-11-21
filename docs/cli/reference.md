@@ -79,6 +79,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe plugin install`↴](#aoe-plugin-install)
 * [`aoe plugin update`↴](#aoe-plugin-update)
 * [`aoe plugin uninstall`↴](#aoe-plugin-uninstall)
+* [`aoe plugin job`↴](#aoe-plugin-job)
 * [`aoe plugin hash`↴](#aoe-plugin-hash)
 * [`aoe plugin discover`↴](#aoe-plugin-discover)
 * [`aoe plugin outdated`↴](#aoe-plugin-outdated)
@@ -95,6 +96,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe project remove`↴](#aoe-project-remove)
 * [`aoe sandbox`↴](#aoe-sandbox)
 * [`aoe sandbox reclaim`↴](#aoe-sandbox-reclaim)
+* [`aoe sandbox login`↴](#aoe-sandbox-login)
 * [`aoe worktree`↴](#aoe-worktree)
 * [`aoe worktree list`↴](#aoe-worktree-list)
 * [`aoe worktree info`↴](#aoe-worktree-info)
@@ -195,7 +197,7 @@ Run without arguments to launch the TUI dashboard.
 * `plugin` — Manage plugins (list, info, enable, disable, install, update, uninstall)
 * `profile` — Manage profiles (separate workspaces)
 * `project` — Manage the project registry used by multi-repo session pickers
-* `sandbox` — Inspect and reclaim per-session sandbox agent stores
+* `sandbox` — Reclaim per-session sandbox agent stores and log agent sandboxes in
 * `worktree` — Manage git worktrees for parallel development
 * `tmux` — tmux integration utilities
 * `sounds` — Manage sound effects for agent state transitions
@@ -1294,6 +1296,7 @@ Manage plugins (list, info, enable, disable, install, update, uninstall)
 * `install` — Install an external plugin from a `gh:owner/repo[@ref]` slug or a local directory. With no `@ref`, installs the repo's latest release; an explicit `@ref` installs unverified, un-audited code. Community plugins run at your own risk
 * `update` — Update an installed external plugin from its recorded source and restart its worker in a running daemon. Prompts to re-approve capabilities if the update changes the capability set
 * `uninstall` — Uninstall an external plugin, removing its files and capability grant
+* `job` — Observe an accepted plugin job without submitting another operation
 * `hash` — Print the deterministic source tree hash for a plugin directory, the value a maintainer pins in the featured index
 * `discover` — Search GitHub's `aoe-plugin` topic for installable plugins
 * `outdated` — List installed external plugins that have an update available
@@ -1398,6 +1401,18 @@ Uninstall an external plugin, removing its files and capability grant
 ###### **Arguments:**
 
 * `<ID>` — Plugin id
+
+
+
+## `aoe plugin job`
+
+Observe an accepted plugin job without submitting another operation
+
+**Usage:** `aoe plugin job <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Job id returned by install, update, or uninstall
 
 
 
@@ -1595,13 +1610,14 @@ Remove a project from the registry
 
 ## `aoe sandbox`
 
-Inspect and reclaim per-session sandbox agent stores
+Reclaim per-session sandbox agent stores and log agent sandboxes in
 
 **Usage:** `aoe sandbox <COMMAND>`
 
 ###### **Subcommands:**
 
 * `reclaim` — Report per-session agent stores whose session no longer exists in any profile, and how much disk they hold. Reports only unless `--delete` is given: a store can hold a copy of that agent's credentials
+* `login` — Log an agent's sandboxes in (sandbox.shared_credential = "separate_login"): prints a sign-in link, then reads the code shown after sign-in. The login belongs to one shared credential file per profile and tool: an agent with its own `session.agent_config_dir` entry (a wrapper agent) has its own file, so a session of profile X running tool T waiting for the login needs `aoe sandbox login -p X --tool T`. The file follows the command T launches (`agent_command_override`, else `custom_agents`, else the built-in). Only agents that declare a sandbox login have one; today that is Claude
 
 
 
@@ -1614,6 +1630,21 @@ Report per-session agent stores whose session no longer exists in any profile, a
 ###### **Options:**
 
 * `--delete` — Remove the reported stores instead of only naming them
+
+
+
+## `aoe sandbox login`
+
+Log an agent's sandboxes in (sandbox.shared_credential = "separate_login"): prints a sign-in link, then reads the code shown after sign-in. The login belongs to one shared credential file per profile and tool: an agent with its own `session.agent_config_dir` entry (a wrapper agent) has its own file, so a session of profile X running tool T waiting for the login needs `aoe sandbox login -p X --tool T`. The file follows the command T launches (`agent_command_override`, else `custom_agents`, else the built-in). Only agents that declare a sandbox login have one; today that is Claude
+
+**Usage:** `aoe sandbox login [OPTIONS]`
+
+###### **Options:**
+
+* `--tool <TOOL>` — The agent whose sandboxes the login is for: the tool name of the sessions waiting for it. Defaults to the profile's default tool when it has a sandbox login, else the only agent that has one
+* `--command <COMMAND>` — The command the launch runs for `--tool` when a session overrides the profile's: the login lands in the file that launch is gated on. A session that waits for the login names it in the message it stops with; without `--command` the profile's command for the tool is used
+* `--check` — Only report whether the shared credential file needs a login: exit 0 when ok, 2 when needed, 3 when not applicable (`host_seed` mode, a tool without a shared credential file, or a login that is needed on Apple Container, which cannot run the login helper)
+* `--force` — Log in again even though the shared credential is usable
 
 
 
@@ -2167,11 +2198,15 @@ Start the aoe daemon: REST/WebSocket API, plus the web dashboard in builds that 
 * `--tunnel-name <TUNNEL_NAME>` — Use a named Cloudflare Tunnel (requires prior `cloudflared tunnel create`). Takes precedence over Tailscale auto-detection
 * `--no-tailscale` — Skip Tailscale Funnel auto-detection and go straight to Cloudflare. Useful if you have Tailscale installed for unrelated reasons
 * `--tunnel-url <TUNNEL_URL>` — Hostname for a named tunnel (e.g., aoe.example.com)
+* `--funnel-port <PORT>` — Public HTTPS port for Tailscale Funnel: 443, 8443 or 10000, so a second daemon on this machine can have its own Funnel. Falls back to `[serve] funnel_port`, then 443
+
+  Possible values: `443`, `8443`, `10000`
+
 * `--daemon` — Run as a background daemon (detach from terminal)
 * `--stop` — Stop a running daemon
 * `--status` — Print the local daemon's PID, mode, URLs, and log path. With `AOE_DAEMON_URL` set, report the remote daemon's reachability and token state instead. Exits non-zero when no daemon is running. Useful for shell scripts that want to know whether a daemon is up without parsing `ps`.
 
-   `--status` is read-only and incompatible with every flag that would change daemon state (`--stop`, `--daemon`, `--remote`) or the bind config of a fresh daemon (`--no-auth`, `--auth`, `--behind-proxy`, `--read-only`, `--passphrase`, `--port`, `--tunnel-name`, `--no-tailscale`, `--tunnel-url`, `--open`, `--allowed-host`, `--allowed-origin`). Clap reports the misuse instead of silently ignoring the extras.
+   `--status` is read-only and incompatible with every flag that would change daemon state (`--stop`, `--daemon`, `--remote`) or the bind config of a fresh daemon (`--no-auth`, `--auth`, `--behind-proxy`, `--read-only`, `--passphrase`, `--port`, `--tunnel-name`, `--no-tailscale`, `--tunnel-url`, `--funnel-port`, `--open`, `--allowed-host`, `--allowed-origin`). Clap reports the misuse instead of silently ignoring the extras.
 * `--passphrase <PASSPHRASE>` — Require a passphrase for login (second-factor auth). Can also be set via AOE_SERVE_PASSPHRASE environment variable
 * `--open` — Open the dashboard URL in the default browser once the server is ready. Ignored in a build with no dashboard bundle, under --daemon or --remote, and whenever no browser the user could see is reachable (see `tui::open_url`): over SSH without a forwarded display, or on Linux/BSD with no display server. `BROWSER` overrides the check on platforms whose launcher reads it, which excludes macOS
 * `--restart` — Restart the running managed daemon with its recorded policy. Missing credentials are rejected before stopping it

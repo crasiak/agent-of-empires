@@ -142,10 +142,7 @@ pub(crate) fn send_wake(instance: &Instance, message: &str) -> anyhow::Result<bo
     {
         return Ok(false);
     }
-    session.send_keys_with_delay(
-        message,
-        crate::agents::send_keys_enter_delay(&instance.tool),
-    )?;
+    session.send_keys_with_delay(message, instance.send_keys_enter_delay())?;
     Ok(true)
 }
 

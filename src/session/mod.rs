@@ -40,6 +40,7 @@ pub(crate) mod purge_owners;
 pub(crate) mod recovery;
 pub mod rename_transaction;
 pub mod restart;
+pub(crate) mod sandbox_login;
 pub mod sandbox_store_reclaim;
 pub mod scope;
 pub mod scratch;
@@ -87,8 +88,9 @@ pub use groups::{
     TRASH_SECTION_PATH,
 };
 #[cfg(test)]
+pub(crate) use instance::before_start_slot_waiters;
+#[cfg(test)]
 pub(crate) use instance::install_aliases;
-pub(crate) use instance::resolved_agent_for;
 pub(crate) use instance::resume_profile_config;
 #[cfg(test)]
 pub(crate) use instance::test_helpers::publish_host_pi_transcript;
@@ -96,8 +98,12 @@ pub(crate) use instance::test_helpers::publish_host_pi_transcript;
 pub(crate) use instance::ActiveExecution;
 pub(crate) use instance::CAPTURE_FAILED_RULE;
 pub(crate) use instance::{
-    duplicate_session_error, is_duplicate_session, HostHookApprovalRequired, PassiveStatusPatch,
-    ResumeIntent, SessionSidecarSource, SidWrite, ToolLaunchUnavailable,
+    duplicate_session_error, is_duplicate_session, persist_session_with_storage,
+    HostHookApprovalRequired, PassiveStatusPatch, ResumeIntent, SessionSidecarSource, SidWrite,
+    ToolLaunchUnavailable,
+};
+pub(crate) use instance::{
+    forget_before_start_resolution, BeforeStartHook, BeforeStartHookError, Releasing,
 };
 pub(crate) use instance::{
     host_hook_agent, host_hook_disclosure, host_hook_disclosure_config_with_repo,
@@ -109,10 +115,12 @@ pub use instance::{
     ExecutionLocation, Instance, LaunchSidOutcome, LegacyToolAdoption, LegacyToolIdentity,
     LegacyToolObservation, LifecycleOperation, LifecycleReservation, LifecycleReservationError,
     ManagedResumeCause, PaneObservation, PanePresence, PendingInitialTurn, PluginCreateIdempotency,
-    PollerStart, SandboxInfo, SessionBucket, SessionGone, StartBlocked, StartOutcome, Status,
-    TerminalInfo, TmuxServerIdentity, View, WorkspaceInfo, WorkspaceRepo, WorktreeInfo,
-    SESSION_COLORS, TMUX_SERVER_UNREACHABLE_ERROR, TMUX_SESSION_GONE_ERROR,
+    PollerStart, SandboxInfo, SandboxLoginRequired, SandboxLoginUnsupported, SessionBucket,
+    SessionGone, StartBlocked, StartOutcome, Status, TerminalInfo, TmuxServerIdentity, View,
+    WorkspaceInfo, WorkspaceRepo, WorktreeInfo, SESSION_COLORS, TMUX_SERVER_UNREACHABLE_ERROR,
+    TMUX_SESSION_GONE_ERROR,
 };
+pub(crate) use instance::{resolved_agent_for, UNBOUND_STORE_HINT};
 pub(crate) use instance::{
     ConversationState, LaunchReservation, ManagedResumeRefused, ResumeAttemptPolicy,
     ResumeLaunchOptions, ResumeProfileConfig, TerminalContextResume,

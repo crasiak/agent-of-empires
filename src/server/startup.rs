@@ -15,7 +15,7 @@ use tokio::sync::{broadcast, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use super::access::{host_from_url, resolve_access_policy};
+use super::access::{authority_from_url, resolve_access_policy};
 use super::acp_events::{acp_event_listener, seed_acp_statuses};
 use super::disk_watch::{disk_watcher_consumer, init_disk_watch_subscriptions};
 use super::ip_discovery::{local_published_hosts, IpKind};
@@ -238,6 +238,16 @@ async fn run_shutdown_sequence<R, F>(
     }
 }
 
+/// The daemon's profile and every session, whose shared credential files may have login
+/// helpers.
+async fn login_helper_scopes(state: &AppState) -> Vec<super::sandbox_login::LoginScope> {
+    use super::sandbox_login::LoginScope;
+    let instances = state.instances.read().await;
+    std::iter::once(LoginScope::profile(state.served_profile().clone()))
+        .chain(instances.iter().flat_map(LoginScope::of_session))
+        .collect()
+}
+
 /// Raise the soft `RLIMIT_NOFILE` so the server can sustain many WS
 /// terminals at once. macOS's default soft cap of 256 is exhausted
 /// quickly: each WS terminal consumes ~3 file descriptors (PTY master +
@@ -294,6 +304,8 @@ pub(crate) struct ServerConfig<'a> {
     pub tunnel_name: Option<&'a str>,
     pub tunnel_url: Option<&'a str>,
     pub no_tailscale: bool,
+    /// The public HTTPS port a Tailscale Funnel listens on.
+    pub funnel_port: u16,
     pub is_daemon: bool,
     pub passphrase: Option<&'a str>,
     /// True when the server sits behind an external reverse proxy
@@ -494,6 +506,7 @@ pub(crate) async fn start_server(
         tunnel_name,
         tunnel_url,
         no_tailscale,
+        funnel_port,
         is_daemon,
         passphrase,
         behind_proxy,
@@ -657,6 +670,33 @@ pub(crate) async fn start_server(
         None
     };
 
+    // Session-scoped `/mcp` credential secret. Only generated when `/mcp` is actually
+    // mounted, so a daemon that never enables it never gets this file on disk.
+    let mcp_session_secret = if config.web.mcp_enabled {
+        match crate::session::get_app_dir() {
+            Ok(dir) => {
+                match crate::server::session_credential::McpSessionSecret::load_or_generate(
+                    &dir.join("mcp_session_secret"),
+                ) {
+                    Ok(secret) => Some(Arc::new(secret)),
+                    Err(e) => {
+                        tracing::warn!(target: "http.middleware",
+                            error = %e,
+                            "/mcp session credentials disabled: failed to load secret"
+                        );
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(target: "http.middleware", error = %e, "/mcp session credentials disabled: app_dir unavailable");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let acp_events_tx = broadcast::channel(ACP_CHANNEL_CAPACITY).0;
     let acp_event_store = {
         let app_dir = crate::session::get_app_dir().context("acp event store: resolve app dir")?;
@@ -708,6 +748,8 @@ pub(crate) async fn start_server(
             control_cache: acp_control_cache.clone(),
         },
     ));
+    // Before any producer of a hold (plugin workers, the reconcilers) can run.
+    let login_notices = session_service.sandbox_login.subscribe();
 
     // the daemon serves fine without plugin workers.
     // The host API includes mutating session.meta.set/cas, so a read-only
@@ -803,7 +845,7 @@ pub(crate) async fn start_server(
             } else if tailscale_ok {
                 info!("Tailscale detected; using Tailscale Funnel for stable HTTPS origin");
                 // Do NOT fall back to Cloudflare on Tailscale failure.
-                tunnel::TunnelHandle::spawn_tailscale(local_port)
+                tunnel::TunnelHandle::spawn_tailscale(local_port, funnel_port)
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!(
@@ -989,7 +1031,9 @@ pub(crate) async fn start_server(
         .unwrap_or("local");
 
     // DNS-rebinding gate.
-    let tunnel_host: Option<String> = tunnel_handle.as_ref().and_then(|h| host_from_url(&h.url));
+    let tunnel_host: Option<String> = tunnel_handle
+        .as_ref()
+        .and_then(|h| authority_from_url(&h.url));
     let (allowed_hosts, allowed_origins) = resolve_access_policy(
         host,
         local_port,
@@ -1052,6 +1096,7 @@ pub(crate) async fn start_server(
         session_service,
         token_manager: Arc::clone(&token_manager),
         login_manager: Arc::clone(&login_manager),
+        mcp_session_secret,
         passkey_manager,
         rate_limiter: Arc::clone(&rate_limiter),
         behind_tunnel: remote || behind_proxy,
@@ -1321,6 +1366,18 @@ pub(crate) async fn start_server(
     }
 
     push::spawn_consumer(state.clone()).await;
+    push::spawn_login_required_consumer(state.clone(), login_notices).await;
+    {
+        let profile = state.served_profile().clone();
+        let scopes = login_helper_scopes(&state).await;
+        state
+            .runtime
+            .work
+            .spawn("server.sandbox_login_sweep", async move {
+                super::sandbox_login::log_login_status(profile).await;
+                super::sandbox_login::sweep_stale_login_helpers(scopes).await;
+            });
+    }
     callback::spawn_consumer(state.clone()).await;
 
     // Report this process's own session commits exactly; the disk consumer covers the rest.

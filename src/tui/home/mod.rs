@@ -334,6 +334,9 @@ pub struct HomeView {
     pub(super) pending_repo_trust_fingerprint: Option<crate::daemon::CreationTrustFingerprint>,
     /// Create without setup, carried through the trust prompt a resubmit reopened.
     pub(super) pending_repo_trust_skip_on_create: bool,
+    /// The setup-failed dialog whose resubmit reopened the trust prompt, so an answer the
+    /// daemon link refuses returns to it instead of losing the request.
+    pub(super) pending_repo_trust_recovery: Option<CreateHookFailedDialog>,
     pub(super) hooks_install_dialog: Option<HooksInstallDialog>,
     pub(super) pending_hooks_install_data: Option<NewSessionData>,
     pub(super) volume_ignores_glob_dialog: Option<ConfirmDialog>,
@@ -404,6 +407,8 @@ pub struct HomeView {
     pub(super) live_takeover: Option<live_send::TakenLive>,
     pub(super) sidebar_collapsed: bool,
     pub(super) sidebar_position: crate::session::config::SidebarPosition,
+
+    pub(super) narrow_layout: crate::session::config::NarrowLayout,
     pub(super) passive_pane_synced: std::collections::HashMap<String, PassiveSynced>,
     pub(super) passive_pane_declined:
         std::collections::HashMap<String, ((u16, u16), std::time::Instant)>,

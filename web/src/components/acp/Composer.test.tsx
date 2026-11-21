@@ -8,6 +8,7 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 
+import { requestComposerPrefill } from "../../lib/composerPrefill";
 import type { PluginUiEntry } from "../../lib/api";
 import type { PromptAttachmentInput, QueuedPrompt } from "../../lib/acpTypes";
 import { buildSkillIndex, type SkillIndex } from "../../lib/skillProvenance";
@@ -124,6 +125,16 @@ describe("toolbar and send", () => {
     expect(send.disabled).toBe(false);
     fireEvent.change(textarea(), { target: { value: "   " } });
     expect(send.disabled).toBe(true);
+  });
+
+  it("sends nothing while blocked, even text a restored draft put there, and says why", () => {
+    const enqueuePrompt = vi.fn();
+    const { textarea } = mount({ blockedReason: "Recreate the container to send messages.", enqueuePrompt });
+    fireEvent.change(textarea(), { target: { value: "restored draft" } });
+    expect([textarea().disabled, textarea().placeholder]).toEqual([true, "Recreate the container to send messages."]);
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -419,5 +430,23 @@ describe("draft persistence", () => {
     fireEvent.change(textarea(), { target: { value: "typed then switched" } });
     unmount();
     expect(stored("sess-a")).toBe("typed then switched");
+  });
+});
+
+describe("file-edit notification", () => {
+  it("appends an explicitly requested notice to a mounted composer without sending", async () => {
+    const enqueuePrompt = vi.fn();
+    const { textarea } = mount({ enqueuePrompt });
+    fireEvent.change(textarea(), { target: { value: "existing draft" } });
+    act(() => requestComposerPrefill("sess", "I edited notes.txt."));
+    await waitFor(() => expect(textarea().value).toBe("existing draft\n\nI edited notes.txt."));
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+  it("keeps a saved draft when a notification waits for the composer to mount", async () => {
+    localStorage.setItem("acp:draft:sess", "saved draft");
+    requestComposerPrefill("other", "other session");
+    requestComposerPrefill("sess", "I edited notes.txt.");
+    const { textarea } = mount();
+    await waitFor(() => expect(textarea().value).toBe("saved draft\n\nI edited notes.txt."));
   });
 });

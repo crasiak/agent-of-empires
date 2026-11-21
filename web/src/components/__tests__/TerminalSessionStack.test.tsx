@@ -110,6 +110,24 @@ describe("TerminalSessionStack", () => {
     });
   });
 
+  it("never detaches a kept terminal when switching, which would reset its scroll to the top", async () => {
+    const activate = await mountThreeKeepingTwo();
+    const stack = screen.getByTestId("terminal-s1").parentElement!.parentElement!;
+    const detached: Node[] = [];
+    const record = (records: MutationRecord[]) => detached.push(...records.flatMap((r) => [...r.removedNodes]));
+    const observer = new MutationObserver(record);
+    observer.observe(stack, { childList: true });
+    for (const id of ["s1", "s2", "s1"]) {
+      activate(id, 2);
+      await waitFor(() => expect(screen.getByTestId(`terminal-${id}`).dataset.active).toBe("true"));
+      await act(async () => {});
+    }
+
+    record(observer.takeRecords());
+    observer.disconnect();
+    expect(detached).toEqual([]);
+  });
+
   it("normalizes configured limits to the supported range", () => {
     expect(normalizePersistentTerminalLimit(0)).toBe(1);
     expect(normalizePersistentTerminalLimit(5.4)).toBe(5);

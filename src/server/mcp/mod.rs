@@ -10,7 +10,11 @@ use rmcp::{
         router::tool::ToolRouter,
         wrapper::{Json, Parameters},
     },
-    model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig},
+    model::{
+        CallToolResult, Implementation, ListToolsResult, PaginatedRequestParams,
+        ServerCapabilities, ServerConfig,
+    },
+    service::{RequestContext, RoleServer},
     transport::streamable_http_server::{
         session::never::NeverSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     },
@@ -19,12 +23,16 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::api::sessions::{list_sessions_envelope, SessionFilter, SessionsView};
+use super::api::sessions::{
+    list_sessions_envelope, session_response_from_instance, SessionFilter, SessionsView,
+};
+use super::auth::AuthenticatedCallerSession;
 use super::state::AppState;
 use crate::daemon::SessionResponse;
 use crate::session::SessionScope;
 
 mod control;
+mod wait;
 
 #[derive(Debug, Default, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -58,7 +66,7 @@ impl McpServer {
     fn new(state: Arc<AppState>) -> Self {
         Self {
             state,
-            tool_router: Self::tool_router() + Self::control_router(),
+            tool_router: Self::tool_router() + Self::control_router() + Self::wait_router(),
         }
     }
 
@@ -84,8 +92,15 @@ impl McpServer {
     #[rmcp::tool(
         description = "The calling session, or null when the caller is not a session AoE launched."
     )]
-    async fn whoami(&self) -> Json<Option<SessionResponse>> {
-        Json(None)
+    async fn whoami(&self, context: RequestContext<RoleServer>) -> Json<Option<SessionResponse>> {
+        let Some(id) = caller_session_id(&context) else {
+            return Json(None);
+        };
+        let instances = self.state.instances.read().await;
+        let response = instances.iter().find(|inst| inst.id == id).map(|inst| {
+            session_response_from_instance(inst, crate::claude_settings::read_tui_fullscreen())
+        });
+        Json(response)
     }
 }
 
@@ -96,6 +111,28 @@ impl ServerHandler for McpServer {
             .with_server_info(Implementation::new("aoe", env!("CARGO_PKG_VERSION")))
             .with_instructions("Read, create and drive Agent of Empires sessions.")
     }
+
+    /// `send_to_parent` is listed only to a caller session with a live parent.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        let mut tools = self.tool_router.list_all();
+        if self.caller_parent(&context).await.is_none() {
+            tools.retain(|tool| tool.name != "send_to_parent");
+        }
+        Ok(ListToolsResult::with_all_items(tools))
+    }
+}
+
+/// The session that made this request with its session credential, if any.
+fn caller_session_id(context: &RequestContext<RoleServer>) -> Option<String> {
+    context
+        .extensions
+        .get::<axum::http::request::Parts>()
+        .and_then(|parts| parts.extensions.get::<AuthenticatedCallerSession>())
+        .map(|AuthenticatedCallerSession(id)| id.clone())
 }
 
 /// A tool error the model can read and act on: `isError` with a stable `code`.

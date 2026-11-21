@@ -26,6 +26,74 @@ fn app(mcp_enabled: bool, prior: Vec<Instance>) -> axum::Router {
     app_with_state(mcp_enabled, prior).0
 }
 
+/// Builds app state with `mcp_enabled` and a session-credential secret, under the given
+/// daemon token policy (`None` means `--auth=none`).
+fn mcp_session_secret_state(
+    prior: Vec<Instance>,
+    token: Option<&str>,
+) -> (
+    std::sync::Arc<super::AppState>,
+    std::sync::Arc<crate::server::session_credential::McpSessionSecret>,
+) {
+    mcp_session_secret_state_configured(prior, token, |_| {})
+}
+
+/// Like [`mcp_session_secret_state`], plus a `configure` callback for tests that need to
+/// mutate other state fields (e.g. `login_manager`) before the state's `Arc` is built.
+fn mcp_session_secret_state_configured(
+    prior: Vec<Instance>,
+    token: Option<&str>,
+    configure: impl FnOnce(&mut super::AppState),
+) -> (
+    std::sync::Arc<super::AppState>,
+    std::sync::Arc<crate::server::session_credential::McpSessionSecret>,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let secret = std::sync::Arc::new(
+        crate::server::session_credential::McpSessionSecret::load_or_generate(
+            &dir.path().join("mcp_session_secret"),
+        )
+        .expect("load_or_generate"),
+    );
+    let secret_for_state = secret.clone();
+    let state = test_support::build_test_app_state_with_policy_configured(
+        prior,
+        vecs(&["localhost"]),
+        Vec::new(),
+        token.map(str::to_string),
+        |state| {
+            state.web_config.mcp_enabled = true;
+            state.mcp_session_secret = Some(secret_for_state);
+            configure(state);
+        },
+    );
+    (state, secret)
+}
+
+/// Like [`app`] with `mcp_enabled`, plus a session-credential secret so a caller can
+/// authenticate as a specific session via `X-AoE-Session` + its HMAC bearer.
+fn app_with_mcp_session_secret(
+    prior: Vec<Instance>,
+) -> (
+    axum::Router,
+    std::sync::Arc<crate::server::session_credential::McpSessionSecret>,
+) {
+    let (state, secret) = mcp_session_secret_state(prior, Some(TOKEN));
+    (test_support::build_router_for_test(state), secret)
+}
+
+/// Like [`app_with_mcp_session_secret`], but with the daemon token gate disabled
+/// (`--auth=none`).
+fn app_with_mcp_session_secret_no_auth(
+    prior: Vec<Instance>,
+) -> (
+    axum::Router,
+    std::sync::Arc<crate::server::session_credential::McpSessionSecret>,
+) {
+    let (state, secret) = mcp_session_secret_state(prior, None);
+    (test_support::build_router_for_test(state), secret)
+}
+
 async fn send(app: &axum::Router, mut req: Request<axum::body::Body>) -> axum::response::Response {
     req.extensions_mut()
         .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
@@ -35,8 +103,14 @@ async fn send(app: &axum::Router, mut req: Request<axum::body::Body>) -> axum::r
     app.clone().oneshot(req).await.unwrap()
 }
 
-/// POST one JSON-RPC message to `/mcp`; returns the status and the JSON-RPC response.
-async fn rpc(app: &axum::Router, token: Option<&str>, body: Value) -> (StatusCode, Option<Value>) {
+/// POST one JSON-RPC message to `/mcp`, with arbitrary extra headers beyond the bearer
+/// (e.g. `X-AoE-Session`); returns the status and the JSON-RPC response.
+async fn rpc_with_headers(
+    app: &axum::Router,
+    token: Option<&str>,
+    extra_headers: &[(&str, &str)],
+    body: Value,
+) -> (StatusCode, Option<Value>) {
     let mut req = Request::builder()
         .method("POST")
         .uri("/mcp")
@@ -45,6 +119,9 @@ async fn rpc(app: &axum::Router, token: Option<&str>, body: Value) -> (StatusCod
         .header(header::ACCEPT, "application/json, text/event-stream");
     if let Some(token) = token {
         req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    for (name, value) in extra_headers {
+        req = req.header(*name, *value);
     }
     let resp = send(
         app,
@@ -56,6 +133,11 @@ async fn rpc(app: &axum::Router, token: Option<&str>, body: Value) -> (StatusCod
         .await
         .unwrap();
     (status, serde_json::from_slice(&bytes).ok())
+}
+
+/// POST one JSON-RPC message to `/mcp`; returns the status and the JSON-RPC response.
+async fn rpc(app: &axum::Router, token: Option<&str>, body: Value) -> (StatusCode, Option<Value>) {
+    rpc_with_headers(app, token, &[], body).await
 }
 
 async fn initialize(app: &axum::Router) {
@@ -269,10 +351,13 @@ async fn tools_list_advertises_each_tool_with_an_output_schema() {
     assert_eq!(
         names,
         [
+            "approve",
             "create_session",
+            "list_approvals",
             "list_sessions",
             "read_output",
             "send",
+            "wait_for",
             "whoami"
         ]
     );
@@ -321,6 +406,296 @@ async fn tools_list_advertises_each_tool_with_an_output_schema() {
 async fn whoami_is_null() {
     let app = app(true, vec![]);
     assert_eq!(call(&app, "whoami", json!({})).await, Value::Null);
+}
+
+/// The daemon-wide bearer still authenticates `/mcp` with no `X-AoE-Session` header, even
+/// once a session-credential secret exists; `whoami` has no caller identity to report.
+#[tokio::test]
+async fn whoami_is_null_for_the_plain_daemon_bearer_even_with_a_secret_configured() {
+    let (app, _secret) = app_with_mcp_session_secret(vec![]);
+    assert_eq!(call(&app, "whoami", json!({})).await, Value::Null);
+}
+
+/// `--auth=none` skips the token gate entirely, but a caller presenting a valid session
+/// credential should still resolve its own identity.
+#[tokio::test]
+async fn whoami_resolves_the_calling_session_under_auth_none() {
+    let inst = session_in("caller", "work", None);
+    let id = inst.id.clone();
+    let (app, secret) = app_with_mcp_session_secret_no_auth(vec![inst]);
+    let bearer = secret.credential_for(&id);
+
+    let (status, message) = rpc_with_headers(
+        &app,
+        Some(&bearer),
+        &[("x-aoe-session", &id)],
+        tools_call(1, "whoami", json!({})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let result = message.unwrap()["result"].clone();
+    assert_ne!(result["isError"], json!(true), "{result}");
+    assert_eq!(result["structuredContent"]["id"], id);
+}
+
+/// `--auth=passphrase` bypasses the passphrase wall entirely for a real Unix-socket peer
+/// (the common case for an agent calling its own daemon); that bypass must not also
+/// suppress caller-session identity for a request that otherwise carries a valid
+/// credential.
+#[tokio::test]
+async fn whoami_resolves_the_calling_session_under_auth_passphrase_on_loopback() {
+    let inst = session_in("caller", "work", None);
+    let id = inst.id.clone();
+    let (state, secret) = mcp_session_secret_state_configured(vec![inst], None, |state| {
+        state.login_manager =
+            std::sync::Arc::new(crate::server::login::LoginManager::new(Some("passphrase")));
+    });
+    let app = test_support::build_router_for_test(state);
+    let bearer = secret.credential_for(&id);
+
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .header("x-aoe-session", &id)
+        .body(axum::body::Body::from(
+            tools_call(1, "whoami", json!({})).to_string(),
+        ))
+        .unwrap();
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        crate::server::peer::ConnectionPeer::UnixOwner {
+            uid: nix::unistd::geteuid().as_raw(),
+        },
+    ));
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let message: Option<Value> = serde_json::from_slice(&bytes).ok();
+
+    assert_eq!(status, StatusCode::OK);
+    let result = message.unwrap()["result"].clone();
+    assert_ne!(result["isError"], json!(true), "{result}");
+    assert_eq!(result["structuredContent"]["id"], id);
+}
+
+/// Off-box, a valid session credential must not bypass the passphrase wall: that wall
+/// exists precisely to stop a leaked credential from being used remotely.
+#[tokio::test]
+async fn session_credential_does_not_bypass_the_passphrase_wall_for_a_remote_caller() {
+    let inst = session_in("caller", "work", None);
+    let id = inst.id.clone();
+    let (state, secret) = mcp_session_secret_state_configured(vec![inst], None, |state| {
+        state.login_manager =
+            std::sync::Arc::new(crate::server::login::LoginManager::new(Some("passphrase")));
+    });
+    let app = test_support::build_router_for_test(state);
+    let bearer = secret.credential_for(&id);
+
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .header("x-aoe-session", &id)
+        .body(axum::body::Body::from(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        ))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [203, 0, 113, 7],
+            5555,
+        ))));
+    let resp = app.oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"], "login_required");
+}
+
+/// A browser-authenticated request (valid device-bound login session) that also happens to
+/// carry a valid `/mcp` session credential must still resolve caller identity: the two are
+/// orthogonal, and this is the one dispatch path that grants access without ever reaching
+/// `attach_caller_session`.
+#[tokio::test]
+async fn whoami_resolves_the_calling_session_for_a_browser_authenticated_request() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+
+    let inst = session_in("caller", "work", None);
+    let id = inst.id.clone();
+    let login = std::sync::Arc::new(crate::server::login::LoginManager::new(Some("passphrase")));
+    let binding = [0xAB; 32];
+    let browser_session_id = login
+        .create_session(&binding, "203.0.113.7", "test-agent")
+        .await;
+    let (state, secret) = mcp_session_secret_state_configured(vec![inst], Some(TOKEN), |state| {
+        state.login_manager = login;
+    });
+    let app = test_support::build_router_for_test(state);
+    let bearer = secret.credential_for(&id);
+
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json, text/event-stream")
+        .header("cookie", format!("aoe_session={browser_session_id}"))
+        .header("x-aoe-device-binding", URL_SAFE_NO_PAD.encode(binding))
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .header("x-aoe-session", &id)
+        .body(axum::body::Body::from(
+            tools_call(1, "whoami", json!({})).to_string(),
+        ))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [203, 0, 113, 7],
+            5555,
+        ))));
+    let resp = app.oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let message: Value = serde_json::from_slice(&bytes).unwrap();
+    let result = message["result"].clone();
+    assert_ne!(result["isError"], json!(true), "{result}");
+    assert_eq!(result["structuredContent"]["id"], id);
+}
+
+fn tools_call(id: i64, name: &str, arguments: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments}
+    })
+}
+
+#[tokio::test]
+async fn whoami_resolves_the_calling_session_for_a_valid_credential() {
+    let inst = session_in("caller", "work", None);
+    let id = inst.id.clone();
+    let (app, secret) = app_with_mcp_session_secret(vec![inst]);
+    let bearer = secret.credential_for(&id);
+
+    let (status, message) = rpc_with_headers(
+        &app,
+        Some(&bearer),
+        &[("x-aoe-session", &id)],
+        tools_call(1, "whoami", json!({})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let result = message.unwrap()["result"].clone();
+    assert_ne!(result["isError"], json!(true), "{result}");
+    assert_eq!(result["structuredContent"]["id"], id);
+}
+
+#[tokio::test]
+async fn session_credential_is_rejected_when_the_header_names_a_different_session() {
+    let a = session_in("a", "work", None);
+    let b = session_in("b", "work", None);
+    let (a_id, b_id) = (a.id.clone(), b.id.clone());
+    let (app, secret) = app_with_mcp_session_secret(vec![a, b]);
+    // Bearer is valid for `a`, but the header claims to be `b`.
+    let bearer_for_a = secret.credential_for(&a_id);
+
+    let (status, _) = rpc_with_headers(
+        &app,
+        Some(&bearer_for_a),
+        &[("x-aoe-session", &b_id)],
+        tools_call(1, "whoami", json!({})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn session_credential_is_rejected_for_an_unknown_session() {
+    let (app, secret) = app_with_mcp_session_secret(vec![]);
+    let bearer = secret.credential_for("no-such-session");
+
+    let (status, _) = rpc_with_headers(
+        &app,
+        Some(&bearer),
+        &[("x-aoe-session", "no-such-session")],
+        tools_call(1, "whoami", json!({})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn session_credential_is_rejected_for_a_trashed_session() {
+    let mut inst = session_in("trashed", "work", None);
+    inst.trash();
+    let id = inst.id.clone();
+    let (app, secret) = app_with_mcp_session_secret(vec![inst]);
+    let bearer = secret.credential_for(&id);
+
+    let (status, _) = rpc_with_headers(
+        &app,
+        Some(&bearer),
+        &[("x-aoe-session", &id)],
+        tools_call(1, "whoami", json!({})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn session_credential_is_rejected_for_an_archived_session() {
+    let mut inst = session_in("archived", "work", None);
+    inst.archive();
+    let id = inst.id.clone();
+    let (app, secret) = app_with_mcp_session_secret(vec![inst]);
+    let bearer = secret.credential_for(&id);
+
+    let (status, _) = rpc_with_headers(
+        &app,
+        Some(&bearer),
+        &[("x-aoe-session", &id)],
+        tools_call(1, "whoami", json!({})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn session_credential_is_rejected_when_the_bearer_does_not_match_the_hmac() {
+    let inst = session_in("caller", "work", None);
+    let id = inst.id.clone();
+    let (app, _secret) = app_with_mcp_session_secret(vec![inst]);
+
+    let (status, _) = rpc_with_headers(
+        &app,
+        Some("not-the-real-hmac"),
+        &[("x-aoe-session", &id)],
+        tools_call(1, "whoami", json!({})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -588,6 +963,10 @@ async fn mutating_tools_refuse_while_read_only() {
             "create_session",
             json!({"path": "/tmp", "tool": "claude", "view": "structured"}),
         ),
+        (
+            "approve",
+            json!({"session_id": id, "nonce": "n", "decision": "allow"}),
+        ),
     ];
     for (tool, arguments) in refused {
         let result = call_result(&app, tool, arguments).await;
@@ -603,8 +982,8 @@ async fn mutating_tools_refuse_while_read_only() {
     assert_eq!(read["view"], "structured");
 }
 
-/// A structured create stores its prompt as the pending initial turn and its parent link; a
-/// refusal comes back with the HTTP error code it carried.
+/// A structured create stores its prompt as the pending initial turn and its parent link, which
+/// defaults to the calling session; a refusal comes back with the HTTP error code it carried.
 #[tokio::test]
 #[serial_test::serial]
 async fn create_session_stores_a_structured_prompt_and_its_parent() {
@@ -625,15 +1004,31 @@ async fn create_session_stores_a_structured_prompt_and_its_parent() {
     child.id = "child".into();
     child.source_profile = "test".into();
     child.parent_session_id = Some("parent".into());
+    let mut elsewhere = Instance::new("elsewhere", "/tmp/aoe-mcp-elsewhere");
+    elsewhere.id = "elsewhere".into();
+    elsewhere.source_profile = "other".into();
     test_support::seed_instances_on_disk_for_test("test", vec![parent.clone(), child.clone()]);
+    test_support::seed_instances_on_disk_for_test("other", vec![elsewhere.clone()]);
     let (launcher, _launches) = test_support::counting_failing_launcher();
+    let secret = std::sync::Arc::new(
+        crate::server::session_credential::McpSessionSecret::load_or_generate(
+            &crate::session::get_app_dir()
+                .unwrap()
+                .join("mcp_session_secret"),
+        )
+        .unwrap(),
+    );
+    let state_secret = secret.clone();
     let state = test_support::build_test_app_state_impl(
-        vec![parent, child],
+        vec![parent, child, elsewhere],
         vecs(&["localhost"]),
         Vec::new(),
         Some(TOKEN.to_string()),
         false,
-        |state| state.web_config.mcp_enabled = true,
+        |state| {
+            state.web_config.mcp_enabled = true;
+            state.mcp_session_secret = Some(state_secret);
+        },
         |supervisor| supervisor.with_launcher(launcher),
     );
     test_support::refresh_canonical_metadata_for_test(&state).await;
@@ -664,7 +1059,7 @@ async fn create_session_stores_a_structured_prompt_and_its_parent() {
     for (path, parent_id, code) in refusals {
         let refused = call_result(&app, "create_session", create(path, parent_id)).await;
         assert_eq!(error_code(&refused), Some(code), "{refused}");
-        assert_eq!(state.instances.read().await.len(), 2, "{code}");
+        assert_eq!(state.instances.read().await.len(), 3, "{code}");
     }
 
     let created = call(&app, "create_session", create(project.path(), "parent")).await;
@@ -685,6 +1080,34 @@ async fn create_session_stores_a_structured_prompt_and_its_parent() {
         row.pending_initial_turn.map(|turn| turn.text).as_deref(),
         Some("review the diff")
     );
+
+    // A caller that names no parent becomes it only where an explicit parent would pass.
+    // (caller, extra arguments, parent, group)
+    let cases = [
+        ("parent", json!({}), Some("parent"), "team"),
+        ("child", json!({}), None, ""),
+        ("parent", json!({"group": "reviews"}), None, "reviews"),
+        ("elsewhere", json!({}), None, ""),
+    ];
+    for (n, (caller, extra, parent, group)) in cases.into_iter().enumerate() {
+        let mut arguments = json!({
+            "path": project.path(), "tool": "claude", "view": "structured", "title": "spawned",
+        });
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let call = tools_call(4 + n as i64, "create_session", arguments);
+        let created = rpc_as(&app, &secret, caller, call).await;
+        assert_ne!(created["isError"], json!(true), "{caller}: {created}");
+        let id = created["structuredContent"]["session"]["id"]
+            .as_str()
+            .unwrap();
+        let rows = state.instances.read().await;
+        let row = rows.iter().find(|row| row.id == id).unwrap();
+        assert_eq!(row.parent_session_id.as_deref(), parent, "{caller} {extra}");
+        assert_eq!(row.group_path, group, "{caller} {extra}");
+    }
 }
 
 /// A terminal session's `send` and `read_output` refuse what HTTP refuses, and read a live pane.
@@ -697,8 +1120,12 @@ async fn terminal_sessions_send_and_read_through_their_pane() {
     let mut stopped = Instance::new("mcp-stopped", "/tmp/aoe-mcp-stopped");
     stopped.source_profile = "default".into();
     let (live_id, stopped_id) = (live.id.clone(), stopped.id.clone());
+    let mut child = Instance::new("mcp-pane-child", "/tmp/aoe-mcp-pane-child");
+    child.source_profile = "default".into();
+    child.parent_session_id = Some(live_id.clone());
+    let child_id = child.id.clone();
     let pane = live.tmux_session().unwrap();
-    let (app, _state) = seeded_app(vec![live, stopped], false).await;
+    let (app, _state, secret) = seeded_app_with_secret(vec![live, stopped, child], false).await;
 
     // (tool, arguments, error code)
     let refusals = [
@@ -776,6 +1203,13 @@ async fn terminal_sessions_send_and_read_through_their_pane() {
     assert_eq!(sent["disposition"], "sent", "{sent}");
     assert!(sent.get("seq").is_none(), "{sent}");
     pane_shows("typed-by-mcp").await;
+
+    // A terminal parent gets `send_to_parent` typed into its pane, as `send` types it.
+    let call = tools_call(9, "send_to_parent", json!({"message": "from-the-child\n"}));
+    let sent = rpc_as(&app, &secret, &child_id, call).await;
+    assert_eq!(sent["structuredContent"]["disposition"], "sent", "{sent}");
+    assert!(sent["structuredContent"].get("seq").is_none(), "{sent}");
+    pane_shows("from-the-child").await;
 }
 
 /// A retried `idempotency_key` answers with the first create's session and delivers nothing:
@@ -948,4 +1382,519 @@ async fn create_session_refuses_an_empty_prompt() {
         );
     }
     assert!(state.instances.read().await.is_empty());
+}
+
+fn approval_requested(
+    nonce: &str,
+    options: Vec<crate::acp::approvals::ApprovalOption>,
+) -> crate::acp::Event {
+    use crate::acp::approvals::{is_choice_list, Approval, Nonce};
+    crate::acp::Event::ApprovalRequested {
+        approval: Approval {
+            nonce: Nonce(nonce.into()),
+            tool_call: crate::acp::state::ToolCall {
+                id: format!("call-{nonce}"),
+                name: "Bash".into(),
+                kind: "execute".into(),
+                args_preview: json!({"command": "cargo test\nmore"}).to_string(),
+                prompt: None,
+                started_at: chrono::Utc::now(),
+                parent_tool_call_id: None,
+                memory_recall: None,
+                diffs: Vec::new(),
+            },
+            destructive: false,
+            choice: is_choice_list(&options),
+            options,
+            plan: None,
+            requested_at: chrono::Utc::now(),
+            resolved: None,
+        },
+    }
+}
+
+/// Waits until a `wait_for` has subscribed to the status broadcast.
+async fn await_subscriber(state: &crate::server::AppState, before: usize) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while state.status_tx.receiver_count() == before {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "wait_for never subscribed"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Moves a session's status as the daemon does: in the store, then on the broadcast.
+async fn move_status(state: &crate::server::AppState, id: &str, to: crate::session::Status) {
+    let mut instances = state.instances.write().await;
+    let inst = instances.iter_mut().find(|i| i.id == id).unwrap();
+    let old = inst.status;
+    inst.status = to;
+    crate::server::push::publish_status_change(&state.status_tx, inst, old);
+}
+
+/// `wait_for` answers a broadcast status change at once, and the current status with
+/// `timed_out` when the deadline passes first.
+#[tokio::test]
+#[serial_test::serial]
+async fn wait_for_returns_on_a_status_broadcast_or_times_out() {
+    use crate::session::Status;
+    let _guard = crate::session::test_support::isolate_app_dir();
+    let id = "mcp-wait";
+    let mut session = structured_session(id);
+    session.status = Status::Running;
+    let (app, state) = seeded_app(vec![session], false).await;
+
+    let timed_out = call(&app, "wait_for", json!({"session_id": id, "timeout_s": 0})).await;
+    assert_eq!(timed_out["status"], "Running", "{timed_out}");
+    assert_eq!(timed_out["timed_out"], true);
+    assert_eq!(timed_out["pending_approvals"], json!([]));
+
+    let subscribers = state.status_tx.receiver_count();
+    let waiter = tokio::spawn({
+        let app = app.clone();
+        async move {
+            call(
+                &app,
+                "wait_for",
+                json!({"session_id": id, "timeout_s": 300}),
+            )
+            .await
+        }
+    });
+    await_subscriber(&state, subscribers).await;
+    // A status outside `states` does not end the wait.
+    move_status(&state, id, Status::Starting).await;
+    move_status(&state, id, Status::Idle).await;
+    let woke = tokio::time::timeout(std::time::Duration::from_secs(10), waiter)
+        .await
+        .expect("wait_for returned on the broadcast")
+        .unwrap();
+    assert_eq!(woke["status"], "Idle", "{woke}");
+    assert_eq!(woke["timed_out"], false);
+
+    let unknown = call_result(
+        &app,
+        "wait_for",
+        json!({"session_id": "nope", "timeout_s": 0}),
+    )
+    .await;
+    assert_eq!(error_code(&unknown), Some("not_found"));
+
+    // A session being deleted is gone, whether the wait sees it start or end that way, and
+    // even when `states` names it.
+    let subscribers = state.status_tx.receiver_count();
+    let waiter = tokio::spawn({
+        let app = app.clone();
+        async move {
+            call_result(
+                &app,
+                "wait_for",
+                json!({"session_id": id, "states": ["Running"], "timeout_s": 300}),
+            )
+            .await
+        }
+    });
+    await_subscriber(&state, subscribers).await;
+    move_status(&state, id, Status::Deleting).await;
+    let deleted = tokio::time::timeout(std::time::Duration::from_secs(10), waiter)
+        .await
+        .expect("wait_for returned on the deletion")
+        .unwrap();
+    assert_eq!(error_code(&deleted), Some("not_found"), "{deleted}");
+    for timeout_s in [0, 300] {
+        let named = call_result(
+            &app,
+            "wait_for",
+            json!({"session_id": id, "states": ["Deleting"], "timeout_s": timeout_s}),
+        )
+        .await;
+        assert_eq!(error_code(&named), Some("not_found"), "{named}");
+    }
+}
+
+/// With `after_seq`, an `Idle` read before that turn ended is the previous turn's, so the
+/// wait goes on; once the turn ends the result carries the transcript after the prompt.
+#[tokio::test]
+#[serial_test::serial]
+async fn wait_for_after_seq_waits_for_that_turn_and_returns_its_messages() {
+    let _guard = crate::session::test_support::isolate_app_dir();
+    let id = "mcp-wait-seq";
+    let (app, state) = seeded_app(vec![structured_session(id)], false).await;
+    let prompt = user_prompt("what is two plus two");
+    seed_events(&state, id, std::slice::from_ref(&prompt));
+    let args = json!({"session_id": id, "after_seq": 1, "timeout_s": 0});
+
+    let pending = call(&app, "wait_for", args).await;
+    assert_eq!(pending["status"], "Idle", "{pending}");
+    assert_eq!(pending["timed_out"], true, "{pending}");
+
+    let subscribers = state.status_tx.receiver_count();
+    let waiter = tokio::spawn({
+        let app = app.clone();
+        async move {
+            call(
+                &app,
+                "wait_for",
+                json!({"session_id": id, "after_seq": 1, "timeout_s": 300}),
+            )
+            .await
+        }
+    });
+    await_subscriber(&state, subscribers).await;
+    let rest = [
+        crate::acp::Event::AgentMessageChunk {
+            text: "four".into(),
+            message_id: None,
+        },
+        crate::acp::Event::Stopped {
+            reason: "end_turn".into(),
+        },
+    ];
+    for (seq, event) in (2..).zip(&rest) {
+        state.acp_event_store.record(id, seq, event).expect("seed");
+    }
+    move_status(&state, id, crate::session::Status::Running).await;
+    move_status(&state, id, crate::session::Status::Idle).await;
+    let done = tokio::time::timeout(std::time::Duration::from_secs(10), waiter)
+        .await
+        .expect("wait_for returned once the turn ended")
+        .unwrap();
+    assert_eq!(done["status"], "Idle", "{done}");
+    assert_eq!(done["timed_out"], false, "{done}");
+    let messages = done["messages"].as_str().unwrap();
+    assert!(messages.contains("four"), "{messages}");
+    assert!(!messages.contains("two plus two"), "{messages}");
+    assert_eq!(done["next_since"], 3);
+    assert_eq!(done["has_more"], false);
+}
+
+/// Approvals seeded through the event log are listed, by `wait_for` too, and each decision
+/// kind reaches the agent; a choice list takes only a named option, and an unknown nonce errors.
+#[tokio::test]
+#[serial_test::serial]
+async fn approvals_are_listed_and_settled_by_nonce() {
+    use crate::acp::approvals::{ApprovalDecision, ApprovalOption, ApprovalOptionKind};
+    let _guard = crate::session::test_support::isolate_app_dir();
+    let id = "mcp-approve";
+    let mut session = structured_session(id);
+    session.status = crate::session::Status::Waiting;
+    let (app, state) = seeded_app(vec![session], false).await;
+
+    // Without a running worker nothing can settle them, so none are listed.
+    let answers = vec![
+        ApprovalOption {
+            option_id: "red".into(),
+            name: "Red".into(),
+            kind: ApprovalOptionKind::AllowOnce,
+        },
+        ApprovalOption {
+            option_id: "blue".into(),
+            name: "Blue".into(),
+            kind: ApprovalOptionKind::AllowOnce,
+        },
+    ];
+    let nonces = ["n-allow", "n-always", "n-deny", "n-choice"];
+    let events: Vec<_> = nonces
+        .iter()
+        .map(|nonce| {
+            let options = if *nonce == "n-choice" {
+                answers.clone()
+            } else {
+                Vec::new()
+            };
+            approval_requested(nonce, options)
+        })
+        .collect();
+    seed_events(&state, id, &events);
+    let listed = call(&app, "list_approvals", json!({"session_id": id})).await;
+    assert_eq!(listed["approvals"], json!([]), "{listed}");
+    let no_worker = call_result(
+        &app,
+        "approve",
+        json!({"session_id": id, "nonce": "n-allow", "decision": "allow"}),
+    )
+    .await;
+    assert_eq!(error_code(&no_worker), Some("not_running"), "{no_worker}");
+
+    let _cmds = state
+        .acp_supervisor
+        .test_insert_worker_cmd_recording(id)
+        .await;
+    let mut parked = std::collections::HashMap::new();
+    for nonce in nonces {
+        parked.insert(
+            nonce,
+            state.acp_supervisor.test_park_approval(id, nonce).await,
+        );
+    }
+
+    let listed = call(&app, "list_approvals", json!({"session_id": id})).await;
+    let approvals = listed["approvals"].as_array().unwrap();
+    let listed_nonces: Vec<&str> = approvals
+        .iter()
+        .map(|a| a["nonce"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed_nonces, nonces);
+    assert_eq!(approvals[0]["tool_name"], "Bash");
+    assert_eq!(approvals[0]["summary"], "cargo test");
+    assert_eq!(approvals[3]["choice"], true);
+    assert_eq!(approvals[3]["options"][1]["option_id"], "blue");
+    assert_eq!(approvals[3]["options"][1]["kind"], "allow_once");
+
+    let waited = call(&app, "wait_for", json!({"session_id": id, "timeout_s": 0})).await;
+    assert_eq!(waited["status"], "Waiting", "{waited}");
+    assert_eq!(waited["timed_out"], false);
+    assert_eq!(waited["pending_approvals"].as_array().unwrap().len(), 4);
+
+    // (arguments, error code) for refusals that leave the approval pending.
+    let refused = [
+        (
+            json!({"nonce": "n-choice", "decision": "allow"}),
+            "invalid_request",
+        ),
+        (
+            json!({"nonce": "n-choice", "decision": "option"}),
+            "invalid_request",
+        ),
+        (
+            json!({"nonce": "n-choice", "decision": "option", "option_id": "green"}),
+            "invalid_request",
+        ),
+        (
+            json!({"nonce": "n-unknown", "decision": "allow"}),
+            "not_found",
+        ),
+    ];
+    for (mut arguments, code) in refused {
+        arguments["session_id"] = id.into();
+        let result = call_result(&app, "approve", arguments.clone()).await;
+        assert_eq!(error_code(&result), Some(code), "{arguments}: {result}");
+    }
+
+    // (nonce, arguments, what the agent receives)
+    let settled = [
+        (
+            "n-allow",
+            json!({"decision": "allow"}),
+            (ApprovalDecision::Allow, None),
+        ),
+        (
+            "n-always",
+            json!({"decision": "always"}),
+            (ApprovalDecision::AllowAlways, None),
+        ),
+        (
+            "n-deny",
+            json!({"decision": "deny"}),
+            (ApprovalDecision::Deny, None),
+        ),
+        (
+            "n-choice",
+            json!({"decision": "option", "option_id": "blue"}),
+            (ApprovalDecision::Allow, Some("blue".to_string())),
+        ),
+    ];
+    for (nonce, mut arguments, want) in settled {
+        arguments["session_id"] = id.into();
+        arguments["nonce"] = nonce.into();
+        let approved = call(&app, "approve", arguments).await;
+        assert_eq!(approved["approved"], true, "{nonce}");
+        let answer = parked.remove(nonce).unwrap().await.unwrap();
+        assert_eq!(answer, Some(want), "{nonce}");
+    }
+
+    // The log still lists it until the agent records the resolution, but the agent no longer
+    // holds the nonce.
+    let again = call_result(
+        &app,
+        "approve",
+        json!({"session_id": id, "nonce": "n-allow", "decision": "allow"}),
+    )
+    .await;
+    assert_eq!(error_code(&again), Some("not_found"), "{again}");
+}
+
+/// A terminal session has no approvals or turns: none are listed, `approve` is refused, and
+/// `after_seq` is ignored.
+#[tokio::test]
+#[serial_test::serial]
+async fn terminal_sessions_have_no_approvals() {
+    let _guard = crate::session::test_support::isolate_app_dir();
+    let mut session = Instance::new("term", "/tmp/aoe-term");
+    session.source_profile = "default".into();
+    let id = session.id.clone();
+    let (app, _state) = seeded_app(vec![session], false).await;
+
+    let listed = call(&app, "list_approvals", json!({"session_id": id})).await;
+    assert_eq!(listed["approvals"], json!([]));
+    // It has no event seqs, so `after_seq` does not hold an `Idle` wait open.
+    let waited = call(
+        &app,
+        "wait_for",
+        json!({"session_id": id, "after_seq": 5, "timeout_s": 0}),
+    )
+    .await;
+    assert_eq!(waited["status"], "Idle", "{waited}");
+    assert_eq!(waited["timed_out"], false, "{waited}");
+    assert!(waited.get("messages").is_none(), "{waited}");
+    let refused = call_result(
+        &app,
+        "approve",
+        json!({"session_id": id, "nonce": "n", "decision": "allow"}),
+    )
+    .await;
+    assert_eq!(error_code(&refused), Some("invalid_request"), "{refused}");
+}
+
+/// [`seeded_app`] with a session-credential secret, so a test can call as a seeded session.
+async fn seeded_app_with_secret(
+    prior: Vec<Instance>,
+    read_only: bool,
+) -> (
+    axum::Router,
+    std::sync::Arc<crate::server::AppState>,
+    std::sync::Arc<crate::server::session_credential::McpSessionSecret>,
+) {
+    crate::session::purge_owners::initialize(&crate::session::get_app_dir().unwrap()).unwrap();
+    test_support::seed_instances_on_disk_for_test("default", prior.clone());
+    let (state, secret) = mcp_session_secret_state_configured(prior, Some(TOKEN), |state| {
+        state.read_only = read_only;
+    });
+    test_support::refresh_canonical_metadata_for_test(&state).await;
+    (
+        test_support::build_router_for_test(state.clone()),
+        state,
+        secret,
+    )
+}
+
+/// One JSON-RPC request made as session `id` with its credential; returns its `result`.
+async fn rpc_as(
+    app: &axum::Router,
+    secret: &crate::server::session_credential::McpSessionSecret,
+    id: &str,
+    body: Value,
+) -> Value {
+    let bearer = secret.credential_for(id);
+    let (status, message) =
+        rpc_with_headers(app, Some(&bearer), &[("x-aoe-session", id)], body).await;
+    assert_eq!(status, StatusCode::OK);
+    message.unwrap()["result"].clone()
+}
+
+/// `send_to_parent` is listed only to a caller whose parent is live, refuses any other caller
+/// with `no_parent`, and otherwise delivers into the parent as `send` does.
+#[tokio::test]
+#[serial_test::serial]
+async fn send_to_parent_is_listed_and_delivers_only_for_a_live_parent() {
+    let _guard = crate::session::test_support::isolate_app_dir();
+    let parent = structured_session("mcp-parent");
+    let mut child = structured_session("mcp-child");
+    child.parent_session_id = Some(parent.id.clone());
+    let orphan = structured_session("mcp-orphan");
+    let mut trashed_parent = structured_session("mcp-trashed-parent");
+    trashed_parent.trash();
+    let mut stranded = structured_session("mcp-stranded");
+    stranded.parent_session_id = Some(trashed_parent.id.clone());
+    let mut archived_parent = structured_session("mcp-archived-parent");
+    archived_parent.archive();
+    let mut shelved = structured_session("mcp-shelved");
+    shelved.parent_session_id = Some(archived_parent.id.clone());
+    let mut dangling = structured_session("mcp-dangling");
+    dangling.parent_session_id = Some("no-such-session".into());
+    let rows = vec![
+        parent,
+        child,
+        orphan,
+        trashed_parent,
+        stranded,
+        archived_parent,
+        shelved,
+        dangling,
+    ];
+    let (app, state, secret) = seeded_app_with_secret(rows, false).await;
+    let _cmds = state
+        .acp_supervisor
+        .test_insert_worker_cmd_recording("mcp-parent")
+        .await;
+
+    let message = json!({"message": "child is done"});
+    // (caller, listed); `None` is the plain daemon bearer.
+    let cases = [
+        (None, false),
+        (Some("mcp-orphan"), false),
+        (Some("mcp-stranded"), false),
+        (Some("mcp-shelved"), false),
+        (Some("mcp-dangling"), false),
+        (Some("mcp-child"), true),
+    ];
+    for (caller, listed) in cases {
+        let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let call = tools_call(2, "send_to_parent", message.clone());
+        let (tools, result) = match caller {
+            Some(id) => (
+                rpc_as(&app, &secret, id, list).await,
+                rpc_as(&app, &secret, id, call).await,
+            ),
+            None => (
+                rpc(&app, Some(TOKEN), list).await.1.unwrap()["result"].clone(),
+                call_result(&app, "send_to_parent", message.clone()).await,
+            ),
+        };
+        let names: Vec<&str> = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.contains(&"send_to_parent"), listed, "{caller:?}");
+        if listed {
+            let sent = &result["structuredContent"];
+            assert_eq!(sent["disposition"], "sent", "{result}");
+            let recorded = state
+                .acp_event_store
+                .replay_from("mcp-parent", 0)
+                .into_iter()
+                .find_map(|(seq, e)| {
+                    matches!(&e, crate::acp::Event::UserPromptSent { text, .. } if text == "child is done")
+                        .then_some(seq)
+                });
+            assert!(recorded.is_some(), "{result}");
+            assert_eq!(sent["seq"].as_u64(), recorded, "{result}");
+        } else {
+            assert_eq!(
+                error_code(&result),
+                Some("no_parent"),
+                "{caller:?}: {result}"
+            );
+        }
+    }
+    for id in ["mcp-trashed-parent", "mcp-archived-parent"] {
+        assert!(state.acp_event_store.replay_from(id, 0).is_empty(), "{id}");
+    }
+
+    // Read-only refuses it before anything is delivered.
+    let (app, state, secret) = seeded_app_with_secret(
+        vec![structured_session("mcp-parent"), {
+            let mut child = structured_session("mcp-child");
+            child.parent_session_id = Some("mcp-parent".into());
+            child
+        }],
+        true,
+    )
+    .await;
+    let result = rpc_as(
+        &app,
+        &secret,
+        "mcp-child",
+        tools_call(3, "send_to_parent", message),
+    )
+    .await;
+    assert_eq!(error_code(&result), Some("read_only"), "{result}");
+    assert!(state
+        .acp_event_store
+        .replay_from("mcp-parent", 0)
+        .is_empty());
 }
