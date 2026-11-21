@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
 use tui_input::backend::crossterm::EventHandler;
 
-use crate::session::tailored::{history::HistoryEntry, CaptureAccount};
+use crate::session::tailored::{history::HistoryEntry, quick::QuickPreset, CaptureAccount};
 use crate::tui::styles::Theme;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -12,6 +12,7 @@ pub(super) enum HistoryAction {
     Research,
     Workshop,
     Document,
+    Quick(QuickPreset),
     Open(String),
     Visibility { id: String, hidden: bool },
 }
@@ -22,6 +23,7 @@ enum Item {
     Research,
     Workshop,
     Document,
+    Quick(QuickPreset),
     Session(HistoryEntry),
 }
 
@@ -50,6 +52,11 @@ impl HistoryPicker {
         }
         if !self.hidden && "skill workshop".contains(&query) {
             items.push(Item::Workshop);
+        }
+        for preset in [QuickPreset::Work, QuickPreset::Personal] {
+            if !self.hidden && preset.title().to_lowercase().contains(&query) {
+                items.push(Item::Quick(preset));
+            }
         }
         items.extend(
             self.rows
@@ -113,6 +120,7 @@ impl HistoryPicker {
                     Some(Item::Research) => HistoryAction::Research,
                     Some(Item::Workshop) => HistoryAction::Workshop,
                     Some(Item::Document) => HistoryAction::Document,
+                    Some(Item::Quick(preset)) => HistoryAction::Quick(*preset),
                     Some(Item::Session(entry)) => HistoryAction::Open(entry.id.clone()),
                     None => HistoryAction::None,
                 }
@@ -159,15 +167,15 @@ impl HistoryPicker {
         .split(inner);
         frame.render_widget(
             Paragraph::new(self.query.value())
-                .block(Block::bordered().title(" Find a preset or previous capture ")),
+                .block(Block::bordered().title(" Find a preset or previous Session ")),
             rows[0],
         );
         self.toggle = rows[1];
         frame.render_widget(
             Paragraph::new(if self.hidden {
-                "Hidden captures · F3 show recent · Restore does not start a Session"
+                "Hidden Sessions · F3 show recent · Restore does not start a Session"
             } else {
-                "Recent captures · F3 show hidden · Hide never stops or deletes a Session"
+                "Recent Sessions · F3 show hidden · Hide never stops or deletes a Session"
             })
             .style(Style::default().fg(theme.dimmed)),
             rows[1],
@@ -177,7 +185,7 @@ impl HistoryPicker {
         let visible = (rows[2].height as usize / 2).max(1);
         let start = self.selected.saturating_sub(visible.saturating_sub(1));
         if items.is_empty() {
-            frame.render_widget(Paragraph::new("No matching captures"), rows[2]);
+            frame.render_widget(Paragraph::new("No matching Sessions"), rows[2]);
         }
         for (index, item) in items.iter().enumerate().skip(start).take(visible) {
             let y = rows[2].y + ((index - start) * 2) as u16;
@@ -198,6 +206,11 @@ impl HistoryPicker {
                 Style::default().fg(theme.text)
             };
             let (title, detail, action) = match item {
+                Item::Quick(preset) => (
+                    format!("+ {}", preset.title()),
+                    "Blank Pi conversation at ~/knowledge · model defaults from Ledger".into(),
+                    HistoryAction::Quick(*preset),
+                ),
                 Item::Document => (
                     "+ Document chat".into(),
                     "Public Markdown/PDF link, direct tool-free conversation".into(),
@@ -303,6 +316,37 @@ mod tests {
         KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
     }
     #[test]
+    fn quick_tiles_filter_and_activate_by_keyboard_and_mouse_but_not_hidden_history() {
+        for preset in [QuickPreset::Work, QuickPreset::Personal] {
+            let mut picker = HistoryPicker::default();
+            picker.handle_paste(preset.title());
+            assert_eq!(picker.items().len(), 1);
+            assert_eq!(
+                picker.handle_key(key(KeyCode::Enter)),
+                HistoryAction::Quick(preset)
+            );
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            terminal
+                .draw(|frame| picker.render(frame, frame.area(), &Theme::default(), None))
+                .unwrap();
+            let hit = picker
+                .hits
+                .iter()
+                .find(|(_, action)| *action == HistoryAction::Quick(preset))
+                .unwrap()
+                .0;
+            assert_eq!(
+                picker.handle_click(hit.x, hit.y),
+                HistoryAction::Quick(preset)
+            );
+            picker.handle_key(key(KeyCode::F(3)));
+            assert!(picker.items().is_empty());
+            assert_eq!(picker.handle_key(key(KeyCode::Enter)), HistoryAction::None);
+        }
+    }
+
+    #[test]
     fn history_reopens_and_hides_an_existing_identity_instead_of_creating() {
         let entry = HistoryEntry {
             id: "saved".into(),
@@ -318,6 +362,8 @@ mod tests {
         };
         let mut picker = HistoryPicker::default();
         picker.replace_rows(vec![entry.clone()]);
+        picker.handle_key(key(KeyCode::Down));
+        picker.handle_key(key(KeyCode::Down));
         picker.handle_key(key(KeyCode::Down));
         picker.handle_key(key(KeyCode::Down));
         picker.handle_key(key(KeyCode::Down));

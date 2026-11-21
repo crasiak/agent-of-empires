@@ -1,4 +1,4 @@
-//! Shared capture-history projection and view-only visibility state.
+//! Shared Tailored history projection and view-only visibility state.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -46,10 +46,15 @@ pub fn capture_account(instance: &Instance) -> Option<CaptureAccount> {
 }
 
 pub fn tailored_account(instance: &Instance) -> Option<CaptureAccount> {
-    capture_account(instance).or_else(|| super::document::account(instance))
+    capture_account(instance)
+        .or_else(|| super::document::account(instance))
+        .or_else(|| super::quick::preset(instance).map(|preset| preset.account()))
 }
 
 fn input_preview(instance: &Instance) -> String {
+    if super::quick::preset(instance).is_some() {
+        return String::new();
+    }
     if super::document::account(instance).is_some() {
         return super::document::preview(instance)
             .chars()
@@ -190,6 +195,39 @@ mod tests {
         assert!(super::entry(&instance, &HiddenSessions::new()).is_some());
         instance.archived_at = Some(Utc::now());
         assert!(super::entry(&instance, &HiddenSessions::new()).is_none());
+    }
+
+    #[test]
+    fn quick_history_preserves_conversation_and_storage_identity_without_awareness_preview() {
+        for preset in [
+            super::super::quick::QuickPreset::Work,
+            super::super::quick::QuickPreset::Personal,
+        ] {
+            let plan = preset.plan(std::path::Path::new("/home/test")).unwrap();
+            let mut instance = Instance::new(preset.title(), "/home/test/knowledge");
+            instance.tool = "pi".into();
+            instance.command = plan.launch.command;
+            instance.extra_args = plan.launch.extra_args;
+            instance.source_profile = "storage-owner".into();
+            instance.agent_session_id = Some("existing-conversation".into());
+            let before = serde_json::to_value(&instance).unwrap();
+            let projected = entry(&instance, &HiddenSessions::new()).unwrap();
+            assert_eq!(projected.id, instance.id);
+            assert_eq!(projected.profile, "storage-owner");
+            assert_eq!(projected.account, preset.account());
+            assert_eq!(projected.title, preset.title());
+            assert!(projected.input_preview.is_empty());
+            assert_eq!(serde_json::to_value(&instance).unwrap(), before);
+            for command in [
+                format!("{} --model other", instance.command),
+                format!("echo {}", instance.command),
+                "ledger run pi --profile work --".into(),
+            ] {
+                let mut other = instance.clone();
+                other.command = command;
+                assert!(tailored_account(&other).is_none());
+            }
+        }
     }
 
     #[test]
