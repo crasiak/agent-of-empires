@@ -447,7 +447,17 @@ impl Preview {
             info_lines.push(Line::from(""));
         }
 
-        if crate::session::work_arc::supported(instance) {
+        let arc_view = if let Some(steno) = instance.steno_arc.as_deref() {
+            let expand = if instance.work_arc_enabled {
+                " [menu: expand]"
+            } else {
+                ""
+            };
+            Some((
+                format!("Arc: {}, {}{expand}", steno.status().label(), steno.covered),
+                Some(&steno.arc),
+            ))
+        } else if crate::session::work_arc::supported(instance) {
             let record = crate::session::work_arc::visible_record(instance);
             let covered = record
                 .map(|r| {
@@ -472,16 +482,28 @@ impl Preview {
             } else {
                 ""
             };
-            info_lines.push(Line::styled(
+            Some((
                 format!("Arc: {}{prior}{covered}{expand}", status.label()),
-                Style::default().fg(theme.dimmed),
-            ));
+                record.map(|r| &r.arc),
+            ))
+        } else if crate::session::work_arc::steno::readable(instance) {
+            let status = if instance.work_arc_enabled {
+                crate::session::work_arc::ArcStatus::Missing
+            } else {
+                crate::session::work_arc::ArcStatus::Off
+            };
+            Some((format!("Arc: {}", status.label()), None))
+        } else {
+            None
+        };
+        if let Some((status_line, arc)) = arc_view {
+            info_lines.push(Line::styled(status_line, Style::default().fg(theme.dimmed)));
             if instance.work_arc_enabled {
                 for (label, value) in [
-                    ("Goal: ", record.map(|r| r.arc.goal.as_str())),
-                    ("Now: ", record.map(|r| r.arc.now.as_str())),
-                    ("Remaining: ", record.map(|r| r.arc.remaining.as_str())),
-                    ("Next: ", record.map(|r| r.arc.next.as_str())),
+                    ("Goal: ", arc.map(|a| a.goal.as_str())),
+                    ("Now: ", arc.map(|a| a.now.as_str())),
+                    ("Remaining: ", arc.map(|a| a.remaining.as_str())),
+                    ("Next: ", arc.map(|a| a.next.as_str())),
                 ] {
                     let label_width = unicode_width::UnicodeWidthStr::width(label) as u16;
                     info_lines.push(Line::from(vec![
@@ -883,6 +905,63 @@ mod tests {
             .join("\n");
         assert!(text.contains("Arc: n/a"), "{text}");
         assert!(!text.contains("Arc: off"), "{text}");
+    }
+
+    #[test]
+    fn info_panel_shows_the_stenographer_arc_for_claude_and_pi() {
+        use crate::session::work_arc::{StenoArc, WorkArc};
+        use ratatui::{backend::TestBackend, Terminal};
+        let theme = crate::tui::styles::load_theme("empire");
+        let render = |session: &Instance| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    Preview::render_info(frame, frame.area(), session, &theme, Duration::ZERO)
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..120)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let steno = |current| StenoArc {
+            arc: WorkArc {
+                goal: "Ship the arc panel [w5]".into(),
+                now: "Ran the suite [w6]".into(),
+                remaining: "Unknown".into(),
+                next: "Open the PR [w6]".into(),
+            },
+            covered: "covered through w6 (turns 51-53, partial); reduced w1-w6".into(),
+            at: chrono::Utc::now(),
+            current,
+            path: "/tmp/arc.json".into(),
+        };
+        for tool in ["claude", "pi"] {
+            let mut session = Instance::new("synthetic", "/tmp/synthetic");
+            session.tool = tool.into();
+            session.agent_session_id = Some("native-id".into());
+            assert!(render(&session).contains("Arc: off"), "{tool}");
+            session.work_arc_enabled = true;
+            if tool == "claude" {
+                assert!(render(&session).contains("Arc: missing"), "{tool}");
+            }
+            session.steno_arc = Some(Box::new(steno(false)));
+            let text = render(&session);
+            assert!(
+                text.contains("Arc: stale, covered through w6 (turns 51-53, partial)"),
+                "{text}"
+            );
+            for line in ["Goal: Ship the arc panel [w5]", "Next: Open the PR [w6]"] {
+                assert!(text.contains(line), "{text}");
+            }
+            session.steno_arc = Some(Box::new(steno(true)));
+            assert!(render(&session).contains("Arc: current, covered"), "{tool}");
+        }
     }
 
     #[test]

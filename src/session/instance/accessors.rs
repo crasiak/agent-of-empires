@@ -72,6 +72,7 @@ impl Instance {
             work_arc_enabled: false,
             work_arc: Default::default(),
             work_arc_status: None,
+            steno_arc: None,
             resume_binding: None,
             active_execution: None,
             omp_capture_generation: None,

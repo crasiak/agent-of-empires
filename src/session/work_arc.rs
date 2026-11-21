@@ -3,11 +3,13 @@
 mod document;
 mod source;
 mod state;
+pub(crate) mod steno;
 pub(crate) use document::*;
 pub(crate) const CONSENT_VERSION: u32 = 2;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) use state::*;
+pub(crate) use steno::StenoArc;
 
 use std::collections::{HashMap, HashSet};
 
