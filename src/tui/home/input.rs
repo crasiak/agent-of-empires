@@ -5797,7 +5797,10 @@ impl HomeView {
                 let work_arc = match &self.flat_items[idx] {
                     super::Item::Session { id, .. } => self
                         .get_instance(id)
-                        .filter(|row| crate::session::work_arc::supported(row))
+                        .filter(|row| {
+                            crate::session::work_arc::supported(row)
+                                || crate::session::work_arc::steno::readable(row)
+                        })
                         .map(|row| row.work_arc_enabled),
                     _ => None,
                 };

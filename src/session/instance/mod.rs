@@ -738,6 +738,9 @@ pub struct Instance {
     pub(crate) work_arc: Box<crate::session::work_arc::ArcState>,
     #[serde(skip)]
     pub(crate) work_arc_status: Option<crate::session::work_arc::ArcStatus>,
+    /// The stenographer's arc for this conversation, re-read while the session is selected.
+    #[serde(skip)]
+    pub(crate) steno_arc: Option<Box<crate::session::work_arc::StenoArc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resume_binding: Option<ConversationBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
