@@ -8030,6 +8030,7 @@ async fn sandbox_login_gate_tmux_start_ensure_and_send_are_409() {
                 Ok(Json(SendMessageRequest {
                     message: "hello".into(),
                     revive: true,
+                    require_idle: false,
                 })),
             )
             .await
