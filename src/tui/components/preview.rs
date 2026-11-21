@@ -1004,7 +1004,7 @@ mod tests {
 
     #[test]
     fn info_panel_shows_the_stenographer_arc_for_claude_and_pi() {
-        use crate::session::work_arc::{ArcLines, StenoArc};
+        use crate::session::work_arc::{steno::ArcLines, StenoArc};
         let steno = |current| StenoArc {
             lines: ArcLines {
                 goal: "Ship the arc panel [w5]".into(),
@@ -1052,7 +1052,7 @@ mod tests {
 
     #[test]
     fn arc_lines_wrap_into_two_full_width_rows_and_clip_with_a_cue() {
-        use crate::session::work_arc::{ArcLines, StenoArc};
+        use crate::session::work_arc::{steno::ArcLines, StenoArc};
         let mut session = Instance::new("synthetic", "/tmp/synthetic");
         session.tool = "claude".into();
         session.agent_session_id = Some("native-id".into());
