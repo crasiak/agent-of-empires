@@ -126,6 +126,16 @@ pub struct StructuredViewState {
     /// or `None` when off or the fetch failed. Read from the daemon's `/api/about`,
     /// not local config, so a remote-attached view honours that daemon (#3253).
     pub compaction_reminder_percent: Option<u8>,
+    /// Transcript-wide tool-card fold from `z`; `None` keeps the per-outcome default.
+    pub tool_fold: Option<ToolFold>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolFold {
+    /// Every tool card on one line, failed and running ones included.
+    Folded,
+    /// Every tool card with its body, successful ones included.
+    Expanded,
 }
 
 /// One open choice-picker: a titled option list plus what accepting means.
@@ -350,7 +360,16 @@ impl StructuredViewState {
             auto_presented_elicitation: None,
             last_scroll_max: std::cell::Cell::new(0),
             compaction_reminder_percent: None,
+            tool_fold: None,
         }
+    }
+
+    /// The default already mixes folded and expanded cards, so the first press folds.
+    pub fn toggle_tool_fold(&mut self) {
+        self.tool_fold = Some(match self.tool_fold {
+            Some(ToolFold::Folded) => ToolFold::Expanded,
+            _ => ToolFold::Folded,
+        });
     }
 
     /// Drop the plugin pane overlay if up, returning focus to the transcript

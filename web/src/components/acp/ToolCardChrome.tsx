@@ -20,7 +20,7 @@ import { hasAnsi, parseAnsi, type AnsiSegment, type AnsiStyle } from "../../lib/
 import { highlightSnippet } from "../../lib/snippetHighlighter";
 import { useAcpFileRef } from "./AcpFileRefContext";
 import { useToolExpansionStore, useToolId, type ExpansionOverride } from "./ToolExpansion";
-import { useToolDisplayMode } from "./ToolDisplayMode";
+import { expansionBaseline, expansionMode, useToolDisplay } from "./ToolDisplayMode";
 import { CopyMarkdownButton } from "./CopyMarkdownButton";
 import { WrapBar, WrapLines, WrapToggle, useWrapState } from "./WrapToggle";
 
@@ -77,19 +77,19 @@ export function spanTimes(items: { tool: ToolCall; result?: ActivityRow }[]) {
   return { startedAt, endedAt };
 }
 
-/** Expand state. Failed cards open by default and compact density closes the
- *  rest; a user toggle overrides the baseline only for the density it was made in.
- *  Inside a `ToolIdProvider` the toggle lives in the shared store, so it outlives
- *  a remount. `seed` starts a local card at that state in the current density, as a
- *  group that absorbs its children's open state. */
+/** Expand state: `expansionBaseline`, overridden by a user toggle only under the
+ *  mode it was made in. Inside a `ToolIdProvider` the toggle lives in the shared
+ *  store, so it outlives a remount. `seed` starts a local card at that state in the
+ *  current mode, as a group that absorbs its children's open state. */
 export function useToolCardExpansion(status: Status, defaultOpen = false, seed?: boolean) {
-  const density = useToolDisplayMode();
-  const baseline = status === "err" ? true : density === "compact" ? false : defaultOpen;
+  const display = useToolDisplay();
+  const mode = expansionMode(display);
+  const baseline = expansionBaseline(display, status === "err", defaultOpen);
   const store = useToolExpansionStore();
   const id = useToolId();
   const shared = store !== null && id !== null;
   const [local, setLocal] = useState<ExpansionOverride | null>(() =>
-    seed === undefined ? null : { density, open: seed },
+    seed === undefined ? null : { mode, open: seed },
   );
   const stored = useSyncExternalStore(
     store?.subscribe ?? noopSubscribe,
@@ -97,18 +97,18 @@ export function useToolCardExpansion(status: Status, defaultOpen = false, seed?:
     () => null,
   );
   const override = shared ? stored : local;
-  const active = override && override.density === density ? override.open : null;
+  const active = override && override.mode === mode ? override.open : null;
   const open = active ?? baseline;
   const setOpen = useCallback(
     (action: SetStateAction<boolean>) => {
       const next = (prev: ExpansionOverride | null): ExpansionOverride => {
-        const current = prev && prev.density === density ? prev.open : baseline;
-        return { density, open: typeof action === "function" ? action(current) : action };
+        const current = prev && prev.mode === mode ? prev.open : baseline;
+        return { mode, open: typeof action === "function" ? action(current) : action };
       };
       if (shared) store.update(id, next);
       else setLocal(next);
     },
-    [density, baseline, shared, store, id],
+    [mode, baseline, shared, store, id],
   );
   return [open, setOpen] as const;
 }

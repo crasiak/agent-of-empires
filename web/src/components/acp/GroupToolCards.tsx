@@ -13,7 +13,7 @@ import {
   useSubagentFor,
 } from "./backgroundAgentsContext";
 import { CardChrome, spanTimes, useToolCardExpansion, type Status, type ToolCardProps } from "./ToolCardChrome";
-import { useToolDisplayMode } from "./ToolDisplayMode";
+import { expansionBaseline, expansionMode, useToolDisplay } from "./ToolDisplayMode";
 import { useToolExpansionStore } from "./ToolExpansion";
 import { ToolCard } from "./ToolCards";
 import { ToolOutputMedia } from "./ToolOutputMedia";
@@ -64,15 +64,16 @@ export function ToolGroupCard({ items }: { items: (ToolCardProps & { kind: strin
   const errorCount = items.filter((i) => i.result && i.result.kind === "tool_error").length;
   const status: Status = items.some((i) => !i.result) ? "running" : "ok";
   // A run folds under the reader: start open if any of its cards showed open.
-  // Failed cards open by default, so a group holding one does too in every
-  // density. The seed is closed only when the reader closed a failed card, and
-  // unset otherwise so a child failing later still opens the group.
+  // Failed cards open by default, so a group holding one does too unless fold
+  // all closed it. The seed is closed only when the reader closed a failed card,
+  // and unset otherwise so a child failing later still opens the group.
   const store = useToolExpansionStore();
-  const density = useToolDisplayMode();
+  const display = useToolDisplay();
   const [seed] = useState<boolean | undefined>(() => {
+    const mode = expansionMode(display);
     const failed = (i: (typeof items)[number]) => i.result?.kind === "tool_error";
-    if (items.some((i) => store?.isOpen(i.tool.id, density, failed(i)))) return true;
-    const closedFailed = items.some((i) => failed(i) && store?.get(i.tool.id)?.density === density);
+    if (items.some((i) => store?.isOpen(i.tool.id, mode, expansionBaseline(display, failed(i))))) return true;
+    const closedFailed = items.some((i) => failed(i) && store?.get(i.tool.id)?.mode === mode);
     return closedFailed ? false : undefined;
   });
   const [open, setOpen] = useToolCardExpansion(errorCount > 0 ? "err" : status, false, seed);

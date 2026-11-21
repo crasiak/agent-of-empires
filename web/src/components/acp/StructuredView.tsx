@@ -1,7 +1,7 @@
 // Structured view conversation surface. assistant-ui renders the thread shell;
 // state lives in AcpRuntime and is only fed to assistant-ui, never owned by it.
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ThreadPrimitive } from "@assistant-ui/react";
 import { ChevronDown } from "lucide-react";
 
@@ -38,7 +38,15 @@ import { SystemNotices } from "./SystemNotices";
 import { AssistantMessage, UserMessage } from "./ThreadMessages";
 import { UsageLimitSection } from "./UsageLimitBanner";
 import { ToolExpansionProvider } from "./ToolExpansion";
-import { ToolDensityToggle, ToolDisplayModeProvider, useToolDensityPref } from "./ToolDisplayMode";
+import {
+  ToolDensityToggle,
+  ToolDisplayModeProvider,
+  ToolFoldToggle,
+  useToolDensityPref,
+  useToolFold,
+  type ToolDensity,
+  type ToolFold,
+} from "./ToolDisplayMode";
 import { useTranscriptScroll } from "./useTranscriptScroll";
 import { WorkingSpinner } from "./WorkingSpinner";
 import type { ShellMode } from "../PairedTerminal";
@@ -119,10 +127,16 @@ export function StructuredView(props: Props) {
   } = props;
   const [showClearedTurns, setShowClearedTurns] = useState(false);
   const [toolDensity, toggleToolDensity] = useToolDensityPref();
+  const [toolFold, toggleToolFold, resetToolFold] = useToolFold();
+  // A density change is a fresh baseline, so it ends any fold-all override.
+  const onToggleToolDensity = useCallback(() => {
+    resetToolFold();
+    toggleToolDensity();
+  }, [resetToolFold, toggleToolDensity]);
   return (
     <AcpFileRefContext.Provider value={{ onOpenFileRef, fileRefSession }}>
       <AgentProfileProvider toolKey={tool} clearAliases={clearAliases} compactAliases={compactAliases}>
-        <ToolDisplayModeProvider density={toolDensity}>
+        <ToolDisplayModeProvider density={toolDensity} fold={toolFold}>
           <ToolExpansionProvider>
             <AcpRuntime
               sessionId={sessionId}
@@ -151,7 +165,9 @@ export function StructuredView(props: Props) {
                     showClearedTurns={showClearedTurns}
                     onToggleClearedTurns={() => setShowClearedTurns((v) => !v)}
                     toolDensity={toolDensity}
-                    onToggleToolDensity={toggleToolDensity}
+                    onToggleToolDensity={onToggleToolDensity}
+                    toolFold={toolFold}
+                    onToggleToolFold={toggleToolFold}
                   />
                 </BackgroundAgentsContext.Provider>
               )}
@@ -198,8 +214,10 @@ interface ChromeProps {
   ctx: AcpContext;
   showClearedTurns: boolean;
   onToggleClearedTurns: () => void;
-  toolDensity: "detailed" | "compact";
+  toolDensity: ToolDensity;
   onToggleToolDensity: () => void;
+  toolFold: ToolFold;
+  onToggleToolFold: () => void;
 }
 
 function AcpChrome({
@@ -209,6 +227,8 @@ function AcpChrome({
   onToggleClearedTurns,
   toolDensity,
   onToggleToolDensity,
+  toolFold,
+  onToggleToolFold,
 }: ChromeProps) {
   const { sessionId, acpWorkerState, acpAgent } = view;
   const { state, status } = ctx;
@@ -324,6 +344,7 @@ function AcpChrome({
               {state.activity.length > 0 && (
                 <div className="mb-2 flex">
                   <ToolDensityToggle density={toolDensity} onToggle={onToggleToolDensity} />
+                  <ToolFoldToggle fold={toolFold} onToggle={onToggleToolFold} />
                 </div>
               )}
 

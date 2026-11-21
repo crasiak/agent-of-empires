@@ -42,6 +42,7 @@ The view opens with the composer ready. The transcript stays scrollable from the
 | Transcript  | `a`             | Answer a pending question (single-select forms) |
 | Transcript  | `s` / `c`       | Skip / cancel a pending question |
 | Transcript  | `o`             | Open this session in the web dashboard |
+| Transcript  | `z`             | Fold every tool call to one line, then expand them all |
 | Transcript  | `Esc`           | Close the structured view |
 | Approval    | `a` / `Shift+A` / `d` | Allow once / allow always / deny |
 | Approval    | `Esc`           | Stop the in-flight turn |
@@ -56,7 +57,7 @@ The **slash-command picker** appears once the composer holds a single-word slash
 
 ### What the TUI renders
 
-Successful tool calls collapse to one line with their target and, for edits, added and removed line counts; running and failed calls stay expanded. The latest plan is pinned as a single progress summary rather than a new checklist per update. Agent messages render as styled markdown using text attributes only (bold, italic, dim), so they track your theme; syntax highlighting is deferred, and `o` opens the dashboard for full fidelity.
+Successful tool calls collapse to one line with their target and, for edits, added and removed line counts; running and failed calls stay expanded. `z` in the transcript folds every call to one line, failed and running ones included; pressing it again expands every call, and it keeps alternating. The latest plan is pinned as a single progress summary rather than a new checklist per update. Agent messages render as styled markdown using text attributes only (bold, italic, dim), so they track your theme; syntax highlighting is deferred, and `o` opens the dashboard for full fidelity.
 
 ## Tool cards
 
@@ -112,3 +113,5 @@ Folding only fires on an unbroken run of the same shape, and the threshold is th
 In the dashboard, **Jump to latest** immediately moves to the newest output and keeps following through folds and streaming updates. Scroll away to read earlier content without being pulled back by streaming text; reopening the page keeps that reading position. Folding preserves an opened tool card's position; focus the transcript to scroll with the keyboard.
 
 The **Compact tools** toggle at the top of the transcript collapses every tool card to its header for scanning, and new cards arrive collapsed while it is on. The agent's narration stays visible, errored cards stay open, and you can still expand a single card. It is a per-browser preference.
+
+**Fold all** beside it folds every tool card to its header, errored cards included, and becomes **Unfold all**, which opens every card. Each press overrides any card you toggled before it, you can still toggle a single card afterwards, and changing **Compact tools** returns to that baseline. It lasts until you leave the view.
