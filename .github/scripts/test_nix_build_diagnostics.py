@@ -78,6 +78,49 @@ class DiagnosticsTests(unittest.TestCase):
         with patch.object(diag.subprocess, "run", side_effect=OSError("unavailable")):
             self.assertIn("unavailable", diag.kernel_oom())
 
+    def test_signal_after_child_assignment_is_not_forwarded_twice(self):
+        class Child:
+            def __init__(self):
+                self.signals = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def send_signal(self, number):
+                self.signals.append(number)
+
+            def wait(self):
+                return 23
+
+        child = Child()
+        delivered = False
+
+        def inject_signal(frame, event, _argument):
+            nonlocal delivered
+            if (event == "line" and frame.f_code is diag.run.__code__
+                    and frame.f_locals.get("child") is child and not delivered):
+                delivered = True
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            return inject_signal
+
+        previous = sys.gettrace()
+        try:
+            with patch.object(diag, "monitor", lambda stop: None), \
+                 patch.object(diag, "resources", return_value={}), \
+                 patch.object(diag, "kernel_oom", return_value={}), \
+                 patch.object(diag.subprocess, "Popen", return_value=child), \
+                 redirect_stdout(io.StringIO()):
+                sys.settrace(inject_signal)
+                status = diag.run(["unused"])
+        finally:
+            sys.settrace(previous)
+        self.assertTrue(delivered)
+        self.assertEqual(status, 23)
+        self.assertEqual(child.signals, [signal.SIGTERM])
+
     def test_termination_reaches_child_and_waits_for_its_status(self):
         for number in (signal.SIGINT, signal.SIGTERM):
             for handled in (False, True):

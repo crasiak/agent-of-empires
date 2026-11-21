@@ -113,12 +113,13 @@ def run(command):
 
     def forward(number, _frame):
         nonlocal pending_signal
-        pending_signal = number
-        if child is not None:
-            try:
-                child.send_signal(number)
-            except ProcessLookupError:
-                pass
+        if child is None:
+            pending_signal = number
+            return
+        try:
+            child.send_signal(number)
+        except ProcessLookupError:
+            pass
 
     handlers = {number: signal.signal(number, forward)
                 for number in (signal.SIGINT, signal.SIGTERM)}
