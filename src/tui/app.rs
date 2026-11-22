@@ -3,8 +3,7 @@
 use anyhow::{Context, Result};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    MouseButton, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use futures_util::StreamExt;
 use ratatui::prelude::*;
@@ -545,9 +544,8 @@ impl App {
         F: FnOnce() -> R,
     {
         crossterm::terminal::disable_raw_mode()?;
-        // Popped and repushed around the child so tmux sees a clean terminal.
         #[cfg(unix)]
-        let _ = crossterm::execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+        let _ = super::keyboard::disable(terminal.backend_mut());
         crossterm::execute!(
             terminal.backend_mut(),
             crossterm::terminal::LeaveAlternateScreen,
@@ -577,10 +575,7 @@ impl App {
             crossterm::cursor::Hide
         )?;
         #[cfg(unix)]
-        let _ = crossterm::execute!(
-            terminal.backend_mut(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
-        );
+        let _ = super::keyboard::enable(terminal.backend_mut());
         self.sync_mouse_capture(terminal)?;
         // Attach may have overwritten the host tab via the pane's OSC 0.
         self.host_title.invalidate();

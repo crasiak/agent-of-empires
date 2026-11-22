@@ -12,6 +12,7 @@ pub(crate) mod highlight;
 pub(crate) mod home;
 mod host_title;
 pub mod hyperlink;
+mod keyboard;
 mod ledger_poller;
 pub(crate) mod links;
 pub(crate) mod markdown;
@@ -107,10 +108,7 @@ pub fn run_vt_pipe(_socket: &str) -> std::io::Result<()> {
 
 use anyhow::Result;
 use crossterm::{
-    event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{
         disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
@@ -175,17 +173,11 @@ impl TerminalGuard {
                 return Err(err.into());
             }
         }
-        // Kitty DISAMBIGUATE_ESCAPE_CODES makes Shift+Enter distinct from Enter;
-        // other terminals ignore it. No support probe: it can stall startup for
-        // 2s. Other flags would change key event shapes. Best-effort.
         #[cfg(unix)]
-        if let Err(err) = execute!(
-            stdout,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
-        ) {
+        if let Err(err) = keyboard::enable(&mut stdout) {
             tracing::debug!(
                 target: "tui.input",
-                "kitty keyboard enhancement push failed (Shift+Enter will submit instead of inserting newline): {err}",
+                "modified-key negotiation failed: {err}",
             );
         }
         Ok(Self {
@@ -197,9 +189,8 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let mut stdout = io::stdout();
-        // Pop the kitty stack first so the shell never inherits it.
         #[cfg(unix)]
-        let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+        let _ = keyboard::disable(&mut stdout);
         let _ = disable_raw_mode();
         if self.disable_mouse {
             let _ = execute!(stdout, DisableMouseCapture);
