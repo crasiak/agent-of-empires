@@ -86,6 +86,13 @@ Every Session currently carrying a Mark.
 **Bulk action**:
 An action applied to every eligible Session in the Marked set, such as sending one message or restarting.
 
+**Breakout**:
+Opening the Marked set as tiled terminal windows (or one split window) outside the aoe TUI, each attached to its Session. aoe stays open.
+_Avoid_: focus (that is a focus request), pop-out
+
+**Breakout agent**:
+A listener on the machine with the screen that opens Breakout windows for an aoe TUI running on another host over ssh.
+
 **Work arc**:
 A short, provenance-bound orientation cue for one Session's Agent conversation: goal, current progress, remaining work and next permissible action. It is derived from bounded conversation evidence, not the Session's Title, Status, a progress percentage or an independent verification of the Agent's claims. A stale arc does not describe the current branch.
 _Avoid_: conversation summary (the separate ACP transcript callout), task list, status report

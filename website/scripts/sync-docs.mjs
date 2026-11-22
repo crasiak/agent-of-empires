@@ -139,6 +139,14 @@ const PAGES = [
       "A feels-attached alternative to a full tmux attach: the dashboard stays visible while keystrokes relay to the agent. Covers the Ctrl+B leader menu, the collapsible sidebar, scrolling, and the exit chord.",
   },
 
+  {
+    source: "docs/guides/breakout.md",
+    dest: "guides/breakout.md",
+    title: "Breakout",
+    description:
+      "Open marked sessions as tiled Ghostty windows on macOS, or as one window of splits, locally or for aoe running on another host through a Breakout agent.",
+  },
+
   // --- Docs pages (docs/ → pages/docs/) ---
   {
     source: "docs/plugins.md",
