@@ -373,12 +373,7 @@ mod tests {
         };
         let mut picker = HistoryPicker::default();
         picker.replace_rows(vec![entry.clone()]);
-        picker.handle_key(key(KeyCode::Down));
-        picker.handle_key(key(KeyCode::Down));
-        picker.handle_key(key(KeyCode::Down));
-        picker.handle_key(key(KeyCode::Down));
-        picker.handle_key(key(KeyCode::Down));
-        picker.handle_key(key(KeyCode::Down));
+        picker.handle_paste("Database idea");
         assert_eq!(
             picker.handle_key(key(KeyCode::Enter)),
             HistoryAction::Open("saved".into())

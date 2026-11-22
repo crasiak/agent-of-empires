@@ -55,10 +55,11 @@ impl IntakeBrief {
                 _ => anyhow::bail!("Unsupported intake Pi argument {flag:?}; remove it or use the ordinary New Session form"),
             }
         }
+        // Native attestation rejects literal newlines even inside quoted arguments.
         Ok(format!(
             "{} {}",
             configured.trim(),
-            shell_words::quote(&self.prompt(profile, group)),
+            shell_words::quote(&serde_json::to_string(&self.prompt(profile, group))?),
         )
         .trim_start()
         .to_string())
@@ -70,13 +71,16 @@ pub(crate) fn split_launch_args(args: &str) -> (String, Option<String>) {
     let Ok(mut words) = shell_words::split(args) else {
         return (args.to_string(), None);
     };
-    if !words.last().is_some_and(|prompt| {
-        prompt.starts_with("# AoE intake brief\n") && prompt.ends_with(POLICY)
-    }) {
+    let prompt = words
+        .last()
+        .and_then(|arg| serde_json::from_str::<String>(arg).ok());
+    let Some(prompt) = prompt
+        .filter(|prompt| prompt.starts_with("# AoE intake brief\n") && prompt.ends_with(POLICY))
+    else {
         return (args.to_string(), None);
-    }
-    let prompt = words.pop();
-    (shell_words::join(words), prompt)
+    };
+    words.pop();
+    (shell_words::join(words), Some(prompt))
 }
 
 #[cfg(test)]

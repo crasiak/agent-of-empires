@@ -12,13 +12,17 @@ fn intake_review_uses_final_setup_and_refuses_unsupported_launch_modes() {
     let mut dialog = NewSessionDialog::new_with_tools(vec!["pi"], TEST_PATH.into());
     dialog.command_override = Input::new("pi".into());
     dialog.extra_args = Input::new("--thinking high".into());
+    let ordinary_yolo = submitted(dialog.build_submit_result()).yolo_mode;
     dialog.set_intake(IntakeBrief::new("Keep this original task".into()).unwrap());
     dialog.set_group("changed/group".into());
     assert!(dialog.validate_structured());
     let data = submitted(dialog.build_submit_result());
     assert!(data.intake);
     assert_eq!(data.command_override, "pi");
-    assert!(!data.yolo_mode);
+    assert_eq!(
+        data.yolo_mode, ordinary_yolo,
+        "intake must preserve the selected agent's permission behavior"
+    );
     assert!(!data.sandbox && !data.structured);
     let (args, prompt) = split_launch_args(&data.extra_args);
     assert!(args.contains("--thinking high"));

@@ -2901,7 +2901,7 @@ sandbox = "unsupported"
         let mut instance = tool_instance("pi", project.to_str().unwrap());
         set_pi_integration(&instance, "identity");
         instance.extra_args = crate::session::tailored::intake::IntakeBrief::new(
-            "Unique intake task 'quoted'\\nsecond line".into(),
+            "Unique intake task 'quoted'\nsecond line".into(),
         )
         .unwrap()
         .launch_args("--thinking high", "default", "aoe")
