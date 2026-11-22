@@ -12,6 +12,7 @@ pub(crate) mod highlight;
 pub(crate) mod home;
 mod host_title;
 pub mod hyperlink;
+#[cfg(unix)]
 mod keyboard;
 mod ledger_poller;
 pub(crate) mod links;
@@ -134,21 +135,9 @@ fn env_mouse_capture_allows() -> bool {
         .unwrap_or(true)
 }
 
-/// RAII guard for the TUI's terminal mode. `enter` turns on raw mode, the
-/// alternate screen, bracketed paste, the kitty keyboard protocol
-/// `DISAMBIGUATE_ESCAPE_CODES` flag (so `Shift+Enter` arrives as a distinct
-/// `KeyEvent` instead of collapsing to bare CR, #2362), and (when requested)
-/// mouse capture; the `Drop` impl reverses all of it. Because it runs on drop,
-/// the terminal is restored on EVERY exit path, including a panic mid-render,
-/// where the old inline teardown was skipped and left the terminal wedged (raw
-/// mode / mouse reporting / enhancement stack stuck on). Drop is best-effort
-/// and never panics.
-///
-/// The kitty-enhancement pop depends on Rust's default `panic = "unwind"`. A future
-/// profile that sets `panic = "abort"` would skip every Drop here and leak
-/// raw mode, alt screen, paste, mouse, and the enhancement stack into the
-/// user's shell; recovery from a leaked enhancement stack is
-/// `printf '\e[<1u'`. Same exposure as a SIGKILL/SIGSEGV mid-TUI.
+/// Restores raw mode, alternate screen, paste, modified-key protocols and mouse
+/// capture on normal exit or unwinding. Drop is best-effort; aborts cannot restore
+/// terminal state.
 struct TerminalGuard {
     /// Whether to emit `DisableMouseCapture` on teardown. Mirrors the startup
     /// gate: under Mosh we never enable capture, so we must not disable it

@@ -4,7 +4,14 @@ Press **Ctrl+Y** in the TUI or Web dashboard to open the Tailored Sessions picke
 including while a Session owns keyboard input. Choose **Capture an idea**, select
 Personal or Work, and enter the idea. Enter and Shift+Enter insert newlines in text
 editors. Select the capture button or press **Ctrl+Enter** (**Meta+Enter** also works
-on web) to submit deliberately. Composition and held submit keys do not submit.
+on web) to submit deliberately. In the TUI, **F4** also submits Capture and Document
+chat from any form field. Composition and held submit keys do not submit.
+If Ctrl+Enter inserts a newline, use F4, Tab to the Capture/Start button and press
+Enter, or click the button. AoE cannot recover a modifier discarded by the terminal
+or a tmux server with `extended-keys off`. Its terminal decoder supports Kitty/CSI-u,
+not tmux's legacy xterm extended-key format. AoE does not change tmux configuration.
+Research and Workshop use the separate reviewed actions described below;
+Ctrl+Enter never authorizes their effects.
 Long text and unbroken URLs soft-wrap in the TUI without adding saved newlines.
 
 Unsent editors remain in memory for the current Home/dashboard lifetime, including

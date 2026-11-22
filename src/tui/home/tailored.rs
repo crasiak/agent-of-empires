@@ -257,6 +257,7 @@ impl TailoredWindow {
                 return WindowAction::Continue;
             }
             if editing
+                && !(key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL))
                 && key.code != KeyCode::Tab
                 && key.code != KeyCode::BackTab
                 && !matches!(key.code, KeyCode::F(_) | KeyCode::Esc)
@@ -371,6 +372,7 @@ impl TailoredWindow {
             KeyCode::Tab => self.focus = (self.focus + 1) % 4,
             KeyCode::BackTab => self.focus = (self.focus + 3) % 4,
             KeyCode::Enter if key.modifiers == KeyModifiers::CONTROL => self.submit(),
+            KeyCode::F(4) if key.modifiers.is_empty() => self.submit(),
             KeyCode::Enter if self.focus == 3 && key.modifiers.is_empty() => self.submit(),
             KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right | KeyCode::Enter
                 if self.focus == 1 =>
@@ -734,7 +736,7 @@ impl TailoredWindow {
             Paragraph::new(if self.checking.is_some() {
                 "Checking minimal Ledger profile…"
             } else {
-                "Enter newline · Ctrl+Enter capture · Tab controls · F2 history · Esc/Ctrl+Q close"
+                "Enter newline · F4/Ctrl+Enter capture · or Tab to button, Enter · F2 history · Esc close"
             })
             .style(style(self.focus == 3)),
             rows[5],
@@ -1620,7 +1622,7 @@ esac
         let form = render(&mut view);
         let rendered: String = form.content().iter().map(|cell| cell.symbol()).collect();
         assert!(rendered.contains("Tailored Sessions"));
-        assert!(rendered.contains("Enter newline · Ctrl+Enter capture"));
+        assert!(rendered.contains("F4/Ctrl+Enter capture · or Tab to button, Enter"));
         assert!(!rendered.contains("Verify idea"));
         let idea_border = form
             .content()
@@ -1717,7 +1719,7 @@ esac
             view.handle_key(shortcut, None);
         }
 
-        for confirm in 0..3 {
+        for confirm in 0..4 {
             render(&mut view);
             match confirm {
                 0 => {
@@ -1728,6 +1730,9 @@ esac
                         view.handle_key(key(KeyCode::Tab), None);
                     }
                     view.handle_key(key(KeyCode::Enter), None);
+                }
+                2 => {
+                    view.handle_key(key(KeyCode::F(4)), None);
                 }
                 _ => {
                     let rect = view.tailored_window.as_ref().unwrap().submit_rect;
@@ -1825,31 +1830,36 @@ esac
     }
 
     #[test]
-    fn capture_ctrl_enter_still_submits_on_press_from_every_control() {
-        for focus in 0..4 {
-            for kind in [KeyEventKind::Press, KeyEventKind::Release] {
-                let mut window = TailoredWindow::new(CaptureAccount::Personal);
-                window.picker_action(HistoryAction::New);
-                window.handle_paste("invalid\0idea");
-                window.focus = focus;
-                window.handle_key(KeyEvent::new_with_kind(
-                    KeyCode::Enter,
-                    KeyModifiers::CONTROL,
-                    kind,
-                ));
-                assert_eq!(window.idea.lines().join("\n"), "invalid\0idea");
-                assert!(window.checking.is_none());
-                assert_eq!(window.focus, focus);
-                assert_eq!(window.account, CaptureAccount::Personal);
-                assert!(!window.immediately);
-                assert_eq!(
-                    window.error.as_deref(),
-                    if kind == KeyEventKind::Press {
-                        Some("Enter an idea between 1 and 16384 bytes, without NUL characters")
-                    } else {
-                        None
-                    }
-                );
+    fn capture_submit_keys_only_act_on_press_from_every_control() {
+        for (code, modifiers) in [
+            (KeyCode::Enter, KeyModifiers::CONTROL),
+            (KeyCode::F(4), KeyModifiers::NONE),
+        ] {
+            for focus in 0..4 {
+                for kind in [
+                    KeyEventKind::Press,
+                    KeyEventKind::Repeat,
+                    KeyEventKind::Release,
+                ] {
+                    let mut window = TailoredWindow::new(CaptureAccount::Personal);
+                    window.picker_action(HistoryAction::New);
+                    window.handle_paste("invalid\0idea");
+                    window.focus = focus;
+                    window.handle_key(KeyEvent::new_with_kind(code, modifiers, kind));
+                    assert_eq!(window.idea.lines().join("\n"), "invalid\0idea");
+                    assert!(window.checking.is_none());
+                    assert_eq!(window.focus, focus);
+                    assert_eq!(window.account, CaptureAccount::Personal);
+                    assert!(!window.immediately);
+                    assert_eq!(
+                        window.error.as_deref(),
+                        if kind == KeyEventKind::Press {
+                            Some("Enter an idea between 1 and 16384 bytes, without NUL characters")
+                        } else {
+                            None
+                        }
+                    );
+                }
             }
         }
     }
@@ -1919,6 +1929,7 @@ esac
             (KeyCode::Enter, KeyModifiers::ALT),
             (KeyCode::Char('j'), KeyModifiers::CONTROL),
             (KeyCode::Enter, KeyModifiers::CONTROL),
+            (KeyCode::F(4), KeyModifiers::NONE),
             (KeyCode::Backspace, KeyModifiers::NONE),
             (KeyCode::Delete, KeyModifiers::NONE),
             (KeyCode::Left, KeyModifiers::NONE),

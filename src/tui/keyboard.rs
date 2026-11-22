@@ -22,8 +22,7 @@ mod tests {
     use std::process::{Command, Output, Stdio};
     use std::time::{Duration, Instant};
 
-    const TEST: &str =
-        "tui::keyboard::tests::tmux_preserves_modified_enter_and_resets_around_children";
+    const TEST: &str = "tui::keyboard::tests::tmux_fallback_submit_survives_without_extended_keys";
     const PROBE: &str = "AOE_KEYBOARD_TEST_PROBE";
 
     struct Tmux {
@@ -68,7 +67,7 @@ mod tests {
         }
     }
 
-    fn probe(root: &Path, mode: &str) {
+    fn probe(root: &Path) {
         crossterm::terminal::enable_raw_mode().unwrap();
         let mut output = io::stdout();
         for (phase, enabled) in [("enabled", true), ("disabled", false), ("resumed", true)] {
@@ -79,30 +78,24 @@ mod tests {
             }
             // The cursor reply fences tmux's processing of the preceding mode change.
             crossterm::cursor::position().unwrap();
-            std::fs::write(root.join(phase), "ready").unwrap();
-            assert!(event::poll(Duration::from_secs(5)).unwrap());
-            let modifiers = if enabled && mode == "on" {
-                KeyModifiers::CONTROL
-            } else {
-                KeyModifiers::NONE
-            };
-            assert_eq!(
-                event::read().unwrap(),
-                Event::Key(KeyEvent::new(KeyCode::Enter, modifiers)),
-                "{mode} {phase}"
-            );
+            for (key, code) in [("enter", KeyCode::Enter), ("submit", KeyCode::F(4))] {
+                std::fs::write(root.join(format!("{phase}-{key}")), "ready").unwrap();
+                assert!(event::poll(Duration::from_secs(5)).unwrap());
+                assert_eq!(
+                    event::read().unwrap(),
+                    Event::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+                    "{phase} {key}"
+                );
+            }
         }
         disable(&mut output).unwrap();
         crossterm::terminal::disable_raw_mode().unwrap();
     }
 
     #[test]
-    fn tmux_preserves_modified_enter_and_resets_around_children() {
-        if let Ok(mode) = std::env::var(PROBE) {
-            probe(
-                Path::new(&std::env::var("AOE_KEYBOARD_TEST_ROOT").unwrap()),
-                &mode,
-            );
+    fn tmux_fallback_submit_survives_without_extended_keys() {
+        if std::env::var_os(PROBE).is_some() {
+            probe(Path::new(&std::env::var("AOE_KEYBOARD_TEST_ROOT").unwrap()));
             return;
         }
         if Command::new("tmux").arg("-V").output().is_err() {
@@ -125,6 +118,8 @@ mod tests {
             "keys",
             "sleep 120",
         ]);
+        tmux.check(&["set-option", "-g", "default-shell", "/bin/sh"]);
+        tmux.check(&["set-window-option", "-g", "remain-on-exit", "on"]);
         for mode in ["on", "off"] {
             tmux.check(&["set-option", "-s", "extended-keys", mode]);
             let case = root.path().join(mode);
@@ -137,11 +132,14 @@ mod tests {
             );
             tmux.check(&["new-window", "-d", "-n", "probe", &command]);
             for phase in ["enabled", "disabled", "resumed"] {
-                tmux.wait(&case.join(phase), &exit);
-                tmux.check(&["send-keys", "-t", "keys:probe", "C-Enter"]);
+                for (key, input) in [("enter", "C-Enter"), ("submit", "F4")] {
+                    tmux.wait(&case.join(format!("{phase}-{key}")), &exit);
+                    tmux.check(&["send-keys", "-t", "keys:probe", input]);
+                }
             }
             tmux.wait(&exit, &exit);
             assert_eq!(std::fs::read_to_string(exit).unwrap(), "0", "{mode}");
+            tmux.check(&["kill-window", "-t", "keys:probe"]);
         }
     }
 }
