@@ -1872,6 +1872,17 @@ impl Instance {
         } else {
             (self.extra_args.clone(), None)
         };
+        if intake_prompt.is_some() {
+            anyhow::ensure!(
+                execution.is_some_and(|native| native.binding.agent == "pi" && native.pi_pinnable),
+                "Intake requires a qualified native Pi launch with exact conversation identity"
+            );
+            anyhow::ensure!(
+                self.started_at.is_none()
+                    || execution.is_some_and(|native| native.pi_transcript_path.is_some()),
+                "Intake native transcript is unavailable; refusing to replay the initial task"
+            );
+        }
 
         if self.command.is_empty() {
             match agent {
