@@ -2429,7 +2429,10 @@ impl NewSessionDialog {
     /// or container work, so a refusal cannot orphan resources.
     fn validate_structured(&mut self) -> bool {
         if let Some(brief) = &self.intake {
-            let error = if self.selected_tool() != "pi"
+            let error = if self
+                .available_tools
+                .get(self.tool_index)
+                .is_none_or(|tool| tool != "pi")
                 || self.sandbox_enabled
                 || self.structured_enabled
             {
