@@ -518,6 +518,27 @@ impl HomeView {
         self.work_arc_refresh.checked = None;
     }
 
+    /// The cited windows of the selected session's record, as the stenographer wrote them.
+    pub(super) fn open_steno_windows(&mut self, windows: &[u32]) {
+        let Some(steno) = self
+            .selected_session
+            .as_ref()
+            .and_then(|id| self.get_instance(id))
+            .and_then(|row| row.steno_arc.as_deref())
+        else {
+            return;
+        };
+        let names: Vec<_> = windows.iter().map(|w| format!("w{w}")).collect();
+        self.info_dialog = Some(
+            InfoDialog::new(
+                &format!("Window {} (Up/Down to scroll)", names.join(", ")),
+                &steno.windows_text(windows),
+            )
+            .with_size(90, 30)
+            .scrollable(),
+        );
+    }
+
     pub(super) fn expand_work_arc(&mut self) {
         let Some(row) = self
             .selected_session

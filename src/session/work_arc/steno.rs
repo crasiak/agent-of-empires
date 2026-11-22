@@ -68,6 +68,143 @@ impl StenoArc {
             super::ArcStatus::Stale
         }
     }
+
+    /// The record directory `derive/arc.json` sits in.
+    fn record(&self) -> Option<&Path> {
+        self.path.parent()?.parent()
+    }
+
+    /// The popup text for the cited windows, in order; an unreadable window says so.
+    pub(crate) fn windows_text(&self, windows: &[u32]) -> String {
+        let mut out = Vec::new();
+        for &window in windows {
+            match self.record().and_then(|record| read_window(record, window)) {
+                Some(view) => out.push(view.text()),
+                None => out.push(format!("w{window}: not readable in the record")),
+            }
+        }
+        out.join("\n\n────────\n\n")
+    }
+}
+
+const MAX_WINDOW_BYTES: u64 = 512 * 1024;
+/// A cite range wider than this is not expanded.
+const MAX_CITED_WINDOWS: u32 = 50;
+
+static CITE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    let one = r"w\d+(?:\s*[-–]\s*w?\d+)?";
+    regex::Regex::new(&format!(r"\[\s*({one}(?:\s*,\s*{one})*)\s*\]")).unwrap()
+});
+
+/// The cites in `text`: each one's byte span and the windows it names, ranges expanded.
+pub(crate) fn cite_spans(text: &str) -> Vec<(std::ops::Range<usize>, Vec<u32>)> {
+    CITE.captures_iter(text)
+        .map(|caps| {
+            let mut windows = Vec::new();
+            for part in caps[1].split(',') {
+                let digits = |s: &str| s.trim().trim_start_matches('w').parse::<u32>().ok();
+                let (lo, hi) = match part.split_once(['-', '–']) {
+                    Some((a, b)) => (digits(a), digits(b)),
+                    None => (digits(part), digits(part)),
+                };
+                if let (Some(lo), Some(hi)) = (lo, hi) {
+                    let (lo, hi) = (lo.min(hi), lo.max(hi));
+                    windows.extend(lo..=hi.min(lo + MAX_CITED_WINDOWS - 1));
+                }
+            }
+            windows.dedup();
+            (caps.get(0).unwrap().range(), windows)
+        })
+        .collect()
+}
+
+/// One landed window of the record, as the stenographer wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WindowView {
+    pub window: u32,
+    pub turns: Option<(u64, u64)>,
+    pub partial: bool,
+    pub narrative: String,
+    /// Checked statements under each heading, in the window's order.
+    pub statements: Vec<(&'static str, Vec<String>)>,
+    /// Statements left out because their check did not pass.
+    pub unchecked: usize,
+}
+
+impl WindowView {
+    fn text(&self) -> String {
+        let turns = self
+            .turns
+            .map(|(a, b)| format!(" · turns {a}-{b}"))
+            .unwrap_or_default();
+        let partial = if self.partial { " (partial)" } else { "" };
+        let mut out = format!("w{}{turns}{partial}\n\n{}\n", self.window, self.narrative);
+        for (heading, items) in &self.statements {
+            out.push_str(&format!("\n{heading}:\n"));
+            for item in items {
+                out.push_str(&format!("- {item}\n"));
+            }
+        }
+        if self.unchecked > 0 {
+            out.push_str(&format!(
+                "\n{} statement(s) left out: their check did not pass.\n",
+                self.unchecked
+            ));
+        }
+        out
+    }
+}
+
+pub(crate) fn read_window(record: &Path, window: u32) -> Option<WindowView> {
+    let file = std::fs::File::open(record.join(format!("windows/{window:02}.json"))).ok()?;
+    if file.metadata().ok()?.len() > MAX_WINDOW_BYTES {
+        return None;
+    }
+    let doc: serde_json::Value = serde_json::from_reader(std::io::BufReader::new(file)).ok()?;
+    if doc.get("window")?.as_u64()? != u64::from(window) {
+        return None;
+    }
+    let turns = doc.get("turns").and_then(|t| {
+        let t = t.as_array()?;
+        Some((t.first()?.as_u64()?, t.last()?.as_u64()?))
+    });
+    let mut unchecked = 0;
+    let mut statements = Vec::new();
+    for (key, heading) in [
+        ("intent", "Intent"),
+        ("progress", "Progress"),
+        ("decisions", "Decisions"),
+        ("unresolved", "Unresolved"),
+        ("next", "Next"),
+    ] {
+        let mut items = Vec::new();
+        for st in doc["fields"][key].as_array().into_iter().flatten() {
+            let text = st["text"].as_str().unwrap_or("").trim();
+            let ok = st["verdicts"]
+                .as_array()
+                .is_some_and(|v| v.len() == 1 && v[0] == "ok");
+            // "None." is how the model fills an empty field.
+            if text.is_empty() || matches!(text.trim_end_matches('.'), "None" | "none" | "N/A") {
+                continue;
+            }
+            if ok {
+                items.push(text.to_string());
+            } else {
+                unchecked += 1;
+            }
+        }
+        if !items.is_empty() {
+            statements.push((heading, items));
+        }
+    }
+    Some(WindowView {
+        window,
+        turns,
+        partial: doc["partial"].as_bool().unwrap_or(false),
+        narrative: doc["narrative"].as_str().unwrap_or("").trim().to_string(),
+        statements,
+        unchecked,
+    })
 }
 
 #[derive(Deserialize)]
@@ -229,6 +366,70 @@ mod tests {
 
         write_arc(&new, &doc("s1", ARC), touched + Duration::from_secs(5));
         assert!(read(root, "pi", "s1").unwrap().current);
+    }
+
+    #[test]
+    fn cites_expand_ranges_and_keep_their_spans() {
+        let text = "Ship it [w1-w3, w6]; then [w9]. Not [x1] or [w].";
+        let spans = cite_spans(text);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(&text[spans[0].0.clone()], "[w1-w3, w6]");
+        assert_eq!(spans[0].1, [1, 2, 3, 6]);
+        assert_eq!(spans[1].1, [9]);
+        assert_eq!(
+            cite_spans("[w5-w1000]")[0].1.len(),
+            MAX_CITED_WINDOWS as usize
+        );
+    }
+
+    #[test]
+    fn a_window_popup_shows_the_narrative_and_only_checked_statements() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("personal/claude/s1");
+        std::fs::create_dir_all(record.join("windows")).unwrap();
+        std::fs::create_dir_all(record.join("derive")).unwrap();
+        let ok = |t: &str| serde_json::json!({"text": t, "cites": [3], "verdicts": ["ok"]});
+        std::fs::write(
+            record.join("windows/07.json"),
+            serde_json::json!({
+                "window": 7, "turns": [61, 70], "partial": false,
+                "narrative": "The assistant fixed the parser.",
+                "fields": {
+                    "intent": [ok("Fix the parser")],
+                    "progress": [ok("Ran the suite"),
+                                 {"text": "Merged it", "cites": [], "verdicts": ["uncited"]}],
+                    "unresolved": [ok("None.")],
+                    "next": [ok("Open the PR")]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let arc = StenoArc {
+            lines: ArcLines {
+                goal: "g [w7]".into(),
+                recent: "r [w7]".into(),
+                pending: "p [w7]".into(),
+                notes: "Unknown".into(),
+            },
+            covered: String::new(),
+            at: Utc::now(),
+            current: true,
+            path: record.join("derive/arc.json"),
+        };
+        let text = arc.windows_text(&[7, 8]);
+        assert!(
+            text.starts_with("w7 · turns 61-70\n\nThe assistant fixed the parser."),
+            "{text}"
+        );
+        assert!(text.contains("Progress:\n- Ran the suite\n"), "{text}");
+        assert!(text.contains("Next:\n- Open the PR"), "{text}");
+        assert!(
+            !text.contains("Merged it") && !text.contains("Unresolved"),
+            "{text}"
+        );
+        assert!(text.contains("1 statement(s) left out"), "{text}");
+        assert!(text.ends_with("w8: not readable in the record"), "{text}");
     }
 
     #[test]

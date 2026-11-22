@@ -183,13 +183,16 @@ pub(crate) fn wrap_rows(text: &str, width: u16, rows: usize) -> Vec<String> {
             out.push(clip_info_text(rest, width as u16));
             break;
         }
-        // The longest prefix ending at a space that fits; a lone long word is clipped.
+        // The longest prefix ending at a space that fits, never inside a "[w1, w3]" cite;
+        // a lone long word is clipped.
         let mut cut = 0;
         for (i, _) in rest.match_indices(' ') {
             if rest[..i].width() > width {
                 break;
             }
-            cut = i;
+            if rest[..i].matches('[').count() == rest[..i].matches(']').count() {
+                cut = i;
+            }
         }
         if cut == 0 {
             out.push(clip_info_text(rest, width as u16));
@@ -265,6 +268,37 @@ pub(crate) fn arc_view(instance: &Instance) -> (String, Option<[(&'static str, &
 }
 
 /// The arc line under `row` in a band laid out by `InfoAreas`, as an index into its four lines.
+/// The band's rows under its rule: each arc line's index and its wrapped text, two per line.
+fn arc_band_rows(instance: &Instance, band_width: u16) -> Vec<(usize, String)> {
+    let lines = arc_view(instance).1;
+    let width = band_width.saturating_sub(ARC_LABEL_WIDTH);
+    (0..4)
+        .flat_map(|index| {
+            let value = lines.map_or("Unknown", |lines| lines[index].1);
+            let mut wrapped = wrap_rows(value, width, usize::from(ARC_LINE_ROWS));
+            wrapped.resize(usize::from(ARC_LINE_ROWS), String::new());
+            wrapped.into_iter().map(move |text| (index, text))
+        })
+        .collect()
+}
+
+/// The windows named by the cite under the pointer, when it is on one in the band.
+pub(crate) fn arc_cite_at(band: Rect, instance: &Instance, col: u16, row: u16) -> Option<Vec<u32>> {
+    use unicode_width::UnicodeWidthStr;
+    arc_line_at(band, instance, col, row)?;
+    let (_, text) = arc_band_rows(instance, band.width)
+        .into_iter()
+        .nth(usize::from(row - band.y - 1))?;
+    let offset = usize::from(col.checked_sub(band.x + ARC_LABEL_WIDTH)?);
+    crate::session::work_arc::steno::cite_spans(&text)
+        .into_iter()
+        .find(|(span, _)| {
+            let start = text[..span.start].width();
+            (start..start + text[span.clone()].width()).contains(&offset)
+        })
+        .map(|(_, windows)| windows)
+}
+
 pub(crate) fn arc_line_at(band: Rect, instance: &Instance, col: u16, row: u16) -> Option<usize> {
     if !instance.work_arc_enabled || !band.contains(Position::from((col, row))) || row == band.y {
         return None;
@@ -568,7 +602,7 @@ impl Preview {
         let dim = Style::default().fg(theme.dimmed);
         let (status, lines) = arc_view(instance);
         let hint = match (instance.work_arc_enabled, lines.is_some()) {
-            (true, true) => " · hover a line, click to expand",
+            (true, true) => " · hover a line, click to expand, click a [wN] for its window",
             (false, true) => " · menu: expand",
             _ => "",
         };
@@ -595,22 +629,34 @@ impl Preview {
             )]
         };
         if instance.work_arc_enabled {
-            let width = area.width.saturating_sub(ARC_LABEL_WIDTH);
             let labels = ["Goal", "Recent", "Pending", "Notes"];
-            for (index, label) in labels.into_iter().enumerate() {
-                let value = lines.map_or("Unknown", |lines| lines[index].1);
-                let mut wrapped = wrap_rows(value, width, usize::from(ARC_LINE_ROWS));
-                wrapped.resize(usize::from(ARC_LINE_ROWS), String::new());
-                for (row, text) in wrapped.into_iter().enumerate() {
-                    let label = if row == 0 { label } else { "" };
-                    rows.push(Line::from(vec![
-                        Span::styled(
-                            format!("{label:<width$}", width = usize::from(ARC_LABEL_WIDTH)),
-                            dim,
-                        ),
-                        Span::styled(text, Style::default().fg(theme.text)),
-                    ]));
+            let cite = dim.underlined();
+            let mut previous = None;
+            for (index, text) in arc_band_rows(instance, area.width) {
+                let label = if previous != Some(index) {
+                    labels[index]
+                } else {
+                    ""
+                };
+                previous = Some(index);
+                let mut spans = vec![Span::styled(
+                    format!("{label:<width$}", width = usize::from(ARC_LABEL_WIDTH)),
+                    dim,
+                )];
+                let mut at = 0;
+                for (span, _) in crate::session::work_arc::steno::cite_spans(&text) {
+                    spans.push(Span::styled(
+                        text[at..span.start].to_string(),
+                        Style::default().fg(theme.text),
+                    ));
+                    spans.push(Span::styled(text[span.clone()].to_string(), cite));
+                    at = span.end;
                 }
+                spans.push(Span::styled(
+                    text[at..].to_string(),
+                    Style::default().fg(theme.text),
+                ));
+                rows.push(Line::from(spans));
             }
         }
         frame.render_widget(Paragraph::new(rows), area);
@@ -1147,7 +1193,59 @@ mod tests {
     }
 
     #[test]
+    fn arc_cite_at_finds_the_window_under_the_pointer() {
+        use crate::session::work_arc::{steno::ArcLines, StenoArc};
+        let mut session = Instance::new("synthetic", "/tmp/synthetic");
+        session.tool = "claude".into();
+        session.agent_session_id = Some("native-id".into());
+        session.work_arc_enabled = true;
+        session.steno_arc = Some(Box::new(StenoArc {
+            lines: ArcLines {
+                goal: "Ship it [w1-w3, w6]".into(),
+                recent: "Ran tests [w9]".into(),
+                pending: "Unknown".into(),
+                notes: "Unknown".into(),
+            },
+            covered: String::new(),
+            at: chrono::Utc::now(),
+            current: true,
+            path: "/tmp/arc.json".into(),
+        }));
+        let band = Rect::new(2, 10, 80, 9);
+        // Goal row: label (10 columns), then "Ship it " (8), then the cite.
+        let cite_col = band.x + 10 + 8;
+        assert_eq!(
+            arc_cite_at(band, &session, cite_col, 11),
+            Some(vec![1, 2, 3, 6])
+        );
+        assert_eq!(
+            arc_cite_at(band, &session, cite_col + 10, 11),
+            Some(vec![1, 2, 3, 6])
+        );
+        assert_eq!(
+            arc_cite_at(band, &session, cite_col + 11, 11),
+            None,
+            "past the cite"
+        );
+        assert_eq!(
+            arc_cite_at(band, &session, band.x + 12, 11),
+            None,
+            "on the text"
+        );
+        assert_eq!(
+            arc_cite_at(band, &session, band.x + 10 + 10, 13),
+            Some(vec![9])
+        );
+        session.work_arc_enabled = false;
+        assert_eq!(arc_cite_at(band, &session, cite_col, 11), None);
+    }
+
+    #[test]
     fn wrap_rows_breaks_at_spaces_and_marks_a_cut() {
+        assert_eq!(
+            wrap_rows("done it [w1, w3] ok", 13, 3),
+            ["done it", "[w1, w3] ok"]
+        );
         assert_eq!(wrap_rows("one two three", 7, 3), ["one two", "three"]);
         assert_eq!(
             wrap_rows("one two three four", 7, 2),
