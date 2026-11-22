@@ -735,6 +735,9 @@ fn render_transcript(
     let max = total.saturating_sub(text_area.height);
     // Lets a scroll step resolve the stick-to-bottom sentinel first.
     state.last_scroll_max.set(max);
+    state
+        .last_text_size
+        .set((text_area.width, text_area.height));
     let first = state.scroll_offset.min(max);
     let para = Paragraph::new(text).scroll((first, 0));
     frame.render_widget(para, text_area);
@@ -891,7 +894,17 @@ pub(super) fn wrapped_transcript(
     width: u16,
     tool_output: ToolOutputMode,
 ) -> Text<'static> {
-    let lines = transcript_lines(
+    wrapped_transcript_items(state, theme, width, tool_output).0
+}
+
+/// `wrapped_transcript` plus the wrapped-line index where each item starts.
+fn wrapped_transcript_items(
+    state: &StructuredViewState,
+    theme: &Theme,
+    width: u16,
+    tool_output: ToolOutputMode,
+) -> (Text<'static>, Vec<usize>) {
+    let (lines, starts) = transcript_lines(
         &state.transcript,
         theme,
         state.path_roots.as_ref(),
@@ -899,10 +912,64 @@ pub(super) fn wrapped_transcript(
         state.tool_fold,
     );
     let mut wrapped: Vec<Line<'static>> = Vec::with_capacity(lines.len());
-    for line in lines {
+    let mut item_starts = Vec::with_capacity(starts.len());
+    let mut pending = starts.iter().peekable();
+    for (index, line) in lines.into_iter().enumerate() {
+        while pending.next_if(|start| **start <= index).is_some() {
+            item_starts.push(wrapped.len());
+        }
         wrap_line_into(own_line(line), width, &mut wrapped);
     }
-    Text::from(wrapped)
+    item_starts.resize(starts.len(), wrapped.len());
+    (Text::from(wrapped), item_starts)
+}
+
+/// The transcript item at the top of a scrolled-up viewport, and how many
+/// rows into it the viewport starts.
+pub(super) struct ScrollAnchor {
+    item: usize,
+    row: usize,
+}
+
+/// Anchor on the item at the top of the last render, or `None` while following
+/// the latest output or before the first render.
+pub(super) fn scroll_anchor(state: &StructuredViewState) -> Option<ScrollAnchor> {
+    let (width, _) = state.last_text_size.get();
+    if state.scroll_offset == u16::MAX || width == 0 {
+        return None;
+    }
+    let (_, starts) =
+        wrapped_transcript_items(state, &Theme::default(), width, ToolOutputMode::Compact);
+    let first = state.scroll_offset.min(state.last_scroll_max.get()) as usize;
+    let item = starts
+        .partition_point(|start| *start <= first)
+        .checked_sub(1)?;
+    Some(ScrollAnchor {
+        item,
+        row: first - starts[item],
+    })
+}
+
+/// The scroll offset that keeps `anchor` at the top after the lines changed;
+/// `u16::MAX` when that reaches the end, which resumes following the latest output.
+pub(super) fn restore_scroll(state: &StructuredViewState, anchor: &ScrollAnchor) -> u16 {
+    let (width, height) = state.last_text_size.get();
+    let (text, starts) =
+        wrapped_transcript_items(state, &Theme::default(), width, ToolOutputMode::Compact);
+    let Some(&start) = starts.get(anchor.item) else {
+        return u16::MAX;
+    };
+    let end = starts
+        .get(anchor.item + 1)
+        .copied()
+        .unwrap_or(text.lines.len());
+    let first = start + anchor.row.min(end.saturating_sub(start + 1));
+    let max = text.lines.len().saturating_sub(height as usize);
+    if first >= max {
+        u16::MAX
+    } else {
+        first as u16
+    }
 }
 
 fn plan_summary_line(plan: &[super::reducer::PlanLine], theme: &Theme) -> Line<'static> {
@@ -1522,15 +1589,16 @@ fn render_agent_message_lines(text: &str) -> Vec<Line<'static>> {
     body
 }
 
-/// Project the daemon's transcript rows to lines. Approvals are control state
-/// shown in the shelf, not here.
+/// Project the daemon's transcript rows to lines, plus the line index where
+/// each item (message, card, note) starts. Approvals are control state shown
+/// in the shelf, not here.
 fn transcript_lines(
     transcript: &AcpTranscript,
     theme: &Theme,
     path_roots: Option<&SessionPathRoots>,
     tool_output: ToolOutputMode,
     fold: Option<ToolFold>,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<usize>) {
     let rows = &transcript.server_rows;
     // One card per tool call at its start row; the last terminal row wins.
     let mut completions: HashMap<&str, &TranscriptRow> = HashMap::new();
@@ -1569,8 +1637,10 @@ fn transcript_lines(
     };
 
     let mut out: Vec<Line<'static>> = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
     let mut i = 0;
     while i < rows.len() {
+        starts.push(out.len());
         let row = &rows[i];
         match row.kind {
             TranscriptRowKind::Message => {
@@ -1674,6 +1744,7 @@ fn transcript_lines(
     }
     if let ToolOutputMode::Retained(outputs) = tool_output {
         for output in outputs {
+            starts.push(out.len());
             out.push(Line::styled(
                 format!(
                     "Retained tool output · completion unavailable · {}",
@@ -1691,7 +1762,7 @@ fn transcript_lines(
             Style::default().add_modifier(Modifier::DIM),
         )));
     }
-    out
+    (out, starts)
 }
 
 /// The spawning tool call of `row`, when its card is in the window.
@@ -2955,13 +3026,8 @@ mod tests {
             chunk("Build", "m-c"),
             chunk("ing now", "m-c"),
         ]);
-        let out = joined(&transcript_lines(
-            &t,
-            &Theme::default(),
-            None,
-            ToolOutputMode::Compact,
-            None,
-        ));
+        let out =
+            joined(&transcript_lines(&t, &Theme::default(), None, ToolOutputMode::Compact, None).0);
         assert!(!out.contains("#4656.The waiter"), "{out:?}");
         assert!(
             out.contains("for #4656.") && out.contains("The waiter has the lock."),
@@ -2986,6 +3052,7 @@ mod tests {
         ]);
         let lines: Vec<String> =
             transcript_lines(&t, &Theme::default(), None, ToolOutputMode::Compact, None)
+                .0
                 .iter()
                 .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
                 .filter(|line: &String| !line.is_empty())
@@ -3038,13 +3105,8 @@ mod tests {
                 text: String::new(),
             },
         ]);
-        let out = joined(&transcript_lines(
-            &t,
-            &Theme::default(),
-            None,
-            ToolOutputMode::Compact,
-            None,
-        ));
+        let out =
+            joined(&transcript_lines(&t, &Theme::default(), None, ToolOutputMode::Compact, None).0);
         assert_eq!(out.matches("Compaction summary").count(), 1, "{out:?}");
         for want in [
             "working on it",
@@ -3474,6 +3536,89 @@ mod tests {
 
         state.toggle_tool_fold();
         assert_eq!(lines(&state), folded);
+    }
+
+    /// Many failed cards with multi-line bodies: expanded they span several
+    /// rows each, folded a single row each.
+    fn failed_cards_state(cards: usize) -> StructuredViewState {
+        use crate::acp::state::ToolCall;
+        let mut events = Vec::new();
+        for n in 0..cards {
+            let id = format!("t-{n}");
+            events.push(Event::ToolCallStarted {
+                tool_call: ToolCall {
+                    id: id.clone(),
+                    name: "Bash".into(),
+                    kind: "execute".into(),
+                    args_preview: serde_json::json!({ "command": format!("cmd-{n}") }).to_string(),
+                    started_at: chrono::Utc::now(),
+                    parent_tool_call_id: None,
+                    memory_recall: None,
+                    diffs: Vec::new(),
+                },
+            });
+            events.push(Event::ToolCallCompleted {
+                tool_call_id: id,
+                is_error: true,
+                content: format!("err-{n}\nsecond\nthird"),
+                output: Vec::new(),
+                completed_at: chrono::Utc::now(),
+                async_subagent: false,
+            });
+        }
+        let mut state = test_state();
+        state.transcript.server_rows = server_rows(&events);
+        state
+    }
+
+    /// The first two transcript rows of the viewport, as the last render painted
+    /// them: a card's header and command line, or its one folded line and the gap.
+    fn top_transcript_rows(state: &StructuredViewState) -> String {
+        let (width, _) = state.last_text_size.get();
+        let text = wrapped_transcript(state, &Theme::default(), width, ToolOutputMode::Compact);
+        let first = state.scroll_offset.min(state.last_scroll_max.get()) as usize;
+        joined(&text.lines[first..first + 2])
+    }
+
+    /// CRA-1813: folding changes line counts, so a scrolled-up view keeps the
+    /// card it showed at the top instead of jumping to unrelated content.
+    #[test]
+    fn tool_fold_toggle_keeps_the_top_card_when_scrolled_up() {
+        let mut state = failed_cards_state(12);
+        render_rows(&state, 100, 14, true);
+        let text = wrapped_transcript(&state, &Theme::default(), 100, ToolOutputMode::Compact);
+        let card = text
+            .lines
+            .iter()
+            .position(|l| line_text(l).contains("cmd-3"))
+            .expect("card 3");
+        // The header sits one row above the command line.
+        state.scroll_offset = card as u16 - 1;
+        render_rows(&state, 100, 14, true);
+        assert!(top_transcript_rows(&state).contains("cmd-3"));
+
+        state.toggle_tool_fold();
+        render_rows(&state, 100, 14, true);
+        assert_ne!(state.scroll_offset, u16::MAX);
+        assert!(top_transcript_rows(&state).contains("cmd-3"));
+
+        state.toggle_tool_fold();
+        render_rows(&state, 100, 14, true);
+        assert!(top_transcript_rows(&state).contains("cmd-3"));
+    }
+
+    /// CRA-1813: a fold that leaves the old position past the new end resumes
+    /// follow mode, so the "G latest" hint does not stay on a bottom view.
+    #[test]
+    fn tool_fold_toggle_near_the_end_resumes_follow_mode() {
+        let mut state = failed_cards_state(12);
+        render_rows(&state, 100, 14, true);
+        state.scroll_offset = state.last_scroll_max.get() - 1;
+        assert!(render_dump(&state, 100, 14).contains("G latest"));
+
+        state.toggle_tool_fold();
+        assert_eq!(state.scroll_offset, u16::MAX);
+        assert!(!render_dump(&state, 100, 14).contains("G latest"));
     }
 
     #[test]

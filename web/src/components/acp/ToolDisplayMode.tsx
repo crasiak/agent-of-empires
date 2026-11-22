@@ -64,10 +64,6 @@ export function ToolDisplayModeProvider({
   return <ToolDisplayModeContext.Provider value={value}>{children}</ToolDisplayModeContext.Provider>;
 }
 
-export function useToolDisplayMode(): ToolDensity {
-  return useContext(ToolDisplayModeContext).density;
-}
-
 export function useToolDisplay(): ToolDisplay {
   return useContext(ToolDisplayModeContext);
 }
