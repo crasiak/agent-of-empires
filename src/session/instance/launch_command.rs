@@ -145,6 +145,23 @@ fn appended_flag_invocation(supplied: &str, extra_args: &str) -> String {
     }
 }
 
+fn append_intake_turn(
+    cmd: &mut String,
+    prompt: Option<&str>,
+    existing: bool,
+    started: bool,
+) -> Result<()> {
+    anyhow::ensure!(prompt.is_none() || existing || !started,
+        "Intake was already launched but its native conversation is unavailable; inspect the original Session instead of replaying the task");
+    if !existing {
+        if let Some(prompt) = prompt {
+            cmd.push(' ');
+            cmd.push_str(&shell_words::quote(prompt));
+        }
+    }
+    Ok(())
+}
+
 /// Refuse an argument AoE appends for the agent when the shell would consume it,
 /// naming the construct so a declaration can be corrected.
 fn refuse_shell_consumed_argument(command: &str, argument: &str) -> Result<()> {
@@ -1850,6 +1867,11 @@ impl Instance {
             self.pi_extension_launched = true;
         }
         let env_prefix = env_prefix;
+        let (launch_args, intake_prompt) = if self.tool == "pi" {
+            crate::session::tailored::intake::split_launch_args(&self.extra_args)
+        } else {
+            (self.extra_args.clone(), None)
+        };
 
         if self.command.is_empty() {
             match agent {
@@ -1858,7 +1880,7 @@ impl Instance {
                     // declaration whose command carries an assignment and fixed
                     // arguments; the binary alone would drop them.
                     let supplied = self.get_launch_command();
-                    let guarded = appended_flag_invocation(&supplied, &self.extra_args);
+                    let guarded = appended_flag_invocation(&supplied, &launch_args);
                     let mut cmd = self.freeze_native_invocation(
                         supplied.clone(),
                         execution,
@@ -1868,14 +1890,11 @@ impl Instance {
                     if let Some((ref flag, _)) = identity_extension {
                         cmd.push_str(flag);
                     }
-                    if !self.extra_args.is_empty() {
-                        // A model id carrying shell metacharacters (a
-                        // context-window suffix such as `[1m]`) would abort the
-                        // launch line before the agent starts.
+                    if !launch_args.is_empty() {
                         cmd = format!(
                             "{} {}",
                             cmd,
-                            crate::session::config::quote_model_value_in_args(&self.extra_args)
+                            crate::session::config::quote_model_value_in_args(&launch_args)
                         );
                     }
                     if host_command.is_none() {
@@ -1925,6 +1944,12 @@ impl Instance {
                             }
                         }
                     }
+                    append_intake_turn(
+                        &mut cmd,
+                        intake_prompt.as_deref(),
+                        is_existing,
+                        self.started_at.is_some(),
+                    )?;
                     apply_no_daemon_flag(&mut cmd, agent, self, execution, unpinned);
                     apply_agent_launch_env(&mut cmd, agent);
                     let raw_command = format!(
@@ -1999,11 +2024,6 @@ impl Instance {
                 );
             }
             let supplied = self.command.clone();
-            let (launch_args, intake_prompt) = if self.tool == "pi" {
-                crate::session::tailored::intake::split_launch_args(&self.extra_args)
-            } else {
-                (self.extra_args.clone(), None)
-            };
             let guarded = appended_flag_invocation(&supplied, &launch_args);
             let mut cmd = self.freeze_native_invocation(
                 supplied.clone(),
@@ -2063,16 +2083,12 @@ impl Instance {
                     &native.inputs.launch_id,
                 )?);
             }
-            anyhow::ensure!(
-                intake_prompt.is_none() || is_existing || self.started_at.is_none(),
-                "Intake was already launched but its native conversation is unavailable; inspect the original Session instead of replaying the task"
-            );
-            if !is_existing {
-                if let Some(prompt) = intake_prompt {
-                    cmd.push(' ');
-                    cmd.push_str(&shell_words::quote(&prompt));
-                }
-            }
+            append_intake_turn(
+                &mut cmd,
+                intake_prompt.as_deref(),
+                is_existing,
+                self.started_at.is_some(),
+            )?;
             apply_ssh_prompt_suppression(&mut cmd);
             apply_no_daemon_flag(&mut cmd, agent, self, execution, unpinned);
             if ledger_pi && !document_chat {
@@ -2898,55 +2914,63 @@ sandbox = "unsupported"
         );
         let project = home.path().join("repo");
         std::fs::create_dir(&project).unwrap();
-        let mut instance = tool_instance("pi", project.to_str().unwrap());
-        set_pi_integration(&instance, "identity");
-        instance.extra_args = crate::session::tailored::intake::IntakeBrief::new(
-            "Unique intake task 'quoted'\nsecond line".into(),
-        )
-        .unwrap()
-        .launch_args("--thinking high", "default", "aoe")
-        .unwrap();
-        let mut native = instance.resolve_native_execution(None).unwrap();
-        let first = instance
-            .build_host_command(
-                instance.resolved_agent(),
-                Some(&native),
-                &mut instance.conversation_state(),
+        for command in ["", "pi"] {
+            let mut instance = tool_instance("pi", project.to_str().unwrap());
+            instance.command = command.into();
+            set_pi_integration(&instance, "identity");
+            instance.extra_args = crate::session::tailored::intake::IntakeBrief::new(
+                "Unique intake task 'quoted'\nsecond line".into(),
             )
+            .unwrap()
+            .launch_args("--thinking high", "default", "aoe")
             .unwrap();
-        assert!(!first.is_existing);
-        let command = first.command.unwrap();
-        assert_eq!(
-            command.matches("Unique intake task").count(),
-            1,
-            "{command}"
-        );
-        let sid = instance.agent_session_id.clone().unwrap();
-        let store = home.path().join("native-history");
-        std::fs::create_dir(&store).unwrap();
-        let transcript = publish_host_pi_transcript(&instance.id, &sid, &store);
-        native.pi_transcript_path = Some(transcript.to_str().unwrap().into());
-        instance.started_at = Some(chrono::Utc::now());
-        let resumed = instance
-            .build_host_command(
-                instance.resolved_agent(),
-                Some(&native),
-                &mut instance.conversation_state(),
-            )
-            .unwrap();
-        assert!(resumed.is_existing);
-        let command = resumed.command.unwrap();
-        assert!(!command.contains("Unique intake task"), "{command}");
-        assert!(command.contains("--thinking high"), "{command}");
-        assert!(command.contains("--session "), "{command}");
-        native.pi_transcript_path = None;
-        assert!(instance
-            .build_host_command(
-                instance.resolved_agent(),
-                Some(&native),
-                &mut instance.conversation_state()
-            )
-            .is_err());
+            let mut native = instance.resolve_native_execution(None).unwrap();
+            let first = instance
+                .build_host_command(
+                    instance.resolved_agent(),
+                    Some(&native),
+                    &mut instance.conversation_state(),
+                )
+                .unwrap();
+            assert!(!first.is_existing);
+            let command = first.command.unwrap();
+            assert_eq!(
+                command.matches("Unique intake task").count(),
+                1,
+                "{command}"
+            );
+            assert!(
+                command
+                    .contains("# AoE intake brief\n\n## Task (original input)\nUnique intake task"),
+                "the native agent receives decoded multiline text: {command}"
+            );
+            let sid = instance.agent_session_id.clone().unwrap();
+            let store = home.path().join(format!("native-history-{}", instance.id));
+            std::fs::create_dir(&store).unwrap();
+            let transcript = publish_host_pi_transcript(&instance.id, &sid, &store);
+            native.pi_transcript_path = Some(transcript.to_str().unwrap().into());
+            instance.started_at = Some(chrono::Utc::now());
+            let resumed = instance
+                .build_host_command(
+                    instance.resolved_agent(),
+                    Some(&native),
+                    &mut instance.conversation_state(),
+                )
+                .unwrap();
+            assert!(resumed.is_existing);
+            let command = resumed.command.unwrap();
+            assert!(!command.contains("Unique intake task"), "{command}");
+            assert!(command.contains("--thinking high"), "{command}");
+            assert!(command.contains("--session "), "{command}");
+            native.pi_transcript_path = None;
+            assert!(instance
+                .build_host_command(
+                    instance.resolved_agent(),
+                    Some(&native),
+                    &mut instance.conversation_state()
+                )
+                .is_err());
+        }
     }
 
     fn owned_codex_namespace(home: &std::path::Path) -> EnvGuard {
