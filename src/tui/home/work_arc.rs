@@ -534,6 +534,7 @@ impl HomeView {
             "{}\n\nPress t for the transcript of these turns.",
             steno.windows_text(windows)
         );
+        self.steno_windows = Some((steno.clone(), windows.to_vec()));
         self.info_dialog = Some(
             InfoDialog::new(
                 &format!(
@@ -545,19 +546,10 @@ impl HomeView {
             .with_size(90, 30)
             .scrollable(),
         );
-        self.steno_windows = Some(windows.to_vec());
     }
 
     /// The record's events for the windows' turns, replacing their popup.
-    pub(super) fn open_steno_transcript(&mut self, windows: &[u32]) {
-        let Some(steno) = self
-            .selected_session
-            .as_ref()
-            .and_then(|id| self.get_instance(id))
-            .and_then(|row| row.steno_arc.as_deref())
-        else {
-            return;
-        };
+    pub(super) fn open_steno_transcript(&mut self, steno: &arc::StenoArc, windows: &[u32]) {
         let names: Vec<_> = windows.iter().map(|w| format!("w{w}")).collect();
         self.info_dialog = Some(
             InfoDialog::new(
