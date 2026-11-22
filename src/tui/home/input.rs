@@ -945,14 +945,26 @@ impl HomeView {
             .map(|index| (instance.id.clone(), index))
     }
 
-    /// Click on an arc line: open the full work arc, returning true when the click was on it.
+    /// Click on an arc line: a `[wN]` cite opens its windows, elsewhere the full work arc.
+    /// True when the click was on a line.
     pub fn handle_arc_click(&mut self, col: u16, row: u16) -> bool {
-        let hit = self.arc_line_under(col, row).is_some();
-        if hit {
-            self.arc_hover = None;
-            self.expand_work_arc();
+        if self.arc_line_under(col, row).is_none() {
+            return false;
         }
-        hit
+        self.arc_hover = None;
+        let windows = self
+            .selected_session
+            .as_deref()
+            .and_then(|id| self.get_instance(id))
+            .and_then(|instance| {
+                let band = self.info_areas(instance)?.arc;
+                crate::tui::components::preview::arc_cite_at(band, instance, col, row)
+            });
+        match windows {
+            Some(windows) => self.open_steno_windows(&windows),
+            None => self.expand_work_arc(),
+        }
+        true
     }
 
     /// Click on the footer tips badge: open the tips overlay, returning true when the
