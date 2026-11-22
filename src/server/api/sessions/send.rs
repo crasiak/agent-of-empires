@@ -898,9 +898,14 @@ mod send_output_tests {
         }
         let _home = crate::session::test_support::isolate_app_dir();
         let root = tempfile::tempdir_in("/tmp").unwrap();
-        // A renamed shell exercises delivery shape, not process authentication.
+        // macOS sh reexecs its selected shell, losing the fixture's name.
         let agent_binary = root.path().join("pi");
-        std::fs::copy("/bin/sh", &agent_binary).unwrap();
+        let shell = if cfg!(target_os = "macos") {
+            "/bin/bash"
+        } else {
+            "/bin/sh"
+        };
+        std::fs::copy(shell, &agent_binary).unwrap();
         let input_reader = format!(
             "'{}' -c 'while IFS= read -r line; do printf \"%s\\n\" \"$line\"; done'",
             agent_binary.display()
