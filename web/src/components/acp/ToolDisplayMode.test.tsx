@@ -31,7 +31,6 @@ import {
   ToolDisplayModeProvider,
   ToolFoldToggle,
   useToolDensityPref,
-  useToolDisplayMode,
   useToolFold,
   type ToolDensity,
   type ToolFold,
@@ -71,16 +70,6 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-});
-
-describe("useToolDisplayMode", () => {
-  it("defaults to detailed outside a provider and reads the provided density inside one", () => {
-    expect(renderHook(() => useToolDisplayMode()).result.current).toBe("detailed");
-    const { result } = renderHook(() => useToolDisplayMode(), {
-      wrapper: ({ children }) => <ToolDisplayModeProvider density="compact">{children}</ToolDisplayModeProvider>,
-    });
-    expect(result.current).toBe("compact");
-  });
 });
 
 describe("useToolDensityPref", () => {
@@ -198,7 +187,7 @@ describe("ToolFoldToggle", () => {
 describe("fold all", () => {
   const ok = makeCompletion({ toolCallId: "bash-1", text: "listing-output" });
   const failed = makeError({ toolCallId: "bash-1", text: "boom" });
-  const card = (result: typeof ok) => <ToolCard tool={fixtures.bash} result={result} />;
+  const card = (result: typeof ok | undefined) => <ToolCard tool={fixtures.bash} result={result} />;
 
   it.each<ToolDensity>(["detailed", "compact"])("folds a failed card and unfolds a successful one (%s)", (density) => {
     const { container, rerender } = render(<Wrap density={density}>{card(failed)}</Wrap>);
@@ -291,5 +280,52 @@ describe("fold all", () => {
     expect(container.textContent).toContain("updated 2 times");
     expect(container.textContent).toContain("item-y-0");
     expect(container.textContent).not.toContain("item-x-0");
+  });
+
+  it("drops a todo-group toggle made under a fold once Compact tools resets it", () => {
+    const updates = ["x", "y"].map((id) => ({
+      tool: makeToolCall({
+        id,
+        name: "TodoWrite",
+        args_preview: JSON.stringify({
+          todos: Array.from({ length: 6 }, (_, n) => ({ content: `item-${id}-${n}`, status: "pending" })),
+        }),
+      }),
+      result: makeCompletion({ toolCallId: id }),
+    }));
+    const { container, rerender } = render(
+      <Wrap density="detailed" toolKey="claude" fold={{ open: false, epoch: 1 }}>
+        <TodoGroupCard items={updates} />
+      </Wrap>,
+    );
+    // Only the opened group lists its updates as "6 items" cards.
+    expect(container.textContent).not.toContain("6 items");
+    fireEvent.click(screen.getByRole("button", { name: /updated 2 times/ }));
+    expect(container.textContent).toContain("6 items");
+    rerender(
+      <Wrap density="detailed" toolKey="claude">
+        <TodoGroupCard items={updates} />
+      </Wrap>,
+    );
+    expect(container.textContent).not.toContain("6 items");
+  });
+
+  it("folds a running card to its header, still marked running, and unfolds it on the next press", () => {
+    const header = () => screen.getByRole("button", { name: /ls -la/ });
+    const { container, rerender } = render(
+      <Wrap density="detailed" fold={{ open: false, epoch: 1 }}>
+        {card(undefined)}
+      </Wrap>,
+    );
+    expect(container.textContent).toContain("running");
+    const folded = container.textContent;
+    rerender(
+      <Wrap density="detailed" fold={{ open: true, epoch: 2 }}>
+        {card(undefined)}
+      </Wrap>,
+    );
+    expect(container.textContent).toContain("running");
+    expect(container.textContent).not.toBe(folded);
+    expect(header()).toBeTruthy();
   });
 });

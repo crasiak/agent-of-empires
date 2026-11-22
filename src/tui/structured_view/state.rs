@@ -122,6 +122,8 @@ pub struct StructuredViewState {
     /// resolve the `u16::MAX` "stick to bottom" sentinel to a concrete position.
     /// Interior-mutable: the render borrows the state immutably. See `apply_scroll`.
     pub last_scroll_max: std::cell::Cell<u16>,
+    /// Width and height of the transcript text area from the last render.
+    pub last_text_size: std::cell::Cell<(u16, u16)>,
     /// Context-window percentage at which the status line nudges toward `/compact`,
     /// or `None` when off or the fetch failed. Read from the daemon's `/api/about`,
     /// not local config, so a remote-attached view honours that daemon (#3253).
@@ -359,17 +361,24 @@ impl StructuredViewState {
             choice: None,
             auto_presented_elicitation: None,
             last_scroll_max: std::cell::Cell::new(0),
+            last_text_size: std::cell::Cell::new((0, 0)),
             compaction_reminder_percent: None,
             tool_fold: None,
         }
     }
 
-    /// The default already mixes folded and expanded cards, so the first press folds.
+    /// The default already mixes folded and expanded cards, so the first press
+    /// folds. Scrolled up, the item at the top stays there; if that lands at the
+    /// end, follow mode resumes.
     pub fn toggle_tool_fold(&mut self) {
+        let anchor = super::render::scroll_anchor(self);
         self.tool_fold = Some(match self.tool_fold {
             Some(ToolFold::Folded) => ToolFold::Expanded,
             _ => ToolFold::Folded,
         });
+        if let Some(anchor) = anchor {
+            self.scroll_offset = super::render::restore_scroll(self, &anchor);
+        }
     }
 
     /// Drop the plugin pane overlay if up, returning focus to the transcript

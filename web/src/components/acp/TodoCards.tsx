@@ -161,7 +161,9 @@ export function TodoGroupCard({ items }: { items: ToolCardProps[] }) {
   const [toggled, setToggled] = useState<ExpansionOverride | null>(() =>
     items.some((i) => store?.isOpen(i.tool.id, mode, false)) ? { mode, open: true } : null,
   );
-  const open = toggled && (toggled.mode === mode || !display.fold) ? toggled.open : (display.fold?.open ?? false);
+  // Like a card, a toggle made under a fold press dies with it.
+  const keepToggle = toggled && (toggled.mode === mode || (!display.fold && !toggled.mode.startsWith("fold-")));
+  const open = keepToggle ? toggled.open : (display.fold?.open ?? false);
   const snapshots = useMemo(
     () =>
       items.flatMap((it) => {

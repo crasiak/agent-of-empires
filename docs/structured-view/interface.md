@@ -114,4 +114,4 @@ In the dashboard, **Jump to latest** immediately moves to the newest output and 
 
 The **Compact tools** toggle at the top of the transcript collapses every tool card to its header for scanning, and new cards arrive collapsed while it is on. The agent's narration stays visible, errored cards stay open, and you can still expand a single card. It is a per-browser preference.
 
-**Fold all** beside it folds every tool card to its header, errored cards included, and becomes **Unfold all**, which opens every card. Each press overrides any card you toggled before it, you can still toggle a single card afterwards, and changing **Compact tools** returns to that baseline. It lasts until you leave the view.
+**Fold all** beside it folds every tool card to its header, errored cards included, and becomes **Unfold all**, which opens every card. Each press overrides any card you toggled before it, and you can still toggle a single card afterwards. Changing **Compact tools** clears the fold. It lasts until the page reloads or the view is closed.
