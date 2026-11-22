@@ -14,8 +14,8 @@ While a session is broken out, its sidebar row shows a `⧉` marker and the prev
 ## Closing
 
 - Stopping, trashing or deleting a session from the sidebar closes its separate Breakout window. A `splits` window is not closed this way, and a stopped session keeps its marker there until **Close Breakout Windows**.
-- **Close Breakout Windows** in the `K` menu (or "Close breakout windows" in the `Ctrl+K` palette) closes every Breakout window on this Mac, including ones aoe lost track of and ones opened for aoe on other hosts.
-- Before each new Breakout, windows whose session no longer exists are closed. Windows opened for another host are left alone, since this Mac cannot see that host's sessions.
+- **Close Breakout Windows** closes every Breakout window on this Mac, including ones aoe lost track of and ones opened for aoe on other hosts. It is in the `K` menu only while sessions are marked; with nothing marked, use "Close breakout windows" in the `Ctrl+K` palette.
+- Before each new Breakout, windows whose session no longer exists are closed. Windows opened for another host are left alone, since this Mac cannot see that host's sessions. When aoe is started with `--profile`, this sweep is skipped, because it only loads that profile's sessions and could not tell another profile's live windows from orphans.
 - aoe never launches Ghostty just to close windows.
 
 Every Breakout window title starts with `aoe breakout · `. Separate windows end with ` · ` and the first 8 characters of the session id, windows for another host carry `@<host>` after the prefix, and a splits window is titled `aoe breakout · splits · <id8> · ...`. aoe finds its windows by these titles, so do not rename them.

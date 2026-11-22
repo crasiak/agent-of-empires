@@ -93,13 +93,15 @@ impl HomeView {
             layout,
             sessions,
         };
-        // A local Breakout first sweeps windows whose Session no longer exists in
-        // any loaded profile.
-        let keep: Vec<String> = self
-            .instances
-            .keys()
-            .map(|id| crate::breakout::id_prefix(id))
-            .collect();
+        // A local Breakout first sweeps windows whose Session no longer exists.
+        // A TUI scoped with `--profile` only loads that profile's Sessions, so it
+        // cannot tell which other profiles' windows are orphans: it skips the sweep.
+        let keep = self.active_profile.is_none().then(|| {
+            self.instances
+                .keys()
+                .map(|id| crate::breakout::id_prefix(id))
+                .collect::<Vec<String>>()
+        });
         self.breakout_opening_titles = crate::breakout::window_titles(&request);
         self.breakout_job = Some(spawn_open(request, transport, keep));
         self.flash_status("Opening breakout windows...");
@@ -284,9 +286,10 @@ impl HomeView {
     }
 }
 
-/// How long the agent may take to open and tile the windows.
-#[cfg(not(test))]
-const AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long to wait for the agent. Its own worst case for the most windows is
+/// an open (15 s + 5 s per window), a frame read (15 s) and a placement (15 s +
+/// 5 s per window) in `breakout::ghostty`: 60 + 15 + 60 = 135 s, plus margin.
+const AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
 
 /// Shown where a remote TUI would close windows: they are on another machine.
 const REMOTE_CLOSE: &str = "Breakout windows are closed on the machine with the screen";
@@ -359,9 +362,9 @@ fn agent_outcome(
     use crate::breakout::agent::AgentResult;
     let reply = reply.map_err(|error| {
         format!(
-            "The Breakout agent did not answer ({error}). Check that `aoe breakout-agent` \
-             is running on the machine with the screen and that your ssh connection \
-             forwards its socket."
+            "The Breakout agent did not answer in time ({error}). The windows may still \
+             open. Check that `aoe breakout-agent` is running on the machine with the \
+             screen and that your ssh connection forwards its socket."
         )
     })?;
     let message = reply.message.unwrap_or_default();
@@ -379,22 +382,29 @@ type OpenJob = std::sync::mpsc::Receiver<Result<crate::breakout::BreakoutOutcome
 type SweepJob = std::sync::mpsc::Receiver<Result<usize, String>>;
 type CloseJob = std::sync::mpsc::Receiver<Result<(), String>>;
 
-/// Open through the transport. Locally, windows of Sessions outside `keep` are
-/// swept first (a failure is only logged); the agent never sweeps.
+/// Open through the transport. Locally, when `keep` is given, windows of
+/// Sessions outside it are swept first (a failure is only logged); the agent
+/// never sweeps.
 #[cfg(not(test))]
-fn spawn_open(request: BreakoutRequest, transport: Transport, keep: Vec<String>) -> OpenJob {
+fn spawn_open(
+    request: BreakoutRequest,
+    transport: Transport,
+    keep: Option<Vec<String>>,
+) -> OpenJob {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = match transport {
             Transport::Local => {
-                match crate::breakout::sweep_local(crate::breakout::SweepScope::Orphans {
-                    keep_id_prefixes: &keep,
-                }) {
-                    Ok(closed) => {
-                        tracing::debug!(target: "tui.breakout", closed, "swept orphaned breakout windows")
-                    }
-                    Err(error) => {
-                        tracing::warn!(target: "tui.breakout", %error, "sweeping orphaned breakout windows failed")
+                if let Some(keep) = &keep {
+                    match crate::breakout::sweep_local(crate::breakout::SweepScope::Orphans {
+                        keep_id_prefixes: keep,
+                    }) {
+                        Ok(closed) => {
+                            tracing::debug!(target: "tui.breakout", closed, "swept orphaned breakout windows")
+                        }
+                        Err(error) => {
+                            tracing::warn!(target: "tui.breakout", %error, "sweeping orphaned breakout windows failed")
+                        }
                     }
                 }
                 crate::breakout::run_local(&request)
@@ -414,10 +424,15 @@ fn spawn_open(request: BreakoutRequest, transport: Transport, keep: Vec<String>)
 /// Tests never reach the driver: the job answers as if every Session opened,
 /// with the window titles a real Breakout gives them.
 #[cfg(test)]
-fn spawn_open(request: BreakoutRequest, transport: Transport, _keep: Vec<String>) -> OpenJob {
+fn spawn_open(
+    request: BreakoutRequest,
+    transport: Transport,
+    keep: Option<Vec<String>>,
+) -> OpenJob {
     test_support::OPENED_FOR.with(|o| {
         *o.borrow_mut() = Some(test_support::Opened {
             request_host: request.host.clone(),
+            orphan_keep: keep,
             agent: match transport {
                 Transport::Agent { socket, host } => Some((socket, host)),
                 _ => None,
@@ -486,6 +501,8 @@ pub(super) mod test_support {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(in crate::tui::home) struct Opened {
         pub(in crate::tui::home) request_host: Option<String>,
+        /// The id prefixes the orphan sweep keeps; `None` when no sweep is requested.
+        pub(in crate::tui::home) orphan_keep: Option<Vec<String>>,
         /// The agent socket and host, when the agent transport was used.
         pub(in crate::tui::home) agent: Option<(std::path::PathBuf, String)>,
     }
@@ -512,10 +529,19 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_timeout_covers_the_agents_worst_case_for_the_most_windows() {
+        // open 15 + 5 * 9, frame 15, place 15 + 5 * 9 (breakout::ghostty::wait_for).
+        assert!(AGENT_TIMEOUT > std::time::Duration::from_secs(60 + 15 + 60));
+    }
+
+    #[test]
     fn a_silent_agent_is_an_error_that_names_the_agent_and_the_forward() {
         let timed_out = std::io::Error::new(std::io::ErrorKind::WouldBlock, "timed out");
         let error = agent_outcome(Err(timed_out)).unwrap_err();
         assert!(error.contains("Breakout agent"), "{error}");
+        assert!(error.contains("did not answer in time"), "{error}");
+        assert!(error.contains("may still open"), "{error}");
+        assert!(!error.contains("is not running"), "{error}");
         assert!(error.contains("ssh"), "{error}");
         assert!(error.contains("forwards its socket"), "{error}");
     }

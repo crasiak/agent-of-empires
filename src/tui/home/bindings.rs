@@ -62,7 +62,8 @@ pub enum ActionId {
     ClearMarks,
     /// Open the menu of Bulk actions on the Marked set.
     BulkMenu,
-    /// Close the Breakout windows this TUI opened (palette only; no chord).
+    /// Close every Breakout window on this Mac, whichever TUI opened it (palette and the
+    /// Marked set's menu; no chord).
     CloseBreakout,
     RespondToPermission,
     Stop,

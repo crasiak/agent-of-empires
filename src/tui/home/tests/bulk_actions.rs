@@ -817,6 +817,11 @@ fn the_bulk_menu_offers_close_wherever_breakout_works() {
         let menu = env.view.context_menu.as_ref().unwrap();
         assert!(menu.is_marks_menu());
         assert!(!menu.items_contain(ContextMenuAction::CloseBreakout));
+        assert!(
+            !menu.items_contain(ContextMenuAction::BulkBreakout),
+            "Break Out is hidden where Breakout is unsupported and no agent applies"
+        );
+        assert!(menu.items_contain(ContextMenuAction::BulkSend));
     }
 
     env.view.context_menu = None;
@@ -832,6 +837,42 @@ fn the_bulk_menu_offers_close_wherever_breakout_works() {
         menu.items_contain(ContextMenuAction::CloseBreakout),
         "offered with no tracked windows, since the sweep finds untracked ones"
     );
+}
+
+#[test]
+#[serial]
+fn a_scoped_tui_runs_no_orphan_sweep_before_a_local_breakout() {
+    let _forced = ForcedSupport::on();
+    crate::tui::home::breakout::test_support::OPENED_FOR.with(|o| *o.borrow_mut() = None);
+    let mut env = create_test_env_with_sessions(2);
+    env.view.active_profile = Some("work".to_string());
+    break_out_all(&mut env);
+    let opened = opened_for().expect("opened");
+    assert_eq!(
+        opened.orphan_keep, None,
+        "a scoped TUI cannot see other profiles"
+    );
+}
+
+#[test]
+#[serial]
+fn an_unscoped_tui_sweeps_orphans_keeping_every_loaded_session() {
+    let _forced = ForcedSupport::on();
+    crate::tui::home::breakout::test_support::OPENED_FOR.with(|o| *o.borrow_mut() = None);
+    let mut env = create_test_env_with_sessions(2);
+    env.view.active_profile = None;
+    let mut expected: Vec<String> = env
+        .view
+        .instances
+        .keys()
+        .map(|id| crate::breakout::id_prefix(id))
+        .collect();
+    expected.sort();
+    break_out_all(&mut env);
+    let mut keep = opened_for().expect("opened").orphan_keep.expect("sweeps");
+    keep.sort();
+    assert_eq!(keep, expected);
+    assert_eq!(keep.len(), 2);
 }
 
 /// Forces `supported_here` for one test and restores it even when an assertion fails.

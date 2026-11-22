@@ -236,6 +236,12 @@ pub fn sweep_script(scope: super::SweepScope<'_>) -> String {
         "            set keep to false\n",
         "            considering case\n",
     ));
+    // `whose name starts with` ignores case; a window that does not match the
+    // prefix exactly is not ours and is never closed.
+    script.push_str(&format!(
+        "                if not (winName starts with {}) then set keep to true\n",
+        as_literal(super::TITLE_PREFIX)
+    ));
     // Windows of Sessions on another host: this machine cannot tell orphans there.
     if skip_host_tagged {
         script.push_str(&format!(
@@ -365,14 +371,22 @@ fn osascript(language_args: &[&str], script: &str, wait: Duration) -> Result<Str
     }
 }
 
-/// Whether Ghostty is installed where macOS can launch it.
+/// Whether Ghostty is installed where macOS can launch it, cached for the run.
+/// Only directories are looked at: no process is spawned and nothing is revealed
+/// or launched, so it is safe to call on the event loop.
 pub fn ghostty_present() -> bool {
-    Command::new("open")
-        .args(["-Ra", "Ghostty"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PRESENT.get_or_init(|| {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let mut roots = vec![std::path::PathBuf::from("/Applications")];
+        roots.extend(home.map(|h| h.join("Applications")));
+        app_installed_in(&roots)
+    })
+}
+
+/// Whether `Ghostty.app` is a directory under any of the application roots.
+fn app_installed_in(roots: &[std::path::PathBuf]) -> bool {
+    roots.iter().any(|root| root.join("Ghostty.app").is_dir())
 }
 
 /// The outcome once placement has been tried. Any placement error leaves the
@@ -808,5 +822,40 @@ mod tests {
         assert!(everything.contains(
             "set winIds to id of every window whose name starts with \"aoe breakout \u{b7} \""
         ));
+    }
+
+    #[test]
+    fn ghostty_is_present_when_its_app_directory_exists_under_a_root() {
+        let none = tempfile::tempdir().unwrap();
+        let some = tempfile::tempdir().unwrap();
+        assert!(!app_installed_in(&[]));
+        assert!(!app_installed_in(&[none.path().to_path_buf()]));
+        // A plain file is not an app bundle.
+        std::fs::write(some.path().join("Ghostty.app"), "").unwrap();
+        assert!(!app_installed_in(&[some.path().to_path_buf()]));
+        std::fs::remove_file(some.path().join("Ghostty.app")).unwrap();
+        std::fs::create_dir(some.path().join("Ghostty.app")).unwrap();
+        assert!(app_installed_in(&[
+            none.path().to_path_buf(),
+            some.path().to_path_buf()
+        ]));
+    }
+
+    #[test]
+    fn the_sweep_rechecks_the_prefix_case_sensitively_before_closing() {
+        for scope in [
+            SweepScope::Everything,
+            SweepScope::Orphans {
+                keep_id_prefixes: &[],
+            },
+        ] {
+            let script = sweep_script(scope);
+            let check =
+                "if not (winName starts with \"aoe breakout \u{b7} \") then set keep to true";
+            let (collect, _) = script.split_once("set closedCount to 0").unwrap();
+            let at = collect.find(check).expect(&script);
+            assert!(at > collect.find("considering case").unwrap());
+            assert!(at < collect.find("end considering").unwrap());
+        }
     }
 }

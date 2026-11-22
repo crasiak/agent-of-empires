@@ -81,7 +81,7 @@ pub enum ContextMenuAction {
     BulkShowSkipped,
     /// Open the marked Sessions in separate windows.
     BulkBreakout,
-    /// Close the Breakout windows this TUI opened.
+    /// Close every Breakout window on this Mac, whichever TUI opened it.
     CloseBreakout,
     /// Drop every Mark.
     ClearMarks,
@@ -559,20 +559,23 @@ impl ContextMenuDialog {
         )
     }
 
-    /// The menu of Bulk actions on the Marked set. Closing Breakout windows is
-    /// offered wherever Breakout works, since the sweep also finds untracked windows.
-    pub fn for_marks(anchor: (u16, u16), breakout_supported: bool) -> Self {
+    /// The menu of Bulk actions on the Marked set. The Breakout entries (open and
+    /// close) are offered wherever Breakout works; the close sweep also finds
+    /// untracked windows.
+    pub fn for_marks(anchor: (u16, u16), breakout_offered: bool) -> Self {
         let mut items = vec![
             (ContextMenuAction::BulkSend, "Send Message to Marked"),
             (ContextMenuAction::BulkRestart, "Restart Marked"),
-            (ContextMenuAction::BulkBreakout, "Break Out into Windows"),
-            (
-                ContextMenuAction::BulkShowSkipped,
-                "Show What Would Be Skipped",
-            ),
-            (ContextMenuAction::ClearMarks, "Clear Marks"),
         ];
-        if breakout_supported {
+        if breakout_offered {
+            items.push((ContextMenuAction::BulkBreakout, "Break Out into Windows"));
+        }
+        items.push((
+            ContextMenuAction::BulkShowSkipped,
+            "Show What Would Be Skipped",
+        ));
+        items.push((ContextMenuAction::ClearMarks, "Clear Marks"));
+        if breakout_offered {
             items.push((ContextMenuAction::CloseBreakout, "Close Breakout Windows"));
         }
         Self::new(anchor, items)
