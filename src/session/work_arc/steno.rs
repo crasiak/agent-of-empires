@@ -88,7 +88,7 @@ impl StenoArc {
 }
 
 const MAX_WINDOW_BYTES: u64 = 512 * 1024;
-/// A cite range wider than this is not expanded.
+/// Maximum windows expanded per citation range.
 const MAX_CITED_WINDOWS: u32 = 50;
 
 static CITE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
@@ -109,7 +109,7 @@ pub(crate) fn cite_spans(text: &str) -> Vec<(std::ops::Range<usize>, Vec<u32>)> 
                 };
                 if let (Some(lo), Some(hi)) = (lo, hi) {
                     let (lo, hi) = (lo.min(hi), lo.max(hi));
-                    windows.extend(lo..=hi.min(lo + MAX_CITED_WINDOWS - 1));
+                    windows.extend(lo..=hi.min(lo.saturating_add(MAX_CITED_WINDOWS - 1)));
                 }
             }
             windows.dedup();

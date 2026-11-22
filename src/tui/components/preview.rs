@@ -285,6 +285,7 @@ fn arc_band_rows(instance: &Instance, band_width: u16) -> Vec<(usize, String)> {
 /// The windows named by the cite under the pointer, when it is on one in the band.
 pub(crate) fn arc_cite_at(band: Rect, instance: &Instance, col: u16, row: u16) -> Option<Vec<u32>> {
     use unicode_width::UnicodeWidthStr;
+    instance.steno_arc.as_ref()?;
     arc_line_at(band, instance, col, row)?;
     let (_, text) = arc_band_rows(instance, band.width)
         .into_iter()
@@ -644,7 +645,12 @@ impl Preview {
                     dim,
                 )];
                 let mut at = 0;
-                for (span, _) in crate::session::work_arc::steno::cite_spans(&text) {
+                let cites = if instance.steno_arc.is_some() {
+                    crate::session::work_arc::steno::cite_spans(&text)
+                } else {
+                    Vec::new()
+                };
+                for (span, _) in cites {
                     spans.push(Span::styled(
                         text[at..span.start].to_string(),
                         Style::default().fg(theme.text),
@@ -1237,6 +1243,20 @@ mod tests {
             arc_cite_at(band, &session, band.x + 10 + 10, 13),
             Some(vec![9])
         );
+        let theme = crate::tui::styles::load_theme("empire");
+        let area = Rect::new(0, 0, 120, agent_info_height(&session) + RESOURCE_ROWS);
+        let (metadata, arc) = agent_info_rows(&session);
+        let rendered_band = InfoAreas::compute(area, metadata, arc).arc;
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                Preview::render_info(frame, frame.area(), &session, &theme, Duration::ZERO)
+            })
+            .unwrap();
+        let (col, row) = (rendered_band.x + ARC_LABEL_WIDTH + 8, rendered_band.y + 1);
+        let cell = &terminal.backend().buffer()[(col, row)];
+        assert_eq!(cell.symbol(), "[");
+        assert!(cell.modifier.contains(Modifier::UNDERLINED));
         session.work_arc_enabled = false;
         assert_eq!(arc_cite_at(band, &session, cite_col, 11), None);
 
@@ -1271,7 +1291,6 @@ mod tests {
         let (col, row) = (band.x + ARC_LABEL_WIDTH + 5, band.y + 1);
         assert_eq!(arc_line_at(band, &session, col, row), Some(0));
         assert_eq!(arc_cite_at(band, &session, col, row), None);
-        let theme = crate::tui::styles::load_theme("empire");
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
             .draw(|frame| {
