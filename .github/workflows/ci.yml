@@ -230,10 +230,7 @@ jobs:
           AOE_WEB_DIST="$PWD/target/ci-web-dist" cargo doc --no-deps --features web
 
   script-selftests:
-    # Toolchain-free self-tests for the scripts other workflows rely on:
-    # verify-shared-target.sh (kache verify), select-internal-pr.py
-    # (nix-npm-hash.yml), check-dependabot-pr.py (dependabot-auto-merge.yml),
-    # classify-cachix-failure.py (cachix-push.yml) and release-pr-fresh.sh.
+    # Toolchain-free regressions for CI scripts.
     name: Script Self-Tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
     runs-on: ubuntu-latest
@@ -248,6 +245,7 @@ jobs:
       - run: python3 .github/scripts/classify-cachix-failure.py --self-test
       - run: python3 scripts/test-export-pi-integration.py -v
       - run: python3 .github/scripts/test_nix_build_diagnostics.py -v
+      - run: python3 .github/scripts/test_nix_ci_memory.py -v
       - run: .github/scripts/release-pr-fresh.sh --self-test
       - run: python3 scripts/check-no-claude-in-core.py --self-test
       # Disabled until C25 to C29 remove Claude from core on
@@ -327,19 +325,9 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
     runs-on: ${{ (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires' || vars.RUNS_ON_DISABLED == 'true') && 'ubuntu-latest' || format('runs-on={0}-nix-build-{1}/runner=8cpu-linux-x64/family=m8a+c8i+m8i/image=ubuntu26-full-x64/volume=80gb/extras=s3-cache', github.run_id, github.run_attempt) }}
     timeout-minutes: 90
-    # Builds the default (aoe) crate through crane. Nix Eval only evaluates
-    # derivations, so a flake recipe that compiles nowhere (a bad source filter,
-    # a missing buildInput) passes it but fails here.
-    #
-    # Gated to the flake recipe itself, and deliberately NOT to `src/**`. This is
-    # a ~20 minute compile with no binary cache, so firing it on every Rust PR
-    # would roughly triple the CI critical path. The one code-driven way to break
-    # the build source, adding an embedded asset the Cargo filter drops (#3204),
-    # is covered on every PR by the seconds-long
-    # `scripts/check-nix-embedded-assets.py` step in Nix Eval. Post-merge,
-    # cachix-push.yml builds a Rust package on every push to main matching
-    # `src/**`, `Cargo.*`, the build scripts or an embedded-asset directory
-    # (see its `paths:` list), so wider breakage still surfaces there.
+    # Realizes the release package; evaluation cannot qualify shipped bytes.
+    # Recipe/helper/workflow gated, not every Rust edit. Embedded assets are
+    # checked in Nix Eval; post-merge builds live in cachix-push.yml.
     steps:
       # Routes actions/cache to the RunsOn S3 bucket (Magic Cache); no-op on GitHub-hosted runners.
       - uses: runs-on/action@284bff869d4a825f778ac7c38e50f1e31ef198fd # v2.6.0
@@ -375,23 +363,60 @@ jobs:
           # A git failure here would leave the pipeline non-zero and skip the
           # build, so keep the diff simple enough that it cannot fail.
           if git diff --name-only "$BASE"...HEAD \
-            | grep -E '^(flake\.nix$|flake\.lock$|nix/|scripts/(export-pi-integration|test-export-pi-integration)\.py$|\.github/scripts/(nix-build-diagnostics|test_nix_build_diagnostics)\.py$)' \
+            | grep -E '^(flake\.nix$|flake\.lock$|nix/|scripts/(export-pi-integration|test-export-pi-integration)\.py$|\.github/workflows/ci\.yml$|\.github/scripts/(nix-build-diagnostics|test_nix_build_diagnostics|nix-ci-memory|test_nix_ci_memory)\.py$)' \
             >/dev/null; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Reserve hosted-runner build memory
+        if: steps.changes.outputs.relevant == 'true' && runner.environment == 'github-hosted'
+        run: python3 .github/scripts/nix-ci-memory.py prepare "$RUNNER_TEMP/aoe-nix-logs/memory.json"
+
       - uses: ./.github/actions/install-nix
         if: steps.changes.outputs.relevant == 'true'
 
       - name: Build default package
         if: steps.changes.outputs.relevant == 'true'
-        run: python3 .github/scripts/nix-build-diagnostics.py nix build --no-link --print-out-paths -L .#packages.x86_64-linux.default
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aoe-nix-logs"
+          limits=()
+          if [ "$RUNNER_ENVIRONMENT" = github-hosted ]; then
+            limits=(--max-jobs 1 --cores 2)
+          fi
+          python3 .github/scripts/nix-build-diagnostics.py nix build \
+            --no-link --no-update-lock-file --print-out-paths -L "${limits[@]}" \
+            .#packages.x86_64-linux.default 2>&1 | tee "$RUNNER_TEMP/aoe-nix-logs/default.log"
 
       - name: Verify final inventory and configuration ownership
         if: steps.changes.outputs.relevant == 'true'
-        run: nix build --no-link -L .#checks.x86_64-linux.aoe-integration-final .#checks.x86_64-linux.aoe-home-manager .#checks.x86_64-linux.aoe-integration-inventory
+        run: |
+          set -euo pipefail
+          limits=()
+          if [ "$RUNNER_ENVIRONMENT" = github-hosted ]; then
+            limits=(--max-jobs 1 --cores 2)
+          fi
+          python3 .github/scripts/nix-build-diagnostics.py nix build \
+            --no-link --no-update-lock-file -L "${limits[@]}" \
+            .#checks.x86_64-linux.aoe-integration-final \
+            .#checks.x86_64-linux.aoe-home-manager \
+            .#checks.x86_64-linux.aoe-integration-inventory \
+            2>&1 | tee "$RUNNER_TEMP/aoe-nix-logs/ownership.log"
+
+      - name: Release owned hosted-runner swap
+        if: always() && steps.changes.outputs.relevant == 'true' && runner.environment == 'github-hosted'
+        run: python3 .github/scripts/nix-ci-memory.py cleanup "$RUNNER_TEMP/aoe-nix-logs/memory.json"
+
+      - name: Retain Nix diagnostics
+        if: always() && steps.changes.outputs.relevant == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nix-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aoe-nix-logs/
+          if-no-files-found: ignore
+          retention-days: 7
 
   nix-build-web:
     name: Nix Build Web
