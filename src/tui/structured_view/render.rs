@@ -1637,10 +1637,10 @@ fn transcript_lines(
     };
 
     let mut out: Vec<Line<'static>> = Vec::new();
-    let mut starts: Vec<usize> = Vec::new();
+    let mut item_starts: Vec<usize> = Vec::new();
     let mut i = 0;
     while i < rows.len() {
-        starts.push(out.len());
+        item_starts.push(out.len());
         let row = &rows[i];
         match row.kind {
             TranscriptRowKind::Message => {
@@ -1744,7 +1744,7 @@ fn transcript_lines(
     }
     if let ToolOutputMode::Retained(outputs) = tool_output {
         for output in outputs {
-            starts.push(out.len());
+            item_starts.push(out.len());
             out.push(Line::styled(
                 format!(
                     "Retained tool output · completion unavailable · {}",
@@ -1762,7 +1762,7 @@ fn transcript_lines(
             Style::default().add_modifier(Modifier::DIM),
         )));
     }
-    (out, starts)
+    (out, item_starts)
 }
 
 /// The spawning tool call of `row`, when its card is in the window.
@@ -3162,6 +3162,7 @@ mod tests {
 
     fn tool_lines(t: &AcpTranscript) -> Vec<String> {
         transcript_lines(t, &Theme::default(), None, ToolOutputMode::Compact, None)
+            .0
             .iter()
             .map(line_text)
             .filter(|line| !line.is_empty())
@@ -3551,6 +3552,7 @@ mod tests {
                     name: "Bash".into(),
                     kind: "execute".into(),
                     args_preview: serde_json::json!({ "command": format!("cmd-{n}") }).to_string(),
+                    prompt: None,
                     started_at: chrono::Utc::now(),
                     parent_tool_call_id: None,
                     memory_recall: None,
