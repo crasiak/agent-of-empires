@@ -112,7 +112,7 @@ fn shortcuts(strict: bool, live_on_enter: bool) -> Vec<(&'static str, Vec<(Strin
         (nav_collapse, "Collapse group"),
         ("l/\u{2192}", "Expand group"),
         ("Home/End/G", "Go to top / bottom"),
-        ("PgUp/Dn", "Move 10 (also Shift+\u{2191}/\u{2193}, { })"),
+        ("PgUp/Dn", "Move 10 (also { })"),
     ]);
 
     let actions_title = if strict {

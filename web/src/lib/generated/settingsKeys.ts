@@ -3,6 +3,7 @@
 export interface SettingsKeys {
   acp: "acp_defaults" | "allow_agent_install" | "allowed_agents" | "auto_stop_idle_secs" | "compaction_reminder" | "compaction_reminder_percent" | "default_agent" | "max_concurrent_workers" | "node_path" | "notice_display" | "notice_timeout_secs" | "rate_limit_auto_resume" | "rate_limit_failover" | "rate_limit_failover_accounts" | "replay_events" | "restrict_agents" | "show_tool_durations" | "silent_orphan_grace_secs" | "structured_view" | "wrap_tool_output";
   auth: "persist_sessions";
+  breakout: "agent_hosts" | "layout";
   diff: "context_lines" | "default_branch" | "split_view";
   logging: "default_level" | "file_path" | "keep_count" | "max_size_mib" | "output" | "rotation" | "show_spans" | "targets";
   sandbox: "allow_image_pull" | "auto_cleanup" | "cap_add" | "cap_drop" | "container_runtime" | "cpu_limit" | "custom_instruction" | "default_image" | "default_terminal_mode" | "enabled_by_default" | "environment" | "extra_run_args" | "extra_volumes" | "memory_limit" | "mount_ssh" | "network" | "port_mappings" | "privileged" | "security_opt" | "selinux_relabel" | "shared_credential" | "volume_ignores" | "volume_ignores_strategy";

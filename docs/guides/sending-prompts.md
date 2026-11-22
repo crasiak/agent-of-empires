@@ -81,3 +81,5 @@ use [Messaging any session](../plugin-api.md#messaging-any-session) for plugin
 attribution. That interface has its own limits and unknown-delivery behavior;
 it is not a reason to install a Plugin for a single send. The current Daemon
 MCP interface is read-only; this workflow does not add a mutating MCP tool.
+
+In the TUI, mark several Sessions with Space and press `m` to send one message to every marked Session that can take it. Sessions that are waiting on a prompt, starting, restarting or not running are skipped and listed. See [Marks and bulk actions](../quick-start.md#marks-and-bulk-actions).

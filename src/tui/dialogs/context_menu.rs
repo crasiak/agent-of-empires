@@ -73,6 +73,33 @@ pub enum ContextMenuAction {
     /// Restore a trashed session.
     Restore,
     RetryTrash,
+    /// Send one message to the Marked set.
+    BulkSend,
+    /// Restart the Marked set after a confirm.
+    BulkRestart,
+    /// List the marked Sessions each bulk action would skip, with reasons.
+    BulkShowSkipped,
+    /// Open the marked Sessions in separate windows.
+    BulkBreakout,
+    /// Close every Breakout window on this Mac, whichever TUI opened it.
+    CloseBreakout,
+    /// Drop every Mark.
+    ClearMarks,
+}
+
+impl ContextMenuAction {
+    /// Whether this acts on the Marked set rather than the row the menu opened on.
+    pub fn is_bulk(self) -> bool {
+        matches!(
+            self,
+            Self::BulkSend
+                | Self::BulkRestart
+                | Self::BulkBreakout
+                | Self::CloseBreakout
+                | Self::BulkShowSkipped
+                | Self::ClearMarks
+        )
+    }
 }
 
 pub struct SessionMenuTarget {
@@ -463,6 +490,12 @@ impl ContextMenuDialog {
         })
     }
 
+    /// Whether this is the Bulk action menu (`for_marks`), which acts on the Marked set
+    /// and so does not belong to the row under the cursor.
+    pub fn is_marks_menu(&self) -> bool {
+        !self.items.is_empty() && self.items.iter().all(|(action, _)| action.is_bulk())
+    }
+
     pub fn for_group(anchor: (u16, u16)) -> Self {
         Self::new(
             anchor,
@@ -548,6 +581,28 @@ impl ContextMenuDialog {
         )
     }
 
+    /// The menu of Bulk actions on the Marked set. The Breakout entries (open and
+    /// close) are offered wherever Breakout works; the close sweep also finds
+    /// untracked windows.
+    pub fn for_marks(anchor: (u16, u16), breakout_offered: bool) -> Self {
+        let mut items = vec![
+            (ContextMenuAction::BulkSend, "Send Message to Marked"),
+            (ContextMenuAction::BulkRestart, "Restart Marked"),
+        ];
+        if breakout_offered {
+            items.push((ContextMenuAction::BulkBreakout, "Break Out into Windows"));
+        }
+        items.push((
+            ContextMenuAction::BulkShowSkipped,
+            "Show What Would Be Skipped",
+        ));
+        items.push((ContextMenuAction::ClearMarks, "Clear Marks"));
+        if breakout_offered {
+            items.push((ContextMenuAction::CloseBreakout, "Close Breakout Windows"));
+        }
+        Self::new(anchor, items)
+    }
+
     fn new(anchor: (u16, u16), items: Vec<MenuItem>) -> Self {
         Self {
             items,
@@ -603,6 +658,11 @@ impl ContextMenuDialog {
     /// hover cleared the highlight.
     pub fn selected_action(&self) -> ContextMenuAction {
         self.items[self.highlight.unwrap_or(0)].0
+    }
+
+    #[cfg(test)]
+    pub fn items_contain(&self, action: ContextMenuAction) -> bool {
+        self.items.iter().any(|(a, _)| *a == action)
     }
 
     #[cfg(test)]

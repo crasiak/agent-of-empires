@@ -1423,6 +1423,9 @@ impl App {
             needs_full_refresh |= self.home.apply_structured_approval_results();
 
             needs_full_refresh |= self.home.apply_restart_results();
+            needs_full_refresh |= self.home.tick_bulk_restart();
+            needs_full_refresh |= self.home.tick_bulk_send();
+            needs_full_refresh |= self.home.tick_breakout();
 
             needs_full_refresh |= self.home.poll_store_move();
 

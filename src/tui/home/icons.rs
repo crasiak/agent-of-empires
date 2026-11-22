@@ -39,3 +39,9 @@ pub(crate) fn get_indent(depth: usize) -> &'static str {
 
 /// Agent-view marker for a session whose paired terminal is running.
 pub(in crate::tui) const ICON_TERMINAL: &str = ">_";
+
+/// Marker for a Session in the Marked set. Single-width, like every sidebar glyph.
+pub(in crate::tui) const ICON_MARK: &str = "\u{2713}";
+
+/// Marker for a Session shown in a Breakout window this TUI opened. Single-width.
+pub(in crate::tui) const ICON_BREAKOUT: &str = "\u{29c9}";

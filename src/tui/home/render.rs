@@ -11,9 +11,9 @@ use rattles::presets::prelude as spinners;
 use super::bindings::ActionId;
 use super::{
     get_indent, live_send, DragKind, HomeView, TerminalMode, ViewMode, ICON_ARCHIVED_SECTION,
-    ICON_COLLAPSED, ICON_DELETING, ICON_DORMANT, ICON_ERROR, ICON_EXPANDED, ICON_FAVORITE,
-    ICON_IDLE, ICON_PINNED, ICON_STOPPED, ICON_TERMINAL, ICON_TRASH_SECTION, ICON_UNKNOWN,
-    ICON_UNREAD,
+    ICON_BREAKOUT, ICON_COLLAPSED, ICON_DELETING, ICON_DORMANT, ICON_ERROR, ICON_EXPANDED,
+    ICON_FAVORITE, ICON_IDLE, ICON_MARK, ICON_PINNED, ICON_STOPPED, ICON_TERMINAL,
+    ICON_TRASH_SECTION, ICON_UNKNOWN, ICON_UNREAD,
 };
 use crate::containers::image_update::ImageUpdate;
 use crate::session::config::{GroupByMode, NarrowLayout, RowTagMode, SidebarPosition, SortOrder};
@@ -109,6 +109,9 @@ fn sidebar_areas(
 /// Extra rows captured beyond the visible window so moderate scrolls don't force a fresh
 /// capture on every wheel tick. Cache invalidation uses the same reserve.
 const CAPTURE_BUFFER: u16 = 20;
+
+/// Preview header text for a Session shown in a Breakout window.
+pub(super) const BREAKOUT_PREVIEW_NOTE: &str = "In a Breakout window";
 
 /// Rows the compact system-health strip occupies.
 const DIAGNOSTICS_STRIP_HEIGHT: u16 = 1;
@@ -1693,6 +1696,9 @@ impl HomeView {
             let plural = if count == 1 { "" } else { "s" };
             title.push_str(&format!("  \u{26a0} {count} ambiguous session{plural}"));
         }
+        if let Some(marks) = self.marks_title() {
+            title.push_str(&format!("  {marks}"));
+        }
         let (border_color, title_color) = match self.view_mode {
             ViewMode::Structured => (theme.border, theme.title),
             ViewMode::Terminal | ViewMode::Tool(_) => {
@@ -2249,7 +2255,41 @@ impl HomeView {
             }
         };
 
-        let mut line_spans = Vec::with_capacity(6);
+        let mut line_spans = Vec::with_capacity(7);
+        // The column exists on every row while anything is marked, so titles stay aligned.
+        if !self.marked.is_empty() {
+            let marked = matches!(item, Item::Session { id, .. } if self.marked.contains(id));
+            line_spans.push(if marked {
+                let mark_style = Style::default().fg(theme.accent).bold();
+                Span::styled(
+                    format!("{ICON_MARK} "),
+                    if is_selected {
+                        selected_row_style(mark_style, theme)
+                    } else {
+                        mark_style
+                    },
+                )
+            } else {
+                Span::raw("  ")
+            });
+        }
+        // Likewise while any Breakout window is tracked.
+        if !self.breakout_titles.is_empty() {
+            let broken_out = matches!(item, Item::Session { id, .. } if self.is_broken_out(id));
+            line_spans.push(if broken_out {
+                let style = Style::default().fg(theme.accent);
+                Span::styled(
+                    format!("{ICON_BREAKOUT} "),
+                    if is_selected {
+                        selected_row_style(style, theme)
+                    } else {
+                        style
+                    },
+                )
+            } else {
+                Span::raw("  ")
+            });
+        }
         if favorite_gutter {
             let favorited = matches!(item, Item::Session { id, .. }
                 if self.get_instance(id).is_some_and(crate::session::is_live_favorite));
@@ -3714,8 +3754,19 @@ impl HomeView {
         } else {
             None
         };
+        let breakout_note = self
+            .selected_session
+            .as_deref()
+            .filter(|id| self.is_broken_out(id))
+            .map(|_| {
+                Span::styled(
+                    format!("{ICON_BREAKOUT} {BREAKOUT_PREVIEW_NOTE} "),
+                    Style::default().fg(theme.accent),
+                )
+            });
 
-        if let Some(line) = compact_title {
+        if let Some(mut line) = compact_title {
+            line.spans.extend(breakout_note);
             block = block.title(line);
         } else {
             let title = match &self.view_mode {
@@ -3723,9 +3774,9 @@ impl HomeView {
                 ViewMode::Terminal => " Terminal Preview ".to_string(),
                 ViewMode::Tool(name) => format!(" {} Preview ", name),
             };
-            block = block
-                .title(title)
-                .title_style(Style::default().fg(title_color));
+            let mut title = Line::from(Span::styled(title, Style::default().fg(title_color)));
+            title.spans.extend(breakout_note);
+            block = block.title(title);
 
             // Advertise the info-header toggle: `i` gates the header in every view mode
             // (Agent's worktree-flavored one, Terminal/Tool's minimal one), so the hint
@@ -5057,6 +5108,10 @@ impl HomeView {
                 groups.push((0, kc('n'), hint));
             }
 
+            if !self.marked.is_empty() {
+                groups.push((0, None, marks_footer_hint(key_style, desc_style, true)));
+            }
+
             let (click, key) = bound(ActionId::SearchStart);
             groups.push((4, click, mk_key(&key)));
             let (click, key) = bound(ActionId::Diff);
@@ -5076,6 +5131,10 @@ impl HomeView {
             groups.push((0, click, mk_key(&key)));
         } else {
             let focused = self.retained_reader_focused();
+            if !self.marked.is_empty() {
+                // With the reader focused, Esc leaves it instead of clearing Marks.
+                groups.push((0, None, marks_footer_hint(key_style, desc_style, !focused)));
+            }
             if focused {
                 groups.push((
                     0,
@@ -5292,6 +5351,23 @@ pub(super) fn live_pane_origin(
         view.pane.x as i32 + left,
         view.pane.y as i32 + pane_top + top,
     )
+}
+
+/// The footer's Marks hint, shown while anything is marked.
+fn marks_footer_hint(key_style: Style, desc_style: Style, esc_clears: bool) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        Span::styled("Space", key_style),
+        Span::styled(" mark ", desc_style),
+        Span::styled("K", key_style),
+        Span::styled(" bulk", desc_style),
+    ];
+    if esc_clears {
+        spans.extend([
+            Span::styled(" Esc", key_style),
+            Span::styled(" clear marks", desc_style),
+        ]);
+    }
+    spans
 }
 
 /// The footer's R entry: the Daemon's problem (red) or limit (dim) when it has one, else
