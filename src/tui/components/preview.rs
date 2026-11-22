@@ -1194,7 +1194,8 @@ mod tests {
 
     #[test]
     fn arc_cite_at_finds_the_window_under_the_pointer() {
-        use crate::session::work_arc::{steno::ArcLines, StenoArc};
+        use crate::session::work_arc::{steno::ArcLines, ArcIdentity, StenoArc, StoredArc, WorkArc};
+        use ratatui::{backend::TestBackend, style::Modifier, Terminal};
         let mut session = Instance::new("synthetic", "/tmp/synthetic");
         session.tool = "claude".into();
         session.agent_session_id = Some("native-id".into());
@@ -1238,6 +1239,48 @@ mod tests {
         );
         session.work_arc_enabled = false;
         assert_eq!(arc_cite_at(band, &session, cite_col, 11), None);
+
+        session.work_arc_enabled = true;
+        session.tool = "pi".into();
+        session.agent_session_id = Some("synthetic-pi".into());
+        session.steno_arc = None;
+        session.work_arc.record = Some(StoredArc {
+            identity: ArcIdentity {
+                session_id: session.id.clone(),
+                pi_id: "synthetic-pi".into(),
+                launch_id: "launch".into(),
+                generation: 0,
+                leaf: "leaf".into(),
+            },
+            at: chrono::Utc::now(),
+            arc: WorkArc {
+                goal: "Keep [w1] as text".into(),
+                now: "Reported progress".into(),
+                remaining: "Unknown".into(),
+                next: "Review".into(),
+            },
+            selected_route: "fake/route".into(),
+            provider: "fake".into(),
+            model: "model".into(),
+            usage: None,
+        });
+        assert_eq!(arc_view(&session).1.unwrap()[0].1, "Keep [w1] as text");
+        let area = Rect::new(0, 0, 120, agent_info_height(&session) + RESOURCE_ROWS);
+        let (metadata, arc) = agent_info_rows(&session);
+        let band = InfoAreas::compute(area, metadata, arc).arc;
+        let (col, row) = (band.x + ARC_LABEL_WIDTH + 5, band.y + 1);
+        assert_eq!(arc_line_at(band, &session, col, row), Some(0));
+        assert_eq!(arc_cite_at(band, &session, col, row), None);
+        let theme = crate::tui::styles::load_theme("empire");
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| {
+                Preview::render_info(frame, frame.area(), &session, &theme, Duration::ZERO)
+            })
+            .unwrap();
+        let cell = &terminal.backend().buffer()[(col, row)];
+        assert_eq!(cell.symbol(), "[");
+        assert!(!cell.modifier.contains(Modifier::UNDERLINED));
     }
 
     #[test]

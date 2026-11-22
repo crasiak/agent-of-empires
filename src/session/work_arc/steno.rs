@@ -380,6 +380,15 @@ mod tests {
             cite_spans("[w5-w1000]")[0].1.len(),
             MAX_CITED_WINDOWS as usize
         );
+        for (text, expected) in [
+            ("[w4294967295]", vec![u32::MAX]),
+            ("[w4294967294-w4294967295]", vec![u32::MAX - 1, u32::MAX]),
+            ("[w4294967295-w4294967294]", vec![u32::MAX - 1, u32::MAX]),
+        ] {
+            let spans = cite_spans(text);
+            assert_eq!(spans.len(), 1, "{text}");
+            assert_eq!(spans[0].1, expected, "{text}");
+        }
     }
 
     #[test]
