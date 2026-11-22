@@ -20,10 +20,37 @@ pub fn id_prefix(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
-/// The window title for a Session, from its printable title text and id.
-pub(crate) fn window_title(display_title: &str, id: &str) -> String {
+/// Starts the host tag that follows `TITLE_PREFIX` in the title of a window whose
+/// Sessions run on another host. Display titles never start with it.
+pub(crate) const HOST_TAG: char = '@';
+
+/// What follows `TITLE_PREFIX` in a title: the host tag of a host-bound window,
+/// or nothing for a Session on this machine.
+fn host_tag(host: Option<&str>) -> String {
+    host.map(|host| format!("{HOST_TAG}{host}{TITLE_SEPARATOR}"))
+        .unwrap_or_default()
+}
+
+/// How every host-tagged title starts. The local orphan sweep skips these: their
+/// Sessions are on another host, which this machine cannot see.
+pub(crate) fn host_tagged_head() -> String {
+    format!("{TITLE_PREFIX}{HOST_TAG}")
+}
+
+/// The part of a Breakout title after the prefix and any host tag.
+fn title_body(title: &str) -> Option<&str> {
+    let rest = title.strip_prefix(TITLE_PREFIX)?;
+    if rest.starts_with(HOST_TAG) {
+        return rest.split_once(TITLE_SEPARATOR).map(|(_, body)| body);
+    }
+    Some(rest)
+}
+
+/// The window title for a Session, from its host, printable title text and id.
+pub(crate) fn window_title(host: Option<&str>, display_title: &str, id: &str) -> String {
     format!(
-        "{TITLE_PREFIX}{display_title}{TITLE_SEPARATOR}{}",
+        "{TITLE_PREFIX}{}{display_title}{TITLE_SEPARATOR}{}",
+        host_tag(host),
         id_prefix(id)
     )
 }
@@ -37,30 +64,47 @@ pub(crate) fn title_suffix(id_prefix: &str) -> String {
 /// Follows `TITLE_PREFIX` in the title of a splits window, before its ids.
 const SPLITS_TAG: &str = "splits";
 
-/// How every splits window title starts.
+/// How every untagged splits window title starts.
 pub(crate) fn splits_head() -> String {
-    format!("{TITLE_PREFIX}{SPLITS_TAG}{TITLE_SEPARATOR}")
+    format!("{TITLE_PREFIX}{}", splits_body_head())
 }
 
-/// The title of one window holding several Sessions: the splits head, then each
-/// Session's id characters, separated like the end of a window title.
-pub(crate) fn splits_title<'a>(ids: impl IntoIterator<Item = &'a str>) -> String {
+/// How the body of every splits window title starts.
+fn splits_body_head() -> String {
+    format!("{SPLITS_TAG}{TITLE_SEPARATOR}")
+}
+
+/// The title of one window holding several Sessions: the prefix, any host tag,
+/// the splits tag, then each Session's id characters, separated like the end of
+/// a window title.
+pub(crate) fn splits_title<'a>(
+    host: Option<&str>,
+    ids: impl IntoIterator<Item = &'a str>,
+) -> String {
     let prefixes: Vec<String> = ids.into_iter().map(id_prefix).collect();
-    format!("{}{}", splits_head(), prefixes.join(TITLE_SEPARATOR))
+    format!(
+        "{TITLE_PREFIX}{}{}{}",
+        host_tag(host),
+        splits_body_head(),
+        prefixes.join(TITLE_SEPARATOR)
+    )
 }
 
 /// Whether `title` is a splits window, which other Sessions may share.
 pub fn is_splits_title(title: &str) -> bool {
-    title.starts_with(&splits_head())
+    title_body(title).is_some_and(|body| body.starts_with(&splits_body_head()))
 }
 
 /// Whether `title` is a Breakout window title of the Session `id`.
 pub fn title_is_for(title: &str, id: &str) -> bool {
-    if let Some(ids) = title.strip_prefix(&splits_head()) {
+    let Some(body) = title_body(title) else {
+        return false;
+    };
+    if let Some(ids) = body.strip_prefix(&splits_body_head()) {
         let prefix = id_prefix(id);
         return ids.split(TITLE_SEPARATOR).any(|part| part == prefix);
     }
-    title.starts_with(TITLE_PREFIX) && title.ends_with(&title_suffix(&id_prefix(id)))
+    body.ends_with(&title_suffix(&id_prefix(id)))
 }
 
 /// The titles of the windows a validated request opens: one per Session, or one
@@ -72,6 +116,7 @@ pub fn window_titles(request: &BreakoutRequest) -> Vec<String> {
             .map(|surface| surface.title)
             .collect(),
         BreakoutLayout::Splits => vec![splits_title(
+            request.host.as_deref(),
             request.sessions.iter().map(|session| session.id.as_str()),
         )],
     }
@@ -141,16 +186,26 @@ pub fn close_local(titles: &[String]) -> Result<(), String> {
     }
 }
 
-/// Close every Breakout window on this machine whose trailing id characters are
-/// not in `keep_id_prefixes`, tracked or not. Returns how many it closed.
-pub fn sweep_local(keep_id_prefixes: &[String]) -> Result<usize, String> {
+/// Which Breakout windows a sweep closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SweepScope<'a> {
+    /// Windows of Sessions whose id characters are not in `keep_id_prefixes`.
+    /// Host-tagged windows are skipped: their Sessions are on another host.
+    Orphans { keep_id_prefixes: &'a [String] },
+    /// Every Breakout window, host-tagged ones included.
+    Everything,
+}
+
+/// Close Breakout windows on this machine, tracked or not, as `scope` says.
+/// Returns how many it closed.
+pub fn sweep_local(scope: SweepScope<'_>) -> Result<usize, String> {
     #[cfg(target_os = "macos")]
     {
-        ghostty::sweep(keep_id_prefixes)
+        ghostty::sweep(scope)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = keep_id_prefixes;
+        let _ = scope;
         Err("Breakout needs macOS with Ghostty".to_string())
     }
 }
@@ -188,7 +243,7 @@ mod tests {
 
     #[test]
     fn titles_match_only_their_own_session() {
-        let title = window_title("Vikings", "a1b2c3d4e5f60718");
+        let title = window_title(None, "Vikings", "a1b2c3d4e5f60718");
         assert_eq!(title, "aoe breakout \u{b7} Vikings \u{b7} a1b2c3d4");
         assert!(title_is_for(&title, "a1b2c3d4e5f60718"));
         assert!(
@@ -197,7 +252,7 @@ mod tests {
         );
         assert!(!title_is_for(&title, "b2c3d4"));
         assert!(!title_is_for(&title, "1b2c3d4"));
-        let short = window_title("Celts", "ffff");
+        let short = window_title(None, "Celts", "ffff");
         assert!(title_is_for(&short, "ffff"));
         assert!(!title_is_for(&short, "ffffabcd"));
         assert!(!title_is_for("Vikings \u{b7} a1b2c3d4", "a1b2c3d4"));
@@ -222,7 +277,7 @@ mod tests {
 
     #[test]
     fn a_splits_title_belongs_to_every_session_in_it() {
-        let title = splits_title(["a1b2c3d4e5", "ffff", "0011223344"]);
+        let title = splits_title(None, ["a1b2c3d4e5", "ffff", "0011223344"]);
         assert_eq!(
             title,
             "aoe breakout \u{b7} splits \u{b7} a1b2c3d4 \u{b7} ffff \u{b7} 00112233"
@@ -235,7 +290,7 @@ mod tests {
         assert!(!title_is_for(&title, "fff"));
         assert!(!title_is_for(&title, "ffffa"));
         assert!(!title_is_for(&title, "splits"));
-        assert!(!is_splits_title(&window_title("Vikings", "a1b2c3d4")));
+        assert!(!is_splits_title(&window_title(None, "Vikings", "a1b2c3d4")));
     }
 
     #[test]
@@ -245,6 +300,55 @@ mod tests {
         assert_eq!(windows.len(), 3);
         assert!(windows.iter().zip(ids).all(|(t, id)| title_is_for(t, id)));
         let splits = window_titles(&request(BreakoutLayout::Splits, &ids));
-        assert_eq!(splits, [splits_title(ids)]);
+        assert_eq!(splits, [splits_title(None, ids)]);
+    }
+
+    #[test]
+    fn host_bound_titles_carry_the_host_tag_and_still_match_their_sessions() {
+        let title = window_title(Some("bender"), "Vikings", "a1b2c3d4e5");
+        assert_eq!(
+            title,
+            "aoe breakout \u{b7} @bender \u{b7} Vikings \u{b7} a1b2c3d4"
+        );
+        assert!(title.starts_with(&host_tagged_head()));
+        assert!(title_is_for(&title, "a1b2c3d4"));
+        assert!(!title_is_for(&title, "bender"));
+        assert!(!is_splits_title(&title));
+
+        let splits = splits_title(Some("bender"), ["a1b2c3d4", "ffff"]);
+        assert_eq!(
+            splits,
+            "aoe breakout \u{b7} @bender \u{b7} splits \u{b7} a1b2c3d4 \u{b7} ffff"
+        );
+        assert!(splits.starts_with(&host_tagged_head()));
+        assert!(is_splits_title(&splits));
+        assert!(title_is_for(&splits, "ffff"));
+        assert!(title_is_for(&splits, "a1b2c3d4"));
+        assert!(!title_is_for(&splits, "fff"));
+
+        let mut remote = request(BreakoutLayout::Windows, &["a1b2c3d4"]);
+        remote.host = Some("bender".to_string());
+        let titles = window_titles(&remote);
+        assert!(titles[0].starts_with(&host_tagged_head()), "{titles:?}");
+        remote.layout = BreakoutLayout::Splits;
+        assert_eq!(
+            window_titles(&remote),
+            [splits_title(Some("bender"), ["a1b2c3d4"])]
+        );
+    }
+
+    #[test]
+    fn a_display_title_cannot_forge_the_host_tag() {
+        let mut forged = request(BreakoutLayout::Windows, &["a1b2c3d4"]);
+        forged.sessions[0].title = "@bender \u{b7} x".to_string();
+        let title = &window_titles(&forged)[0];
+        assert!(
+            !title.starts_with(&host_tagged_head()),
+            "a local Session is never host-tagged: {title}"
+        );
+        assert!(title_is_for(title, "a1b2c3d4"));
+        forged.sessions[0].title = "splits \u{b7} ffff".to_string();
+        let title = &window_titles(&forged)[0];
+        assert!(title_is_for(title, "a1b2c3d4"));
     }
 }

@@ -199,11 +199,16 @@ pub fn close_script(titles: &[String]) -> String {
     with_timeout(&script)
 }
 
-/// Close every Breakout window, found by the title prefix, except those whose
-/// title ends with one of the kept id prefixes. Ids and names are collected
-/// before anything closes, then each window is closed by id with the same error
-/// rules as `close_script`. The script returns how many windows it closed.
-pub fn sweep_script(keep_id_prefixes: &[String]) -> String {
+/// Close Breakout windows, found by the title prefix. An orphan sweep keeps
+/// windows whose title ends with one of the kept id prefixes and every
+/// host-tagged window; a sweep of everything keeps none. Ids and names are
+/// collected before anything closes, then each window is closed by id with the
+/// same error rules as `close_script`. The script returns how many it closed.
+pub fn sweep_script(scope: super::SweepScope<'_>) -> String {
+    let (keep_id_prefixes, skip_host_tagged) = match scope {
+        super::SweepScope::Orphans { keep_id_prefixes } => (keep_id_prefixes, true),
+        super::SweepScope::Everything => (&[][..], false),
+    };
     let keep: Vec<String> = keep_id_prefixes
         .iter()
         .map(|prefix| as_literal(&super::title_suffix(prefix)))
@@ -230,6 +235,15 @@ pub fn sweep_script(keep_id_prefixes: &[String]) -> String {
         "            set winName to name of (first window whose id is (contents of i))\n",
         "            set keep to false\n",
         "            considering case\n",
+    ));
+    // Windows of Sessions on another host: this machine cannot tell orphans there.
+    if skip_host_tagged {
+        script.push_str(&format!(
+            "                if winName starts with {} then set keep to true\n",
+            as_literal(&super::host_tagged_head())
+        ));
+    }
+    script.push_str(concat!(
         "                repeat with s in keepSuffixes\n",
         "                    if winName ends with (contents of s) then set keep to true\n",
     ));
@@ -439,10 +453,10 @@ pub fn close(titles: &[String]) -> Result<(), String> {
 
 /// Run the sweep. Its window count is unknown up front, so it waits as long as
 /// the largest Breakout would.
-pub fn sweep(keep_id_prefixes: &[String]) -> Result<usize, String> {
+pub fn sweep(scope: super::SweepScope<'_>) -> Result<usize, String> {
     let output = osascript(
         &[],
-        &sweep_script(keep_id_prefixes),
+        &sweep_script(scope),
         wait_for(super::request::MAX_SESSIONS),
     )?;
     output
@@ -453,6 +467,7 @@ pub fn sweep(keep_id_prefixes: &[String]) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::breakout::SweepScope;
 
     fn surface(title: &str, command: &str) -> Surface {
         Surface {
@@ -487,7 +502,7 @@ mod tests {
                 },
             )]),
             close_script(&["t".to_string()]),
-            sweep_script(&[]),
+            sweep_script(SweepScope::Everything),
         ] {
             assert!(
                 script.starts_with("with timeout of 10 seconds\n"),
@@ -561,7 +576,7 @@ mod tests {
 
     #[test]
     fn sweep_script_finds_by_prefix_and_closes_by_id() {
-        let script = sweep_script(&[]);
+        let script = sweep_script(SweepScope::Everything);
         assert!(script.contains(
             "set winIds to id of every window whose name starts with \"aoe breakout \u{b7} \""
         ));
@@ -580,7 +595,10 @@ mod tests {
 
     #[test]
     fn close_and_sweep_never_launch_ghostty() {
-        for script in [close_script(&["t".to_string()]), sweep_script(&[])] {
+        for script in [
+            close_script(&["t".to_string()]),
+            sweep_script(SweepScope::Everything),
+        ] {
             let guard = script
                 .find("if application \"Ghostty\" is running then")
                 .expect("guarded");
@@ -588,7 +606,7 @@ mod tests {
             assert!(guard < tell, "{script}");
             assert!(script.contains("end tell\nend if\n"), "{script}");
         }
-        let sweep = sweep_script(&[]);
+        let sweep = sweep_script(SweepScope::Everything);
         assert!(
             sweep.contains("end if\nreturn 0\n"),
             "a sweep with Ghostty not running closes nothing: {sweep}"
@@ -601,7 +619,9 @@ mod tests {
 
     #[test]
     fn sweep_script_skips_kept_id_prefixes() {
-        let script = sweep_script(&["a1b2c3d4".to_string(), "x\"y".to_string()]);
+        let script = sweep_script(SweepScope::Orphans {
+            keep_id_prefixes: &["a1b2c3d4".to_string(), "x\"y".to_string()],
+        });
         assert!(
             script.contains("set keepSuffixes to {\" \u{b7} a1b2c3d4\", \" \u{b7} x\\\"y\"}"),
             "{script}"
@@ -758,11 +778,35 @@ mod tests {
 
     #[test]
     fn sweep_keeps_a_splits_window_while_any_of_its_sessions_exists() {
-        let script = sweep_script(&["b2".to_string()]);
+        let script = sweep_script(SweepScope::Orphans {
+            keep_id_prefixes: &["b2".to_string()],
+        });
         assert!(script.contains("set splitsHead to \"aoe breakout \u{b7} splits \u{b7} \""));
         assert!(script.contains(concat!(
             "if winName starts with splitsHead and ((winName & \" \u{b7} \") ",
             "contains ((contents of s) & \" \u{b7} \")) then set keep to true"
         )));
+    }
+
+    const HOST_SKIP: &str =
+        "if winName starts with \"aoe breakout \u{b7} @\" then set keep to true";
+
+    #[test]
+    fn the_orphan_sweep_skips_host_tagged_windows_and_close_all_does_not() {
+        let orphans = sweep_script(SweepScope::Orphans {
+            keep_id_prefixes: &[],
+        });
+        assert!(orphans.contains(HOST_SKIP), "{orphans}");
+        let (collect, _) = orphans.split_once("set closedCount to 0").unwrap();
+        assert!(
+            collect.find(HOST_SKIP).unwrap() > collect.find("considering case").unwrap(),
+            "matched case-sensitively"
+        );
+        let everything = sweep_script(SweepScope::Everything);
+        assert!(!everything.contains("@"), "{everything}");
+        assert!(everything.contains("set keepSuffixes to {}"));
+        assert!(everything.contains(
+            "set winIds to id of every window whose name starts with \"aoe breakout \u{b7} \""
+        ));
     }
 }

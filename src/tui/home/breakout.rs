@@ -387,7 +387,9 @@ fn spawn_open(request: BreakoutRequest, transport: Transport, keep: Vec<String>)
     std::thread::spawn(move || {
         let result = match transport {
             Transport::Local => {
-                match crate::breakout::sweep_local(&keep) {
+                match crate::breakout::sweep_local(crate::breakout::SweepScope::Orphans {
+                    keep_id_prefixes: &keep,
+                }) {
                     Ok(closed) => {
                         tracing::debug!(target: "tui.breakout", closed, "swept orphaned breakout windows")
                     }
@@ -437,7 +439,9 @@ fn spawn_open(request: BreakoutRequest, transport: Transport, _keep: Vec<String>
 fn spawn_sweep() -> SweepJob {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(crate::breakout::sweep_local(&[]));
+        let _ = tx.send(crate::breakout::sweep_local(
+            crate::breakout::SweepScope::Everything,
+        ));
     });
     rx
 }

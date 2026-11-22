@@ -104,9 +104,15 @@ impl BreakoutRequest {
     }
 }
 
-/// Printable title text for a window: no control characters, at most 60 characters.
+/// Printable title text for a window: no control characters, at most 60
+/// characters. A leading host tag character becomes its fullwidth form, so a
+/// Session title can never make a local window look host-bound.
 fn display_title(title: &str) -> String {
-    title.chars().filter(|c| !c.is_control()).take(60).collect()
+    let text: String = title.chars().filter(|c| !c.is_control()).take(60).collect();
+    match text.strip_prefix(super::HOST_TAG) {
+        Some(rest) => format!("\u{ff20}{rest}"),
+        None => text,
+    }
 }
 
 /// Quote one argument for `/bin/sh`.
@@ -121,7 +127,11 @@ pub fn surfaces(request: &BreakoutRequest, local_exe: &str) -> Vec<Surface> {
         .sessions
         .iter()
         .map(|session| Surface {
-            title: super::window_title(&display_title(&session.title), &session.id),
+            title: super::window_title(
+                request.host.as_deref(),
+                &display_title(&session.title),
+                &session.id,
+            ),
             command: attach_command(request.host.as_deref(), session, local_exe),
         })
         .collect()
@@ -462,7 +472,7 @@ mod tests {
         );
         assert_eq!(
             got[0].title,
-            format!("aoe breakout \u{b7} {title} \u{b7} abc")
+            format!("aoe breakout \u{b7} @bender \u{b7} {title} \u{b7} abc")
         );
     }
 

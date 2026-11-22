@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,8 @@ use super::BreakoutOutcome;
 /// The longest request or reply line read.
 const MAX_LINE: u64 = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_millis(500);
+/// The longest a whole request may take to arrive.
+const READ_DEADLINE: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -115,11 +117,30 @@ pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
+/// Reads that fail once `until` has passed, so a client dripping bytes slower
+/// than the per-read timeout still cannot hold the agent.
+struct Deadline<'a> {
+    stream: &'a UnixStream,
+    until: Instant,
+}
+
+impl Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left.min(IO_TIMEOUT)))?;
+        (&mut &*self.stream).read(buf)
+    }
+}
+
 /// One newline-terminated line of at most `MAX_LINE` bytes that parses and
 /// validates. Anything else is dropped without a reply.
-fn read_request(stream: &UnixStream) -> Option<BreakoutRequest> {
+fn read_request(stream: &UnixStream, deadline: Duration) -> Option<BreakoutRequest> {
     let mut line = String::new();
-    BufReader::new(stream.take(MAX_LINE))
+    let until = Instant::now() + deadline;
+    BufReader::new(Deadline { stream, until }.take(MAX_LINE))
         .read_line(&mut line)
         .ok()?;
     if !line.ends_with('\n') {
@@ -171,12 +192,13 @@ pub fn serve(
     allowed_hosts: Vec<String>,
     open: impl Fn(&BreakoutRequest) -> Result<BreakoutOutcome, String>,
 ) {
-    serve_as(listener, own_uid(), &allowed_hosts, &open);
+    serve_as(listener, own_uid(), READ_DEADLINE, &allowed_hosts, &open);
 }
 
 fn serve_as(
     listener: UnixListener,
     owner: u32,
+    read_deadline: Duration,
     allowed_hosts: &[String],
     open: &impl Fn(&BreakoutRequest) -> Result<BreakoutOutcome, String>,
 ) {
@@ -187,7 +209,7 @@ fn serve_as(
         }
         let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
         let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-        let Some(request) = read_request(&stream) else {
+        let Some(request) = read_request(&stream, read_deadline) else {
             tracing::warn!(target: "cli.breakout", "ignored a malformed request");
             continue;
         };
@@ -465,6 +487,53 @@ mod tests {
     }
 
     #[test]
+    fn a_slow_drip_client_is_cut_off_at_the_read_deadline() {
+        let dir = short_tmp();
+        let path = dir.path().join("breakout").join("agent.sock");
+        let listener = bind(&path).unwrap();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&ran);
+        let deadline = Duration::from_millis(600);
+        std::thread::spawn(move || {
+            serve_as(
+                listener,
+                own_uid(),
+                deadline,
+                &["bender".to_string()],
+                &|r| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(outcome(r))
+                },
+            )
+        });
+        let line = format!(
+            "{}\n",
+            serde_json::to_string(&request(Some("bender"))).unwrap()
+        );
+        let mut stream = UnixStream::connect(&path).unwrap();
+        stream.set_read_timeout(Some(WAIT)).unwrap();
+        // One byte every 100 ms stays under the per-read timeout throughout.
+        let started = std::time::Instant::now();
+        for byte in line.as_bytes() {
+            if stream.write_all(&[*byte]).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            if started.elapsed() > Duration::from_secs(4) {
+                break;
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the agent cut the client off"
+        );
+        let mut reply = String::new();
+        let _ = BufReader::new(&stream).read_line(&mut reply);
+        assert!(reply.is_empty(), "{reply}");
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn a_peer_with_another_uid_gets_no_reply() {
         let dir = short_tmp();
         let path = dir.path().join("breakout").join("agent.sock");
@@ -473,10 +542,16 @@ mod tests {
         let counter = Arc::clone(&ran);
         let other = nix::unistd::getuid().as_raw().wrapping_add(1);
         std::thread::spawn(move || {
-            serve_as(listener, other, &["bender".to_string()], &|r| {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Ok(outcome(r))
-            })
+            serve_as(
+                listener,
+                other,
+                READ_DEADLINE,
+                &["bender".to_string()],
+                &|r| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(outcome(r))
+                },
+            )
         });
         let line = format!(
             "{}\n",

@@ -1231,7 +1231,7 @@ fn a_splits_window_marks_every_session_and_outlives_one_of_them() {
     let _forced = ForcedSupport::on();
     let mut env = create_test_env_with_sessions(3);
     let ids: Vec<String> = (0..3).map(|i| env.view.instance_at(i).id.clone()).collect();
-    let title = crate::breakout::splits_title(ids.iter().map(String::as_str));
+    let title = crate::breakout::splits_title(None, ids.iter().map(String::as_str));
     env.view.breakout_titles = vec![title.clone()];
     for id in &ids {
         assert!(env.view.is_broken_out(id));
@@ -1257,6 +1257,7 @@ fn a_session_stopped_while_its_splits_window_opens_closes_nothing() {
     let mut env = create_test_env_with_sessions(2);
     let ids: Vec<String> = (0..2).map(|i| env.view.instance_at(i).id.clone()).collect();
     env.view.breakout_opening_titles = vec![crate::breakout::splits_title(
+        None,
         ids.iter().map(String::as_str),
     )];
     let _respond = env.view.session_feed.command_driver_for_test();
