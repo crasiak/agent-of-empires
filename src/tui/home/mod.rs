@@ -477,6 +477,8 @@ pub struct HomeView {
     pub(super) diagnostics_hovered: bool,
     /// The selected session and the arc line under the pointer, for its tooltip.
     pub(super) arc_hover: Option<(String, usize)>,
+    /// The windows the open info dialog shows, so `t` can open their transcript.
+    pub(super) steno_windows: Option<Vec<u32>>,
     pub(super) system_health_tip_high_samples: u8,
     pub(super) system_health_tip_earned: bool,
     pub(super) system_health_discovered: bool,

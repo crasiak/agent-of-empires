@@ -293,6 +293,7 @@ impl HomeView {
             diagnostics_area: Rect::default(),
             diagnostics_hovered: false,
             arc_hover: None,
+            steno_windows: None,
             system_health_tip_high_samples: 0,
             system_health_tip_earned: user_config
                 .as_ref()

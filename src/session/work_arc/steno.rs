@@ -85,7 +85,88 @@ impl StenoArc {
         }
         out.join("\n\n────────\n\n")
     }
+
+    /// The record's events for the cited windows' turns, oldest first, from `events.jsonl`:
+    /// the session as the stenographer normalised it, the same for every harness.
+    pub(crate) fn transcript_text(&self, windows: &[u32]) -> String {
+        use std::io::BufRead;
+        let Some(record) = self.record() else {
+            return "The record is not readable.".into();
+        };
+        let spans: Vec<_> = windows
+            .iter()
+            .filter_map(|&w| Some((w, read_window(record, w)?.turns?)))
+            .collect();
+        if spans.is_empty() {
+            return "No turn range is recorded for these windows.".into();
+        }
+        let last_turn = spans.iter().map(|(_, (_, hi))| *hi).max().unwrap_or(0);
+        let Ok(file) = std::fs::File::open(record.join("events.jsonl")) else {
+            return "events.jsonl is not readable in the record.".into();
+        };
+        let mut out = String::new();
+        let mut current = None;
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let Some(turn) = event["turn"].as_u64() else {
+                continue;
+            };
+            if turn > last_turn {
+                break;
+            }
+            let Some(&(window, _)) = spans
+                .iter()
+                .find(|(_, (lo, hi))| (*lo..=*hi).contains(&turn))
+            else {
+                continue;
+            };
+            if out.len() > MAX_TRANSCRIPT_BYTES {
+                out.push_str(
+                    "\n… later events left out; the full text is in the record's events.jsonl\n",
+                );
+                break;
+            }
+            if current != Some(window) {
+                current = Some(window);
+                let (lo, hi) = spans.iter().find(|(w, _)| *w == window).unwrap().1;
+                out.push_str(&format!("\n── w{window} · turns {lo}-{hi} ──\n"));
+            }
+            let time = event["ts"]
+                .as_str()
+                .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+                .map(|ts| {
+                    ts.with_timezone(&chrono::Local)
+                        .format("%H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_else(|| "--:--:--".into());
+            let kind = event["kind"].as_str().unwrap_or("event").replace('_', " ");
+            let error = if event["is_error"].as_bool() == Some(true) {
+                " (error)"
+            } else {
+                ""
+            };
+            let text = event["text"].as_str().unwrap_or("").trim();
+            let shown: String = text.chars().take(MAX_EVENT_CHARS).collect();
+            let more = text.chars().count().saturating_sub(MAX_EVENT_CHARS);
+            out.push_str(&format!(
+                "\n[{time}] turn {turn} · {kind}{error}\n{shown}\n"
+            ));
+            if more > 0 {
+                out.push_str(&format!("… {more} more characters\n"));
+            }
+        }
+        if out.is_empty() {
+            return "No events are recorded for these turns.".into();
+        }
+        out.trim_start().to_string()
+    }
 }
+
+const MAX_EVENT_CHARS: usize = 1500;
+const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
 
 const MAX_WINDOW_BYTES: u64 = 512 * 1024;
 /// Maximum windows expanded per citation range.
@@ -426,6 +507,45 @@ mod tests {
             current: true,
             path: record.join("derive/arc.json"),
         };
+        std::fs::write(
+            record.join("events.jsonl"),
+            [
+                serde_json::json!({"rid": 1, "kind": "user", "text": "before", "turn": 60,
+                                   "ts": "2026-11-21T10:00:00Z", "is_error": false}),
+                serde_json::json!({"rid": 2, "kind": "user", "text": "fix the parser", "turn": 61,
+                                   "ts": "2026-11-21T10:01:00Z", "is_error": false}),
+                serde_json::json!({"rid": 3, "kind": "tool_result", "text": "x".repeat(2000),
+                                   "turn": 62, "ts": "2026-11-21T10:02:00Z", "is_error": true}),
+                serde_json::json!({"rid": 4, "kind": "assistant", "text": "after", "turn": 71,
+                                   "ts": "2026-11-21T10:03:00Z", "is_error": false}),
+            ]
+            .iter()
+            .map(|e| e.to_string() + "\n")
+            .collect::<String>(),
+        )
+        .unwrap();
+        let transcript = arc.transcript_text(&[7]);
+        assert!(
+            transcript.starts_with("── w7 · turns 61-70 ──"),
+            "{transcript}"
+        );
+        assert!(
+            transcript.contains("turn 61 · user\nfix the parser"),
+            "{transcript}"
+        );
+        assert!(
+            transcript.contains("turn 62 · tool result (error)"),
+            "{transcript}"
+        );
+        assert!(transcript.contains("… 500 more characters"), "{transcript}");
+        assert!(
+            !transcript.contains("before") && !transcript.contains("after"),
+            "{transcript}"
+        );
+        assert_eq!(
+            arc.transcript_text(&[8]),
+            "No turn range is recorded for these windows."
+        );
         let text = arc.windows_text(&[7, 8]);
         assert!(
             text.starts_with("w7 · turns 61-70\n\nThe assistant fixed the parser."),
