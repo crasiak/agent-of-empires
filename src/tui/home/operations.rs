@@ -27,6 +27,16 @@ fn group_membership<'a>(
     }
 }
 
+/// What a restart request did.
+pub(super) enum RestartSubmit {
+    /// Sent to the daemon; the Session is now in `restart_in_flight`.
+    Submitted,
+    /// Not sent: transient row, shelved, in flight already, or inside the key-repeat cooldown.
+    Skipped,
+    /// The runtime refused the request before it was sent.
+    Refused(String),
+}
+
 impl HomeView {
     /// Why this process may not write `projects.json`, or `None` when it may.
     ///
@@ -409,28 +419,60 @@ impl HomeView {
         new_command_override: Option<&str>,
         for_update: bool,
     ) -> anyhow::Result<()> {
-        let id = match &self.selected_session {
-            Some(id) => id.clone(),
-            None => return Ok(()),
+        let Some(id) = self.selected_session.clone() else {
+            return Ok(());
         };
+        if let RestartSubmit::Refused(error) = self.restart_session_by_id(
+            &id,
+            new_profile,
+            new_tool,
+            new_extra_args,
+            new_command_override,
+            for_update,
+        ) {
+            self.info_dialog = Some(InfoDialog::new(
+                "Restart failed",
+                &format!("{error}\nReconnect the runtime and try again."),
+            ));
+        }
+        Ok(())
+    }
 
+    /// Whether `id` was restarted too recently for another restart to be accepted.
+    pub(super) fn restart_cooling_down(&self, id: &str) -> bool {
+        self.restart_cooldown_at
+            .get(id)
+            .is_some_and(|prev| prev.elapsed() < std::time::Duration::from_millis(1500))
+    }
+
+    /// Submit a restart for one Session, whatever the cursor is on. Launch edits travel
+    /// with the command; `None` keeps what the Session already runs.
+    pub(super) fn restart_session_by_id(
+        &mut self,
+        id: &str,
+        new_profile: Option<&str>,
+        new_tool: Option<&str>,
+        new_extra_args: Option<&str>,
+        new_command_override: Option<&str>,
+        for_update: bool,
+    ) -> RestartSubmit {
         // A daemon start for this row is already in flight. The start runs
         // off the event loop now, so the 1.5s keyboard-repeat debounce below
         // does not cover a deliberate second press during a multi-second
         // start. Without this guard a duplicate submit would churn the
         // still-booting agent a second time.
-        if self.restart_in_flight.contains(&id) {
-            return Ok(());
+        if self.restart_in_flight.contains(id) {
+            return RestartSubmit::Skipped;
         }
 
-        if self.refuse_start_if_shelved(&id) {
-            return Ok(());
+        if self.refuse_start_if_shelved(id) {
+            return RestartSubmit::Skipped;
         }
 
         // Skip transient rows. Snoozed rows only skip when the user is
         // in Attention sort; see method doc.
         let in_attention = self.sort_order == crate::session::config::SortOrder::Attention;
-        let (skip, wake_snooze) = match self.get_instance(&id) {
+        let (skip, wake_snooze) = match self.get_instance(id) {
             Some(inst) => {
                 let snoozed = inst.is_snoozed();
                 let skip = matches!(inst.status, Status::Creating | Status::Deleting)
@@ -438,20 +480,18 @@ impl HomeView {
                 let wake_snooze = snoozed && !in_attention;
                 (skip, wake_snooze)
             }
-            None => return Ok(()),
+            None => return RestartSubmit::Skipped,
         };
         if skip {
-            return Ok(());
+            return RestartSubmit::Skipped;
         }
 
         // Spam-debounce. Holding `e` or pressing it twice fast otherwise
         // races overlapping restart_with_size calls.
-        let now = std::time::Instant::now();
-        if let Some(prev) = self.restart_cooldown_at.get(&id) {
-            if now.duration_since(*prev) < std::time::Duration::from_millis(1500) {
-                return Ok(());
-            }
+        if self.restart_cooling_down(id) {
+            return RestartSubmit::Skipped;
         }
+        let now = std::time::Instant::now();
         let body = crate::daemon::RestartSessionBody {
             size: crate::terminal::get_size().and_then(|(cols, rows)| {
                 Some(crate::daemon::TerminalSize {
@@ -470,17 +510,13 @@ impl HomeView {
         };
         if let Err(error) = self
             .session_feed
-            .submit(id.clone(), crate::daemon::SessionMutation::Restart(body))
+            .submit(id.to_owned(), crate::daemon::SessionMutation::Restart(body))
         {
-            self.info_dialog = Some(InfoDialog::new(
-                "Restart failed",
-                &format!("{error}\nReconnect the runtime and try again."),
-            ));
-            return Ok(());
+            return RestartSubmit::Refused(error.to_string());
         }
-        self.restart_cooldown_at.insert(id.clone(), now);
-        self.restart_in_flight.insert(id);
-        Ok(())
+        self.restart_cooldown_at.insert(id.to_owned(), now);
+        self.restart_in_flight.insert(id.to_owned());
+        RestartSubmit::Submitted
     }
 
     pub(super) fn submit_session_delete(&mut self, options: &DeleteOptions) -> anyhow::Result<()> {
@@ -505,8 +541,12 @@ impl HomeView {
         body.delete_sandbox = options.delete_sandbox;
         body.force_delete = options.force_delete;
         body.keep_scratch = options.keep_scratch;
-        self.session_feed
-            .submit_request(id, crate::tui::session_feed::SessionRequest::Purge(body))
+        self.session_feed.submit_request(
+            id.clone(),
+            crate::tui::session_feed::SessionRequest::Purge(body),
+        )?;
+        self.close_breakout_of(&id);
+        Ok(())
     }
 
     pub(super) fn delete_selected_group(
@@ -566,6 +606,13 @@ impl HomeView {
         };
         anyhow::ensure!(!has_creating, "A session in this group is still being created. Wait for it to finish before deleting the group.");
         anyhow::ensure!(!has_restarting, "A session in this group is still restarting. Wait for it to finish before deleting the group.");
+        let members: Vec<String> = {
+            let is_member = group_membership(&path, &prefix, Some(&group.profile));
+            self.instances()
+                .filter(|row| is_member(row))
+                .map(|row| row.id.clone())
+                .collect()
+        };
         self.submit_namespace_intent(
             crate::daemon::NamespaceMutation::DeleteGroup(crate::daemon::DeleteGroupBody {
                 group,
@@ -580,7 +627,11 @@ impl HomeView {
                 },
             }),
             super::NamespaceIntent::Plain,
-        )
+        )?;
+        for id in members {
+            self.close_breakout_of(&id);
+        }
+        Ok(())
     }
 
     /// Forget a stuck deletion record; finish runtime cleanup off the input thread.
@@ -943,7 +994,9 @@ impl HomeView {
                 "Could Not Trash Session",
                 &error.to_string(),
             ));
+            return;
         }
+        self.close_breakout_of(id);
     }
 
     /// Restore the selected trashed session, clearing `trashed_at` so it
@@ -1069,8 +1122,13 @@ impl HomeView {
             ));
         }
         requests.sort_by(|a, b| a.0.cmp(&b.0));
+        let ids: Vec<String> = requests.iter().map(|(id, _)| id.clone()).collect();
         if let Err(error) = self.session_feed.submit_batch(requests) {
             self.info_dialog = Some(InfoDialog::new("Could Not Empty Trash", &error.to_string()));
+            return;
+        }
+        for id in ids {
+            self.close_breakout_of(&id);
         }
     }
 

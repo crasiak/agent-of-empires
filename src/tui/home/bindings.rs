@@ -52,6 +52,19 @@ pub enum ActionId {
     AttachTerminal,
     ToggleView,
     SendMessage,
+    /// Toggle the Mark on the cursor row (a Group header toggles all its Sessions).
+    ToggleMark,
+    /// Mark the cursor row and the row above it, moving the cursor up.
+    ExtendMarkUp,
+    /// Mark the cursor row and the row below it, moving the cursor down.
+    ExtendMarkDown,
+    /// Drop every Mark (palette and `Esc`; no chord of its own).
+    ClearMarks,
+    /// Open the menu of Bulk actions on the Marked set.
+    BulkMenu,
+    /// Close every Breakout window on this Mac, whichever TUI opened it (palette and the
+    /// Marked set's menu; no chord).
+    CloseBreakout,
     RespondToPermission,
     Stop,
     Delete,
@@ -498,6 +511,9 @@ pub fn key_event(id: ActionId, strict: bool) -> Option<KeyEvent> {
 }
 
 fn format_chord(c: &Chord) -> String {
+    if c.code == KeyCode::Char(' ') && !c.ctrl && !c.alt {
+        return "Space".to_string();
+    }
     let key = match c.code {
         KeyCode::Char(ch) => ch.to_ascii_uppercase().to_string(),
         KeyCode::F(n) => format!("F{n}"),
@@ -986,6 +1002,78 @@ pub static BINDINGS: &[Binding] = &[
         }),
     },
     Binding {
+        id: ActionId::ToggleMark,
+        non_strict: &[k(' ')],
+        strict: &[k(' ')],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Mark or unmark for bulk actions",
+        }),
+        palette: None,
+    },
+    Binding {
+        id: ActionId::ExtendMarkUp,
+        non_strict: &[shift_code(KeyCode::Up)],
+        strict: &[shift_code(KeyCode::Up)],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Extend marks upward",
+        }),
+        palette: None,
+    },
+    Binding {
+        id: ActionId::ExtendMarkDown,
+        non_strict: &[shift_code(KeyCode::Down)],
+        strict: &[shift_code(KeyCode::Down)],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Extend marks downward",
+        }),
+        palette: None,
+    },
+    Binding {
+        id: ActionId::ClearMarks,
+        non_strict: &[],
+        strict: &[],
+        context: Context::Always,
+        help: None,
+        palette: Some(PaletteMeta {
+            title: "Clear marks",
+            keywords: &["unmark", "deselect", "bulk"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
+        id: ActionId::CloseBreakout,
+        non_strict: &[],
+        strict: &[],
+        context: Context::Always,
+        help: None,
+        palette: Some(PaletteMeta {
+            title: "Close breakout windows",
+            keywords: &["breakout", "windows", "ghostty", "close"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
+        id: ActionId::BulkMenu,
+        non_strict: &[k('K')],
+        strict: &[k('K')],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Bulk actions on marked sessions",
+        }),
+        palette: Some(PaletteMeta {
+            title: "Bulk actions on marked sessions",
+            keywords: &["marked", "bulk", "many", "multi", "all"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
         id: ActionId::RespondToPermission,
         non_strict: &[k('a')],
         strict: &[k('A')],
@@ -1462,6 +1550,12 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::AttachTerminal => "attach-terminal",
         ActionId::ToggleView => "toggle-view",
         ActionId::SendMessage => "send-message",
+        ActionId::ToggleMark => "toggle-mark",
+        ActionId::ExtendMarkUp => "extend-mark-up",
+        ActionId::ExtendMarkDown => "extend-mark-down",
+        ActionId::ClearMarks => "clear-marks",
+        ActionId::BulkMenu => "bulk-menu",
+        ActionId::CloseBreakout => "close-breakout",
         ActionId::RespondToPermission => "respond-to-permission",
         ActionId::Stop => "stop",
         ActionId::Delete => "delete",

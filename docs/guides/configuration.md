@@ -642,6 +642,18 @@ default_branch = "main"   # auto-detected when unset
 context_lines = 3
 ```
 
+## Breakout
+
+```toml
+[breakout]
+# "windows" (one tiled window per session) or "splits" (one window, split into a grid)
+layout = "windows"
+# Hosts allowed to ask this machine's Breakout agent to open windows
+agent_hosts = []
+```
+
+See [Breakout](breakout.md).
+
 ## Updates
 
 ```toml

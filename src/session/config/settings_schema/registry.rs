@@ -2,9 +2,9 @@
 
 use super::FieldDescriptor;
 use crate::session::config::{
-    AcpConfig, AuthConfig, DiffConfig, LoggingConfig, SandboxConfig, SessionConfig, SkillsConfig,
-    SystemdSettings, TelemetryConfig, ThemeConfig, TmuxConfig, UpdatesConfig, WebConfig,
-    WorktreeConfig,
+    AcpConfig, AuthConfig, BreakoutConfig, DiffConfig, LoggingConfig, SandboxConfig, SessionConfig,
+    SkillsConfig, SystemdSettings, TelemetryConfig, ThemeConfig, TmuxConfig, UpdatesConfig,
+    WebConfig, WorktreeConfig,
 };
 use crate::sound::SoundConfig;
 use crate::status_hooks::StatusHookConfig;
@@ -36,6 +36,7 @@ fn build_schema() -> Vec<FieldDescriptor> {
     out.extend(AuthConfig::settings_descriptors());
     out.extend(AcpConfig::settings_descriptors());
     out.extend(DiffConfig::settings_descriptors());
+    out.extend(BreakoutConfig::settings_descriptors());
     out.extend(SkillsConfig::settings_descriptors());
     out.extend(LoggingConfig::settings_descriptors());
     out
@@ -121,6 +122,26 @@ mod tests {
             &serde_json::json!(2_147_484)
         )
         .is_err());
+    }
+
+    #[test]
+    fn breakout_settings_are_on_the_interaction_tab() {
+        let layout = descriptor("breakout", "layout").expect("breakout.layout");
+        assert_eq!(layout.category, "Interaction");
+        assert!(layout.tui_only);
+        match &layout.widget {
+            WidgetKind::Select { options } => {
+                let values: Vec<_> = options.iter().map(|o| o.value.as_str()).collect();
+                assert_eq!(values, ["windows", "splits"]);
+            }
+            other => panic!("expected select, got {other:?}"),
+        }
+
+        let hosts = descriptor("breakout", "agent_hosts").expect("breakout.agent_hosts");
+        assert_eq!(hosts.category, "Interaction");
+        assert_eq!(hosts.widget, WidgetKind::List);
+        assert!(!hosts.profile_overridable);
+        assert!(matches!(hosts.web_write, WebWritePolicy::LocalOnly { .. }));
     }
 
     #[test]

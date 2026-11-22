@@ -1730,6 +1730,10 @@ async fn attach_session(profile: &str, args: SessionIdArgs) -> Result<()> {
         );
     }
 
+    // The home preview leaves a detached session at `window-size manual`; without
+    // this the attaching client keeps the preview's dimensions.
+    tmux_session.reset_size_to_latest_client();
+
     let mut working = inst.clone();
     working.source_profile = profile.to_string();
     supervise_attach_capture(&mut working, |_| tmux_session.attach())
