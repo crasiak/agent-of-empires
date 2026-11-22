@@ -66,7 +66,7 @@ pub(crate) fn title_suffix(id_prefix: &str) -> String {
 const SPLITS_TAG: &str = "splits";
 
 /// How every untagged splits window title starts.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 pub(crate) fn splits_head() -> String {
     format!("{TITLE_PREFIX}{}", splits_body_head())
 }
