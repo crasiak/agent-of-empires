@@ -2596,11 +2596,24 @@ impl HomeView {
         }
 
         if self.snooze_duration_dialog.is_none() || self.confirm_dialog.is_none() {
+            // `t` drills from a window popup into its turns; a click can close the popup
+            // without clearing `steno_windows`, so the open dialog must still be it.
+            let window_popup = self
+                .info_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.title().starts_with("Window w"));
+            if key.code == KeyCode::Char('t') && window_popup {
+                if let Some(windows) = self.steno_windows.take() {
+                    self.open_steno_transcript(&windows);
+                    return None;
+                }
+            }
             if let Some(dialog) = &mut self.info_dialog {
                 match dialog.handle_key(key) {
                     DialogResult::Continue => {}
                     DialogResult::Cancel | DialogResult::Submit(_) => {
                         self.info_dialog = None;
+                        self.steno_windows = None;
                         if let Some(session_id) = self.pending_attach_after_warning.take() {
                             return Some(Action::AttachSession(session_id));
                         }

@@ -529,12 +529,41 @@ impl HomeView {
             return;
         };
         let names: Vec<_> = windows.iter().map(|w| format!("w{w}")).collect();
+        let text = format!(
+            "{}\n\nPress t for the transcript of these turns.",
+            steno.windows_text(windows)
+        );
         self.info_dialog = Some(
             InfoDialog::new(
-                &format!("Window {} (Up/Down to scroll)", names.join(", ")),
-                &steno.windows_text(windows),
+                &format!(
+                    "Window {} (Up/Down to scroll, t: transcript)",
+                    names.join(", ")
+                ),
+                &text,
             )
             .with_size(90, 30)
+            .scrollable(),
+        );
+        self.steno_windows = Some(windows.to_vec());
+    }
+
+    /// The record's events for the windows' turns, replacing their popup.
+    pub(super) fn open_steno_transcript(&mut self, windows: &[u32]) {
+        let Some(steno) = self
+            .selected_session
+            .as_ref()
+            .and_then(|id| self.get_instance(id))
+            .and_then(|row| row.steno_arc.as_deref())
+        else {
+            return;
+        };
+        let names: Vec<_> = windows.iter().map(|w| format!("w{w}")).collect();
+        self.info_dialog = Some(
+            InfoDialog::new(
+                &format!("Transcript {} (Up/Down to scroll)", names.join(", ")),
+                &steno.transcript_text(windows),
+            )
+            .with_size(110, 40)
             .scrollable(),
         );
     }
