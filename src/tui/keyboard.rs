@@ -132,7 +132,7 @@ mod tests {
             );
             tmux.check(&["new-window", "-d", "-n", "probe", &command]);
             for phase in ["enabled", "disabled", "resumed"] {
-                for (key, input) in [("enter", "C-Enter"), ("submit", "F4")] {
+                for (key, input) in [("enter", "Enter"), ("submit", "F4")] {
                     tmux.wait(&case.join(format!("{phase}-{key}")), &exit);
                     tmux.check(&["send-keys", "-t", "keys:probe", input]);
                 }
