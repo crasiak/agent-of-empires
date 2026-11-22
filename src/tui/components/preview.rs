@@ -1200,7 +1200,9 @@ mod tests {
 
     #[test]
     fn arc_cite_at_finds_the_window_under_the_pointer() {
-        use crate::session::work_arc::{steno::ArcLines, ArcIdentity, StenoArc, StoredArc, WorkArc};
+        use crate::session::work_arc::{
+            steno::ArcLines, ArcIdentity, StenoArc, StoredArc, WorkArc,
+        };
         use ratatui::{backend::TestBackend, style::Modifier, Terminal};
         let mut session = Instance::new("synthetic", "/tmp/synthetic");
         session.tool = "claude".into();
