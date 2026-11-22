@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Behavioral checks for the foreground build diagnostics wrapper."""
 
+from collections import deque
 from contextlib import redirect_stdout
 import importlib.util
 import io
@@ -134,14 +135,31 @@ class DiagnosticsTests(unittest.TestCase):
             f"signal.signal({number}, {handler}); "
             "print('CHILD_READY:'+str(os.getpid()), flush=True); signal.pause()"
         )
+        wrapper = (
+            "import faulthandler,runpy,sys\n"
+            "script = sys.argv.pop(1)\n"
+            "faulthandler.dump_traceback_later(8, repeat=True)\n"
+            "try:\n"
+            "    runpy.run_path(script, run_name='__main__')\n"
+            "finally:\n"
+            "    faulthandler.cancel_dump_traceback_later()\n"
+        )
         process = subprocess.Popen(
-            [sys.executable, str(SCRIPT), sys.executable, "-c", child],
+            [sys.executable, "-c", wrapper, str(SCRIPT), sys.executable, "-c", child],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         lines = queue.Queue()
+        output = deque(maxlen=100)
+        output_lock = threading.Lock()
+
+        def captured_output():
+            with output_lock:
+                return "".join(output)
 
         def read_output():
             for line in process.stdout:
+                with output_lock:
+                    output.append(line)
                 lines.put(line)
 
         reader = threading.Thread(target=read_output, daemon=True)
@@ -156,7 +174,12 @@ class DiagnosticsTests(unittest.TestCase):
                 if line.startswith("CHILD_READY:"):
                     child_pid = int(line.partition(":")[2])
             process.send_signal(number)
-            self.assertEqual(process.wait(timeout=20), 23 if handled else 128 + number)
+            try:
+                status = process.wait(timeout=20)
+            except subprocess.TimeoutExpired as error:
+                error.add_note("Wrapper output before fixture cleanup:\n" + captured_output())
+                raise
+            self.assertEqual(status, 23 if handled else 128 + number, captured_output())
         finally:
             if process.poll() is None:
                 if child_pid is not None:
