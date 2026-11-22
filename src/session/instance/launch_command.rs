@@ -1999,7 +1999,12 @@ impl Instance {
                 );
             }
             let supplied = self.command.clone();
-            let guarded = appended_flag_invocation(&supplied, &self.extra_args);
+            let (launch_args, intake_prompt) = if self.tool == "pi" {
+                crate::session::tailored::intake::split_launch_args(&self.extra_args)
+            } else {
+                (self.extra_args.clone(), None)
+            };
+            let guarded = appended_flag_invocation(&supplied, &launch_args);
             let mut cmd = self.freeze_native_invocation(
                 supplied.clone(),
                 execution,
@@ -2009,8 +2014,8 @@ impl Instance {
             if let Some((ref flag, _)) = identity_extension {
                 cmd.push_str(flag);
             }
-            if !self.extra_args.is_empty() {
-                cmd = format!("{} {}", cmd, self.extra_args);
+            if !launch_args.is_empty() {
+                cmd = format!("{} {}", cmd, launch_args);
             }
             if host_command.is_none() {
                 if let Some(yolo) = yolo {
@@ -2057,6 +2062,16 @@ impl Instance {
                     native_id,
                     &native.inputs.launch_id,
                 )?);
+            }
+            anyhow::ensure!(
+                intake_prompt.is_none() || is_existing || self.started_at.is_none(),
+                "Intake was already launched but its native conversation is unavailable; inspect the original Session instead of replaying the task"
+            );
+            if !is_existing {
+                if let Some(prompt) = intake_prompt {
+                    cmd.push(' ');
+                    cmd.push_str(&shell_words::quote(&prompt));
+                }
             }
             apply_ssh_prompt_suppression(&mut cmd);
             apply_no_daemon_flag(&mut cmd, agent, self, execution, unpinned);
@@ -2867,6 +2882,71 @@ sandbox = "unsupported"
                 .is_err(),
             "Missing native history must not silently start/replay a paid turn"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn intake_native_launch_delivers_one_task_and_resume_does_not_replay_it() {
+        let home = tempfile::tempdir().unwrap();
+        let _app = crate::session::test_support::isolate_app_dir_at(home.path());
+        crate::agents::forget_agent_help_for_test();
+        let _env = EnvGuard::unset(&["PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR"]);
+        let _pi = crate::session::test_support::install_login_shell_path_command(
+            home.path(),
+            "pi",
+            "#!/bin/sh\nprintf '%s\\n' '--session-id --session --extension'\n",
+        );
+        let project = home.path().join("repo");
+        std::fs::create_dir(&project).unwrap();
+        let mut instance = tool_instance("pi", project.to_str().unwrap());
+        set_pi_integration(&instance, "identity");
+        instance.extra_args = crate::session::tailored::intake::IntakeBrief::new(
+            "Unique intake task 'quoted'\\nsecond line".into(),
+        )
+        .unwrap()
+        .launch_args("--thinking high", "default", "aoe")
+        .unwrap();
+        let mut native = instance.resolve_native_execution(None).unwrap();
+        let first = instance
+            .build_host_command(
+                instance.resolved_agent(),
+                Some(&native),
+                &mut instance.conversation_state(),
+            )
+            .unwrap();
+        assert!(!first.is_existing);
+        let command = first.command.unwrap();
+        assert_eq!(
+            command.matches("Unique intake task").count(),
+            1,
+            "{command}"
+        );
+        let sid = instance.agent_session_id.clone().unwrap();
+        let store = home.path().join("native-history");
+        std::fs::create_dir(&store).unwrap();
+        let transcript = publish_host_pi_transcript(&instance.id, &sid, &store);
+        native.pi_transcript_path = Some(transcript.to_str().unwrap().into());
+        instance.started_at = Some(chrono::Utc::now());
+        let resumed = instance
+            .build_host_command(
+                instance.resolved_agent(),
+                Some(&native),
+                &mut instance.conversation_state(),
+            )
+            .unwrap();
+        assert!(resumed.is_existing);
+        let command = resumed.command.unwrap();
+        assert!(!command.contains("Unique intake task"), "{command}");
+        assert!(command.contains("--thinking high"), "{command}");
+        assert!(command.contains("--session "), "{command}");
+        native.pi_transcript_path = None;
+        assert!(instance
+            .build_host_command(
+                instance.resolved_agent(),
+                Some(&native),
+                &mut instance.conversation_state()
+            )
+            .is_err());
     }
 
     fn owned_codex_namespace(home: &std::path::Path) -> EnvGuard {

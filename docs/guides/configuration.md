@@ -162,19 +162,22 @@ Stop the daemon and any running AoE TUIs before repairing or removing the direct
 
 ### Quick launch
 
-On the TUI home screen, **Ctrl+1** through **Ctrl+9** open an editable New Session
-form from an explicitly assigned preset. Nothing launches until you submit.
+On the TUI home screen, **Ctrl+2** through **Ctrl+9** open an editable New Session
+form from an explicitly assigned preset. **Ctrl+1** is reserved for
+[intake](tailored-sessions.md#intake-a-task), even if slot 1 is configured. Move an
+existing slot-1 preset to an unused slot from 2 through 9; AoE does not rewrite
+configuration automatically. Nothing launches until you submit.
 Assignments are global, independent of profile picker order, and empty by default.
 Configure them in **Settings > Global > Interaction > Quick Launch Presets** as
 JSON, or in the global `config.toml`:
 
 ```toml
 [session.quick_launch]
-"1" = { profile = "personal-sub-headroom-ledger", tool = "pi", ledger_profile = "personal" }
-"2" = { profile = "work-headroom-ledger", tool = "pi", ledger_profile = "work" }
-"3" = { profile = "personal-oss-headroom-ledger", tool = "pi", ledger_profile = "personal-oss" }
-"4" = { profile = "personal-sub-headroom-ledger", tool = "claude", ledger_profile = "personal" }
-"5" = { profile = "work-headroom-ledger", tool = "pi", ledger_profile = "work-claude" }
+"2" = { profile = "personal-sub-headroom-ledger", tool = "pi", ledger_profile = "personal" }
+"3" = { profile = "work-headroom-ledger", tool = "pi", ledger_profile = "work" }
+"4" = { profile = "personal-oss-headroom-ledger", tool = "pi", ledger_profile = "personal-oss" }
+"5" = { profile = "personal-sub-headroom-ledger", tool = "claude", ledger_profile = "personal" }
+"6" = { profile = "work-headroom-ledger", tool = "pi", ledger_profile = "work-claude" }
 ```
 
 `profile` is the destination AoE profile. Its settings supply the form defaults.

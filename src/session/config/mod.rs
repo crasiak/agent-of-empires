@@ -1910,8 +1910,8 @@ pub struct SessionConfig {
     )]
     pub new_session_mode: NewSessionMode,
 
-    /// Ctrl+1 through Ctrl+9 presets, keyed by number. Each selects an AoE profile,
-    /// optionally an agent and Ledger profile; sidebar context suggests the directory and group.
+    /// Ctrl+2 through Ctrl+9 presets select an AoE profile and optional agent/Ledger profile.
+    /// Slot 1 is retained but inactive: Ctrl+1 opens intake. Move that preset to 2..9.
     #[serde(default)]
     #[setting(
         label = "Quick Launch Presets",

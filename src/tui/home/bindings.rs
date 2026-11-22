@@ -47,6 +47,7 @@ pub enum ActionId {
     SearchNext,
     NewSession,
     TailoredSessions,
+    Intake,
     NewFromSelection,
     NewFromProject,
     AttachTerminal,
@@ -191,6 +192,11 @@ const fn ctrl(c: char) -> Chord {
 }
 
 const TAILORED_CHORD: Chord = ctrl('y');
+const INTAKE_CHORD: Chord = ctrl('1');
+
+pub(in crate::tui) fn is_intake_shortcut(key: &KeyEvent) -> bool {
+    key.kind == crossterm::event::KeyEventKind::Press && chord_matches(&INTAKE_CHORD, key)
+}
 
 pub(in crate::tui) fn is_tailored_shortcut(key: &KeyEvent) -> bool {
     key.kind == crossterm::event::KeyEventKind::Press && chord_matches(&TAILORED_CHORD, key)
@@ -335,7 +341,9 @@ fn context_holds(context: Context, ctx: &Ctx) -> bool {
 /// are listed before the unguarded entries that share their chord.
 pub fn resolve(key: &KeyEvent, strict: bool, ctx: &Ctx) -> Option<ActionId> {
     for b in BINDINGS {
-        if b.id == ActionId::TailoredSessions && key.kind != crossterm::event::KeyEventKind::Press {
+        if matches!(b.id, ActionId::TailoredSessions | ActionId::Intake)
+            && key.kind != crossterm::event::KeyEventKind::Press
+        {
             continue;
         }
         let chords = if strict { b.strict } else { b.non_strict };
@@ -894,6 +902,21 @@ pub static BINDINGS: &[Binding] = &[
         palette: Some(PaletteMeta {
             title: "Tailored Sessions",
             keywords: &["capture", "idea", "preset"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
+        id: ActionId::Intake,
+        non_strict: &[INTAKE_CHORD],
+        strict: &[INTAKE_CHORD],
+        context: Context::Always,
+        help: Some(HelpMeta {
+            section: HelpSection::Actions,
+            desc: "Intake task brief",
+        }),
+        palette: Some(PaletteMeta {
+            title: "Intake task brief",
+            keywords: &["intake", "brief", "task", "tailored"],
             group: PaletteGroup::Actions,
         }),
     },
@@ -1485,6 +1508,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
     match id {
         ActionId::NewSession => "new-session",
         ActionId::TailoredSessions => "tailored-sessions",
+        ActionId::Intake => "intake",
         ActionId::NewFromSelection => "new-from-selection",
         ActionId::NewFromProject => "new-from-project",
         ActionId::AttachTerminal => "attach-terminal",

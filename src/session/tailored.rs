@@ -1,7 +1,8 @@
-//! Purpose-scoped launches. Ledger owns the account and loaded resource surface.
+//! Purpose-scoped launches with explicit profile and account boundaries.
 
 pub mod document;
 pub mod history;
+pub mod intake;
 pub mod quick;
 pub mod research;
 pub mod workshop;

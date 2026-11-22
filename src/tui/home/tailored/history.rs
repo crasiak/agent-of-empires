@@ -9,6 +9,7 @@ use crate::tui::styles::Theme;
 pub(super) enum HistoryAction {
     None,
     New,
+    Intake,
     Research,
     Workshop,
     Document,
@@ -20,6 +21,7 @@ pub(super) enum HistoryAction {
 #[derive(Clone)]
 enum Item {
     New,
+    Intake,
     Research,
     Workshop,
     Document,
@@ -43,6 +45,9 @@ impl HistoryPicker {
         let mut items = Vec::new();
         if !self.hidden && "capture an idea".contains(&query) {
             items.push(Item::New);
+        }
+        if !self.hidden && "intake task brief".contains(&query) {
+            items.push(Item::Intake);
         }
         if !self.hidden && "tailored research".contains(&query) {
             items.push(Item::Research);
@@ -117,6 +122,7 @@ impl HistoryPicker {
             KeyCode::Enter => {
                 return match items.get(self.selected) {
                     Some(Item::New) => HistoryAction::New,
+                    Some(Item::Intake) => HistoryAction::Intake,
                     Some(Item::Research) => HistoryAction::Research,
                     Some(Item::Workshop) => HistoryAction::Workshop,
                     Some(Item::Document) => HistoryAction::Document,
@@ -206,6 +212,11 @@ impl HistoryPicker {
                 Style::default().fg(theme.text)
             };
             let (title, detail, action) = match item {
+                Item::Intake => (
+                    "+ Intake".into(),
+                    "Prepare a task brief, review setup, create one Session · Ctrl+1".into(),
+                    HistoryAction::Intake,
+                ),
                 Item::Quick(preset) => (
                     format!("+ {}", preset.title()),
                     "Blank Pi conversation at ~/knowledge · model defaults from Ledger".into(),

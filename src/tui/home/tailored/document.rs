@@ -255,6 +255,7 @@ impl DocumentWindow {
                     scratch: true,
                     fork_seed: None,
                     structured: false,
+                    intake: false,
                 });
                 let built = crate::session::tailored::document::build(
                     params,

@@ -622,6 +622,7 @@ async fn unknown_creation_uses_current_canonical_authority_after_reconnection_no
 /// Drive a full receipt-confirmed creation under `sessions` and return the committed id.
 fn commit_creation_under_filter(
     sessions: Vec<Option<String>>,
+    intake: bool,
 ) -> (String, Option<String>, bool, Option<String>, Option<String>) {
     let CreationTestEnv {
         mut view,
@@ -634,15 +635,18 @@ fn commit_creation_under_filter(
         .publish_for_test(creation_snapshot(vec![], "test", 1));
     view.apply_session_feed();
     view.highlight_filters.sessions = sessions;
-    view.request_creation(
-        creation_data(&project_dir, "Filtered", "group"),
-        None,
-        None,
-        false,
-    );
+    let mut data = creation_data(&project_dir, "Filtered", "group");
+    data.intake = intake;
+    if intake {
+        data.tool = "pi".into();
+    }
+    view.request_creation(data, None, None, false);
     let key = view.creating_stub_id.clone().unwrap();
     let stub_color = view.get_instance(&key).unwrap().color.clone();
     let mut committed = Instance::new("Filtered", project_dir.to_str().unwrap());
+    if intake {
+        committed.tool = "pi".into();
+    }
     committed.source_profile = "default".into();
     committed.idempotency_key = Some(key.clone());
     committed.status = Status::Idle;
@@ -667,7 +671,30 @@ fn commit_creation_under_filter(
     view.session_feed
         .publish_for_test(creation_snapshot(vec![row], "test", 2));
     view.apply_session_feed();
-    assert_eq!(view.apply_creation_results(), Some(committed.id.clone()));
+    assert_eq!(
+        view.apply_creation_results(),
+        if intake {
+            None
+        } else {
+            Some(committed.id.clone())
+        }
+    );
+    if intake {
+        assert_eq!(
+            view.work_arc_refresh.consent.as_ref().map(|row| &row.id),
+            Some(&committed.id)
+        );
+        assert!(
+            !view.get_instance(&committed.id).unwrap().work_arc_enabled,
+            "Arc must await its existing consent"
+        );
+        assert!(
+            view.apply_creation_results().is_none(),
+            "a repeated receipt must not create or deliver again"
+        );
+        view.confirm_work_arc();
+        assert!(view.get_instance(&committed.id).unwrap().work_arc_enabled);
+    }
     let visible = view.flat_items.iter().any(
         |item| matches!(item, crate::tui::home::Item::Session { id, .. } if id == &committed.id),
     );
@@ -692,7 +719,7 @@ fn commit_creation_under_filter(
 #[serial]
 fn a_creation_under_a_color_filter_takes_that_color_and_is_revealed() {
     let (_, color, visible, persisted, stub_color) =
-        commit_creation_under_filter(vec![Some("amber".into())]);
+        commit_creation_under_filter(vec![Some("amber".into())], false);
     assert_eq!(
         stub_color.as_deref(),
         Some("amber"),
@@ -705,9 +732,21 @@ fn a_creation_under_a_color_filter_takes_that_color_and_is_revealed() {
 
 #[test]
 #[serial]
+fn intake_commits_once_stays_visible_under_multicolor_filter_and_offers_arc_consent() {
+    let (_, color, visible, persisted, stub_color) =
+        commit_creation_under_filter(vec![Some("purple".into()), Some("teal".into())], true);
+    assert_eq!(stub_color.as_deref(), Some("purple"));
+    assert_eq!(color.as_deref(), Some("purple"));
+    assert_eq!(persisted.as_deref(), Some("purple"));
+    assert!(visible);
+}
+
+#[test]
+#[serial]
 fn a_creation_stays_uncolored_when_the_filter_admits_uncolored_rows_or_is_off() {
     for sessions in [vec![None, Some("amber".into())], vec![]] {
-        let (_, color, visible, persisted, stub_color) = commit_creation_under_filter(sessions);
+        let (_, color, visible, persisted, stub_color) =
+            commit_creation_under_filter(sessions, false);
         assert_eq!(stub_color, None);
         assert_eq!(color, None);
         assert_eq!(persisted, None);

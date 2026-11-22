@@ -436,12 +436,13 @@ impl HomeView {
     }
 
     pub(super) fn toggle_work_arc(&mut self) {
-        let Some(before) = self
-            .selected_session
-            .as_ref()
-            .and_then(|id| self.get_instance(id))
-            .cloned()
-        else {
+        if let Some(id) = self.selected_session.clone() {
+            self.toggle_work_arc_for(&id);
+        }
+    }
+
+    pub(super) fn toggle_work_arc_for(&mut self, id: &str) {
+        let Some(before) = self.get_instance(id).cloned() else {
             return;
         };
         if !arc::supported(&before) && !arc::steno::readable(&before) {

@@ -1,5 +1,6 @@
 mod document;
 mod history;
+mod intake;
 mod research;
 mod workshop;
 
@@ -21,6 +22,8 @@ use crate::tui::styles::Theme;
 
 pub(in crate::tui) struct TailoredWindow {
     picker: HistoryPicker,
+    intake: Option<intake::IntakeWindow>,
+    intake_draft: Option<intake::IntakeWindow>,
     research: Option<research::ResearchWindow>,
     workshop: Option<workshop::WorkshopWindow>,
     document: Option<document::DocumentWindow>,
@@ -68,6 +71,8 @@ pub(super) enum WindowAction {
     Close,
     Open(String),
     Quick(QuickPreset),
+    Intake,
+    ConfigureIntake(crate::session::tailored::intake::IntakeBrief),
     Visibility { id: String, hidden: bool },
 }
 
@@ -116,6 +121,7 @@ impl TailoredStart {
             scratch,
             fork_seed: None,
             structured: false,
+            intake: false,
         })
     }
 }
@@ -168,6 +174,8 @@ impl TailoredWindow {
     pub(super) fn new(account: CaptureAccount) -> Self {
         Self {
             picker: HistoryPicker::default(),
+            intake: None,
+            intake_draft: None,
             research: None,
             workshop: None,
             document: None,
@@ -232,6 +240,20 @@ impl TailoredWindow {
             } else {
                 WindowAction::Continue
             };
+        }
+        if self.intake.is_some() {
+            if key.kind == KeyEventKind::Press {
+                if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::CONTROL {
+                    return WindowAction::Close;
+                }
+                if key.code == KeyCode::F(2) {
+                    self.park_forms();
+                    self.composing = false;
+                    self.picker.recent();
+                    return WindowAction::Continue;
+                }
+            }
+            return self.intake.as_mut().unwrap().key(key);
         }
         let capture_editing = self.composing
             && self.focus == 0
@@ -394,6 +416,7 @@ impl TailoredWindow {
         match action {
             HistoryAction::None => WindowAction::Continue,
             HistoryAction::Quick(preset) => WindowAction::Quick(preset),
+            HistoryAction::Intake => WindowAction::Intake,
             HistoryAction::Document => {
                 self.open_document(self.document_account);
                 WindowAction::Continue
@@ -426,6 +449,10 @@ impl TailoredWindow {
         if self.hidden || self.checking_quick.is_some() || self.starting_quick.is_some() {
             return;
         }
+        if let Some(intake) = &mut self.intake {
+            intake.paste(text);
+            return;
+        }
         if let Some(workshop) = &mut self.workshop {
             workshop.paste(text);
             return;
@@ -456,6 +483,9 @@ impl TailoredWindow {
     pub(super) fn handle_click(&mut self, col: u16, row: u16) -> WindowAction {
         if self.hidden || self.checking_quick.is_some() || self.starting_quick.is_some() {
             return WindowAction::Continue;
+        }
+        if let Some(intake) = &mut self.intake {
+            return intake.click(col, row);
         }
         if self
             .document
@@ -512,6 +542,9 @@ impl TailoredWindow {
     }
 
     fn park_forms(&mut self) {
+        if let Some(form) = self.intake.take() {
+            self.intake_draft = Some(form);
+        }
         if let Some(form) = self.research.take() {
             self.research_drafts.push(form);
         }
@@ -588,6 +621,8 @@ impl TailoredWindow {
         let height = area.height.saturating_sub(4).min(
             if self.terminal.is_some() || self.research.is_some() || self.workshop.is_some() {
                 48
+            } else if self.intake.is_some() {
+                36
             } else if self.composing || self.document.is_some() {
                 20
             } else {
@@ -612,6 +647,10 @@ impl TailoredWindow {
         self.account_rect = Rect::default();
         self.immediately_rect = Rect::default();
         self.submit_rect = Rect::default();
+        if let Some(intake) = &mut self.intake {
+            intake.render(frame, inner, theme);
+            return;
+        }
         if let Some(document) = &mut self.document {
             document.render(frame, inner, theme);
             return;
@@ -759,10 +798,16 @@ fn capture_target_available(instance: Option<&crate::session::Instance>, title: 
 impl HomeView {
     pub(in crate::tui) fn routes_tailored_key(&self, key: &KeyEvent) -> bool {
         self.tailored_window.is_some()
-            || (super::bindings::is_tailored_shortcut(key) && !self.has_non_live_send_overlay())
+            || ((super::bindings::is_tailored_shortcut(key)
+                || super::bindings::is_intake_shortcut(key))
+                && !self.has_non_live_send_overlay())
     }
 
     pub(super) fn open_tailored(&mut self) {
+        self.open_tailored_window(true);
+    }
+
+    fn open_tailored_window(&mut self, resume_terminal: bool) {
         if self.tailored_window.is_some() {
             return;
         }
@@ -777,10 +822,29 @@ impl HomeView {
         window.profile = profile;
         let terminal = window.suspended_terminal.take();
         self.tailored_window = Some(window);
-        if let Some(id) = terminal {
+        if let Some(id) = terminal.filter(|_| resume_terminal) {
             self.apply_tailored_action(WindowAction::Open(id));
         }
         self.refresh_tailored_history();
+    }
+
+    pub(super) fn open_intake(&mut self) {
+        self.open_tailored_window(false);
+        if let Some(window) = &mut self.tailored_window {
+            if window.checking.is_some()
+                || window.checking_quick.is_some()
+                || window.starting_quick.is_some()
+            {
+                window.error =
+                    Some("Wait for the accepted Tailored launch before opening intake".into());
+                return;
+            }
+            window.terminal = None;
+            window.starting_document_foreground = false;
+            window.park_forms();
+            window.intake = Some(intake::IntakeWindow::default());
+            window.composing = false;
+        }
     }
 
     pub(super) fn handle_tailored_key(&mut self, key: KeyEvent) {
@@ -805,6 +869,13 @@ impl HomeView {
         match action {
             WindowAction::Continue => {}
             WindowAction::Quick(preset) => self.prepare_quick(preset),
+            WindowAction::Intake => {
+                if let Some(window) = &mut self.tailored_window {
+                    window.park_forms();
+                    window.intake = Some(window.intake_draft.take().unwrap_or_default());
+                }
+            }
+            WindowAction::ConfigureIntake(brief) => self.configure_intake(brief),
             WindowAction::Close => {
                 if let Some(mut window) = self.tailored_window.take() {
                     window.hidden = true;

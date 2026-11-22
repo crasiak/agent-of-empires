@@ -6,6 +6,46 @@ use std::fs;
 
 const TEST_PATH: &str = ".";
 
+#[test]
+fn intake_review_uses_final_setup_and_refuses_unsupported_launch_modes() {
+    use crate::session::tailored::intake::{split_launch_args, IntakeBrief};
+    let mut dialog = NewSessionDialog::new_with_tools(vec!["pi"], TEST_PATH.into());
+    dialog.command_override = Input::new("pi".into());
+    dialog.extra_args = Input::new("--thinking high".into());
+    dialog.set_intake(IntakeBrief::new("Keep this original task".into()).unwrap());
+    dialog.set_group("changed/group".into());
+    assert!(dialog.validate_structured());
+    let data = submitted(dialog.build_submit_result());
+    assert!(data.intake);
+    assert_eq!(data.command_override, "pi");
+    assert!(!data.yolo_mode);
+    assert!(!data.sandbox && !data.structured);
+    let (args, prompt) = split_launch_args(&data.extra_args);
+    assert!(args.contains("--thinking high"));
+    let prompt = prompt.unwrap();
+    assert!(prompt.contains("Keep this original task"));
+    assert!(prompt.contains("Group: \"changed/group\""));
+    for (sandbox, structured) in [(true, false), (false, true)] {
+        dialog.sandbox_enabled = sandbox;
+        dialog.structured_enabled = structured;
+        assert!(!dialog.validate_structured());
+        assert!(dialog
+            .error_message
+            .as_ref()
+            .unwrap()
+            .contains("terminal Pi"));
+    }
+    dialog.sandbox_enabled = false;
+    dialog.structured_enabled = false;
+    dialog.extra_args = Input::new("--resume other".into());
+    assert!(!dialog.validate_structured());
+    assert!(dialog
+        .error_message
+        .as_ref()
+        .unwrap()
+        .contains("fresh interactive"));
+}
+
 /// Field layout with one tool and one profile: path 0, title 1, yolo 2,
 /// worktree 3, group 4.
 fn single_tool_dialog() -> NewSessionDialog {

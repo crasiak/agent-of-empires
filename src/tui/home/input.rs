@@ -2295,6 +2295,12 @@ impl HomeView {
         // it would point at unrelated content. Covers the live-send branch below too.
         self.clear_preview_selection();
         self.enforce_trash_read_only();
+        if super::bindings::is_intake_shortcut(&key)
+            && (self.tailored_window.is_some() || !self.has_non_live_send_overlay())
+        {
+            self.open_intake();
+            return None;
+        }
         if self.tailored_window.is_some() {
             self.handle_tailored_key(key);
             return None;
@@ -3641,6 +3647,7 @@ impl HomeView {
             }
             ActionId::NewSession => self.open_new_session_dialog(),
             ActionId::TailoredSessions => self.open_tailored(),
+            ActionId::Intake => self.open_intake(),
             ActionId::NewFromSelection => self.open_new_from_selection(),
             ActionId::NewFromProject => self.open_project_session_picker(),
             ActionId::AttachTerminal => return self.attach_terminal_for_selected(),
@@ -8669,6 +8676,7 @@ mod tests {
             scratch: false,
             fork_seed: None,
             structured: false,
+            intake: false,
         }
     }
 

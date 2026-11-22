@@ -85,7 +85,7 @@ fn shortcuts(strict: bool, live_on_enter: bool) -> Vec<(&'static str, Vec<(Strin
         ("Enter".to_string(), enter_desc.to_string()),
         ("Tab".to_string(), tab_desc.to_string()),
         (
-            "Ctrl+1..9".to_string(),
+            "Ctrl+2..9".to_string(),
             "Quick launch preset (editable form)".to_string(),
         ),
     ];

@@ -141,7 +141,14 @@ impl NewSessionDialog {
             .sum();
         let dialog_height = fields_height + 4; // +2 border, +2 margin
 
-        let block = crate::tui::dialogs::dialog_block(" New Session ", theme);
+        let block = crate::tui::dialogs::dialog_block(
+            if self.intake.is_some() {
+                " Intake: review setup, then Create "
+            } else {
+                " New Session "
+            },
+            theme,
+        );
         let (_, inner) = crate::tui::dialogs::render_dialog_frame(
             frame,
             area,

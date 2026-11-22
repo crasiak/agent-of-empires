@@ -41,8 +41,9 @@ A new Session seeded from a parent Session's Agent conversation.
 A Session with no Project. It runs in a temporary directory AoE owns.
 
 **Tailored Session**:
-A Session launched from a purpose-scoped preset with its own minimal Ledger profile,
-shown in an overlay without leaving the current Session. See
+A Session launched from a purpose-scoped preset, usually with its own minimal Ledger
+profile and an overlay. Intake instead reviews the existing profile and creates one
+task Session through the normal launch form. See
 [the capture workflow](docs/guides/tailored-sessions.md).
 
 **Group**:
