@@ -394,10 +394,11 @@ fn shift_k_works_in_strict_mode() {
 #[test]
 #[serial]
 fn the_bulk_menu_restart_entry_opens_the_confirm() {
+    // Menu without Breakout entries: Send, Restart, Show skipped, Clear marks.
+    let _forced = ForcedSupport::set(false);
     let mut env = create_test_env_with_sessions(2);
     mark_all(&mut env);
     env.view.handle_key(shift_k(), None);
-    // Entries: Send, Restart, Show skipped, Clear marks.
     env.view.handle_key(key(KeyCode::Down), None);
     env.view.handle_key(key(KeyCode::Enter), None);
 
@@ -408,10 +409,12 @@ fn the_bulk_menu_restart_entry_opens_the_confirm() {
 #[test]
 #[serial]
 fn the_bulk_menu_can_clear_marks() {
+    // Fixed menu: Send, Restart, Show skipped, Clear marks (no Breakout entries).
+    let _forced = ForcedSupport::set(false);
     let mut env = create_test_env_with_sessions(2);
     mark_all(&mut env);
     env.view.handle_key(shift_k(), None);
-    for _ in 0..4 {
+    for _ in 0..3 {
         env.view.handle_key(key(KeyCode::Down), None);
     }
     env.view.handle_key(key(KeyCode::Enter), None);
@@ -421,6 +424,8 @@ fn the_bulk_menu_can_clear_marks() {
 #[test]
 #[serial]
 fn the_bulk_menu_lists_what_would_be_skipped() {
+    // Fixed menu: Send, Restart, Show skipped, Clear marks (no Breakout entries).
+    let _forced = ForcedSupport::set(false);
     let mut env = create_test_env_with_sessions(2);
     mark_all(&mut env);
     env.view.handle_key(shift_k(), None);
@@ -505,6 +510,8 @@ fn trashed_cursor_env() -> TestEnv {
 #[test]
 #[serial]
 fn the_bulk_menu_survives_a_trashed_cursor_row() {
+    // Fixed menu: Send, Restart, Show skipped, Clear marks (no Breakout entries).
+    let _forced = ForcedSupport::set(false);
     let mut env = trashed_cursor_env();
     env.view.handle_key(shift_k(), None);
     assert!(env.view.context_menu.is_some());
@@ -521,6 +528,8 @@ fn the_bulk_menu_survives_a_trashed_cursor_row() {
 #[test]
 #[serial]
 fn the_bulk_send_dialog_survives_a_trashed_cursor_row() {
+    // Fixed menu: Send, Restart, Show skipped, Clear marks (no Breakout entries).
+    let _forced = ForcedSupport::set(false);
     let mut env = trashed_cursor_env();
     env.view.handle_key(shift_k(), None);
     env.view.handle_key(key(KeyCode::Enter), None);

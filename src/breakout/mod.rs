@@ -33,6 +33,7 @@ fn host_tag(host: Option<&str>) -> String {
 
 /// How every host-tagged title starts. The local orphan sweep skips these: their
 /// Sessions are on another host, which this machine cannot see.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn host_tagged_head() -> String {
     format!("{TITLE_PREFIX}{HOST_TAG}")
 }
@@ -65,6 +66,7 @@ pub(crate) fn title_suffix(id_prefix: &str) -> String {
 const SPLITS_TAG: &str = "splits";
 
 /// How every untagged splits window title starts.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn splits_head() -> String {
     format!("{TITLE_PREFIX}{}", splits_body_head())
 }
