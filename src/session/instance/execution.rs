@@ -1985,6 +1985,12 @@ impl Instance {
         } else {
             self.extra_args.clone()
         };
+        let extra = if self.tool == "pi" {
+            // The renderer owns the intake turn; only configured flags enter attestation.
+            crate::session::tailored::intake::split_launch_args(&extra).0
+        } else {
+            extra
+        };
         if Self::contains_active_shell_syntax(&extra) {
             return Err(anyhow::anyhow!(
                 "managed conversation cannot use active shell syntax in arguments"
