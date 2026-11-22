@@ -9,12 +9,12 @@ Breakout opens several sessions as tiled Ghostty windows next to aoe, so you can
 
 Each window attaches to one session. Detaching (your tmux detach key) closes that window. Up to 9 sessions open at once; more than 6 asks first. **Show What Would Be Skipped** in the same menu lists the marked sessions that cannot open and why: structured-view sessions, sessions whose agent is not running, and sessions that are archived, in the trash, or being created or deleted.
 
-While a session is broken out, its sidebar row shows a `⧉` marker and the preview header reads "In a Breakout window". The marker reflects what this aoe opened. A window you close by hand keeps its marker until you run **Close breakout windows**.
+While a session is broken out, its sidebar row shows a `⧉` marker and the preview header reads "In a Breakout window". The marker reflects what this aoe opened. A window you close by hand keeps its marker until you run **Close Breakout Windows**.
 
 ## Closing
 
-- Stopping, trashing or deleting a session from the sidebar closes its separate Breakout window. A `splits` window is not closed this way, and a stopped session keeps its marker there until **Close breakout windows**.
-- **Close breakout windows** (in the `K` menu, or `Ctrl+K` and type its name) closes every Breakout window on this Mac, including ones aoe lost track of and ones opened for aoe on other hosts.
+- Stopping, trashing or deleting a session from the sidebar closes its separate Breakout window. A `splits` window is not closed this way, and a stopped session keeps its marker there until **Close Breakout Windows**.
+- **Close Breakout Windows** in the `K` menu (or "Close breakout windows" in the `Ctrl+K` palette) closes every Breakout window on this Mac, including ones aoe lost track of and ones opened for aoe on other hosts.
 - Before each new Breakout, windows whose session no longer exists are closed. Windows opened for another host are left alone, since this Mac cannot see that host's sessions.
 - aoe never launches Ghostty just to close windows.
 
@@ -61,11 +61,19 @@ An entry must exactly match the remote machine's short hostname (`bender`, not `
 aoe breakout-agent
 ```
 
-In `~/.ssh/config` on the Mac, forward the agent's socket and share connections so each window does not pay a new handshake. The forward's remote end is the app dir of the remote aoe: `~/.config/agent-of-empires/breakout/agent.sock` on Linux (honoring `$XDG_CONFIG_HOME`), `~/.agent-of-empires/breakout/agent.sock` on a macOS remote (or the same path under `~/.config` if that app dir exists).
+The agent prints the socket it listens on (`Breakout agent listening on ...`); that is the forward's local end. It sits in the Mac's aoe app dir, which is `~/.config/agent-of-empires` if that directory exists and `~/.agent-of-empires` otherwise.
+
+The forward's remote end is the app dir of the remote aoe: `~/.config/agent-of-empires/breakout/agent.sock` on Linux (honoring `$XDG_CONFIG_HOME`), `~/.agent-of-empires/breakout/agent.sock` on a macOS remote (or the same path under `~/.config` if that app dir exists). sshd does not create the directory, so create it once on the remote host:
+
+```sh
+mkdir -p ~/.config/agent-of-empires/breakout && chmod 700 ~/.config/agent-of-empires/breakout
+```
+
+In `~/.ssh/config` on the Mac, forward the socket and share connections so each window does not pay a new handshake. `RemoteForward` does not expand `~`, so write both paths in full:
 
 ```
 Host bender
-    RemoteForward /home/YOU/.config/agent-of-empires/breakout/agent.sock /Users/YOU/.agent-of-empires/breakout/agent.sock
+    RemoteForward /home/YOU/.config/agent-of-empires/breakout/agent.sock /Users/YOU/.config/agent-of-empires/breakout/agent.sock
     ControlMaster auto
     ControlPath ~/.ssh/cm-%r@%h:%p
     ControlPersist 10m
@@ -79,7 +87,7 @@ StreamLocalBindUnlink yes
 
 Then use Breakout in the remote aoe as usual. `aoe` must be on the remote host's PATH for non-interactive ssh. If the forward exists but the agent does not answer, the remote aoe says so and never opens windows on the remote host.
 
-From the remote aoe, **Close breakout windows** and closing a window with its session do not reach the Mac. Close those windows on the Mac, or run **Close breakout windows** in an aoe running on the Mac.
+From the remote aoe, **Close Breakout Windows** and closing a window with its session do not reach the Mac. Close those windows on the Mac, or run **Close Breakout Windows** in an aoe running on the Mac.
 
 ### Security
 
