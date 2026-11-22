@@ -394,7 +394,6 @@ impl TailoredWindow {
             KeyCode::Tab => self.focus = (self.focus + 1) % 4,
             KeyCode::BackTab => self.focus = (self.focus + 3) % 4,
             KeyCode::Enter if key.modifiers == KeyModifiers::CONTROL => self.submit(),
-            KeyCode::F(4) if key.modifiers.is_empty() => self.submit(),
             KeyCode::Enter if self.focus == 3 && key.modifiers.is_empty() => self.submit(),
             KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right | KeyCode::Enter
                 if self.focus == 1 =>
@@ -775,7 +774,7 @@ impl TailoredWindow {
             Paragraph::new(if self.checking.is_some() {
                 "Checking minimal Ledger profile…"
             } else {
-                "Enter newline · F4/Ctrl+Enter capture · or Tab to button, Enter · F2 history · Esc close"
+                "Enter newline · Tab to Capture, Enter · Ctrl+Enter capture · F2 history · Esc close"
             })
             .style(style(self.focus == 3)),
             rows[5],
@@ -1693,7 +1692,7 @@ esac
         let form = render(&mut view);
         let rendered: String = form.content().iter().map(|cell| cell.symbol()).collect();
         assert!(rendered.contains("Tailored Sessions"));
-        assert!(rendered.contains("F4/Ctrl+Enter capture · or Tab to button, Enter"));
+        assert!(rendered.contains("Tab to Capture, Enter · Ctrl+Enter capture"));
         assert!(!rendered.contains("Verify idea"));
         let idea_border = form
             .content()
@@ -1790,7 +1789,7 @@ esac
             view.handle_key(shortcut, None);
         }
 
-        for confirm in 0..4 {
+        for confirm in 0..3 {
             render(&mut view);
             match confirm {
                 0 => {
@@ -1801,9 +1800,6 @@ esac
                         view.handle_key(key(KeyCode::Tab), None);
                     }
                     view.handle_key(key(KeyCode::Enter), None);
-                }
-                2 => {
-                    view.handle_key(key(KeyCode::F(4)), None);
                 }
                 _ => {
                     let rect = view.tailored_window.as_ref().unwrap().submit_rect;
@@ -1901,10 +1897,10 @@ esac
     }
 
     #[test]
-    fn capture_submit_keys_only_act_on_press_from_every_control() {
-        for (code, modifiers) in [
-            (KeyCode::Enter, KeyModifiers::CONTROL),
-            (KeyCode::F(4), KeyModifiers::NONE),
+    fn capture_ignores_highlight_key_and_only_submits_on_control_enter_press() {
+        for (code, modifiers, submits) in [
+            (KeyCode::Enter, KeyModifiers::CONTROL, true),
+            (KeyCode::F(4), KeyModifiers::NONE, false),
         ] {
             for focus in 0..4 {
                 for kind in [
@@ -1924,7 +1920,7 @@ esac
                     assert!(!window.immediately);
                     assert_eq!(
                         window.error.as_deref(),
-                        if kind == KeyEventKind::Press {
+                        if submits && kind == KeyEventKind::Press {
                             Some("Enter an idea between 1 and 16384 bytes, without NUL characters")
                         } else {
                             None

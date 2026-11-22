@@ -165,7 +165,6 @@ impl DocumentWindow {
         match key.code {
             KeyCode::Tab => self.focus = (self.focus + 1) % 4,
             KeyCode::BackTab => self.focus = (self.focus + 3) % 4,
-            KeyCode::F(4) if key.modifiers.is_empty() => self.start(profile),
             KeyCode::Enter
                 if key.modifiers == KeyModifiers::CONTROL
                     || self.focus == 3 && key.modifiers.is_empty() =>
@@ -334,7 +333,7 @@ impl DocumentWindow {
             Paragraph::new(if self.busy() {
                 "Preparing source; no model started…"
             } else {
-                "[ Start ] · F4/Ctrl+Enter or Tab to Start, Enter · F2 history"
+                "[ Start ] · Tab to Start, Enter · Ctrl+Enter · F2 history"
             })
             .style(Style::default().fg(if self.focus == 3 {
                 theme.accent
@@ -371,7 +370,7 @@ mod tests {
         for account in [CaptureAccount::Personal, CaptureAccount::Work] {
             for (code, modifiers) in [
                 (KeyCode::Enter, KeyModifiers::CONTROL),
-                (KeyCode::F(4), KeyModifiers::NONE),
+                (KeyCode::Enter, KeyModifiers::NONE),
             ] {
                 for focus in 0..4 {
                     let mut overlay = TailoredWindow::new(account);
@@ -379,6 +378,27 @@ mod tests {
                     let form = overlay.document.as_mut().unwrap();
                     form.paste("https://example.org/source.md");
                     form.focus = focus;
+                    for kind in [
+                        KeyEventKind::Press,
+                        KeyEventKind::Repeat,
+                        KeyEventKind::Release,
+                    ] {
+                        overlay.handle_key(KeyEvent::new_with_kind(
+                            KeyCode::F(4),
+                            KeyModifiers::NONE,
+                            kind,
+                        ));
+                        let form = overlay.document.as_ref().unwrap();
+                        assert!(!form.busy());
+                        assert!(form.error.is_none());
+                        assert_eq!(form.focus, focus);
+                    }
+                    if modifiers.is_empty() {
+                        for _ in focus..3 {
+                            overlay.handle_key(KeyEvent::from(KeyCode::Tab));
+                        }
+                    }
+                    let submit_focus = overlay.document.as_ref().unwrap().focus;
                     for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
                         overlay.handle_key(KeyEvent::new_with_kind(code, modifiers, kind));
                         assert!(!overlay.document.as_ref().unwrap().busy());
@@ -395,7 +415,7 @@ mod tests {
                     overlay.handle_paste("not accepted");
                     let form = overlay.document.as_mut().unwrap();
                     assert_eq!(form.account, account);
-                    assert_eq!(form.focus, focus);
+                    assert_eq!(form.focus, submit_focus);
                     assert_eq!(form.url.lines().join("\n"), "https://example.org/source.md");
                     let error = form
                         .pending

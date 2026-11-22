@@ -22,7 +22,7 @@ mod tests {
     use std::process::{Command, Output, Stdio};
     use std::time::{Duration, Instant};
 
-    const TEST: &str = "tui::keyboard::tests::tmux_fallback_submit_survives_without_extended_keys";
+    const TEST: &str = "tui::keyboard::tests::tmux_tab_and_enter_survive_without_extended_keys";
     const PROBE: &str = "AOE_KEYBOARD_TEST_PROBE";
 
     struct Tmux {
@@ -78,7 +78,7 @@ mod tests {
             }
             // The cursor reply fences tmux's processing of the preceding mode change.
             crossterm::cursor::position().unwrap();
-            for (key, code) in [("enter", KeyCode::Enter), ("submit", KeyCode::F(4))] {
+            for (key, code) in [("enter", KeyCode::Enter), ("tab", KeyCode::Tab)] {
                 std::fs::write(root.join(format!("{phase}-{key}")), "ready").unwrap();
                 assert!(event::poll(Duration::from_secs(5)).unwrap());
                 assert_eq!(
@@ -93,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn tmux_fallback_submit_survives_without_extended_keys() {
+    fn tmux_tab_and_enter_survive_without_extended_keys() {
         if std::env::var_os(PROBE).is_some() {
             probe(Path::new(&std::env::var("AOE_KEYBOARD_TEST_ROOT").unwrap()));
             return;
@@ -132,7 +132,7 @@ mod tests {
             );
             tmux.check(&["new-window", "-d", "-n", "probe", &command]);
             for phase in ["enabled", "disabled", "resumed"] {
-                for (key, input) in [("enter", "Enter"), ("submit", "F4")] {
+                for (key, input) in [("enter", "Enter"), ("tab", "Tab")] {
                     tmux.wait(&case.join(format!("{phase}-{key}")), &exit);
                     tmux.check(&["send-keys", "-t", "keys:probe", input]);
                 }
