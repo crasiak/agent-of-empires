@@ -3697,9 +3697,22 @@ mod tests {
 
                     state.toggle_tool_fold();
                     render_rows(&state, width, 14, true);
+                    // Expanding also changes the successful parent's height.
+                    let expanded = wrapped_transcript(
+                        &state,
+                        &Theme::default(),
+                        text_width,
+                        ToolOutputMode::Compact,
+                    );
+                    let expanded_header = expanded
+                        .lines
+                        .iter()
+                        .position(|line| line_text(line).contains("cmd-2"))
+                        .unwrap()
+                        - 1;
                     assert_eq!(
                         state.scroll_offset as usize,
-                        header + retained_row,
+                        expanded_header + retained_row,
                         "unfold width={width} grandchild={grandchild} row={row_offset}"
                     );
                 }
