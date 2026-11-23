@@ -75,8 +75,8 @@ impl Item {
                 preset.title().into(),
                 "Pi".into(),
                 format!(
-                    "Account: {} · Agent: Pi\nLedger Profile: {}\nBlank conversation at ~/knowledge.\nModel defaults come from Ledger.",
-                    account_label(preset.account()), preset.profile()
+                    "Account: {} · Agent: Pi\nAoE Profile: {}\nBlank conversation at ~/knowledge.\nUses this profile's configured Pi launcher.",
+                    account_label(preset.account()), preset.aoe_profile()
                 ),
                 HistoryAction::Quick(*preset),
             ),

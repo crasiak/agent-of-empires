@@ -89,9 +89,16 @@ enum TailoredStart {
 
 impl TailoredStart {
     fn data(self, profile: String) -> anyhow::Result<crate::tui::dialogs::NewSessionData> {
-        let (title, path, scratch, launch) = match self {
-            Self::Capture(request) => ("Capture an idea", String::new(), true, request.launch()?),
+        let (profile, title, path, scratch, launch) = match self {
+            Self::Capture(request) => (
+                profile,
+                "Capture an idea",
+                String::new(),
+                true,
+                request.launch()?,
+            ),
             Self::Quick(plan) => (
+                plan.preset.aoe_profile().into(),
                 plan.preset.title(),
                 plan.cwd.to_string_lossy().into_owned(),
                 false,
@@ -225,6 +232,13 @@ impl TailoredWindow {
     ) {
         self.workshop_history = Some((self.workshop_history_generation, receiver));
         self.history_refreshed = Some(Instant::now());
+    }
+
+    fn pi_launch_pending(&self) -> bool {
+        self.checking_quick.is_some()
+            || self.starting_quick.is_some()
+            || self.checking.is_some()
+            || self.starting_document.is_some()
     }
 
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> WindowAction {
@@ -1028,19 +1042,35 @@ impl HomeView {
     }
 
     fn prepare_quick(&mut self, preset: QuickPreset) {
-        let Some(window) = &mut self.tailored_window else {
-            return;
-        };
-        if window.checking_quick.is_some()
-            || window.starting_quick.is_some()
-            || window.checking.is_some()
-            || window.starting_document.is_some()
+        if self
+            .tailored_window
+            .as_ref()
+            .is_none_or(TailoredWindow::pi_launch_pending)
         {
+            return;
+        }
+        let selected = (|| -> anyhow::Result<()> {
+            preset.verify_profile()?;
+            if self.active_profile.as_deref() != Some(preset.aoe_profile()) {
+                self.switch_profile(Some(preset.aoe_profile().into()))?;
+                self.open_tailored_window(false);
+            }
+            Ok(())
+        })();
+        if let Err(error) = selected {
+            self.open_tailored_window(false);
+            if let Some(window) = &mut self.tailored_window {
+                window.error = Some(format!("Quick profile selection failed: {error:#}"));
+            }
+            return;
+        }
+        let window = self.tailored_window.as_mut().expect("Quick owner");
+        if window.pi_launch_pending() {
             return;
         }
         let (tx, rx) = mpsc::channel();
         window.checking_quick = Some(rx);
-        window.error = Some(format!("Checking {} Ledger profile…", preset.title()));
+        window.error = Some(format!("Checking {} AoE profile…", preset.title()));
         std::thread::spawn(move || {
             let result = (|| -> anyhow::Result<QuickPlan> {
                 let home = dirs::home_dir()
@@ -1373,6 +1403,12 @@ impl HomeView {
                         });
                     if let Some(id) = previous {
                         self.select_and_reveal_session(&id);
+                    } else if self
+                        .tailored_window
+                        .as_ref()
+                        .is_some_and(|window| window.hidden)
+                    {
+                        self.selected_session = None;
                     }
                     if let Some(window) = &mut self.tailored_window {
                         window.checking_quick = None;
@@ -1452,6 +1488,9 @@ impl HomeView {
     }
 
     fn create_tailored_pi(&mut self, start: TailoredStart) -> anyhow::Result<String> {
+        if let TailoredStart::Quick(plan) = &start {
+            plan.preset.verify_profile()?;
+        }
         let profile = self
             .tailored_window
             .as_ref()
@@ -1479,7 +1518,7 @@ impl HomeView {
             window.terminal = None;
             window.composing = false;
             window.error = Some(
-                "Starting Quick conversation; guarded Ledger qualification is running…".into(),
+                "Starting Quick conversation with the profile's configured Pi launcher…".into(),
             );
         }
         #[cfg(test)]
@@ -1623,17 +1662,8 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn quick_creation_uses_the_existing_owner_launcher_without_moving_the_picker() {
-        use crate::session::{Instance, Storage};
-        let root = tempfile::tempdir().unwrap();
-        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
-        let knowledge = root.path().join("knowledge");
-        std::fs::create_dir(&knowledge).unwrap();
-        let _ledger = crate::session::test_support::install_login_shell_path_command(
-            root.path(),
-            "ledger",
-            "#!/bin/sh\nexit 99\n",
-        );
+    fn quick_creation_switches_to_existing_owner_without_background_focus_or_draft_transfer() {
+        use crate::session::Storage;
         for (preset, owner, launcher) in [
             (
                 QuickPreset::Work,
@@ -1646,48 +1676,142 @@ mod tests {
                 "configured-personal-pi",
             ),
         ] {
-            let path = crate::session::get_profile_dir_path(owner).unwrap();
-            std::fs::create_dir_all(&path).unwrap();
-            let config = format!("[session.agent_command_override]\npi = \"{launcher}\"\n");
-            std::fs::write(path.join("config.toml"), &config).unwrap();
-            let mut view = HomeView::new_for_test(
-                Some("picker-owner".into()),
-                crate::tmux::AvailableTools::with_tools(&["pi"]),
-                crate::file_watch::FileWatchService::noop(),
-            )
-            .unwrap();
-            view.open_tailored();
-            view.tailored_window
-                .as_mut()
-                .unwrap()
-                .idea
-                .insert_str("original draft");
-            let id = view
-                .create_tailored_pi(TailoredStart::Quick(preset.plan(root.path()).unwrap()))
+            for background in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+                let knowledge = root.path().join("knowledge");
+                std::fs::create_dir(&knowledge).unwrap();
+                let _ledger = crate::session::test_support::install_login_shell_path_command(
+                    root.path(),
+                    "ledger",
+                    "#!/bin/sh\nexit 99\n",
+                );
+                let path = crate::session::get_profile_dir_path(owner).unwrap();
+                std::fs::create_dir_all(&path).unwrap();
+                let config = format!("[session.agent_command_override]\npi = \"{launcher}\"\n");
+                std::fs::write(path.join("config.toml"), &config).unwrap();
+                let mut view = HomeView::new_for_test(
+                    Some("picker-owner".into()),
+                    crate::tmux::AvailableTools::with_tools(&["pi"]),
+                    crate::file_watch::FileWatchService::noop(),
+                )
                 .unwrap();
-            let created: &Instance = view.get_instance(&id).unwrap();
-            assert_eq!(created.effective_profile(), owner);
-            assert_eq!(created.command, launcher);
-            assert_eq!(
-                crate::session::tailored::quick::preset(created),
-                Some(preset)
-            );
-            assert_eq!(created.project_path, knowledge.to_string_lossy());
-            let window = view.tailored_window.as_ref().unwrap();
-            assert_eq!(window.profile, "picker-owner");
-            assert_eq!(window.idea.lines().join("\n"), "original draft");
-            assert!(Storage::new_unwatched("picker-owner")
-                .unwrap()
-                .load()
-                .unwrap()
-                .is_empty());
-            let stored = Storage::new_unwatched(owner).unwrap().load().unwrap();
-            assert_eq!(stored.len(), 1);
-            assert_eq!(stored[0].id, id);
-            assert_eq!(
-                std::fs::read_to_string(path.join("config.toml")).unwrap(),
-                config
-            );
+                view.open_tailored();
+                view.tailored_window
+                    .as_mut()
+                    .unwrap()
+                    .idea
+                    .insert_str("original draft");
+                view.prepare_quick(preset);
+                let prepared = view
+                    .tailored_window
+                    .as_mut()
+                    .unwrap()
+                    .checking_quick
+                    .take()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                assert_eq!(view.active_profile.as_deref(), Some(owner));
+                let plan = prepared.unwrap();
+                let (release, pending) = mpsc::channel();
+                let (started, arrivals) = mpsc::channel();
+                let window = view.tailored_window.as_mut().unwrap();
+                assert_eq!(window.profile, owner);
+                assert!(window.idea.lines().join("\n").is_empty());
+                window.checking_quick = Some(pending);
+                window.quick_starter = Some(Box::new(move |instance| {
+                    let (finish, pending) = mpsc::channel();
+                    started.send((instance.id, finish)).unwrap();
+                    document::StartWorker::from_receiver_for_test(pending)
+                }));
+                if background {
+                    Storage::new_unwatched("other-profile").unwrap();
+                    view.switch_profile(Some("other-profile".into())).unwrap();
+                    view.open_tailored();
+                    view.tailored_window
+                        .as_mut()
+                        .unwrap()
+                        .idea
+                        .insert_str("other profile draft");
+                }
+                release.send(Ok(plan)).unwrap();
+                view.tick_tailored();
+                let (id, finish) = arrivals.recv_timeout(Duration::from_secs(5)).unwrap();
+                let storage = Storage::new_unwatched(owner).unwrap();
+                let stored = storage.load().unwrap();
+                assert_eq!(stored.len(), 1);
+                assert_eq!(stored[0].id, id);
+                assert_eq!(stored[0].effective_profile(), owner);
+                assert_eq!(stored[0].command, launcher);
+                assert_eq!(
+                    crate::session::tailored::quick::preset(&stored[0]),
+                    Some(preset)
+                );
+                assert_eq!(stored[0].project_path, knowledge.to_string_lossy());
+                if background {
+                    assert!(
+                        view.selected_session.is_none(),
+                        "background Quick stole selection"
+                    );
+                }
+                finish
+                    .send((id.clone(), Err("injected native start refusal".into())))
+                    .unwrap();
+                view.tick_tailored();
+                assert_eq!(
+                    view.active_profile.as_deref(),
+                    Some(if background { "other-profile" } else { owner })
+                );
+                let origin = view
+                    .retained_tailored_windows
+                    .iter()
+                    .find(|window| window.profile == "picker-owner")
+                    .unwrap();
+                assert_eq!(origin.idea.lines().join("\n"), "original draft");
+                if background {
+                    assert_eq!(
+                        view.tailored_window
+                            .as_ref()
+                            .unwrap()
+                            .idea
+                            .lines()
+                            .join("\n"),
+                        "other profile draft"
+                    );
+                }
+                let owner_window = view
+                    .tailored_window
+                    .iter()
+                    .chain(&view.retained_tailored_windows)
+                    .find(|window| window.profile == owner)
+                    .unwrap();
+                assert!(owner_window.starting_quick.is_none());
+                assert!(owner_window.error.as_ref().unwrap().contains(&id));
+                assert_eq!(
+                    storage.load().unwrap().len(),
+                    1,
+                    "Quick created a replacement"
+                );
+                assert!(Storage::new_unwatched("picker-owner")
+                    .unwrap()
+                    .load()
+                    .unwrap()
+                    .is_empty());
+                assert_eq!(
+                    std::fs::read_to_string(path.join("config.toml")).unwrap(),
+                    config
+                );
+                for window in view
+                    .tailored_window
+                    .iter_mut()
+                    .chain(&mut view.retained_tailored_windows)
+                {
+                    if let Some((_, pending)) = window.workshop_history.take() {
+                        let _ = pending.recv_timeout(Duration::from_secs(5)).unwrap();
+                    }
+                }
+            }
         }
     }
 
@@ -1777,7 +1901,7 @@ mod tests {
         window.picker.handle_paste(QuickPreset::Work.title());
         let quick = draw(&mut window);
         assert!(quick.contains("Blank conversation at ~/knowledge."));
-        assert!(quick.contains("Model defaults come from Ledger."));
+        assert!(quick.contains("Uses this profile's configured Pi launcher."));
         assert!(quick.contains("AoE Profile: work-headroom-ledger"));
         let mut first = history_template;
         first.id = "long-first".into();

@@ -198,15 +198,19 @@ mod tests {
     }
 
     #[test]
-    fn quick_history_preserves_conversation_and_storage_identity_without_awareness_preview() {
-        for preset in [
-            super::super::quick::QuickPreset::Work,
-            super::super::quick::QuickPreset::Personal,
+    fn legacy_quick_history_preserves_conversation_and_storage_identity_without_awareness_preview()
+    {
+        for (preset, profile) in [
+            (super::super::quick::QuickPreset::Work, "aoe-quick-work"),
+            (
+                super::super::quick::QuickPreset::Personal,
+                "aoe-quick-personal",
+            ),
         ] {
             let plan = preset.plan(std::path::Path::new("/home/test")).unwrap();
             let mut instance = Instance::new(preset.title(), "/home/test/knowledge");
             instance.tool = "pi".into();
-            instance.command = plan.launch.command;
+            instance.command = format!("ledger run pi --profile {profile} --");
             instance.extra_args = plan.launch.extra_args;
             instance.source_profile = "storage-owner".into();
             instance.agent_session_id = Some("existing-conversation".into());

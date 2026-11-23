@@ -18,10 +18,18 @@ The TUI picker separates **Workflows**, **Quick Pi sessions**, and **Previous
 Sessions**. Compact rows show the choice and its kind; only the selected choice
 shows full details, beside the list on wide terminals or below it on narrower
 ones. **PgUp/PgDn** scroll longer selected details. Account and Agent are separate
-labels, not interchangeable roles or personas; **Ledger Profile** identifies a
-Quick launch configuration, while **AoE Profile** identifies a previous Session's
-storage namespace. Selecting a row does not start it; Enter or a click opens the
-existing workflow or Session.
+labels, not interchangeable roles or personas. **AoE Profile** identifies the
+Quick destination or a previous Session's storage namespace. Selecting a row does
+not start it; Enter or a click opens the existing workflow or Session.
+
+**Work Quick** uses the existing `work-headroom-ledger` AoE profile;
+**Personal Quick** uses `personal-sub-headroom-ledger`. Choosing Quick switches
+the current view to that profile and opens a blank Pi conversation at `~/knowledge`,
+using its configured Pi launcher and existing Ledger policy. AoE does not create
+or reconfigure Ledger profiles, choose a different model, or change Claude settings.
+The destination AoE profile and workspace must already exist. Original drafts stay
+in their original profile bank; a pending launch completing after navigation does
+not switch the current view or take focus.
 
 Unsent editors remain in memory for the current Home/dashboard lifetime, including
 cursor and undo history, across close/reopen, F2/history and preset navigation.
