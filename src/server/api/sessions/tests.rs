@@ -13453,7 +13453,7 @@ async fn cli_shell_validation_preserves_owner_literals_and_remote_word_boundarie
             .oneshot(request(
                 peer,
                 serde_json::json!({
-                    "path": root.path(), "tool": "", "profile": "test",
+                    "path": root.path(), "tool": "lenovo-claude", "profile": "test",
                     "title": format!("quoted prompt {index}"),
                     "extra_args": extra_args,
                 }),
