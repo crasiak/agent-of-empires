@@ -327,6 +327,80 @@ mod tests {
         KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
     }
     #[test]
+    fn picker_groups_choices_and_only_expands_the_selected_item() {
+        for (width, height) in [(110, 30), (80, 28)] {
+            let mut picker = HistoryPicker::default();
+            picker.replace_rows(vec![HistoryEntry {
+                id: "saved".into(),
+                profile: "personal-profile".into(),
+                title: "Saved capture".into(),
+                account: CaptureAccount::Personal,
+                input_preview: "Database idea".into(),
+                status: "idle".into(),
+                created_at: chrono::DateTime::UNIX_EPOCH,
+                hidden: false,
+                research: false,
+                workshop: false,
+            }]);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            let draw =
+                |picker: &mut HistoryPicker,
+                 terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+                    terminal
+                        .draw(|frame| picker.render(frame, frame.area(), &Theme::default(), None))
+                        .unwrap();
+                    terminal
+                        .backend()
+                        .buffer()
+                        .content()
+                        .chunks(width as usize)
+                        .map(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>())
+                        .collect::<Vec<_>>()
+                };
+            let lines = draw(&mut picker, &mut terminal);
+            let row = |label: &str| lines.iter().position(|line| line.contains(label)).unwrap();
+            assert!(row("Workflows") < row("Quick Pi sessions"));
+            assert!(row("Quick Pi sessions") < row("Previous Sessions"));
+            assert!(!lines.join("\n").contains("Tool-free refinement"));
+            assert_eq!(
+                picker.handle_click(0, row("Workflows") as u16),
+                HistoryAction::None
+            );
+            picker.handle_key(key(KeyCode::Down));
+            assert_eq!(
+                picker.handle_key(key(KeyCode::Enter)),
+                HistoryAction::Intake
+            );
+            for _ in 0..4 {
+                picker.handle_key(key(KeyCode::Down));
+            }
+            let quick = draw(&mut picker, &mut terminal).join("\n");
+            assert!(quick.contains("Account: Work"));
+            assert!(quick.contains("Agent: Pi"));
+            assert!(quick.contains("Model defaults"));
+            assert_eq!(
+                picker.handle_key(key(KeyCode::Enter)),
+                HistoryAction::Quick(QuickPreset::Work)
+            );
+            picker.handle_paste("Database idea");
+            let saved = draw(&mut picker, &mut terminal).join("\n");
+            assert!(saved.contains("Profile: personal-profile"));
+            assert!(!saved.contains("Model defaults"));
+            let hit = picker
+                .hits
+                .iter()
+                .find(|(_, action)| *action == HistoryAction::Open("saved".into()))
+                .unwrap()
+                .0;
+            assert_eq!(
+                picker.handle_click(hit.x, hit.y),
+                HistoryAction::Open("saved".into())
+            );
+        }
+    }
+
+    #[test]
     fn quick_tiles_filter_and_activate_by_keyboard_and_mouse_but_not_hidden_history() {
         for preset in [QuickPreset::Work, QuickPreset::Personal] {
             let mut picker = HistoryPicker::default();
