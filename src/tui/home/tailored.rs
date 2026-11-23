@@ -1653,6 +1653,7 @@ mod tests {
         let mut second = first.clone();
         second.id = "second".into();
         second.input_preview = "Second task preview".into();
+        let history_template = first.clone();
         window.picker.replace_rows(vec![first, second]);
         window.picker.handle_paste("Saved capture");
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
@@ -1672,6 +1673,7 @@ mod tests {
         let first = draw(&mut window);
         assert!(first.contains("First task preview"));
         assert!(first.contains("Created:"));
+        assert!(first.contains("AoE Profile: personal-profile"));
         assert!(!first.contains("Second task preview"));
         window.handle_key(key(KeyCode::Down));
         let second = draw(&mut window);
@@ -1685,6 +1687,34 @@ mod tests {
         let quick = draw(&mut window);
         assert!(quick.contains("Blank conversation at ~/knowledge."));
         assert!(quick.contains("Model defaults come from Ledger."));
+        assert!(quick.contains("Ledger Profile: aoe-quick-work"));
+        let mut first = history_template;
+        first.id = "long-first".into();
+        first.input_preview = format!("{}FIRST-END", "界".repeat(150));
+        let mut second = first.clone();
+        second.id = "long-second".into();
+        second.input_preview = format!("{}SECOND-END", "界".repeat(150));
+        window.picker = HistoryPicker::default();
+        window.picker.replace_rows(vec![first, second]);
+        window.picker.handle_paste("Saved capture");
+        assert!(!draw(&mut window).contains("FIRST-END"));
+        window.handle_key(key(KeyCode::PageDown));
+        assert!(draw(&mut window).contains("FIRST-END"));
+        for _ in 0..8 {
+            window.handle_key(key(KeyCode::PageDown));
+        }
+        assert!(draw(&mut window).contains("FIRST-END"));
+        window.handle_key(key(KeyCode::PageUp));
+        assert!(!draw(&mut window).contains("FIRST-END"));
+        window.handle_key(key(KeyCode::PageDown));
+        window.handle_key(key(KeyCode::Down));
+        let reset = draw(&mut window);
+        assert!(!reset.contains("FIRST-END") && !reset.contains("SECOND-END"));
+        window.handle_key(key(KeyCode::PageDown));
+        assert!(draw(&mut window).contains("SECOND-END"));
+        assert!(
+            matches!(window.handle_key(key(KeyCode::Enter)), WindowAction::Open(id) if id == "long-second")
+        );
     }
 
     #[test]

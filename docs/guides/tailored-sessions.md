@@ -17,9 +17,11 @@ Long text and unbroken URLs soft-wrap in the TUI without adding saved newlines.
 The TUI picker separates **Workflows**, **Quick Pi sessions**, and **Previous
 Sessions**. Compact rows show the choice and its kind; only the selected choice
 shows full details, beside the list on wide terminals or below it on narrower
-ones. Account, Agent, and Profile labels describe separate launch choices, not
-interchangeable roles or personas. Selecting a row does not start it; Enter or a
-click opens the existing workflow or Session.
+ones. **PgUp/PgDn** scroll longer selected details. Account and Agent are separate
+labels, not interchangeable roles or personas; **Ledger Profile** identifies a
+Quick launch configuration, while **AoE Profile** identifies a previous Session's
+storage namespace. Selecting a row does not start it; Enter or a click opens the
+existing workflow or Session.
 
 Unsent editors remain in memory for the current Home/dashboard lifetime, including
 cursor and undo history, across close/reopen, F2/history and preset navigation.
