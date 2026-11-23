@@ -151,7 +151,7 @@ fn quick_launch_refuses_bad_assignments_and_respects_overlay_and_search_routing(
 
 #[test]
 #[serial]
-fn intake_reserves_slot_one_and_reviews_context_without_creating_or_crossing_profiles() {
+fn launcher_reserves_slot_one_and_intake_reviews_context_without_crossing_profiles() {
     use crate::session::tailored::intake::IntakeBrief;
     let (temp, _guard) = test_home();
     let directory = temp.path().join("repo");
@@ -161,8 +161,8 @@ fn intake_reserves_slot_one_and_reviews_context_without_creating_or_crossing_pro
     seed_profile("personal", &[source.clone()]);
     seed_profile("work", &[]);
     assign("1", "work", Some("claude"), None);
-    let shortcut = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL);
-    for strict in [false, true] {
+    for (strict, digit) in [(false, '1'), (true, '1'), (false, 'y'), (true, 'y')] {
+        let shortcut = KeyEvent::new(KeyCode::Char(digit), KeyModifiers::CONTROL);
         let mut view = test_view(Some("personal"));
         view.available_tools = AvailableTools::with_tools(&["claude", "pi"]);
         view.strict_hotkeys = strict;
@@ -172,8 +172,21 @@ fn intake_reserves_slot_one_and_reviews_context_without_creating_or_crossing_pro
         view.handle_key(shortcut, None);
         assert!(view.tailored_window.is_some());
         assert!(view.new_dialog.is_none(), "configured slot 1 must not win");
-        assert!(render_home_to_string(&mut view, 100, 45).contains("Intake"));
+        let launcher = render_home_to_string(&mut view, 100, 45);
+        assert!(launcher.contains("Workflows"));
+        assert!(launcher.contains("Quick Pi sessions"));
+        view.handle_key(key(KeyCode::Down), None);
+        view.handle_key(key(KeyCode::Enter), None);
+        assert!(render_home_to_string(&mut view, 100, 45).contains("Prepare brief"));
         view.handle_paste("Fix this task");
+        view.handle_key(
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL),
+            None,
+        );
+        assert!(render_home_to_string(&mut view, 100, 45).contains("Workflows"));
+        view.handle_key(key(KeyCode::Down), None);
+        view.handle_key(key(KeyCode::Enter), None);
+        assert!(render_home_to_string(&mut view, 100, 45).contains("Fix this task"));
         view.handle_key(key(KeyCode::Enter), None);
         assert!(view.new_dialog.is_none(), "plain Enter edits text");
         view.handle_paste("second line");
