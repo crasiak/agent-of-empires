@@ -140,6 +140,108 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial]
+    fn quick_preflight_uses_existing_aoe_profiles_without_inspecting_or_creating_ledger_profiles() {
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+        let probe = root.path().join("ledger-inspected");
+        let _ledger = crate::session::test_support::install_login_shell_path_command(
+            root.path(),
+            "ledger",
+            &format!(
+                "#!/bin/sh\nprintf inspected > {}\nexit 99\n",
+                shell_words::quote(probe.to_str().unwrap())
+            ),
+        );
+        for (preset, profile, launcher) in [
+            (
+                QuickPreset::Work,
+                "work-headroom-ledger",
+                "configured-work-pi",
+            ),
+            (
+                QuickPreset::Personal,
+                "personal-sub-headroom-ledger",
+                "configured-personal-pi",
+            ),
+        ] {
+            let path = crate::session::get_profile_dir_path(profile).unwrap();
+            assert!(preset.verify_profile().is_err());
+            assert!(!path.exists(), "missing profile was created");
+            std::fs::create_dir_all(&path).unwrap();
+            let config = format!("[session.agent_command_override]\npi = \"{launcher}\"\n");
+            std::fs::write(path.join("config.toml"), &config).unwrap();
+            preset
+                .verify_profile()
+                .expect("existing AoE profile must be accepted");
+            assert_eq!(
+                std::fs::read_to_string(path.join("config.toml")).unwrap(),
+                config
+            );
+        }
+        assert!(!probe.exists(), "Quick inspected a separate Ledger profile");
+        for invented in ["aoe-quick-work", "aoe-quick-personal"] {
+            assert!(!crate::session::get_profile_dir_path(invented)
+                .unwrap()
+                .exists());
+        }
+    }
+
+    #[test]
+    fn quick_history_requires_account_intent_and_the_existing_aoe_owner() {
+        for (selected, owner, other, account) in [
+            (
+                QuickPreset::Work,
+                "work-headroom-ledger",
+                "personal-sub-headroom-ledger",
+                "work",
+            ),
+            (
+                QuickPreset::Personal,
+                "personal-sub-headroom-ledger",
+                "work-headroom-ledger",
+                "personal",
+            ),
+        ] {
+            let plan = selected.plan(Path::new("/home/test")).unwrap();
+            let args = shell_words::split(&plan.launch.extra_args).unwrap();
+            let marker = format!("AoE Quick Pi session v1: {account}\n");
+            assert!(
+                args[1].starts_with(&marker),
+                "missing explicit Quick intent"
+            );
+            let mut instance = Instance::new(selected.title(), "/home/test/knowledge");
+            instance.tool = "pi".into();
+            instance.source_profile = owner.into();
+            instance.command = "configured-pi-launcher".into();
+            instance.extra_args = plan.launch.extra_args.clone();
+            assert_eq!(preset(&instance), Some(selected));
+            let row = super::super::history::entry(&instance, &Default::default()).unwrap();
+            assert_eq!(row.account, selected.account());
+            assert_eq!(row.profile, owner);
+            assert!(row.input_preview.is_empty());
+            instance.extra_args.clear();
+            assert_eq!(
+                preset(&instance),
+                None,
+                "ordinary Pi was classified as Quick"
+            );
+            instance.extra_args = plan.launch.extra_args.clone();
+            instance.source_profile = other.into();
+            assert_eq!(preset(&instance), None, "Quick crossed its account owner");
+            instance.source_profile = owner.into();
+            instance.tool = "claude".into();
+            assert_eq!(preset(&instance), None);
+            instance.tool = "pi".into();
+            instance.extra_args = plan
+                .launch
+                .extra_args
+                .replacen("session v1:", "session v2:", 1);
+            assert_eq!(preset(&instance), None, "near-match intent was accepted");
+        }
+    }
+
+    #[test]
     fn quick_preflight_rejects_wrong_identity_or_mutable_shared_runtime() {
         let valid = serde_json::json!({
             "schema": "ledger-profile-lock-v4",

@@ -1587,20 +1587,23 @@ mod tests {
     }
 
     #[test]
-    fn quick_start_uses_knowledge_without_repurposing_capture_or_storage_account() {
-        for preset in [QuickPreset::Work, QuickPreset::Personal] {
+    fn quick_start_uses_knowledge_and_the_existing_account_profile_not_the_picker_owner() {
+        for (preset, expected_profile) in [
+            (QuickPreset::Work, "work-headroom-ledger"),
+            (QuickPreset::Personal, "personal-sub-headroom-ledger"),
+        ] {
             let data =
                 TailoredStart::Quick(preset.plan(std::path::Path::new("/home/test")).unwrap())
                     .data("aoe-storage-owner".into())
                     .unwrap();
-            assert_eq!(data.profile, "aoe-storage-owner");
+            assert_eq!(data.profile, expected_profile);
             assert_eq!(data.path, "/home/test/knowledge");
             assert_eq!(data.title, preset.title());
             assert!(!data.scratch && !data.workspace && !data.worktree_enabled && !data.sandbox);
             assert!(data.extra_repo_paths.is_empty());
-            assert_eq!(
-                crate::session::ledger_pi::profile(&data.tool, &data.command_override).as_deref(),
-                Some(preset.profile())
+            assert!(
+                data.command_override.is_empty(),
+                "Quick bypassed the account profile's configured Pi launcher"
             );
         }
         let data = TailoredStart::Capture(TailoredRequest {
@@ -1612,9 +1615,80 @@ mod tests {
         })
         .data("aoe-storage-owner".into())
         .unwrap();
+        assert_eq!(data.profile, "aoe-storage-owner");
         assert!(data.scratch);
         assert!(data.path.is_empty());
         assert!(data.command_override.contains("aoe-capture-personal"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn quick_creation_uses_the_existing_owner_launcher_without_moving_the_picker() {
+        use crate::session::{Instance, Storage};
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+        let knowledge = root.path().join("knowledge");
+        std::fs::create_dir(&knowledge).unwrap();
+        let _ledger = crate::session::test_support::install_login_shell_path_command(
+            root.path(),
+            "ledger",
+            "#!/bin/sh\nexit 99\n",
+        );
+        for (preset, owner, launcher) in [
+            (
+                QuickPreset::Work,
+                "work-headroom-ledger",
+                "configured-work-pi",
+            ),
+            (
+                QuickPreset::Personal,
+                "personal-sub-headroom-ledger",
+                "configured-personal-pi",
+            ),
+        ] {
+            let path = crate::session::get_profile_dir_path(owner).unwrap();
+            std::fs::create_dir_all(&path).unwrap();
+            let config = format!("[session.agent_command_override]\npi = \"{launcher}\"\n");
+            std::fs::write(path.join("config.toml"), &config).unwrap();
+            let mut view = HomeView::new_for_test(
+                Some("picker-owner".into()),
+                crate::tmux::AvailableTools::with_tools(&["pi"]),
+                crate::file_watch::FileWatchService::noop(),
+            )
+            .unwrap();
+            view.open_tailored();
+            view.tailored_window
+                .as_mut()
+                .unwrap()
+                .idea
+                .insert_str("original draft");
+            let id = view
+                .create_tailored_pi(TailoredStart::Quick(preset.plan(root.path()).unwrap()))
+                .unwrap();
+            let created: &Instance = view.get_instance(&id).unwrap();
+            assert_eq!(created.effective_profile(), owner);
+            assert_eq!(created.command, launcher);
+            assert_eq!(
+                crate::session::tailored::quick::preset(created),
+                Some(preset)
+            );
+            assert_eq!(created.project_path, knowledge.to_string_lossy());
+            let window = view.tailored_window.as_ref().unwrap();
+            assert_eq!(window.profile, "picker-owner");
+            assert_eq!(window.idea.lines().join("\n"), "original draft");
+            assert!(Storage::new_unwatched("picker-owner")
+                .unwrap()
+                .load()
+                .unwrap()
+                .is_empty());
+            let stored = Storage::new_unwatched(owner).unwrap().load().unwrap();
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].id, id);
+            assert_eq!(
+                std::fs::read_to_string(path.join("config.toml")).unwrap(),
+                config
+            );
+        }
     }
 
     #[test]
@@ -1704,7 +1778,7 @@ mod tests {
         let quick = draw(&mut window);
         assert!(quick.contains("Blank conversation at ~/knowledge."));
         assert!(quick.contains("Model defaults come from Ledger."));
-        assert!(quick.contains("Ledger Profile: aoe-quick-work"));
+        assert!(quick.contains("AoE Profile: work-headroom-ledger"));
         let mut first = history_template;
         first.id = "long-first".into();
         first.input_preview = format!("{}FIRST-END", "界".repeat(150));
