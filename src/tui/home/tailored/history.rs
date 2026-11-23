@@ -557,7 +557,7 @@ mod tests {
             let quick = draw(&mut picker, &mut terminal).join("\n");
             assert!(quick.contains("Account: Work"));
             assert!(quick.contains("Agent: Pi"));
-            assert!(quick.contains("Model defaults"));
+            assert!(quick.contains("configured Pi launcher"));
             assert_eq!(
                 picker.handle_key(key(KeyCode::Enter)),
                 HistoryAction::Quick(QuickPreset::Work)

@@ -1663,7 +1663,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn quick_creation_switches_to_existing_owner_without_background_focus_or_draft_transfer() {
-        use crate::session::Storage;
+        use crate::session::{Instance, Storage};
         for (preset, owner, launcher) in [
             (
                 QuickPreset::Work,
@@ -1676,7 +1676,7 @@ mod tests {
                 "configured-personal-pi",
             ),
         ] {
-            for background in [false, true] {
+            for (background, selected_foreground) in [(false, false), (true, false), (true, true)] {
                 let root = tempfile::tempdir().unwrap();
                 let _home = crate::session::test_support::isolate_app_dir_at(root.path());
                 let knowledge = root.path().join("knowledge");
@@ -1726,8 +1726,43 @@ mod tests {
                     document::StartWorker::from_receiver_for_test(pending)
                 }));
                 if background {
-                    Storage::new_unwatched("other-profile").unwrap();
+                    let storage = Storage::new_unwatched("other-profile").unwrap();
+                    let mut foreground = Instance::new("Foreground", knowledge.to_str().unwrap());
+                    foreground.source_profile = "other-profile".into();
+                    foreground.tool = "pi".into();
+                    foreground.command = "configured-foreground-pi".into();
+                    foreground.group_path = "foreground-group".into();
+                    let rows = if selected_foreground {
+                        storage
+                            .update(|rows, _| {
+                                rows.push(foreground.clone());
+                                Ok(())
+                            })
+                            .unwrap();
+                        vec![
+                            crate::server::api::sessions::session_response_from_instance(
+                                &foreground,
+                                false,
+                            ),
+                        ]
+                    } else {
+                        Vec::new()
+                    };
+                    let snapshot = super::super::tests::fixture_snapshot(rows, owner, "test", 1);
+                    view.session_feed.publish_for_test(
+                        crate::tui::session_feed::SessionFeedResult::Snapshot(std::sync::Arc::new(
+                            snapshot,
+                        )),
+                    );
+                    view.apply_session_feed();
                     view.switch_profile(Some("other-profile".into())).unwrap();
+                    if selected_foreground {
+                        view.select_and_reveal_session(&foreground.id);
+                        assert_eq!(
+                            view.selected_session.as_deref(),
+                            Some(foreground.id.as_str())
+                        );
+                    }
                     view.open_tailored();
                     view.tailored_window
                         .as_mut()
@@ -1735,6 +1770,19 @@ mod tests {
                         .idea
                         .insert_str("other profile draft");
                 }
+                assert!(
+                    view.info_dialog.is_none(),
+                    "fixture already has a foreground modal"
+                );
+                let foreground_state = (
+                    view.cursor,
+                    view.selected_session.clone(),
+                    view.selected_group.clone(),
+                    view.selected_group_profile.clone(),
+                    view.preview_scroll_offset,
+                    view.retained_scroll_offset,
+                    format!("{:?}", view.flat_items),
+                );
                 release.send(Ok(plan)).unwrap();
                 view.tick_tailored();
                 let (id, finish) = arrivals.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -1748,11 +1796,27 @@ mod tests {
                     crate::session::tailored::quick::preset(&stored[0]),
                     Some(preset)
                 );
-                assert_eq!(stored[0].project_path, knowledge.to_string_lossy());
+                assert_eq!(
+                    stored[0].project_path,
+                    knowledge.canonicalize().unwrap().to_string_lossy()
+                );
                 if background {
                     assert!(
-                        view.selected_session.is_none(),
-                        "background Quick stole selection"
+                        view.info_dialog.is_none(),
+                        "background Quick opened a global modal"
+                    );
+                    assert_eq!(
+                        (
+                            view.cursor,
+                            view.selected_session.clone(),
+                            view.selected_group.clone(),
+                            view.selected_group_profile.clone(),
+                            view.preview_scroll_offset,
+                            view.retained_scroll_offset,
+                            format!("{:?}", view.flat_items)
+                        ),
+                        foreground_state,
+                        "background Quick changed the foreground model or selection"
                     );
                 }
                 finish
@@ -1812,6 +1876,68 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn quick_selection_parks_the_restored_destination_form_without_discarding_its_draft() {
+        for preset in [QuickPreset::Work, QuickPreset::Personal] {
+            let root = tempfile::tempdir().unwrap();
+            let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+            std::fs::create_dir(root.path().join("knowledge")).unwrap();
+            std::fs::create_dir_all(
+                crate::session::get_profile_dir_path(preset.aoe_profile()).unwrap(),
+            )
+            .unwrap();
+            let mut view = HomeView::new_for_test(
+                Some("picker-owner".into()),
+                crate::tmux::AvailableTools::with_tools(&["pi"]),
+                crate::file_watch::FileWatchService::noop(),
+            )
+            .unwrap();
+            view.open_tailored();
+            let mut destination = TailoredWindow::new(preset.account());
+            destination.profile = preset.aoe_profile().into();
+            destination.hidden = true;
+            destination.open_document(preset.account());
+            destination
+                .document
+                .as_mut()
+                .unwrap()
+                .paste("https://example.org/retained.md");
+            view.retained_tailored_windows.push(destination);
+            view.prepare_quick(preset);
+            view.tailored_window
+                .as_mut()
+                .unwrap()
+                .checking_quick
+                .take()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            for window in view
+                .tailored_window
+                .iter_mut()
+                .chain(&mut view.retained_tailored_windows)
+            {
+                if let Some((_, pending)) = window.workshop_history.take() {
+                    let _ = pending.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            }
+            let destination = view.tailored_window.as_ref().unwrap();
+            assert!(
+                destination.document.is_none(),
+                "restored Document form hides Quick"
+            );
+            assert_eq!(destination.document_drafts.len(), 1);
+            assert_eq!(
+                destination.document_drafts[0].url_text_for_test(),
+                "https://example.org/retained.md"
+            );
+            assert!(!destination.composing);
+            assert!(destination.error.as_ref().unwrap().contains("Checking"));
         }
     }
 
