@@ -111,7 +111,7 @@ jobs:
       # trade wall time for flake risk on tests that wait on an ACP handshake.
       - name: Build tests (web, e2e)
         if: matrix.leg == 'web-e2e'
-        run: cargo test --features web,e2e-tests --test e2e --test integration --lib --no-run
+        run: python3 .github/scripts/nix-build-diagnostics.py cargo test --features web,e2e-tests --test e2e --test integration --lib --no-run
       - name: Cargo test (web, e2e only)
         if: matrix.leg == 'web-e2e'
         env:
