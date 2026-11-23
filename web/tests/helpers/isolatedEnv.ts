@@ -54,6 +54,8 @@ export const HOST_STATE_VARS = new Set([
   "AOE_E2E_STORAGE_LOCK_CONTENDED",
   // Set only by the Ledger Pi metadata test for its own re-exec'd helper.
   "AOE_LEDGER_FIXTURE_ROOT",
+  "AOE_KEYBOARD_TEST_PROBE",
+  "AOE_KEYBOARD_TEST_ROOT",
   "AOE_PROJECT_FIFO_TEST_CHILD",
   "AOE_PROJECT_FIFO_TEST_ENTERED",
   "AOE_HOOK_ATOMIC_UMASK_CHILD_BASE",
