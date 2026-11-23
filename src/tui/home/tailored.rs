@@ -1636,6 +1636,58 @@ mod tests {
     }
 
     #[test]
+    fn picker_details_distinguish_same_title_sessions_at_eighty_by_twenty_four() {
+        let mut window = TailoredWindow::new(CaptureAccount::Personal);
+        let first = crate::session::tailored::history::HistoryEntry {
+            id: "first".into(),
+            profile: "personal-profile".into(),
+            title: "Saved capture".into(),
+            account: CaptureAccount::Personal,
+            input_preview: "First task preview".into(),
+            status: "idle".into(),
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            hidden: false,
+            research: false,
+            workshop: false,
+        };
+        let mut second = first.clone();
+        second.id = "second".into();
+        second.input_preview = "Second task preview".into();
+        window.picker.replace_rows(vec![first, second]);
+        window.picker.handle_paste("Saved capture");
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut draw = |window: &mut TailoredWindow| {
+            terminal
+                .draw(|frame| window.render(frame, frame.area(), &Theme::default()))
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .chunks(80)
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let first = draw(&mut window);
+        assert!(first.contains("First task preview"));
+        assert!(first.contains("Created:"));
+        assert!(!first.contains("Second task preview"));
+        window.handle_key(key(KeyCode::Down));
+        let second = draw(&mut window);
+        assert!(second.contains("Second task preview"));
+        assert!(!second.contains("First task preview"));
+        assert!(
+            matches!(window.handle_key(key(KeyCode::Enter)), WindowAction::Open(id) if id == "second")
+        );
+        window.picker = HistoryPicker::default();
+        window.picker.handle_paste(QuickPreset::Work.title());
+        let quick = draw(&mut window);
+        assert!(quick.contains("Blank conversation at ~/knowledge."));
+        assert!(quick.contains("Model defaults come from Ledger."));
+    }
+
+    #[test]
     #[serial_test::serial]
     fn rendered_capture_home_events_preserve_multiline_until_explicit_confirm() {
         let root = tempfile::tempdir().unwrap();
