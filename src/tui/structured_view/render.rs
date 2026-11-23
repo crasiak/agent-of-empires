@@ -3609,6 +3609,91 @@ mod tests {
         assert!(top_transcript_rows(&state).contains("cmd-3"));
     }
 
+    #[test]
+    fn tool_fold_toggle_keeps_nested_card_identity() {
+        for width in [40, 100] {
+            for grandchild in [false, true] {
+                for row_offset in [0, 2] {
+                    let mut state = failed_cards_state(12);
+                    for row in &mut state.transcript.server_rows {
+                        match (row.kind, row.tool_call_id.as_deref()) {
+                            (TranscriptRowKind::ToolError, Some("t-0")) => {
+                                row.kind = TranscriptRowKind::ToolComplete;
+                            }
+                            (TranscriptRowKind::ToolStart, Some(id @ ("t-1" | "t-2" | "t-3"))) => {
+                                let tool = row.tool.as_mut().unwrap();
+                                tool.parent_tool_call_id = Some(
+                                    if grandchild && id == "t-2" {
+                                        "t-1"
+                                    } else {
+                                        "t-0"
+                                    }
+                                    .into(),
+                                );
+                                if id == "t-2" {
+                                    tool.args_preview = serde_json::json!({
+                                        "command": format!("cmd-2 {}", "日本語".repeat(30))
+                                    })
+                                    .to_string();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    render_rows(&state, width, 14, true);
+                    let (text_width, _) = state.last_text_size.get();
+                    let text = wrapped_transcript(
+                        &state,
+                        &Theme::default(),
+                        text_width,
+                        ToolOutputMode::Compact,
+                    );
+                    let header = text
+                        .lines
+                        .iter()
+                        .position(|line| line_text(line).contains("cmd-2"))
+                        .unwrap()
+                        - 1;
+                    state.scroll_offset = (header + row_offset) as u16;
+                    render_rows(&state, width, 14, true);
+
+                    state.toggle_tool_fold();
+                    render_rows(&state, width, 14, true);
+                    let folded = wrapped_transcript(
+                        &state,
+                        &Theme::default(),
+                        text_width,
+                        ToolOutputMode::Compact,
+                    );
+                    let folded_header = folded
+                        .lines
+                        .iter()
+                        .position(|line| line_text(line).contains("cmd-2"))
+                        .unwrap();
+                    let next_header = folded
+                        .lines
+                        .iter()
+                        .position(|line| line_text(line).contains("cmd-3"))
+                        .unwrap();
+                    let retained_row = row_offset.min(next_header - folded_header - 1);
+                    assert_eq!(
+                        state.scroll_offset as usize,
+                        folded_header + retained_row,
+                        "width={width} grandchild={grandchild} row={row_offset}"
+                    );
+
+                    state.toggle_tool_fold();
+                    render_rows(&state, width, 14, true);
+                    assert_eq!(
+                        state.scroll_offset as usize,
+                        header + retained_row,
+                        "unfold width={width} grandchild={grandchild} row={row_offset}"
+                    );
+                }
+            }
+        }
+    }
+
     /// CRA-1813: a fold that leaves the old position past the new end resumes
     /// follow mode, so the "G latest" hint does not stay on a bottom view.
     #[test]

@@ -1888,6 +1888,12 @@ esac
             assert!(retained.terminal.is_none());
             assert_eq!(retained.idea.lines().join("\n"), expected);
             view.handle_key(shortcut, None);
+            assert!(!view.tailored_window.as_ref().unwrap().composing);
+            view.handle_key(key(KeyCode::Enter), None);
+            let window = view.tailored_window.as_ref().unwrap();
+            assert!(window.composing);
+            assert_eq!(window.idea.lines().join("\n"), expected);
+            assert!(window.checking.is_none());
         }
 
         for confirm in 0..3 {
