@@ -2315,10 +2315,10 @@ impl HomeView {
         // it would point at unrelated content. Covers the live-send branch below too.
         self.clear_preview_selection();
         self.enforce_trash_read_only();
-        if super::bindings::is_intake_shortcut(&key)
+        if super::bindings::is_launcher_shortcut(&key)
             && (self.tailored_window.is_some() || !self.has_non_live_send_overlay())
         {
-            self.open_intake();
+            self.open_tailored_picker();
             return None;
         }
         if self.tailored_window.is_some() {
@@ -2326,7 +2326,7 @@ impl HomeView {
             return None;
         }
         if super::bindings::is_tailored_shortcut(&key) && !self.has_non_live_send_overlay() {
-            self.open_tailored();
+            self.open_tailored_picker();
             return None;
         }
         if self.retained_reader_focused() && !self.has_non_live_send_overlay() {

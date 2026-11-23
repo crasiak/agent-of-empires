@@ -205,14 +205,17 @@ const fn ctrl(c: char) -> Chord {
 }
 
 const TAILORED_CHORD: Chord = ctrl('y');
-const INTAKE_CHORD: Chord = ctrl('1');
+const LAUNCHER_CHORD: Chord = ctrl('1');
 
-pub(in crate::tui) fn is_intake_shortcut(key: &KeyEvent) -> bool {
-    key.kind == crossterm::event::KeyEventKind::Press && chord_matches(&INTAKE_CHORD, key)
+pub(in crate::tui) fn is_launcher_shortcut(key: &KeyEvent) -> bool {
+    key.kind == crossterm::event::KeyEventKind::Press && chord_matches(&LAUNCHER_CHORD, key)
 }
 
 pub(in crate::tui) fn is_tailored_shortcut(key: &KeyEvent) -> bool {
-    key.kind == crossterm::event::KeyEventKind::Press && chord_matches(&TAILORED_CHORD, key)
+    key.kind == crossterm::event::KeyEventKind::Press
+        && [LAUNCHER_CHORD, TAILORED_CHORD]
+            .iter()
+            .any(|chord| chord_matches(chord, key))
 }
 
 const fn f(n: u8) -> Chord {
@@ -908,8 +911,8 @@ pub static BINDINGS: &[Binding] = &[
     },
     Binding {
         id: ActionId::TailoredSessions,
-        non_strict: &[TAILORED_CHORD],
-        strict: &[TAILORED_CHORD],
+        non_strict: &[LAUNCHER_CHORD, TAILORED_CHORD],
+        strict: &[LAUNCHER_CHORD, TAILORED_CHORD],
         context: Context::Always,
         help: Some(HelpMeta {
             section: HelpSection::Actions,
@@ -923,13 +926,10 @@ pub static BINDINGS: &[Binding] = &[
     },
     Binding {
         id: ActionId::Intake,
-        non_strict: &[INTAKE_CHORD],
-        strict: &[INTAKE_CHORD],
+        non_strict: &[],
+        strict: &[],
         context: Context::Always,
-        help: Some(HelpMeta {
-            section: HelpSection::Actions,
-            desc: "Intake task brief",
-        }),
+        help: None,
         palette: Some(PaletteMeta {
             title: "Intake task brief",
             keywords: &["intake", "brief", "task", "tailored"],

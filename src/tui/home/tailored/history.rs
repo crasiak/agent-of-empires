@@ -50,7 +50,7 @@ impl Item {
             Self::Intake => (
                 "Intake".into(),
                 "Task brief".into(),
-                "Account: Current profile · Agent: Pi\nPrepare a task brief, review setup, then create one Session.\nCtrl+1 opens fresh input; this picker resumes your draft.".into(),
+                "Account: Current profile · Agent: Pi\nPrepare a task brief, review setup, then create one Session.\nOpening Intake here resumes your draft.".into(),
                 HistoryAction::Intake,
             ),
             Self::Research => (

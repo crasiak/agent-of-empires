@@ -1,7 +1,7 @@
 # Tailored Sessions
 
-Press **Ctrl+Y** in the TUI or Web dashboard to open the Tailored Sessions picker,
-including while a Session owns keyboard input. Choose **Capture an idea**, select
+Press **Ctrl+1** or **Ctrl+Y** in the TUI to open the Tailored Sessions picker,
+including while a Session owns keyboard input. The web dashboard uses **Ctrl+Y**. Choose **Capture an idea**, select
 Personal or Work, and enter the idea. Enter and Shift+Enter insert newlines in text
 editors. Select the capture button or press **Ctrl+Enter** (**Meta+Enter** also works
 on web) to submit deliberately. Composition and held submit keys do not submit.
@@ -46,11 +46,11 @@ agent. The TUI also accepts Ctrl+Q to close the overlay.
 
 ## Intake a task
 
-In the TUI, **Ctrl+1** opens fresh intake input without starting work. This chord
-is reserved even when quick-launch slot 1 is configured; move that preset to
-Ctrl+2 through Ctrl+9. Ctrl+Y keeps the Tailored picker. Choose **Intake** there,
-or **Intake task brief** in the command palette, if your terminal cannot send a
-distinct Ctrl+1. The web dashboard does not yet offer intake.
+In the TUI, open the full launcher with **Ctrl+1** or **Ctrl+Y**, then choose
+**Intake**. Ctrl+1 is reserved even when quick-launch slot 1 is configured; move
+that preset to Ctrl+2 through Ctrl+9. **Intake task brief** in the command palette
+opens fresh intake input directly. If your terminal cannot send a distinct
+Ctrl+1, use Ctrl+Y. The web dashboard does not yet offer intake.
 
 Describe the task, then choose **Prepare brief**. Review the original task and
 prepared brief/initial prompt, then choose **Configure Session**. Both buttons
@@ -94,8 +94,9 @@ through the normal controls when ready.
 
 Unsent input and prepared briefs stay in the current profile's in-memory Tailored
 window across close/reopen and F2 navigation. Opening **Intake** from the picker
-resumes that draft. Ctrl+1 explicitly replaces the intake draft with fresh input;
-it does not clear Capture, Research, Document or Workshop drafts. Closing the TUI
+resumes that draft. Ctrl+1 returns to the launcher without clearing drafts;
+**Intake task brief** in the command palette explicitly starts fresh intake input.
+Capture, Research, Document and Workshop retain their own drafts. Closing the TUI
 does not save an unsent draft. Sandboxing, new Ledger integration and Fable/Astra
 handoff are outside this workflow.
 

@@ -163,8 +163,8 @@ Stop the daemon and any running AoE TUIs before repairing or removing the direct
 ### Quick launch
 
 On the TUI home screen, **Ctrl+2** through **Ctrl+9** open an editable New Session
-form from an explicitly assigned preset. **Ctrl+1** is reserved for
-[intake](tailored-sessions.md#intake-a-task), even if slot 1 is configured. Move an
+form from an explicitly assigned preset. **Ctrl+1** is reserved for the
+[Tailored launcher](tailored-sessions.md), even if slot 1 is configured. Move an
 existing slot-1 preset to an unused slot from 2 through 9; AoE does not rewrite
 configuration automatically. Nothing launches until you submit.
 Assignments are global, independent of profile picker order, and empty by default.

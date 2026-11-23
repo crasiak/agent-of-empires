@@ -305,13 +305,7 @@ impl TailoredWindow {
             return WindowAction::Close;
         }
         if key.code == KeyCode::F(2) && self.checking.is_none() {
-            self.terminal = None;
-            self.starting_document_foreground = false;
-            self.park_forms();
-            self.composing = false;
-            self.picker.recent();
-            self.history_refreshed = None;
-            self.error = None;
+            self.show_picker();
             return WindowAction::Continue;
         }
         if key.modifiers.is_empty()
@@ -537,6 +531,16 @@ impl TailoredWindow {
             std::mem::replace(&mut self.draft_committed, committed),
         ));
         self.account = other_account(self.account);
+        self.error = None;
+    }
+
+    fn show_picker(&mut self) {
+        self.terminal = None;
+        self.starting_document_foreground = false;
+        self.park_forms();
+        self.composing = false;
+        self.picker.recent();
+        self.history_refreshed = None;
         self.error = None;
     }
 
@@ -799,9 +803,7 @@ fn capture_target_available(instance: Option<&crate::session::Instance>, title: 
 impl HomeView {
     pub(in crate::tui) fn routes_tailored_key(&self, key: &KeyEvent) -> bool {
         self.tailored_window.is_some()
-            || ((super::bindings::is_tailored_shortcut(key)
-                || super::bindings::is_intake_shortcut(key))
-                && !self.has_non_live_send_overlay())
+            || (super::bindings::is_tailored_shortcut(key) && !self.has_non_live_send_overlay())
     }
 
     pub(super) fn open_tailored(&mut self) {
@@ -827,6 +829,21 @@ impl HomeView {
             self.apply_tailored_action(WindowAction::Open(id));
         }
         self.refresh_tailored_history();
+    }
+
+    pub(super) fn open_tailored_picker(&mut self) {
+        self.open_tailored_window(false);
+        if let Some(window) = &mut self.tailored_window {
+            if window.checking.is_some()
+                || window.checking_quick.is_some()
+                || window.starting_quick.is_some()
+            {
+                window.error =
+                    Some("Wait for the pending Tailored launch before changing forms".into());
+                return;
+            }
+            window.show_picker();
+        }
     }
 
     pub(super) fn open_intake(&mut self) {

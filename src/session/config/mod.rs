@@ -1914,7 +1914,7 @@ pub struct SessionConfig {
     pub new_session_mode: NewSessionMode,
 
     /// Ctrl+2 through Ctrl+9 presets select an AoE profile and optional agent/Ledger profile.
-    /// Slot 1 is retained but inactive: Ctrl+1 opens intake. Move that preset to 2..9.
+    /// Slot 1 is retained but inactive: Ctrl+1 opens the Tailored launcher. Move it to 2..9.
     #[serde(default)]
     #[setting(
         label = "Quick Launch Presets",
