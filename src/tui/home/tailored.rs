@@ -1068,6 +1068,7 @@ impl HomeView {
         if window.pi_launch_pending() {
             return;
         }
+        window.show_picker();
         let (tx, rx) = mpsc::channel();
         window.checking_quick = Some(rx);
         window.error = Some(format!("Checking {} AoE profile…", preset.title()));
@@ -1393,7 +1394,11 @@ impl HomeView {
             match result {
                 Err(mpsc::TryRecvError::Empty) => return refreshed,
                 ready => {
-                    let previous = self.selected_session.clone();
+                    let previous = self
+                        .tailored_window
+                        .as_ref()
+                        .filter(|window| !window.hidden)
+                        .and_then(|_| self.selected_session.clone());
                     let result = ready
                         .unwrap_or_else(|_| Err("Quick profile check stopped unexpectedly".into()))
                         .map_err(anyhow::Error::msg)
@@ -1403,12 +1408,6 @@ impl HomeView {
                         });
                     if let Some(id) = previous {
                         self.select_and_reveal_session(&id);
-                    } else if self
-                        .tailored_window
-                        .as_ref()
-                        .is_some_and(|window| window.hidden)
-                    {
-                        self.selected_session = None;
                     }
                     if let Some(window) = &mut self.tailored_window {
                         window.checking_quick = None;
@@ -1491,13 +1490,10 @@ impl HomeView {
         if let TailoredStart::Quick(plan) = &start {
             plan.preset.verify_profile()?;
         }
-        let profile = self
-            .tailored_window
-            .as_ref()
-            .expect("Tailored owner")
-            .profile
-            .clone();
-        self.create_session(start.data(profile)?)
+        let window = self.tailored_window.as_ref().expect("Tailored owner");
+        let profile = window.profile.clone();
+        let reveal = !window.hidden || matches!(&start, TailoredStart::Capture(_));
+        self.create_session_with_reveal(start.data(profile)?, reveal)
     }
 
     fn start_quick_terminal(&mut self, id: &str, foreground: bool) -> anyhow::Result<()> {
@@ -1757,7 +1753,7 @@ mod tests {
                     view.apply_session_feed();
                     view.switch_profile(Some("other-profile".into())).unwrap();
                     if selected_foreground {
-                        view.select_and_reveal_session(&foreground.id);
+                        view.select_session_by_id(&foreground.id);
                         assert_eq!(
                             view.selected_session.as_deref(),
                             Some(foreground.id.as_str())
@@ -1774,15 +1770,18 @@ mod tests {
                     view.info_dialog.is_none(),
                     "fixture already has a foreground modal"
                 );
-                let foreground_state = (
-                    view.cursor,
-                    view.selected_session.clone(),
-                    view.selected_group.clone(),
-                    view.selected_group_profile.clone(),
-                    view.preview_scroll_offset,
-                    view.retained_scroll_offset,
-                    format!("{:?}", view.flat_items),
-                );
+                let foreground_state = |view: &HomeView| {
+                    (
+                        view.cursor,
+                        view.selected_session.clone(),
+                        view.selected_group.clone(),
+                        view.selected_group_profile.clone(),
+                        view.preview_scroll_offset,
+                        view.retained_scroll_offset,
+                        format!("{:?}", view.flat_items),
+                    )
+                };
+                let before = foreground_state(&view);
                 release.send(Ok(plan)).unwrap();
                 view.tick_tailored();
                 let (id, finish) = arrivals.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -1806,16 +1805,8 @@ mod tests {
                         "background Quick opened a global modal"
                     );
                     assert_eq!(
-                        (
-                            view.cursor,
-                            view.selected_session.clone(),
-                            view.selected_group.clone(),
-                            view.selected_group_profile.clone(),
-                            view.preview_scroll_offset,
-                            view.retained_scroll_offset,
-                            format!("{:?}", view.flat_items)
-                        ),
-                        foreground_state,
+                        foreground_state(&view),
+                        before,
                         "background Quick changed the foreground model or selection"
                     );
                 }
@@ -1823,6 +1814,17 @@ mod tests {
                     .send((id.clone(), Err("injected native start refusal".into())))
                     .unwrap();
                 view.tick_tailored();
+                if background {
+                    assert!(
+                        view.info_dialog.is_none(),
+                        "background Quick completion opened a global modal"
+                    );
+                    assert_eq!(
+                        foreground_state(&view),
+                        before,
+                        "background native completion changed the foreground"
+                    );
+                }
                 assert_eq!(
                     view.active_profile.as_deref(),
                     Some(if background { "other-profile" } else { owner })

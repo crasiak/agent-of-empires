@@ -225,10 +225,15 @@ impl HomeView {
     }
 
     pub(super) fn create_session(&mut self, data: NewSessionData) -> anyhow::Result<String> {
-        let target_profile = data.profile.clone();
+        self.create_session_with_reveal(data, true)
+    }
 
-        // In unified mode, all instances are loaded, so use them for title dedup.
-        // For the target profile, filter to that profile's instances.
+    pub(super) fn create_session_with_reveal(
+        &mut self,
+        data: NewSessionData,
+        reveal: bool,
+    ) -> anyhow::Result<String> {
+        let target_profile = data.profile.clone();
         let existing_titles: Vec<&str> = self
             .instances()
             .filter(|i| i.source_profile == target_profile)
@@ -240,8 +245,6 @@ impl HomeView {
             .filter_map(|i| i.worktree_info.as_ref().map(|w| w.branch.as_str()))
             .collect();
 
-        // `structured` is applied post-build (mirrors the web create
-        // handler); read it off before the params conversion consumes data.
         let structured = data.structured;
         let params = InstanceParams::from(data);
 
@@ -251,7 +254,7 @@ impl HomeView {
             &existing_branches,
             &target_profile,
         )?;
-        self.accept_built_session(build_result, target_profile, structured)
+        self.accept_built_session_with_reveal(build_result, target_profile, structured, reveal)
     }
 
     pub(super) fn accept_built_session(
@@ -260,17 +263,33 @@ impl HomeView {
         target_profile: String,
         structured: bool,
     ) -> anyhow::Result<String> {
+        self.accept_built_session_with_reveal(build_result, target_profile, structured, true)
+    }
+
+    fn accept_built_session_with_reveal(
+        &mut self,
+        build_result: builder::BuildResult,
+        target_profile: String,
+        structured: bool,
+        reveal: bool,
+    ) -> anyhow::Result<String> {
         let mut instance = build_result.instance;
-        instance.source_profile = target_profile.clone();
+        instance.source_profile = target_profile;
         if structured {
             builder::structured::apply_structured_choice(&mut instance);
         }
-        self.insert_new_session(instance)
+        self.insert_new_session_with_reveal(instance, reveal)
     }
 
-    /// Persist a built instance the way `aoe session import` does; the daemon
-    /// publishes the row from storage, and the display mirror shows it until then.
     pub(super) fn insert_new_session(&mut self, instance: Instance) -> anyhow::Result<String> {
+        self.insert_new_session_with_reveal(instance, true)
+    }
+
+    fn insert_new_session_with_reveal(
+        &mut self,
+        instance: Instance,
+        reveal: bool,
+    ) -> anyhow::Result<String> {
         let session_id = instance.id.clone();
         // A new profile has no directory yet, so create rather than open it.
         Storage::new_unwatched(&instance.source_profile)?.update(|rows, groups| {
@@ -286,9 +305,11 @@ impl HomeView {
         crate::usage::record_lifecycle(&instance, crate::usage::UsageKind::InstanceCreated);
         crate::tips::record_session_creations(1);
         self.instances.insert(session_id.clone(), instance);
-        self.rebuild_group_trees();
-        self.rebuild_flat_items();
-        self.select_and_reveal_session(&session_id);
+        if reveal {
+            self.rebuild_group_trees();
+            self.rebuild_flat_items();
+            self.select_and_reveal_session(&session_id);
+        }
         Ok(session_id)
     }
 
