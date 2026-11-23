@@ -613,6 +613,8 @@ impl TailoredWindow {
         let width = area.width.saturating_sub(4).min(
             if self.terminal.is_some() || self.research.is_some() || self.workshop.is_some() {
                 140
+            } else if self.intake.is_none() && self.document.is_none() && !self.composing {
+                112
             } else {
                 84
             },

@@ -14,6 +14,13 @@ Research and Workshop use the separate reviewed actions described below;
 Ctrl+Enter never authorizes their effects.
 Long text and unbroken URLs soft-wrap in the TUI without adding saved newlines.
 
+The TUI picker separates **Workflows**, **Quick Pi sessions**, and **Previous
+Sessions**. Compact rows show the choice and its kind; only the selected choice
+shows full details, beside the list on wide terminals or below it on narrower
+ones. Account, Agent, and Profile labels describe separate launch choices, not
+interchangeable roles or personas. Selecting a row does not start it; Enter or a
+click opens the existing workflow or Session.
+
 Unsent editors remain in memory for the current Home/dashboard lifetime, including
 cursor and undo history, across close/reopen, F2/history and preset navigation.
 Personal and Work have separate new drafts; switching accounts never transfers

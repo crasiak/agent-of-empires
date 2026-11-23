@@ -29,6 +29,85 @@ enum Item {
     Session(HistoryEntry),
 }
 
+impl Item {
+    fn group(&self) -> &'static str {
+        match self {
+            Self::Quick(_) => "Quick Pi sessions",
+            Self::Session(entry) if entry.hidden => "Hidden Sessions",
+            Self::Session(_) => "Previous Sessions",
+            _ => "Workflows",
+        }
+    }
+
+    fn presentation(&self) -> (String, String, String, HistoryAction) {
+        match self {
+            Self::New => (
+                "Capture an idea".into(),
+                "Idea".into(),
+                "Account: Choose Personal or Work · Agent: Pi\nCapture an idea in its own purpose-scoped Session.\nReview proposed destinations before making changes.".into(),
+                HistoryAction::New,
+            ),
+            Self::Intake => (
+                "Intake".into(),
+                "Task brief".into(),
+                "Account: Current profile · Agent: Pi\nPrepare a task brief, review setup, then create one Session.\nCtrl+1 opens fresh input; this picker resumes your draft.".into(),
+                HistoryAction::Intake,
+            ),
+            Self::Research => (
+                "Tailored research".into(),
+                "ORX / EVO".into(),
+                "Account: Choose Personal or Work · Agent: Pi\nDevelop a research prompt, choose ORX/EVO, then review.\nOnly the explicit Run action starts research.".into(),
+                HistoryAction::Research,
+            ),
+            Self::Document => (
+                "Document chat".into(),
+                "Markdown / PDF".into(),
+                "Account: Choose Personal or Work · Agent: Pi\nDiscuss a public Markdown/PDF link without tools.\nReview the document and account before starting.".into(),
+                HistoryAction::Document,
+            ),
+            Self::Workshop => (
+                "Skill workshop".into(),
+                "Skill".into(),
+                "Account: Choose Personal or Work · Agent: Pi\nRefine a skill in a tool-free conversation.\nReview and local Commit are explicit actions.\nPublish, Land and Deploy need separate approval.".into(),
+                HistoryAction::Workshop,
+            ),
+            Self::Quick(preset) => (
+                preset.title().into(),
+                "Pi".into(),
+                format!(
+                    "Account: {} · Agent: Pi\nProfile: {}\nBlank conversation at ~/knowledge.\nModel defaults come from Ledger.",
+                    account_label(preset.account()), preset.profile()
+                ),
+                HistoryAction::Quick(*preset),
+            ),
+            Self::Session(entry) => (
+                entry.title.clone(),
+                format!("{} · {}", account_label(entry.account), entry.status),
+                format!(
+                    "Account: {}\nProfile: {}\nCreated: {}\n{}\nEnter resumes this Session; Hide only changes this list.",
+                    account_label(entry.account), entry.profile,
+                    entry.created_at.with_timezone(&chrono::Local).format("%m-%d %H:%M"),
+                    entry.input_preview
+                ),
+                HistoryAction::Open(entry.id.clone()),
+            ),
+        }
+    }
+}
+
+fn account_label(account: CaptureAccount) -> &'static str {
+    match account {
+        CaptureAccount::Personal => "Personal",
+        CaptureAccount::Work => "Work",
+    }
+}
+
+enum PickerRow {
+    Heading(&'static str),
+    Gap,
+    Choice(usize),
+}
+
 #[derive(Default)]
 pub(super) struct HistoryPicker {
     query: tui_input::Input,
@@ -167,7 +246,7 @@ impl HistoryPicker {
             Constraint::Length(3),
             Constraint::Length(1),
             Constraint::Min(0),
-            Constraint::Length(2),
+            Constraint::Length(if error.is_some() { 2 } else { 0 }),
             Constraint::Length(1),
         ])
         .split(inner);
@@ -179,97 +258,122 @@ impl HistoryPicker {
         self.toggle = rows[1];
         frame.render_widget(
             Paragraph::new(if self.hidden {
-                "Hidden Sessions · F3 show recent · Restore does not start a Session"
+                "Showing hidden · F3 show recent"
             } else {
-                "Recent Sessions · F3 show hidden · Hide never stops or deletes a Session"
+                "Showing recent · F3 show hidden"
             })
             .style(Style::default().fg(theme.dimmed)),
             rows[1],
         );
         let items = self.items();
         self.selected = self.selected.min(items.len().saturating_sub(1));
-        let visible = (rows[2].height as usize / 2).max(1);
-        let start = self.selected.saturating_sub(visible.saturating_sub(1));
-        if items.is_empty() {
-            frame.render_widget(Paragraph::new("No matching Sessions"), rows[2]);
-        }
-        for (index, item) in items.iter().enumerate().skip(start).take(visible) {
-            let y = rows[2].y + ((index - start) * 2) as u16;
-            let rect = Rect::new(
-                rows[2].x,
-                y,
-                rows[2].width,
-                2.min(rows[2].bottom().saturating_sub(y)),
-            );
-            if rect.height == 0 {
-                continue;
+        let content = rows[2];
+        let (list, details) = if content.width >= 96 && content.height >= 8 {
+            let columns = Layout::horizontal([
+                Constraint::Percentage(55),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(content);
+            (columns[0], columns[2])
+        } else {
+            let detail_height = if content.height >= 17 {
+                7
+            } else if content.height >= 9 {
+                4
+            } else {
+                0
+            };
+            let sections = Layout::vertical([
+                Constraint::Min(0),
+                Constraint::Length(u16::from(detail_height > 0)),
+                Constraint::Length(detail_height),
+            ])
+            .split(content);
+            (sections[0], sections[2])
+        };
+        let mut display = Vec::new();
+        let mut group = None;
+        for (index, item) in items.iter().enumerate() {
+            if group != Some(item.group()) {
+                if group.is_some() {
+                    display.push(PickerRow::Gap);
+                }
+                display.push(PickerRow::Heading(item.group()));
+                group = Some(item.group());
             }
-            let style = if index == self.selected {
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::REVERSED)
+            display.push(PickerRow::Choice(index));
+        }
+        let selected_row = display
+            .iter()
+            .position(|row| matches!(row, PickerRow::Choice(index) if *index == self.selected))
+            .unwrap_or(0);
+        let start = selected_row.saturating_sub(usize::from(list.height).saturating_sub(1));
+        if items.is_empty() {
+            frame.render_widget(Paragraph::new("No matching choices or Sessions"), list);
+        }
+        for (offset, row) in display
+            .iter()
+            .skip(start)
+            .take(usize::from(list.height))
+            .enumerate()
+        {
+            let rect = Rect::new(list.x, list.y + offset as u16, list.width, 1);
+            let index = match row {
+                PickerRow::Heading(label) => {
+                    frame.render_widget(
+                        Paragraph::new(*label).style(
+                            Style::default()
+                                .fg(theme.group)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        rect,
+                    );
+                    continue;
+                }
+                PickerRow::Gap => continue,
+                PickerRow::Choice(index) => *index,
+            };
+            let item = &items[index];
+            let (title, tag, _, action) = item.presentation();
+            let selected = index == self.selected;
+            let style = if selected {
+                Style::default().fg(theme.accent).bg(theme.selection)
             } else {
                 Style::default().fg(theme.text)
             };
-            let (title, detail, action) = match item {
-                Item::Intake => (
-                    "+ Intake".into(),
-                    "Prepare a task brief, review setup, create one Session · Ctrl+1".into(),
-                    HistoryAction::Intake,
-                ),
-                Item::Quick(preset) => (
-                    format!("+ {}", preset.title()),
-                    "Blank Pi conversation at ~/knowledge · model defaults from Ledger".into(),
-                    HistoryAction::Quick(*preset),
-                ),
-                Item::Document => (
-                    "+ Document chat".into(),
-                    "Public Markdown/PDF link, direct tool-free conversation".into(),
-                    HistoryAction::Document,
-                ),
-                Item::Workshop => ("+ Skill workshop".into(), "Tool-free refinement, exact Review/local Commit, destination Publish, separate Land and targeted Deploy".into(), HistoryAction::Workshop),
-                Item::Research => (
-                    "+ Tailored research".into(),
-                    "Develop prompt, choose ORX/EVO, review then explicit Run".into(),
-                    HistoryAction::Research,
-                ),
-                Item::New => (
-                    "+ Capture an idea".into(),
-                    "New Session with its own minimal Ledger profile".into(),
-                    HistoryAction::New,
-                ),
-                Item::Session(entry) => (
-                    format!(
-                        "{} · {} · {} · {}",
-                        entry.title,
-                        match entry.account {
-                            CaptureAccount::Personal => "personal",
-                            CaptureAccount::Work => "work",
-                        },
-                        entry.status,
-                        entry
-                            .created_at
-                            .with_timezone(&chrono::Local)
-                            .format("%m-%d %H:%M")
-                    ),
-                    format!("{} · {}", entry.profile, entry.input_preview),
-                    HistoryAction::Open(entry.id.clone()),
-                ),
-            };
+            frame.render_widget(Block::new().style(style), rect);
             let button_width = if matches!(item, Item::Session(_)) {
                 8.min(rect.width)
             } else {
                 0
             };
-            let text = Rect::new(
-                rect.x,
-                rect.y,
-                rect.width.saturating_sub(button_width),
-                rect.height,
+            let text = Rect::new(rect.x, rect.y, rect.width.saturating_sub(button_width), 1);
+            let tag_width = (Line::from(tag.as_str()).width() as u16).min(text.width / 2);
+            let columns = Layout::horizontal([
+                Constraint::Min(0),
+                Constraint::Length(2),
+                Constraint::Length(tag_width),
+            ])
+            .split(text);
+            let prefix = if matches!(item, Item::Session(_)) {
+                ""
+            } else {
+                "+ "
+            };
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} {prefix}{title}",
+                    if selected { "›" } else { " " }
+                ))
+                .style(style.add_modifier(Modifier::BOLD)),
+                columns[0],
             );
             frame.render_widget(
-                Paragraph::new(vec![Line::from(title), Line::from(detail)]).style(style),
-                text,
+                Paragraph::new(tag)
+                    .alignment(Alignment::Right)
+                    .style(style.fg(if selected { theme.accent } else { theme.dimmed })),
+                columns[2],
             );
             if let Item::Session(entry) = item {
                 let button = Rect::new(
@@ -280,7 +384,7 @@ impl HistoryPicker {
                 );
                 frame.render_widget(
                     Paragraph::new(if entry.hidden { "Restore" } else { "Hide" })
-                        .style(Style::default().fg(theme.accent)),
+                        .style(style.fg(theme.accent)),
                     button,
                 );
                 self.hits.push((
@@ -292,6 +396,21 @@ impl HistoryPicker {
                 ));
             }
             self.hits.push((rect, action));
+        }
+        if let Some(item) = items.get(self.selected).filter(|_| details.height > 2) {
+            let (title, _, description, _) = item.presentation();
+            frame.render_widget(
+                Paragraph::new(description)
+                    .wrap(Wrap { trim: false })
+                    .block(
+                        Block::bordered()
+                            .border_type(BorderType::Rounded)
+                            .title(format!(" {title} "))
+                            .border_style(Style::default().fg(theme.border)),
+                    )
+                    .style(Style::default().fg(theme.dimmed)),
+                details,
+            );
         }
         if let Some(error) = error {
             frame.render_widget(
@@ -402,7 +521,10 @@ mod tests {
 
     #[test]
     fn quick_tiles_filter_and_activate_by_keyboard_and_mouse_but_not_hidden_history() {
-        for preset in [QuickPreset::Work, QuickPreset::Personal] {
+        for (preset, (width, height)) in [QuickPreset::Work, QuickPreset::Personal]
+            .into_iter()
+            .flat_map(|preset| [(100, 30), (42, 12), (16, 6)].map(|size| (preset, size)))
+        {
             let mut picker = HistoryPicker::default();
             picker.handle_paste(preset.title());
             assert_eq!(picker.items().len(), 1);
@@ -411,7 +533,7 @@ mod tests {
                 HistoryAction::Quick(preset)
             );
             let mut terminal =
-                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
             terminal
                 .draw(|frame| picker.render(frame, frame.area(), &Theme::default(), None))
                 .unwrap();
