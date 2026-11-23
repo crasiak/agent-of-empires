@@ -826,6 +826,7 @@ mod tests {
                 let _response = crate::server::api::sessions::restart_session(
                     axum::extract::State(state),
                     axum::extract::Path(row.id),
+                    None,
                     Ok(Some(axum::Json(
                         crate::daemon::RestartSessionBody::default(),
                     ))),

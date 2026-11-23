@@ -2077,6 +2077,7 @@ pub async fn start_session(
 pub async fn restart_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    local: Option<axum::Extension<crate::server::principal::Principal>>,
     body: Result<
         Option<Json<crate::daemon::RestartSessionBody>>,
         axum::extract::rejection::JsonRejection,
@@ -2085,17 +2086,22 @@ pub async fn restart_session(
     if let Some(response) = crate::server::api::cityhall_block(&state) {
         return response;
     }
-    let body = match body {
+    let mut body = match body {
         Ok(body) => body.map(|Json(body)| body).unwrap_or_default(),
         Err(error) => return error.into_response(),
     };
-    // The restart body sets the same spawn fields the create route accepts, so
-    // it answers with the same gate and the same `400 validation_failed`.
-    if let Err(message) = super::validate_shell_fields(&[(
-        body.extra_args.as_deref().unwrap_or_default(),
-        "extra_args",
-    )]) {
-        return api_error(StatusCode::BAD_REQUEST, "validation_failed", message);
+    // Same `extra_args` gate as the create route.
+    if let Some(extra_args) = body.extra_args.as_mut() {
+        let local_owner = crate::server::principal::authorize(
+            local.as_deref(),
+            crate::server::principal::Capability::CreateHookDetail,
+        );
+        match super::normalize_extra_args(extra_args, local_owner) {
+            Ok(args) => *extra_args = args,
+            Err(message) => {
+                return api_error(StatusCode::BAD_REQUEST, "validation_failed", message)
+            }
+        }
     }
     prepare_agent_session(
         state,
@@ -4443,7 +4449,8 @@ mod durable_stop_tests {
             let before = state.runtime.publish(&state).await?;
             let response = match target {
                 "restart" => {
-                    restart_session(State(state.clone()), Path(row.id.clone()), Ok(None)).await
+                    restart_session(State(state.clone()), Path(row.id.clone()), None, Ok(None))
+                        .await
                 }
                 "container-terminal" => super::super::ensure::ensure_container_terminal(
                     State(state.clone()),
@@ -4662,6 +4669,7 @@ mod durable_stop_tests {
             let response = restart_session(
                 State(state.clone()),
                 Path(row.id.clone()),
+                None,
                 Ok(Some(Json(crate::daemon::RestartSessionBody {
                     skip_on_launch: true,
                     wake_message: Some(String::new()),
@@ -4814,6 +4822,7 @@ mod durable_stop_tests {
         let response = restart_session(
             State(state.clone()),
             Path(row.id.clone()),
+            None,
             Ok(Some(Json(crate::daemon::RestartSessionBody {
                 skip_on_launch: true,
                 wake_message: Some(String::new()),
