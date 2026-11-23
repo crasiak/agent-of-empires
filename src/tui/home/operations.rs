@@ -224,10 +224,6 @@ impl HomeView {
         }
     }
 
-    pub(super) fn create_session(&mut self, data: NewSessionData) -> anyhow::Result<String> {
-        self.create_session_with_reveal(data, true)
-    }
-
     pub(super) fn create_session_with_reveal(
         &mut self,
         data: NewSessionData,
