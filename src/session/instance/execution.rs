@@ -2005,9 +2005,14 @@ impl Instance {
             );
             return Ok(None);
         }
-        if crate::session::ledger_pi::profile(&self.tool, &self.get_tool_command()).is_some() {
+        if let Some(profile) =
+            crate::session::ledger_pi::profile(&self.tool, &self.get_tool_command())
+        {
             let arguments = shell_words::split(&extra)
                 .map_err(|_| anyhow::anyhow!("Ledger Pi launch arguments cannot be parsed"))?;
+            if crate::session::tailored::is_capture_launch_arguments(&profile, &arguments) {
+                return Ok(None);
+            }
             return validate_managed_arguments(agent, &arguments).map_err(|_| {
                 anyhow::anyhow!(
                     "Ledger Pi arguments are not supported by the guarded launch contract"

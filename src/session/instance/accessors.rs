@@ -349,7 +349,7 @@ impl Instance {
         let mut quote = None;
         let mut escaped = false;
         for ch in value.chars() {
-            if matches!(ch, '\n' | '\r') {
+            if matches!(ch, '\n' | '\r') && quote.is_none() {
                 return true;
             }
             if escaped {
@@ -1065,6 +1065,34 @@ pub(crate) fn resolved_agent_for(
 mod tests {
     use super::*;
     use crate::session::instance::test_helpers::*;
+
+    #[test]
+    fn shell_syntax_distinguishes_quoted_lines_from_shell_commands() {
+        for literal in [
+            "'first\nsecond'",
+            "\"first\nsecond\"",
+            "'first\rsecond'",
+            "'a '\"'\"'quoted'\"'\"' idea; $(not-a-command)\nnext line'",
+        ] {
+            assert!(
+                !Instance::contains_active_shell_syntax(literal),
+                "{literal:?}"
+            );
+            assert_eq!(shell_words::split(literal).unwrap().len(), 1);
+        }
+        for active in [
+            "first\nsecond",
+            "first\rsecond",
+            "'first'\nsecond",
+            "'first\nsecond'\nthird",
+            "first\\\nsecond",
+            "\"first\n$(not-a-command)\"",
+            "\"first\n`not-a-command`\"",
+            "'first\nsecond'; third",
+        ] {
+            assert!(Instance::contains_active_shell_syntax(active), "{active:?}");
+        }
+    }
 
     /// A session stored with the fallback's own command keeps its capture after
     /// an approved declaration takes over the OMP listing.

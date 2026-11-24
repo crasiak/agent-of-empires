@@ -62,7 +62,14 @@ impl std::fmt::Display for EnsureReadyError {
     }
 }
 
-impl std::error::Error for EnsureReadyError {}
+impl std::error::Error for EnsureReadyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Tmux(error) => error.source(),
+            _ => None,
+        }
+    }
+}
 
 /// A peer purged the stored row while a caller still held its cached copy.
 #[derive(Debug, thiserror::Error)]
