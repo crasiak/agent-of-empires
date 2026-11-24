@@ -4066,22 +4066,34 @@ mod tests {
                 vec![runtime.join("sessions")]
             );
             let command = prepared.command.unwrap();
-            let words = shell_words::split(&command).unwrap();
-            assert_eq!(words.iter().filter(|word| **word == prompt).count(), 1);
+            let inspected = std::fs::read(root.join("argv")).unwrap();
+            let words = inspected
+                .split(|byte| *byte == 0)
+                .filter(|word| !word.is_empty())
+                .map(|word| std::str::from_utf8(word).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(words[..2], ["launch", "describe"]);
+            let boundary = words.iter().position(|word| *word == "--").unwrap();
+            let words = &words[boundary + 1..];
             assert_eq!(
                 words
                     .iter()
-                    .filter(|word| *word == "--expect-launch")
+                    .filter(|word| **word == prompt.as_str())
                     .count(),
                 1
             );
+            assert_eq!(command.matches("--expect-launch").count(), 1);
+            assert!(command.contains(&"b".repeat(64)));
             assert_eq!(
-                words.iter().filter(|word| *word == "--session-dir").count(),
+                words
+                    .iter()
+                    .filter(|word| **word == "--session-dir")
+                    .count(),
                 1
             );
             assert!(!words
                 .iter()
-                .any(|word| word == "--session" || word == "/outside"));
+                .any(|word| *word == "--session" || *word == "/outside"));
             assert!(uuid::Uuid::parse_str(capture.agent_session_id.as_ref().unwrap()).is_ok());
             let agent = crate::agents::get_agent("pi").unwrap();
             for invalid in [
@@ -4105,6 +4117,20 @@ mod tests {
             }
             capture.extra_args = launch.extra_args;
             capture.command = format!("{} run pi --profile personal --", quote(&selected_ledger));
+            assert!(capture.managed_user_argv(agent).is_err());
+            let other = match account {
+                crate::session::tailored::CaptureAccount::Personal => {
+                    crate::session::tailored::CaptureAccount::Work
+                }
+                crate::session::tailored::CaptureAccount::Work => {
+                    crate::session::tailored::CaptureAccount::Personal
+                }
+            };
+            capture.command = format!(
+                "{} run pi --profile {} --",
+                quote(&selected_ledger),
+                other.ledger_profile()
+            );
             assert!(capture.managed_user_argv(agent).is_err());
         }
         let calls = std::fs::read_to_string(calls).unwrap();

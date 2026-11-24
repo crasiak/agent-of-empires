@@ -55,7 +55,6 @@ impl IntakeBrief {
                 _ => anyhow::bail!("Unsupported intake Pi argument {flag:?}; remove it or use the ordinary New Session form"),
             }
         }
-        // Native attestation rejects literal newlines even inside quoted arguments.
         Ok(format!(
             "{} {}",
             configured.trim(),
