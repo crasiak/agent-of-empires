@@ -4022,6 +4022,86 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("Ledger Pi arguments"), "{message}");
         assert!(!message.contains("private-argv-detail"), "{message}");
+        for (account, immediately) in [
+            (crate::session::tailored::CaptureAccount::Personal, false),
+            (crate::session::tailored::CaptureAccount::Work, true),
+        ] {
+            let request = crate::session::tailored::TailoredRequest {
+                preset: "capture-idea".into(),
+                account,
+                idea: "A 'quoted' idea; $(not-a-command)\n--session stolen --extension /outside"
+                    .into(),
+                immediately,
+                document: None,
+            };
+            let launch = request.launch().unwrap();
+            let prompt = shell_words::split(&launch.extra_args).unwrap().remove(0);
+            let mut capture =
+                crate::session::instance::test_helpers::tool_instance("pi", cwd.to_str().unwrap());
+            capture.command = launch
+                .command
+                .replacen("ledger", &quote(&selected_ledger), 1);
+            capture.extra_args = launch.extra_args.clone();
+            let mut capture_lock = lock.clone();
+            capture_lock["profile"]["name"] = serde_json::json!(account.ledger_profile());
+            let mut capture_description = stale.clone();
+            capture_description["profile"] = serde_json::json!(account.ledger_profile());
+            capture_description["state"] = serde_json::json!("current");
+            std::fs::write(&lock_file, serde_json::to_vec(&capture_lock).unwrap()).unwrap();
+            std::fs::write(
+                &description_file,
+                serde_json::to_vec(&capture_description).unwrap(),
+            )
+            .unwrap();
+            let prepared = capture
+                .prepare_launch_command(capture.conversation_state())
+                .unwrap_or_else(|error| panic!("Capture {account:?}: {error:#}"));
+            assert_eq!(
+                prepared.execution.as_ref().unwrap().binding.stores,
+                vec![runtime.join("sessions")]
+            );
+            let command = prepared.command.unwrap();
+            let words = shell_words::split(&command).unwrap();
+            assert_eq!(words.iter().filter(|word| **word == prompt).count(), 1);
+            assert_eq!(
+                words
+                    .iter()
+                    .filter(|word| *word == "--expect-launch")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                words.iter().filter(|word| *word == "--session-dir").count(),
+                1
+            );
+            assert!(!words
+                .iter()
+                .any(|word| word == "--session" || word == "/outside"));
+            assert!(uuid::Uuid::parse_str(capture.agent_session_id.as_ref().unwrap()).is_ok());
+            let agent = crate::agents::get_agent("pi").unwrap();
+            for invalid in [
+                "auth".to_owned(),
+                "private-argv-detail".to_owned(),
+                format!("{} --session-dir /outside", launch.extra_args),
+                shell_words::quote(&prompt.replace("capture-idea skill", "another skill"))
+                    .into_owned(),
+                shell_words::quote(&prompt.replace(
+                    if immediately {
+                        "Immediately is ON"
+                    } else {
+                        "Immediately is OFF"
+                    },
+                    "Immediately is undecided",
+                ))
+                .into_owned(),
+            ] {
+                capture.extra_args = invalid;
+                assert!(capture.managed_user_argv(agent).is_err());
+            }
+            capture.extra_args = launch.extra_args;
+            capture.command = format!("{} run pi --profile personal --", quote(&selected_ledger));
+            assert!(capture.managed_user_argv(agent).is_err());
+        }
         let calls = std::fs::read_to_string(calls).unwrap();
         assert!(
             !calls.lines().any(|line| line.starts_with("run ")),

@@ -226,6 +226,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pane_ready_errors_preserve_qualification_causes() {
+        let error = EnsureReadyError::from(
+            anyhow::anyhow!("Ledger Pi arguments are not supported by the guarded launch contract")
+                .context("Ledger Pi native qualification failed"),
+        );
+        let report = format!("{:#}", anyhow::Error::new(error));
+        assert_eq!(
+            report,
+            "Ledger Pi native qualification failed: Ledger Pi arguments are not supported by the guarded launch contract"
+        );
+    }
+
+    #[test]
     fn test_ensure_pane_ready_bails_on_creating() {
         let mut inst = Instance::new("test", "/tmp/test");
         inst.status = Status::Creating;
