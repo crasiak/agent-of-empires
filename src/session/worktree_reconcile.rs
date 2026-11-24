@@ -298,6 +298,71 @@ mod tests {
     }
 
     #[test]
+    fn relocation_inventory_shares_queries_and_expires_negative_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        let other = dir.path().join("other");
+        let present = dir.path().join("present");
+        let moved = dir.path().join("moved");
+        let ambiguous_a = dir.path().join("ambiguous-a");
+        let ambiguous_b = dir.path().join("ambiguous-b");
+        for path in [&main, &other, &present, &moved, &ambiguous_a, &ambiguous_b] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let make_row = |id: &str, repo: &Path, branch: &str| {
+            let mut row = Instance::new(id, dir.path().join(id).to_str().unwrap());
+            row.id = id.to_string();
+            row.worktree_info = Some(WorktreeInfo {
+                branch: branch.to_string(),
+                main_repo_path: repo.to_str().unwrap().to_string(),
+                managed_by_aoe: true,
+                created_at: chrono::Utc::now(),
+                base_branch: None,
+            });
+            row
+        };
+        let mut rows: Vec<_> = (0..49)
+            .map(|index| make_row(&format!("missing-{index}"), &main, &format!("gone-{index}")))
+            .collect();
+        rows.push(make_row("relocated", &main, "moved"));
+        rows.push(make_row("ambiguous", &main, "ambiguous"));
+        rows.push(make_row("unreachable-a", &other, "unknown-a"));
+        rows.push(make_row("unreachable-b", &other, "unknown-b"));
+        let mut current = make_row("current", &main, "moved");
+        current.project_path = present.to_str().unwrap().to_string();
+        rows.push(current);
+        let mut unmanaged = make_row("unmanaged", &main, "moved");
+        unmanaged.worktree_info.as_mut().unwrap().managed_by_aoe = false;
+        rows.push(unmanaged);
+        let mut trashed = make_row("trashed", &main, "moved");
+        trashed.trashed_at = Some(chrono::Utc::now());
+        rows.push(trashed);
+        let mut queries = HashMap::new();
+        let candidates = relocation_candidates_with(&rows, |repo| {
+            *queries.entry(repo.to_string()).or_insert(0) += 1;
+            if repo == main.to_str().unwrap() {
+                Ok(vec![
+                    entry(&main, Some("gone-0")),
+                    entry(&moved, Some("moved")),
+                    entry(&ambiguous_a, Some("ambiguous")),
+                    entry(&ambiguous_b, Some("ambiguous")),
+                ])
+            } else {
+                Err(crate::git::error::GitError::NotAGitRepo)
+            }
+        });
+        assert_eq!(
+            candidates,
+            ["relocated", "ambiguous", "unreachable-a", "unreachable-b"]
+        );
+        assert_eq!(queries.len(), 2);
+        assert!(queries.values().all(|count| *count == 1));
+        let next =
+            relocation_candidates_with(&rows[..49], |_| Ok(vec![entry(&moved, Some("gone-0"))]));
+        assert_eq!(next, ["missing-0"]);
+    }
+
+    #[test]
     #[serial_test::serial]
     fn reconciliation_waits_for_resource_identity_exclusion() {
         let _home = crate::session::test_support::isolate_app_dir();
