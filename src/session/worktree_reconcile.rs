@@ -114,6 +114,40 @@ pub fn resolve_worktree_path(
     select_live_worktree(entries, &info.branch, Path::new(&info.main_repo_path))
 }
 
+/// Read-only sweep hints. Possible moves still need fresh locked reconciliation.
+pub(crate) fn relocation_candidates(instances: &[Instance]) -> Vec<String> {
+    relocation_candidates_with(instances, |main_repo| {
+        GitWorktree::new(PathBuf::from(main_repo))?.list_worktrees()
+    })
+}
+
+fn relocation_candidates_with(
+    instances: &[Instance],
+    mut list: impl FnMut(&str) -> crate::git::error::Result<Vec<WorktreeEntry>>,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    for instance in instances {
+        let Some(info) = &instance.worktree_info else {
+            continue;
+        };
+        let recorded = Path::new(&instance.project_path);
+        if instance.is_trashed() || !info.managed_by_aoe || recorded.exists() {
+            continue;
+        }
+        let entries = list(&info.main_repo_path);
+        let resolution = entries
+            .as_ref()
+            .map(|entries| resolve_worktree_path(entries, recorded, info));
+        if !matches!(
+            resolution,
+            Ok(WorktreePathResolution::Current | WorktreePathResolution::Missing)
+        ) {
+            candidates.push(instance.id.clone());
+        }
+    }
+    candidates
+}
+
 /// Reconcile the current durable row under app-wide reference exclusion.
 /// The supplied store, not `source_profile`, determines the profile.
 pub fn reconcile_and_persist(
@@ -356,7 +390,7 @@ mod tests {
             ["relocated", "ambiguous", "unreachable-a", "unreachable-b"]
         );
         assert_eq!(queries.len(), 2);
-        assert!(queries.values().all(|count| *count == 1));
+        assert!(queries.values().all(|count| *count == 1), "{queries:?}");
         let next =
             relocation_candidates_with(&rows[..49], |_| Ok(vec![entry(&moved, Some("gone-0"))]));
         assert_eq!(next, ["missing-0"]);
