@@ -1666,6 +1666,7 @@ mod tests {
             "read_only",
             "cityhall_terminal",
             "cityhall_structured",
+            "changed_branch",
             "broken_groups",
         ] {
             let _home = crate::session::test_support::isolate_app_dir();
@@ -1699,6 +1700,9 @@ mod tests {
                 if policy == "cityhall_terminal" {
                     cached.view = crate::session::View::Structured;
                 }
+            }
+            if policy == "changed_branch" {
+                moving.worktree_info.as_mut().unwrap().branch = "gone".into();
             }
             source.update(|rows, groups| {
                 *rows.iter_mut().find(|row| row.id == moving.id).unwrap() = moving.clone();
