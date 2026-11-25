@@ -875,16 +875,8 @@ impl Instance {
             }
             Ok(scopes.clone())
         })?);
-        let launch_directory = match prepared.execution.as_ref() {
-            Some(execution) if execution.ledger_runtime.is_some() => execution
-                .inputs
-                .cwd
-                .to_str()
-                .context("Qualified Ledger Pi working directory is not UTF-8")?,
-            _ => &self.project_path,
-        };
         session.create_with_size_env_and_container_env(
-            launch_directory,
+            &self.project_path,
             prepared.command.as_deref(),
             size,
             profile,
@@ -1546,7 +1538,7 @@ AOE_LEDGER_FIXTURE_ROOT={} {} --exact session::instance::execution::tests::ledge
         assert!(started.is_ok(), "{started:?}");
         assert_eq!(
             pane_field(session.name(), "#{pane_start_path}"),
-            cwd.to_str().unwrap()
+            logical.to_str().unwrap()
         );
         assert_eq!(instance.project_path, logical.to_str().unwrap());
     }

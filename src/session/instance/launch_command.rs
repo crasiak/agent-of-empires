@@ -2150,9 +2150,18 @@ impl Instance {
                         &overrides,
                     )?)
                 } else {
+                    let working_directory =
+                        match execution.filter(|execution| execution.ledger_runtime.is_some()) {
+                            Some(execution) => execution
+                                .inputs
+                                .cwd
+                                .to_str()
+                                .context("Qualified Ledger Pi working directory is not UTF-8")?,
+                            None => self.project_path.as_str(),
+                        };
                     Some(wrap_command_ignore_suspend(
                         &command,
-                        &self.project_path,
+                        working_directory,
                         routing,
                         execution.map_or(&[], |execution| execution.case_insensitive_routing),
                     ))
