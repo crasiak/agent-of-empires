@@ -1397,10 +1397,6 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn ledger_pi_spawn_uses_the_qualified_physical_working_directory() {
-        if std::env::var_os("AOE_FROZEN_NATIVE_TEST_CHILD").is_some() {
-            crate::process::exec_frozen_environment().unwrap();
-            return;
-        }
         use crate::session::test_support::{isolate_app_dir_at, EnvGuard};
         use crate::tmux::test_helpers::{pane_field, tmux_available, TmuxTestSession};
         use std::os::unix::fs::{symlink, PermissionsExt};
@@ -1495,10 +1491,6 @@ AOE_LEDGER_FIXTURE_ROOT={} {} --exact session::instance::execution::tests::ledge
             .unwrap()
             .status
             .success());
-        let _helper = frozen_test_helper(
-            &root,
-            "ledger_pi_spawn_uses_the_qualified_physical_working_directory",
-        );
         let mut instance =
             crate::session::instance::test_helpers::tool_instance("pi", logical.to_str().unwrap());
         instance.source_profile = "ledger-cwd-fixture".into();
