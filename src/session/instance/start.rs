@@ -875,8 +875,16 @@ impl Instance {
             }
             Ok(scopes.clone())
         })?);
+        let launch_directory = match prepared.execution.as_ref() {
+            Some(execution) if execution.ledger_runtime.is_some() => execution
+                .inputs
+                .cwd
+                .to_str()
+                .context("Qualified Ledger Pi working directory is not UTF-8")?,
+            _ => &self.project_path,
+        };
         session.create_with_size_env_and_container_env(
-            &self.project_path,
+            launch_directory,
             prepared.command.as_deref(),
             size,
             profile,
