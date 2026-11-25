@@ -1507,9 +1507,16 @@ AOE_LEDGER_FIXTURE_ROOT={} {} --exact session::instance::execution::tests::ledge
             quote(&ledger)
         );
         super::super::test_helpers::set_pi_integration(&instance, "identity");
+        let storage = crate::session::Storage::new_unwatched(&instance.source_profile).unwrap();
+        storage
+            .update(|rows, _| {
+                rows.push(instance.clone());
+                Ok(())
+            })
+            .unwrap();
         let session = instance.tmux_session().unwrap();
         let _pane = TmuxTestSession::from_name(session.name());
-        instance.start_with_size_opts(None, true).unwrap();
+        let started = instance.start_with_size_opts(None, true);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let actual = loop {
             if let Ok(value) = std::fs::read_to_string(&observed) {
@@ -1528,6 +1535,7 @@ AOE_LEDGER_FIXTURE_ROOT={} {} --exact session::instance::execution::tests::ledge
             cwd.to_str().unwrap(),
             "guarded run must use the same CWD spelling as Describe"
         );
+        assert!(started.is_ok(), "{started:?}");
         assert_eq!(
             pane_field(session.name(), "#{pane_start_path}"),
             cwd.to_str().unwrap()
