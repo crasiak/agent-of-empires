@@ -113,7 +113,7 @@ pub fn title_is_for(title: &str, id: &str) -> bool {
 /// splits window for all of them.
 pub fn window_titles(request: &BreakoutRequest) -> Vec<String> {
     match request.layout {
-        BreakoutLayout::Windows => request::surfaces(request, "")
+        BreakoutLayout::Windows => request::surfaces(request, "", None)
             .into_iter()
             .map(|surface| surface.title)
             .collect(),
@@ -158,7 +158,8 @@ pub fn run_local(request: &BreakoutRequest) -> Result<BreakoutOutcome, String> {
     {
         let exe =
             std::env::current_exe().map_err(|e| format!("cannot find the aoe binary: {e}"))?;
-        let surfaces = request::surfaces(request, &exe.to_string_lossy());
+        let path = std::env::var("PATH").ok();
+        let surfaces = request::surfaces(request, &exe.to_string_lossy(), path.as_deref());
         match request.layout {
             BreakoutLayout::Windows => ghostty::run_windows(&surfaces),
             BreakoutLayout::Splits => {

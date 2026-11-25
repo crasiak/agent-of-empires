@@ -649,7 +649,7 @@ mod tests {
         let seen = seen.recv_timeout(WAIT).unwrap();
         // The opener (`run_local`) builds commands from validated fields only; a
         // host-bound request never runs a local binary path.
-        for surface in crate::breakout::request::surfaces(&seen, "/evil/binary") {
+        for surface in crate::breakout::request::surfaces(&seen, "/evil/binary", None) {
             assert_eq!(surface.command, "ssh -t bender aoe session attach abc");
         }
     }
