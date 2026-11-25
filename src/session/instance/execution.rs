@@ -3840,7 +3840,7 @@ mod tests {
         let quote =
             |p: &std::path::Path| crate::session::environment::shell_escape(p.to_str().unwrap());
         let executable = std::env::current_exe().unwrap();
-        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nprintf '%s\\0' \"$@\" > {}\nAOE_LEDGER_FIXTURE_ROOT={} {} --exact session::instance::execution::tests::ledger_pi_metadata_helper --ignored > {} 2>&1 || exit 94\n/bin/cat {}\n", quote(&calls), quote(&root.join("argv")), quote(&root), quote(&executable), quote(&root.join("helper.log")), quote(&root.join("response.json")));
+        let script = format!("#!/bin/sh\nif [ \"$1\" = run ]; then\n    printf '%s\\0' \"$@\" > {}\n    exit 0\nfi\nprintf '%s\\n' \"$*\" >> {}\nprintf '%s\\0' \"$@\" > {}\nAOE_LEDGER_FIXTURE_ROOT={} {} --exact session::instance::execution::tests::ledger_pi_metadata_helper --ignored > {} 2>&1 || exit 94\n/bin/cat {}\n", quote(&root.join("run-argv")), quote(&calls), quote(&root.join("argv")), quote(&root), quote(&executable), quote(&root.join("helper.log")), quote(&root.join("response.json")));
         let _ledger = install_login_shell_path_command(
             &root,
             "ledger",
@@ -4034,7 +4034,7 @@ mod tests {
             let request = crate::session::tailored::TailoredRequest {
                 preset: "capture-idea".into(),
                 account,
-                idea: "A 'quoted' idea; $(not-a-command)\n--session stolen --extension /outside"
+                idea: "A 'quoted' idea; $(not-a-command)\r\n--session stolen --extension /outside"
                     .into(),
                 immediately,
                 document: None,
@@ -4095,6 +4095,44 @@ mod tests {
                 .iter()
                 .any(|word| *word == "--session" || *word == "/outside"));
             assert!(uuid::Uuid::parse_str(capture.agent_session_id.as_ref().unwrap()).is_ok());
+            let mut shell = std::process::Command::new("/bin/sh");
+            shell.arg("-c").arg(&command).current_dir(&cwd);
+            let output = crate::process::run_with_bounded_stdout(
+                &mut shell,
+                std::time::Duration::from_secs(10),
+                128 * 1024,
+            )
+            .unwrap()
+            .expect("fixture launch timed out");
+            assert!(
+                output.status.success(),
+                "Capture {account:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let executed = std::fs::read(root.join("run-argv")).unwrap();
+            let executed = executed
+                .strip_suffix(&[0])
+                .expect("fixture argv must end with NUL")
+                .split(|byte| *byte == 0)
+                .map(|word| std::str::from_utf8(word).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                executed[..5],
+                [
+                    "run",
+                    "pi",
+                    "--profile",
+                    account.ledger_profile(),
+                    "--expect-launch",
+                ]
+            );
+            assert_eq!(executed[5], "b".repeat(64));
+            assert_eq!(executed[6], "--");
+            assert_eq!(
+                &executed[7..],
+                words,
+                "Capture {account:?}: executed arguments differ from guarded Describe"
+            );
             let agent = crate::agents::get_agent("pi").unwrap();
             for invalid in [
                 "auth".to_owned(),
