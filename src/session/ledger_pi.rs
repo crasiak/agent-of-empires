@@ -124,7 +124,7 @@ impl Runtime {
         words.splice(5..5, ["--expect-launch".to_owned(), guard.digest.clone()]);
         Ok(words
             .iter()
-            .map(|word| super::environment::shell_escape(word))
+            .map(|word| super::environment::shell_escape_script_word(word))
             .collect::<Vec<_>>()
             .join(" "))
     }
