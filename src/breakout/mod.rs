@@ -158,6 +158,7 @@ pub fn run_local(request: &BreakoutRequest) -> Result<BreakoutOutcome, String> {
     {
         let exe =
             std::env::current_exe().map_err(|e| format!("cannot find the aoe binary: {e}"))?;
+        // Ghostty's app PATH may omit shell-installed tmux.
         let path = std::env::var("PATH").ok();
         let surfaces = request::surfaces(request, &exe.to_string_lossy(), path.as_deref());
         match request.layout {

@@ -125,7 +125,7 @@ fn sh_quote(arg: &str) -> String {
 pub fn surfaces(
     request: &BreakoutRequest,
     local_exe: &str,
-    _local_path: Option<&str>,
+    local_path: Option<&str>,
 ) -> Vec<Surface> {
     request
         .sessions
@@ -136,18 +136,28 @@ pub fn surfaces(
                 &display_title(&session.title),
                 &session.id,
             ),
-            command: attach_command(request.host.as_deref(), session, local_exe),
+            command: attach_command(request.host.as_deref(), session, local_exe, local_path),
         })
         .collect()
 }
 
-/// The one place the attach command line is built. Ids, profiles and hosts are
-/// validated to a shell-safe alphabet with no leading `-`, so only the local
-/// binary path needs quoting.
-fn attach_command(host: Option<&str>, session: &BreakoutSession, local_exe: &str) -> String {
+/// Validated names form the ssh command; local binary and PATH values are quoted.
+fn attach_command(
+    host: Option<&str>,
+    session: &BreakoutSession,
+    local_exe: &str,
+    local_path: Option<&str>,
+) -> String {
     let mut command = match host {
         Some(host) => format!("ssh -t {host} aoe"),
-        None => sh_quote(local_exe),
+        None => match local_path {
+            Some(path) => format!(
+                "/usr/bin/env {} {}",
+                sh_quote(&format!("PATH={path}")),
+                sh_quote(local_exe)
+            ),
+            None => sh_quote(local_exe),
+        },
     };
     if !session.profile.is_empty() {
         command.push_str(&format!(" --profile {}", session.profile));
