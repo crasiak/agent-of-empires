@@ -10,6 +10,7 @@ pub(super) use super::unix::{
 };
 
 /// Read an already-running Ghostty's window names without activating it.
+#[cfg(not(test))]
 pub(crate) fn ghostty_window_titles() -> Result<Vec<String>, String> {
     if !ghostty_automation_allowed()? {
         return Ok(Vec::new());
@@ -45,6 +46,7 @@ end timeout
     parse_window_titles(&output.stdout)
 }
 
+#[cfg(not(test))]
 fn ghostty_automation_allowed() -> Result<bool, String> {
     // AEDataModel.h packs AEDesc to two-byte alignment.
     #[repr(C, packed(2))]

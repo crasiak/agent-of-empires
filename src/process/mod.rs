@@ -20,7 +20,7 @@ mod linux;
 
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "macos")]
+#[cfg(all(not(test), target_os = "macos"))]
 pub(crate) use macos::ghostty_window_titles;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix;
