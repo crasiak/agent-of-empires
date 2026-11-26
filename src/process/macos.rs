@@ -17,11 +17,12 @@ pub(crate) fn ghostty_window_titles() -> Result<Vec<String>, String> {
     let script = r#"with timeout of 10 seconds
 if application id "com.mitchellh.ghostty" is running then
     tell application id "com.mitchellh.ghostty"
-        set quotedNames to {}
-        repeat with windowName in (name of every window)
-            set end of quotedNames to quoted form of (contents of windowName)
-        end repeat
+        set windowNames to get name of every window
     end tell
+    set quotedNames to {}
+    repeat with windowName in windowNames
+        set end of quotedNames to quoted form of (windowName as text)
+    end repeat
     set AppleScript's text item delimiters to linefeed
     return quotedNames as text
 end if

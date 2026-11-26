@@ -1096,6 +1096,8 @@ fn restarting_home_rediscovers_existing_local_breakout_windows() {
         crate::file_watch::FileWatchService::noop(),
     )
     .unwrap();
+    restarted.group_by = crate::session::config::GroupByMode::Manual;
+    restarted.flat_items = restarted.build_flat_items();
     assert!(restarted.breakout_discovery_job.is_some());
     assert!(!restarted.is_broken_out(&ids[0]));
     let cursor = restarted.cursor;
