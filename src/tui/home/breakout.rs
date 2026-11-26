@@ -1,6 +1,4 @@
-//! Breakout from the home view: build the request from the Marked set, open the
-//! surfaces off the event loop, remember them so they can be closed, and close a
-//! Session's window when the Session is stopped, trashed or deleted.
+//! Open, rediscover and close Breakout windows off the event loop.
 
 use crate::breakout::request::{
     BreakoutRequest, BreakoutSession, CONFIRM_ABOVE, MAX_SESSIONS, PROTOCOL,
@@ -107,7 +105,7 @@ impl HomeView {
         self.flash_status("Opening breakout windows...");
     }
 
-    /// Report a finished Breakout. Returns whether the screen needs a redraw.
+    /// Apply job results and queued closes, returning whether a redraw is needed.
     pub fn tick_breakout(&mut self) -> bool {
         let redraw = self.tick_discovery_job()
             | self.tick_open_job()
