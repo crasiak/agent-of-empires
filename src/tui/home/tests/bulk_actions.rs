@@ -1136,7 +1136,11 @@ fn restarting_home_rediscovers_existing_local_breakout_windows() {
             )
         })
         .unwrap();
-    assert!(rendered_row_text(&restarted, row).starts_with(ICON_BREAKOUT));
+    let rendered = rendered_row_text(&restarted, row);
+    assert!(
+        rendered.starts_with(&format!("  {ICON_BREAKOUT} ")),
+        "{rendered:?}"
+    );
     assert_eq!(restarted.cursor, cursor);
     assert_eq!(restarted.active_profile, profile);
     assert!(restarted.marked.contains(&ids[3]));
