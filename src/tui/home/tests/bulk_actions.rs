@@ -1078,6 +1078,73 @@ fn a_finished_breakout_marks_its_sessions_until_closed() {
 
 #[test]
 #[serial]
+fn restarting_home_rediscovers_existing_local_breakout_windows() {
+    use crate::tui::home::breakout::test_support::DISCOVERY;
+    use crate::tui::home::icons::ICON_BREAKOUT;
+
+    let _forced = ForcedSupport::on();
+    let env = create_test_env_with_sessions(4);
+    let ids: Vec<_> = (0..4).map(|i| env.view.instance_at(i).id.clone()).collect();
+    let separate = crate::breakout::window_title(None, "existing, 'window'", &ids[0]);
+    let splits = crate::breakout::splits_title(None, ids[1..3].iter().map(String::as_str));
+    let remote = crate::breakout::window_title(Some("other-host"), "remote", &ids[3]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    DISCOVERY.with(|job| *job.borrow_mut() = Some(rx));
+    let mut restarted = HomeView::new_for_test(
+        Some("test".into()),
+        AvailableTools::with_tools(&["claude"]),
+        crate::file_watch::FileWatchService::noop(),
+    )
+    .unwrap();
+    assert!(restarted.breakout_discovery_job.is_some());
+    assert!(!restarted.is_broken_out(&ids[0]));
+    let cursor = restarted.cursor;
+    let profile = restarted.active_profile.clone();
+    restarted.marked.insert(ids[3].clone());
+    tx.send(Ok(vec![
+        separate.clone(),
+        splits.clone(),
+        remote,
+        separate.clone(),
+        "ordinary Ghostty window".into(),
+    ]))
+    .unwrap();
+    restarted.tick_breakout();
+
+    assert!(
+        restarted.is_broken_out(&ids[0]),
+        "existing window must regain its marker"
+    );
+    assert!(restarted.is_broken_out(&ids[1]));
+    assert!(restarted.is_broken_out(&ids[2]));
+    assert!(
+        !restarted.is_broken_out(&ids[3]),
+        "another host is not local"
+    );
+    assert_eq!(restarted.breakout_titles, [separate, splits]);
+    let row = restarted
+        .flat_items
+        .iter()
+        .find(|item| {
+            matches!(
+                item, Item::Session { id, .. } if id == &ids[0]
+            )
+        })
+        .unwrap();
+    assert!(rendered_row_text(&restarted, row).starts_with(ICON_BREAKOUT));
+    assert_eq!(restarted.cursor, cursor);
+    assert_eq!(restarted.active_profile, profile);
+    assert!(restarted.marked.contains(&ids[3]));
+    assert!(restarted.info_dialog.is_none());
+    assert!(restarted.breakout_job.is_none());
+    assert!(restarted.breakout_close_job.is_none());
+    assert!(restarted.breakout_session_close_job.is_none());
+    assert!(restarted.breakout_close_queue.is_empty());
+    assert!(restarted.breakout_discovery_job.is_none());
+}
+
+#[test]
+#[serial]
 fn close_breakout_windows_sweeps_even_with_nothing_tracked() {
     let _forced = ForcedSupport::on();
     let mut env = create_test_env_with_sessions(1);

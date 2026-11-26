@@ -456,6 +456,8 @@ pub struct HomeView {
     pending_bulk_restart: bool,
     /// A Breakout confirm (more than six Sessions) is open.
     pending_breakout: bool,
+    /// Existing desktop windows queried once at startup.
+    breakout_discovery_job: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
     /// The Breakout being opened off the event loop.
     breakout_job:
         Option<std::sync::mpsc::Receiver<Result<crate::breakout::BreakoutOutcome, String>>>,

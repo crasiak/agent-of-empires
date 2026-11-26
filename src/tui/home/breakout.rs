@@ -382,6 +382,17 @@ type OpenJob = std::sync::mpsc::Receiver<Result<crate::breakout::BreakoutOutcome
 type SweepJob = std::sync::mpsc::Receiver<Result<usize, String>>;
 type CloseJob = std::sync::mpsc::Receiver<Result<(), String>>;
 
+pub(super) fn spawn_discovery() -> Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>> {
+    #[cfg(test)]
+    {
+        test_support::DISCOVERY.with(|job| job.borrow_mut().take())
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
 /// Open through the transport. Locally, when `keep` is given, windows of
 /// Sessions outside it are swept first (a failure is only logged); the agent
 /// never sweeps.
@@ -493,6 +504,10 @@ pub(super) mod test_support {
     thread_local! {
         /// Stands in for the ssh environment so tests do not depend on how they are run.
         pub(in crate::tui::home) static UNDER_SSH: Cell<bool> = const { Cell::new(false) };
+        /// A startup inventory without querying a real desktop.
+        pub(in crate::tui::home) static DISCOVERY:
+            RefCell<Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>> =
+            const { RefCell::new(None) };
         /// How the last Breakout was opened.
         pub(in crate::tui::home) static OPENED_FOR: RefCell<Option<Opened>> =
             const { RefCell::new(None) };
