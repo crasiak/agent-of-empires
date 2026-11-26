@@ -458,6 +458,8 @@ pub struct HomeView {
     pending_breakout: bool,
     /// Existing desktop windows queried once at startup.
     breakout_discovery_job: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
+    /// Sessions closed before the startup inventory arrives.
+    breakout_discovery_closes: Vec<String>,
     /// The Breakout being opened off the event loop.
     breakout_job:
         Option<std::sync::mpsc::Receiver<Result<crate::breakout::BreakoutOutcome, String>>>,
@@ -469,7 +471,7 @@ pub struct HomeView {
     breakout_close_queue: Vec<String>,
     /// Titles the running open job will give its windows.
     breakout_opening_titles: Vec<String>,
-    /// Titles of the Breakout windows this TUI opened and has not closed.
+    /// Titles of opened or rediscovered Breakout windows.
     breakout_titles: Vec<String>,
     /// The bulk restart in progress, if any.
     bulk_restart: Option<bulk_restart::BulkRestartRun>,

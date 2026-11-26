@@ -9,7 +9,7 @@ Breakout opens several sessions as tiled Ghostty windows next to aoe, so you can
 
 Each window attaches to one session. Detaching (your tmux detach key) closes that window. Up to 9 sessions open at once; more than 6 asks first. **Show What Would Be Skipped** in the same menu lists the marked sessions that cannot open and why: structured-view sessions, sessions whose agent is not running, and sessions that are archived, in the trash, or being created or deleted.
 
-While a session is broken out, its sidebar row shows a `⧉` marker and the preview header reads "In a Breakout window". The marker reflects what this aoe opened. A window you close by hand keeps its marker until you run **Close Breakout Windows**.
+While a session is broken out, its sidebar row shows a `⧉` marker and the preview header reads "In a Breakout window". On startup, local aoe rediscovers existing Ghostty Breakout windows and restores their markers without reopening or moving them. Discovery uses existing Automation permission and does not prompt for it. Host-tagged windows belong to aoe on another host and are not adopted locally. A window you close by hand keeps its marker until **Close Breakout Windows** or the next aoe restart.
 
 ## Closing
 

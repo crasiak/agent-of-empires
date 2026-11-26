@@ -269,6 +269,7 @@ impl HomeView {
             pending_bulk_restart: false,
             pending_breakout: false,
             breakout_discovery_job: super::breakout::spawn_discovery(),
+            breakout_discovery_closes: Vec::new(),
             breakout_job: None,
             breakout_close_job: None,
             breakout_session_close_job: None,

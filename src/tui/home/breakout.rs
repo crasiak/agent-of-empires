@@ -109,12 +109,15 @@ impl HomeView {
 
     /// Report a finished Breakout. Returns whether the screen needs a redraw.
     pub fn tick_breakout(&mut self) -> bool {
-        let redraw = self.tick_open_job() | self.tick_close_job() | self.tick_session_close_job();
+        let redraw = self.tick_discovery_job()
+            | self.tick_open_job()
+            | self.tick_close_job()
+            | self.tick_session_close_job();
         self.drain_breakout_close_queue();
         redraw
     }
 
-    /// Whether this TUI opened a Breakout window for the Session and has not closed it.
+    /// Whether a tracked Breakout window contains the Session.
     pub fn is_broken_out(&self, session_id: &str) -> bool {
         self.breakout_titles
             .iter()
@@ -126,6 +129,14 @@ impl HomeView {
     /// window holds other Sessions too, so it stays: the Session's pane ends when
     /// its attach exits, and the window keeps its title until it is closed.
     pub(super) fn close_breakout_of(&mut self, session_id: &str) {
+        if self.breakout_discovery_job.is_some()
+            && !self
+                .breakout_discovery_closes
+                .iter()
+                .any(|id| id == session_id)
+        {
+            self.breakout_discovery_closes.push(session_id.to_string());
+        }
         let own_window = |title: &String| {
             crate::breakout::title_is_for(title, session_id)
                 && !crate::breakout::is_splits_title(title)
@@ -151,7 +162,8 @@ impl HomeView {
     }
 
     fn any_breakout_job(&self) -> bool {
-        self.breakout_job.is_some()
+        self.breakout_discovery_job.is_some()
+            || self.breakout_job.is_some()
             || self.breakout_close_job.is_some()
             || self.breakout_session_close_job.is_some()
     }
@@ -174,9 +186,46 @@ impl HomeView {
     fn breakout_busy(&mut self) -> bool {
         let busy = self.any_breakout_job();
         if busy {
-            self.flash_status("A breakout is still opening or closing");
+            self.flash_status(if self.breakout_discovery_job.is_some() {
+                "Checking existing breakout windows..."
+            } else {
+                "A breakout is still opening or closing"
+            });
         }
         busy
+    }
+
+    fn tick_discovery_job(&mut self) -> bool {
+        let Some(job) = self.breakout_discovery_job.as_ref() else {
+            return false;
+        };
+        let result = match job.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the discovery worker stopped".to_string())
+            }
+        };
+        self.breakout_discovery_job = None;
+        match result {
+            Ok(titles) => {
+                for title in titles {
+                    let local = title
+                        .strip_prefix(crate::breakout::TITLE_PREFIX)
+                        .is_some_and(|body| !body.starts_with(crate::breakout::HOST_TAG));
+                    if local && !self.breakout_titles.contains(&title) {
+                        self.breakout_titles.push(title);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(target: "tui.breakout", %error, "discovering breakout windows failed");
+            }
+        }
+        for id in std::mem::take(&mut self.breakout_discovery_closes) {
+            self.close_breakout_of(&id);
+        }
+        true
     }
 
     fn tick_open_job(&mut self) -> bool {
@@ -382,12 +431,28 @@ type OpenJob = std::sync::mpsc::Receiver<Result<crate::breakout::BreakoutOutcome
 type SweepJob = std::sync::mpsc::Receiver<Result<usize, String>>;
 type CloseJob = std::sync::mpsc::Receiver<Result<(), String>>;
 
-pub(super) fn spawn_discovery() -> Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>> {
+type DiscoveryJob = std::sync::mpsc::Receiver<Result<Vec<String>, String>>;
+
+pub(super) fn spawn_discovery() -> Option<DiscoveryJob> {
+    if under_ssh() {
+        return None;
+    }
     #[cfg(test)]
     {
         test_support::DISCOVERY.with(|job| job.borrow_mut().take())
     }
-    #[cfg(not(test))]
+    #[cfg(all(not(test), target_os = "macos"))]
+    {
+        if !crate::breakout::supported_here() {
+            return None;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::process::ghostty_window_titles());
+        });
+        Some(rx)
+    }
+    #[cfg(all(not(test), not(target_os = "macos")))]
     {
         None
     }
@@ -491,7 +556,8 @@ fn spawn_close(titles: Vec<String>) -> CloseJob {
 
 /// Tests never reach the driver: the job answers as if the windows closed.
 #[cfg(test)]
-fn spawn_close(_titles: Vec<String>) -> CloseJob {
+fn spawn_close(titles: Vec<String>) -> CloseJob {
+    test_support::CLOSED.with(|closed| closed.borrow_mut().extend(titles));
     let (tx, rx) = std::sync::mpsc::channel();
     let _ = tx.send(Ok(()));
     rx
@@ -505,9 +571,9 @@ pub(super) mod test_support {
         /// Stands in for the ssh environment so tests do not depend on how they are run.
         pub(in crate::tui::home) static UNDER_SSH: Cell<bool> = const { Cell::new(false) };
         /// A startup inventory without querying a real desktop.
-        pub(in crate::tui::home) static DISCOVERY:
-            RefCell<Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>> =
+        pub(in crate::tui::home) static DISCOVERY: RefCell<Option<super::DiscoveryJob>> =
             const { RefCell::new(None) };
+        pub(in crate::tui::home) static CLOSED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
         /// How the last Breakout was opened.
         pub(in crate::tui::home) static OPENED_FOR: RefCell<Option<Opened>> =
             const { RefCell::new(None) };
