@@ -80,7 +80,7 @@ test.describe("resize handle and compact rail (#2288)", () => {
     await expect.poll(width).toBeLessThan(120);
     await expect(page.locator(COUNT)).toHaveCount(0);
     await expect(page.getByRole("button", { name: "New session in repo-alpha" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Expand sidebar" })).toBeVisible();
+    await expect(page.getByRole("separator", { name: "Resize sidebar" })).toBeVisible();
     await panel.getByText("alpha-session").click();
     // Wide uppercase footer labels used to spill past the rail.
     await expect.poll(() => panel.evaluate((el) => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
