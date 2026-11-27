@@ -56,9 +56,11 @@ test("highlight filters support keyboard selection, grouping, compact mode, and 
   await page.screenshot({ path: testInfo.outputPath("highlight-filters-desktop.png") });
   await input.fill("tests");
   await expect(page.getByText("No matches for “tests”")).toBeVisible();
-  await page.getByRole("button", { name: "Compact sidebar" }).click();
+  // Enter on the resize handle toggles the compact rail.
+  const resize = page.getByRole("separator", { name: "Resize sidebar" });
+  await resize.press("Enter");
   await expect(rows).toHaveCount(4);
-  await page.getByRole("button", { name: "Expand sidebar" }).click();
+  await resize.press("Enter");
   await expect(rows).toHaveCount(0);
   await red.focus();
   await page.keyboard.press("Escape");

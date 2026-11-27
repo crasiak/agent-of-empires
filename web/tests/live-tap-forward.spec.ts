@@ -13,6 +13,8 @@ test.describe("Live terminal tap-to-click (mobile)", () => {
   const sgrReports = (h: MockHandle) => liveTexts(h).filter((s) => s.startsWith("\x1b[<"));
 
   async function mount(page: Page, lines: string[], mouseSgr = true) {
+    // The install banner would push the wrapped frame's top rows above the terminal.
+    await page.addInitScript(() => localStorage.setItem("aoe-install-banner-dismissed", "1"));
     const handle = await openLiveTerminal(page, { mobile: true });
     await handle.pushLiveFrame({
       content: `${[...lines, ...Array<string>(24 - lines.length).fill("")].join("\n")}\n`,

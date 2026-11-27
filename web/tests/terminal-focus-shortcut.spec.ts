@@ -263,6 +263,7 @@ test.describe("Open session row input focus", () => {
 
   test("frames the open row in text-primary while a main panel terminal has focus", async ({ page }) => {
     await mockTerminalApis(page);
+    await openPanelsByDefault(page);
     await page.goto("/");
     await openSession(page);
 
