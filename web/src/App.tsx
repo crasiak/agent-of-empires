@@ -367,29 +367,29 @@ export default function App() {
       <UnreadIndicatorContext.Provider value={unreadIndicatorEnabled}>
         <SessionRowTagContext.Provider value={sessionRowTagMode}>
           <PanelDefaultsContext.Provider value={panelDefaults}>
-          <HideEmptyGroupsContext.Provider value={hideEmptyGroups}>
-            <SessionColorsContext.Provider value={sessionColorsEnabled}>
-              <SystemHealthEnabledContext.Provider value={systemHealthEnabled}>
-                <UsageOverlayEnabledContext.Provider value={usageOverlayEnabled}>
-                  <LedgerOverlayEnabledContext.Provider value={ledgerOverlayEnabled}>
-                    <HeadroomOverlayEnabledContext.Provider value={headroomOverlayEnabled}>
-                      {/* PluginUiProvider must sit above AppContent: AppContent itself reads
+            <HideEmptyGroupsContext.Provider value={hideEmptyGroups}>
+              <SessionColorsContext.Provider value={sessionColorsEnabled}>
+                <SystemHealthEnabledContext.Provider value={systemHealthEnabled}>
+                  <UsageOverlayEnabledContext.Provider value={usageOverlayEnabled}>
+                    <LedgerOverlayEnabledContext.Provider value={ledgerOverlayEnabled}>
+                      <HeadroomOverlayEnabledContext.Provider value={headroomOverlayEnabled}>
+                        {/* PluginUiProvider must sit above AppContent: AppContent itself reads
                       the plugin UI snapshot (usePluginPanes), so the provider can't live
                       inside its own return. */}
-                      <PluginUiProvider>
-                        <AppContent
-                          loginRequired={loginRequired}
-                          onLogout={handleLogout}
-                          resolvedTheme={resolvedTheme}
-                        />
-                      </PluginUiProvider>
-                      <ElevationPrompt />
-                    </HeadroomOverlayEnabledContext.Provider>
-                  </LedgerOverlayEnabledContext.Provider>
-                </UsageOverlayEnabledContext.Provider>
-              </SystemHealthEnabledContext.Provider>
-            </SessionColorsContext.Provider>
-          </HideEmptyGroupsContext.Provider>
+                        <PluginUiProvider>
+                          <AppContent
+                            loginRequired={loginRequired}
+                            onLogout={handleLogout}
+                            resolvedTheme={resolvedTheme}
+                          />
+                        </PluginUiProvider>
+                        <ElevationPrompt />
+                      </HeadroomOverlayEnabledContext.Provider>
+                    </LedgerOverlayEnabledContext.Provider>
+                  </UsageOverlayEnabledContext.Provider>
+                </SystemHealthEnabledContext.Provider>
+              </SessionColorsContext.Provider>
+            </HideEmptyGroupsContext.Provider>
           </PanelDefaultsContext.Provider>
         </SessionRowTagContext.Provider>
       </UnreadIndicatorContext.Provider>

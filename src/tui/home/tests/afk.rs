@@ -130,7 +130,10 @@ fn afk_paste_stays_in_review(session_count: usize) {
     env.view.pending_paste = Some("existing paste".into());
     env.view.pending_paste_for_structured_view.insert(
         "other".into(),
-        PendingStructuredInput::from_parts(Vec::new(), "existing structured text".into()),
+        crate::tui::home::PendingStructuredInput::from_parts(
+            Vec::new(),
+            "existing structured text".into(),
+        ),
     );
     let original_target = env.view.pending_send_target.clone();
     let buffered_text = |view: &HomeView| {

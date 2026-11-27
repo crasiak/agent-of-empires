@@ -29,7 +29,7 @@ beforeEach(() => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
-      if (url === "/api/groups") return load();
+      if (url.split("?")[0] === "/api/groups") return load();
       if (init?.method === "PATCH") {
         patches.push({ url, body: JSON.parse(init.body as string) });
         const id = decodeURIComponent(url.split("/")[3]!);

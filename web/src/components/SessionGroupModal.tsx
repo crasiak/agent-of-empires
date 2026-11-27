@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { isImeComposing } from "../lib/ime";
 import { fetchGroups } from "../lib/api";
 import { CancelButton, ConfirmButton, Dialog } from "./Dialog";
 import { useConfirmKeys, useDialogFocus } from "./dialogHooks";
@@ -20,8 +21,12 @@ interface Props {
 export function SessionGroupModal({ sessionTitle, currentGroup, profile, onSave, onClose }: Props) {
   const [value, setValue] = useState(currentGroup);
   const [manual, setManual] = useState(false);
-  const [groups, setGroups] = useState<string[]>([]);
-  const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
+  const [loaded, setLoaded] = useState<{ profile?: string; groups: string[]; status: "loading" | "loaded" | "error" }>({
+    groups: [],
+    status: "loading",
+  });
+  const groups = loaded.profile === profile ? loaded.groups : [];
+  const loadState = loaded.profile === profile ? loaded.status : "loading";
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -31,16 +36,13 @@ export function SessionGroupModal({ sessionTitle, currentGroup, profile, onSave,
   useEffect(() => {
     mounted.current = true;
     let active = true;
-    setGroups([]);
-    setLoadState("loading");
     void fetchGroups({ profile, throwOnError: true }).then(
       (loaded) => {
         if (!active) return;
-        setGroups(loaded.map((group) => group.path).filter(Boolean));
-        setLoadState("loaded");
+        setLoaded({ profile, groups: loaded.map((group) => group.path).filter(Boolean), status: "loaded" });
       },
       () => {
-        if (active) setLoadState("error");
+        if (active) setLoaded({ profile, groups: [], status: "error" });
       },
     );
     return () => {
@@ -142,7 +144,7 @@ export function SessionGroupModal({ sessionTitle, currentGroup, profile, onSave,
           setError(null);
         }}
         onKeyDown={(e) => {
-          if (e.key === "Enter") {
+          if (e.key === "Enter" && !e.defaultPrevented && !isImeComposing(e)) {
             e.preventDefault();
             if (!saving) void handleSave();
           }

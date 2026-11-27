@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { useLayoutEffect } from "react";
+import { act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
@@ -105,6 +107,70 @@ describe("SessionGroupModal", () => {
     fireEvent.click(backdrop);
     expect(onClose).toHaveBeenCalledTimes(3);
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["keyCode 229", { key: "Enter", keyCode: 229 }],
+    ["isComposing", { key: "Enter", isComposing: true }],
+  ] as const)("does not submit while an IME composes (%s)", (_label, init) => {
+    const { input, onSave, onClose } = setup("old");
+    fireEvent.change(input, { target: { value: "new" } });
+    fireEvent.keyDown(input, init);
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSave).toHaveBeenCalledWith("new");
+  });
+
+  it("leaves an already-handled Enter alone", () => {
+    const { input, onSave } = setup("old");
+    fireEvent.change(input, { target: { value: "new" } });
+    const event = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    event.preventDefault();
+    fireEvent(input, event);
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("withholds another profile's groups in the committed render and ignores its late result", async () => {
+    let finishB!: (value: Response) => void;
+    const pendingB = new Promise<Response>((resolve) => {
+      finishB = resolve;
+    });
+    const requested: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        requested.push(url);
+        return url.endsWith("profile=b")
+          ? pendingB
+          : Promise.resolve(new Response(JSON.stringify([{ path: "from-a", session_count: 1 }])));
+      }),
+    );
+    const painted: string[][] = [];
+    function PaintProbe() {
+      useLayoutEffect(() => {
+        painted.push(Array.from(document.querySelectorAll("option")).map((option) => option.value));
+      });
+      return null;
+    }
+    const props = { sessionTitle: "alpha", currentGroup: "work", onSave: vi.fn(), onClose: vi.fn() };
+    const view = (profile: string) => (
+      <>
+        <SessionGroupModal {...props} profile={profile} />
+        <PaintProbe />
+      </>
+    );
+    const { rerender } = render(view("a"));
+    await screen.findByRole("option", { name: '"from-a"' });
+    rerender(view("b"));
+    expect(painted.at(-1)).not.toContain("group:from-a");
+    expect(screen.queryByRole("option", { name: '"from-a"' })).toBeNull();
+    await act(async () => {
+      finishB(new Response(JSON.stringify([{ path: "from-b", session_count: 1 }])));
+    });
+    await screen.findByRole("option", { name: '"from-b"' });
+    expect(requested).toEqual(["/api/groups?profile=a", "/api/groups?profile=b"]);
+    expect(screen.queryByRole("option", { name: '"from-a"' })).toBeNull();
   });
 
   it("restores focus on unmount", () => {

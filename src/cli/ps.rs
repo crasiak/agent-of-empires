@@ -143,7 +143,7 @@ impl Signals {
     ) -> Self {
         Self {
             last_activity: window_activity
-                .and_then(|epoch| crate::time::Timestamp::from_unix_secs(epoch))
+                .and_then(crate::time::Timestamp::from_unix_secs)
                 .map(rfc3339),
             unread,
             idle_since: idle_entered_at
