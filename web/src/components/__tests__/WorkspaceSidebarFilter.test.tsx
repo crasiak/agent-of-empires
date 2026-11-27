@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen } from "@testing-library/react";
+import { useWebSettings } from "../../hooks/useWebSettings";
 import { WorkspaceSidebar } from "../WorkspaceSidebar";
 import { makeSession, makeWorkspace } from "./fixtures";
 import {
@@ -273,6 +274,13 @@ describe("sidebar highlight filters", () => {
   );
 
   it("clears filters, suspends them in compact mode, and disables reordering only while filtered", () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(
+        () =>
+          ({ matches: true, addEventListener: () => {}, removeEventListener: () => {} }) as unknown as MediaQueryList,
+      ),
+    );
     render(<Sidebar />);
     const draggableRows = () => document.querySelectorAll('[aria-roledescription="Press and hold to reorder"]');
     expect(draggableRows()).toHaveLength(6);
@@ -283,10 +291,15 @@ describe("sidebar highlight filters", () => {
     expect(rows()).toEqual(["red-one"]);
     expect(draggableRows()).toHaveLength(0);
     expect(document.querySelectorAll('[data-draggable="true"]')).toHaveLength(0);
-    click("Compact sidebar");
+    const settings = renderHook(useWebSettings);
+    act(() => {
+      settings.result.current.update({ sidebarCompact: true });
+      window.dispatchEvent(new Event("resize"));
+    });
     expect(rows()).toHaveLength(6);
     expect(screen.queryByTestId("sidebar-filter-input")).toBeNull();
-    click("Expand sidebar");
+    act(() => settings.result.current.update({ sidebarCompact: false }));
+    vi.unstubAllGlobals();
     expect(rows()).toEqual(["red-one"]);
     click("Clear filters");
     expect(rows()).toHaveLength(6);

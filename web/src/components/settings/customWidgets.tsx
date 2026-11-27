@@ -165,7 +165,7 @@ const KNOWN_TARGETS: { value: string; group: string }[] = [
   { value: "migrations.v048", group: "Migrations" },
   { value: "migrations.v052", group: "Migrations" },
   { value: "migrations.v053", group: "Migrations" },
-  { value: "migrations.v058", group: "Migrations" },
+  { value: "migrations.v073", group: "Migrations" },
   { value: "migrations.v076", group: "Migrations" },
   { value: "update.fetch", group: "Update" },
   { value: "update.cache", group: "Update" },

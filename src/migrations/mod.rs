@@ -704,8 +704,7 @@ mod tests {
             let migrated: serde_json::Value =
                 serde_json::from_slice(&fs::read(&sessions).unwrap()).unwrap();
             let mut expected = row.clone();
-            expected["terminal_handoff"]["outcome"] =
-                serde_json::to_value(&intent.outcome).unwrap();
+            expected["terminal_handoff"]["outcome"] = serde_json::to_value(intent.outcome).unwrap();
             assert_eq!(migrated, serde_json::json!([expected]));
             assert_eq!(fs::read(app.join("state.toml")).unwrap(), state);
             assert_eq!(

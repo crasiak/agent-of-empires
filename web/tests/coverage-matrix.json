@@ -459,7 +459,7 @@
         "web/src/components/TopBar.tsx",
         "web/src/lib/liveControl.ts"
       ],
-      "notes": "While this tab holds control on a transport with reason pipe_owned, \"Updates are slower.\" shows in the Session's top bar, outside the pane, so it never resizes the terminal; view only, the docked strip adds \"· Updates may lag\" instead. A grid transport, an absent reason, or a newly opened socket clears it. Reconnect redials and sends an explicit claim on the new socket, not claim_if_vacant; a per-pane dismissal persists until a grid transport or a user-initiated reconnect."
+      "notes": "While this tab holds control on a transport with reason pipe_owned, \"Updates are slower.\" shows in the Session's top bar, outside the pane, so it never resizes the terminal; view only, the docked strip adds \"\u00b7 Updates may lag\" instead. A grid transport, an absent reason, or a newly opened socket clears it. Reconnect redials and sends an explicit claim on the new socket, not claim_if_vacant; a per-pane dismissal persists until a grid transport or a user-initiated reconnect."
     },
     {
       "id": "terminal.live-alt-screen-scroll",
@@ -654,7 +654,7 @@
         "web/src/hooks/useCommandActions.ts",
         "web/src/lib/liveControl.ts"
       ],
-      "notes": "A view-only tab docks one strip above where you type (above the key bar on phones): \"Open in the TUI.\", \"Open in another Web dashboard window.\" or, without the Daemon's owner kind (#5543), \"Open in another window.\", then \"Take control to type.\"; Take control and the command palette's Take control send claim. × collapses it to a View only button, remembered per Session, surface and pane. A blocked key holds \"Not sent. Take control to type.\" for 2 s, restarted per key, and only then does a plain Tab from the terminal's input or App's keyboard proxy reach Take control; otherwise Tab stays terminal input. Take control from that escape gives focus back to the input or proxy it came from (a fine-pointer click falls back to the terminal's input; a touch tap moves nothing), and the claim follows the grid without the strip even when a fit was already queued at the click. A read-only Daemon shows a steady strip; disconnects keep the connection banner. The live ping-pong cases take control through the strip; at 375px the owner's taller grid crops from the top so its input line stays visible."
+      "notes": "A view-only tab docks one strip above where you type (above the key bar on phones): \"Open in the TUI.\", \"Open in another Web dashboard window.\" or, without the Daemon's owner kind (#5543), \"Open in another window.\", then \"Take control to type.\"; Take control and the command palette's Take control send claim. \u00d7 collapses it to a View only button, remembered per Session, surface and pane. A blocked key holds \"Not sent. Take control to type.\" for 2 s, restarted per key, and only then does a plain Tab from the terminal's input or App's keyboard proxy reach Take control; otherwise Tab stays terminal input. Take control from that escape gives focus back to the input or proxy it came from (a fine-pointer click falls back to the terminal's input; a touch tap moves nothing), and the claim follows the grid without the strip even when a fit was already queued at the click. A read-only Daemon shows a steady strip; disconnects keep the connection banner. The live ping-pong cases take control through the strip; at 375px the owner's taller grid crops from the top so its input line stays visible."
     },
     {
       "id": "terminal.mobile-live-wheel-forward",
@@ -1338,7 +1338,7 @@
         "web/src/lib/platform.ts",
         "web/src/lib/tourSteps.ts"
       ],
-      "notes": "#4595: a phone or tablet browser tab gets iOS Home Screen steps (any iPad, including desktop mode), a Settings › Notifications link where the tab can push (feature-detected), or the generic install line. It hides once installed, when push is on, denied or off on the server, while Disconnected or the tour runs, and for good after ×; Settings › Notifications shows each platform's own step. Live: an iPhone with the tour seen and never opened, and × across a reload."
+      "notes": "#4595: a phone or tablet browser tab gets iOS Home Screen steps (any iPad, including desktop mode), a Settings \u203a Notifications link where the tab can push (feature-detected), or the generic install line. It hides once installed, when push is on, denied or off on the server, while Disconnected or the tour runs, and for good after \u00d7; Settings \u203a Notifications shows each platform's own step. Live: an iPhone with the tour seen and never opened, and \u00d7 across a reload."
     },
     {
       "id": "notifications.push-health-banner",
@@ -1863,7 +1863,7 @@
         "web/src/components/session-wizard/useSandboxImageRowStatus.ts",
         "web/src/lib/api.ts"
       ],
-      "notes": "With Sandbox on and available, the row leads with /api/sandbox/image-status for the image the wizard will use (sandboxImage, seeded from the Profile's sandbox.default_image; empty asks for the default): Update available, Up to date, Couldn't check for updates (check_failed), Downloads on launch (unknown with reason not_pulled), and Update status unknown for any other unknown reason, a refusal such as unknown_image for an edited image that isn't configured, or no answer; then ' · <image>'. The first answered check of an opening sends fresh=true; an edit waits 500 ms after the last keystroke and asks from the cache, and a late answer for a previous image is dropped. Off, blocked or before the Profile's defaults settle, the row asks nothing. At 375px the status stays whole and only the image truncates."
+      "notes": "With Sandbox on and available, the row leads with /api/sandbox/image-status for the image the wizard will use (sandboxImage, seeded from the Profile's sandbox.default_image; empty asks for the default): Update available, Up to date, Couldn't check for updates (check_failed), Downloads on launch (unknown with reason not_pulled), and Update status unknown for any other unknown reason, a refusal such as unknown_image for an edited image that isn't configured, or no answer; then ' \u00b7 <image>'. The first answered check of an opening sends fresh=true; an edit waits 500 ms after the last keystroke and asks from the cache, and a late answer for a previous image is dropped. Off, blocked or before the Profile's defaults settle, the row asks nothing. At 375px the status stays whole and only the image truncates."
     },
     {
       "id": "wizard.pull-latest-image",
@@ -3230,9 +3230,9 @@
       "id": "session.existing-group-chooser-keyboard",
       "kind": "mocked-playwright",
       "risk": "medium",
-      "specs": ["tests/session-group-chooser.spec.ts"],
+      "specs": ["tests/session-group-chooser.spec.ts", "tests/session-group-edit-short-viewport.spec.ts"],
       "components": ["web/src/components/SessionGroupModal.tsx", "web/src/components/sidebar/SessionActions.tsx"],
-      "notes": "Native option labels distinguish Review/Done from Review / Done and repeated edge/internal spaces; keyboard focus, Save, Escape, and unchanged save preserve request semantics. Complete canonical mutation receipts and subsequent snapshots retain exact paths with matching epochs and advancing revisions."
+      "notes": "Native option labels distinguish Review/Done from Review / Done and repeated edge/internal spaces; keyboard focus, Save, Escape, and unchanged save preserve request semantics. Complete canonical mutation receipts and subsequent snapshots retain exact paths with matching epochs and advancing revisions. Profile-scoped choices; short-screen Save and No-group real clicks; deferred failed-save focus, preserved draft and successful retry."
     },
     {
       "id": "session.delete-dialog-keyboard",
@@ -3761,7 +3761,7 @@
       "risk": "medium",
       "specs": ["tests/update-banner.spec.ts", "src/components/__tests__/UpdateBanner.test.tsx"],
       "components": ["web/src/components/UpdateBanner.tsx"],
-      "notes": "The dismiss test asserts text-subtle, not text-muted or text-secondary, on the dismiss control. #5514: each install method's lines are pinned in UpdateBanner.test.tsx (an unknown install reads \"Run aoe update on the machine running AoE.\"; a release install has no second line). The mocked spec checks the layout: at 1280px the dot and lines form one centered block, line two starts under line one, and the dot and × share line one's center, × pinned right; at 375px the lines stack left-aligned with × at the top right and nothing scrolls sideways."
+      "notes": "The dismiss test asserts text-subtle, not text-muted or text-secondary, on the dismiss control. #5514: each install method's lines are pinned in UpdateBanner.test.tsx (an unknown install reads \"Run aoe update on the machine running AoE.\"; a release install has no second line). The mocked spec checks the layout: at 1280px the dot and lines form one centered block, line two starts under line one, and the dot and \u00d7 share line one's center, \u00d7 pinned right; at 375px the lines stack left-aligned with \u00d7 at the top right and nothing scrolls sideways."
     },
     {
       "id": "connectivity.banner-stack",
@@ -5046,7 +5046,7 @@
         "web/src/lib/registeredProjects.ts",
         "web/src/lib/sidebarAxis.ts"
       ],
-      "notes": "Where the grouping draws repository headers (By repo, By organization, By repo and group) the section is \"Projects, no sessions\" and lists unpinned Projects without a live group; By group draws none, so it is \"Projects\" and lists every registered Project once, pinned or with live sessions included, a pinned row marked ◆ (#5065). Compact is \"Projects\" on every axis. The per-axis rule is axisDrawsRepoHeaders, a Record over SidebarAxis."
+      "notes": "Where the grouping draws repository headers (By repo, By organization, By repo and group) the section is \"Projects, no sessions\" and lists unpinned Projects without a live group; By group draws none, so it is \"Projects\" and lists every registered Project once, pinned or with live sessions included, a pinned row marked \u25c6 (#5065). Compact is \"Projects\" on every axis. The per-axis rule is axisDrawsRepoHeaders, a Record over SidebarAxis."
     },
     {
       "id": "story.settings-paired-terminal-sizing",
@@ -6151,7 +6151,7 @@
         "web/src/components/ContextMenu.tsx",
         "web/src/components/plugin/PluginSessionMenu.tsx"
       ],
-      "notes": "The Session menu groups its items into tiers (quick row, Rename, Run, Start another, More, Settings, plugin items, Move to Trash…) with a separator only between tiers that show something, in the popover and the mobile sheet. Restart to update and Recreate container carry a second line as their description. The Notify hint shows only for Off and All. The heading adds the Session's status and view, or a count for a row with several. Read-only leaves only Notify."
+      "notes": "The Session menu groups its items into tiers (quick row, Rename, Run, Start another, More, Settings, plugin items, Move to Trash\u2026) with a separator only between tiers that show something, in the popover and the mobile sheet. Restart to update and Recreate container carry a second line as their description. The Notify hint shows only for Off and All. The heading adds the Session's status and view, or a count for a row with several. Read-only leaves only Notify."
     },
     {
       "id": "sidebar.context-menu-clamp",
@@ -6430,7 +6430,7 @@
         "src/components/__tests__/SessionRowTriage.test.tsx"
       ],
       "components": ["web/src/components/SessionErrorPanel.tsx", "web/src/components/sidebar/SessionRow.tsx"],
-      "notes": "An Error Session deleted from its panel keeps the panel without Restart. A Deleting row's glyph tooltip reads Deleting…."
+      "notes": "An Error Session deleted from its panel keeps the panel without Restart. A Deleting row's glyph tooltip reads Deleting\u2026."
     },
     {
       "id": "sidebar.error-tooltip-and-badge",
@@ -6447,7 +6447,7 @@
         "web/src/components/sidebar/SidebarGroupHeader.tsx",
         "web/src/lib/statusLegend.ts"
       ],
-      "notes": "A Terminal view Error row's glyph tooltip reads Error plus the first line of last_error, or Error · no details recorded, and the glyph is described by that line. A Structured view Error row keeps its generic meaning. The Group badge says 3 Sessions need attention · 2 have errors, or 2 Sessions have errors when all are errors."
+      "notes": "A Terminal view Error row's glyph tooltip reads Error plus the first line of last_error, or Error \u00b7 no details recorded, and the glyph is described by that line. A Structured view Error row keeps its generic meaning. The Group badge says 3 Sessions need attention \u00b7 2 have errors, or 2 Sessions have errors when all are errors."
     },
     {
       "id": "settings.plugins",

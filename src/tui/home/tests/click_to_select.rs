@@ -517,7 +517,7 @@ fn structured_click_leaves_a_relay_on_another_session() {
     });
 
     let now = std::time::Instant::now();
-    assert_eq!(env.view.handle_click_at(now, 5, 3), None);
+    assert_eq!(env.view.handle_click_at(now, 5, ROW_2_BELOW_LIVE_BOX), None);
     assert_eq!(
         env.view.selected_session.as_deref(),
         Some(target.as_str()),

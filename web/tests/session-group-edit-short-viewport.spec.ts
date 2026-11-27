@@ -1,5 +1,4 @@
-// Edit group dialog on a short viewport: the open inline list must not push Save or
-// Remove from group off-screen, and both must take real clicks.
+// Save, clear and failed-save retry stay reachable on a short viewport.
 
 import type { Page } from "@playwright/test";
 import { test, expect } from "./helpers/mockedTest";
@@ -29,8 +28,7 @@ async function openEditGroup(page: Page) {
   await page.locator("[data-testid='sidebar-session-row']").click({ button: "right" });
   await page.locator("[data-testid='sidebar-context-menu-more']").click();
   await page.locator("[data-testid='sidebar-context-menu-edit-group']").click();
-  // Groups load after the list opens; measure only once they are all rows.
-  await expect(page.getByRole("option")).toHaveCount(GROUPS.length);
+  await expect(page.getByRole("option")).toHaveCount(GROUPS.length + 2);
   return bodies;
 }
 
@@ -43,21 +41,48 @@ async function expectInViewport(page: Page, testId: string) {
 }
 
 test.describe("Edit group dialog on a short viewport", () => {
-  test("Save is on screen and clickable with the list open", async ({ page }) => {
+  test("Save is on screen and clickable with loaded native choices", async ({ page }) => {
     const bodies = await openEditGroup(page);
     await page.getByTestId("session-group-modal-input").fill("team");
-    await expect(page.getByRole("option", { name: /team-g/ })).toBeVisible();
+    await expect(page.getByRole("option", { name: /team-g/ })).toHaveCount(1);
     await expectInViewport(page, "session-group-modal-save");
     await page.getByTestId("session-group-modal-save").click();
     await expect(page.getByTestId("session-group-modal")).toBeHidden();
     expect(bodies).toEqual([{ group: "team" }]);
   });
 
-  test("Remove from group is on screen and clickable with the list open", async ({ page }) => {
+  test("No group selection clears the group with a real Save click", async ({ page }) => {
     const bodies = await openEditGroup(page);
-    await expectInViewport(page, "session-group-modal-remove");
-    await page.getByTestId("session-group-modal-remove").click();
+    await page.getByRole("combobox", { name: "Existing group" }).selectOption("");
+    await expectInViewport(page, "session-group-modal-save");
+    await page.getByTestId("session-group-modal-save").click();
     await expect(page.getByTestId("session-group-modal")).toBeHidden();
     expect(bodies).toEqual([{ group: "" }]);
+  });
+  test("a pending failed save re-enables and refocuses the editor before retry", async ({ page }) => {
+    const bodies = await openEditGroup(page);
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let first = true;
+    await page.route(`**/api/sessions/${ID}/group`, async (route) => {
+      if (!first) return route.fallback();
+      first = false;
+      await pending;
+      return route.fulfill({ status: 500, json: { error: "synthetic save failure" } });
+    });
+    const input = page.getByTestId("session-group-modal-input");
+    await input.fill("retained draft");
+    await page.getByTestId("session-group-modal-save").click();
+    await expect(input).toBeDisabled();
+    release();
+    await expect(page.getByTestId("session-group-modal-error")).toHaveText("Failed to update group.");
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue("retained draft");
+    await expectInViewport(page, "session-group-modal-save");
+    await page.getByTestId("session-group-modal-save").click();
+    await expect(page.getByTestId("session-group-modal")).toBeHidden();
+    expect(bodies).toEqual([{ group: "retained draft" }]);
   });
 });

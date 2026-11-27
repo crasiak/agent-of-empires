@@ -115,10 +115,10 @@ it("QuickLaunchWidget displays host-only presets without offering web edits", ()
   expect(save).not.toHaveBeenCalled();
 });
 
-it("LoggingTargetsWidget exposes the v058 and v076 migration targets and saves them", () => {
+it("LoggingTargetsWidget exposes the v073 and v076 migration targets and saves them", () => {
   const { save } = mount(LoggingTargetsWidget, "Targets", {});
-  fireEvent.change(control("migrations.v058", "select"), { target: { value: "debug" } });
-  expect(save).toHaveBeenLastCalledWith({ "migrations.v058": "debug" });
+  fireEvent.change(control("migrations.v073", "select"), { target: { value: "debug" } });
+  expect(save).toHaveBeenLastCalledWith({ "migrations.v073": "debug" });
   fireEvent.change(control("migrations.v076", "select"), { target: { value: "info" } });
   expect(save).toHaveBeenLastCalledWith({ "migrations.v076": "info" });
 });

@@ -15975,7 +15975,16 @@ async fn publish_reuses_resolved_config_across_publications() {
         replacement.len(),
         std::fs::metadata(linked.join(".git")).unwrap().len() as usize
     );
-    std::fs::write(linked.join(".git"), replacement).unwrap();
+    std::fs::rename(&linked, repos.path().join("previous-linked")).unwrap();
+    run_git(
+        &other,
+        &[
+            "worktree",
+            "move",
+            other_linked.to_str().unwrap(),
+            linked.to_str().unwrap(),
+        ],
+    );
     state.runtime.publish(&state).await.unwrap();
     assert_eq!(
         state.list_sessions_resolver_misses.load(Ordering::Relaxed),

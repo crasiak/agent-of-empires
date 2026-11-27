@@ -1,3 +1,4 @@
+import { flushSync } from "react-dom";
 import { useEffect, useRef, useState } from "react";
 import { isImeComposing } from "../lib/ime";
 import { fetchGroups } from "../lib/api";
@@ -62,8 +63,10 @@ export function SessionGroupModal({ sessionTitle, currentGroup, profile, onSave,
     const saved = await onSave(next);
     if (!mounted.current) return;
     if (saved) return onClose();
-    setSaving(false);
-    setError(next ? "Failed to update group." : "Failed to clear group.");
+    flushSync(() => {
+      setSaving(false);
+      setError(next ? "Failed to update group." : "Failed to clear group.");
+    });
     inputRef.current?.focus();
   };
   useConfirmKeys(
@@ -77,7 +80,7 @@ export function SessionGroupModal({ sessionTitle, currentGroup, profile, onSave,
       id={DIALOG_ID}
       title="Edit group"
       describedBy={PROMPT_ID}
-      bodyClassName="px-5 py-4 space-y-3"
+      bodyClassName="px-5 py-4 space-y-3 max-h-[calc(100vh-13rem)] overflow-y-auto"
       onDismiss={() => !saving && onClose()}
       footer={
         <>

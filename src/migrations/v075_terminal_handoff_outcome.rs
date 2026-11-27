@@ -372,8 +372,8 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn a_handoff_written_before_the_migration_loads_as_it_was_read() -> Result<()> {
-        // From 47, v048 validates the handoff before v075 records its outcome.
-        for version in ["47", "58"] {
+        // From 62, v063 validates the handoff before v075 records its outcome.
+        for version in ["62", "73"] {
             let home = tempfile::tempdir()?;
             let _home = crate::session::test_support::isolate_app_dir_at(home.path());
             let app = crate::session::get_app_dir()?;
