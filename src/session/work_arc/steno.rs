@@ -55,7 +55,10 @@ pub(crate) struct StenoArc {
     pub covered: String,
     /// When the file was written.
     pub at: DateTime<Utc>,
-    /// Written after the transcript last changed, so no turn is missing from it.
+    /// Covers every turn the record knows: the arc's last covered turn is at least the
+    /// record's turn count. The transcript file's mtime says nothing here: Claude Code
+    /// appends housekeeping records (`session-owner`, `mode`, `queue-operation`) to the
+    /// `.jsonl` days after the last real turn (attic CRA-1822).
     pub current: bool,
     pub path: PathBuf,
 }
@@ -85,7 +88,88 @@ impl StenoArc {
         }
         out.join("\n\n────────\n\n")
     }
+
+    /// The record's events for the cited windows' turns, oldest first, from `events.jsonl`:
+    /// the session as the stenographer normalised it, the same for every harness.
+    pub(crate) fn transcript_text(&self, windows: &[u32]) -> String {
+        use std::io::BufRead;
+        let Some(record) = self.record() else {
+            return "The record is not readable.".into();
+        };
+        let spans: Vec<_> = windows
+            .iter()
+            .filter_map(|&w| Some((w, read_window(record, w)?.turns?)))
+            .collect();
+        if spans.is_empty() {
+            return "No turn range is recorded for these windows.".into();
+        }
+        let last_turn = spans.iter().map(|(_, (_, hi))| *hi).max().unwrap_or(0);
+        let Ok(file) = std::fs::File::open(record.join("events.jsonl")) else {
+            return "events.jsonl is not readable in the record.".into();
+        };
+        let mut out = String::new();
+        let mut current = None;
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let Some(turn) = event["turn"].as_u64() else {
+                continue;
+            };
+            if turn > last_turn {
+                break;
+            }
+            let Some(&(window, _)) = spans
+                .iter()
+                .find(|(_, (lo, hi))| (*lo..=*hi).contains(&turn))
+            else {
+                continue;
+            };
+            if out.len() > MAX_TRANSCRIPT_BYTES {
+                out.push_str(
+                    "\n… later events left out; the full text is in the record's events.jsonl\n",
+                );
+                break;
+            }
+            if current != Some(window) {
+                current = Some(window);
+                let (lo, hi) = spans.iter().find(|(w, _)| *w == window).unwrap().1;
+                out.push_str(&format!("\n── w{window} · turns {lo}-{hi} ──\n"));
+            }
+            let time = event["ts"]
+                .as_str()
+                .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+                .map(|ts| {
+                    ts.with_timezone(&chrono::Local)
+                        .format("%H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_else(|| "--:--:--".into());
+            let kind = event["kind"].as_str().unwrap_or("event").replace('_', " ");
+            let error = if event["is_error"].as_bool() == Some(true) {
+                " (error)"
+            } else {
+                ""
+            };
+            let text = event["text"].as_str().unwrap_or("").trim();
+            let shown: String = text.chars().take(MAX_EVENT_CHARS).collect();
+            let more = text.chars().count().saturating_sub(MAX_EVENT_CHARS);
+            out.push_str(&format!(
+                "\n[{time}] turn {turn} · {kind}{error}\n{shown}\n"
+            ));
+            if more > 0 {
+                out.push_str(&format!("… {more} more characters\n"));
+            }
+        }
+        if out.is_empty() {
+            return "No events are recorded for these turns.".into();
+        }
+        out.trim_start().to_string()
+    }
 }
+
+const MAX_EVENT_CHARS: usize = 1500;
+const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
 
 const MAX_WINDOW_BYTES: u64 = 512 * 1024;
 /// Maximum windows expanded per citation range.
@@ -218,11 +302,15 @@ struct ArcFile {
 struct Covered {
     text: String,
     session_id: Option<String>,
+    /// `[first, last]` turn of the last window the arc covers.
+    turns: Option<Vec<u64>>,
 }
 
+/// The keys of the record's `state.json` the arc's freshness depends on.
 #[derive(Deserialize)]
 struct RecordState {
-    transcript: Option<PathBuf>,
+    /// Real turns in the transcript at the last sweep (housekeeping records do not count).
+    turns: Option<u64>,
 }
 
 /// The stenographer's harness directory for an AoE tool, wrapped tools (`claude-hr`) included.
@@ -292,17 +380,20 @@ fn load(record: &Path, session_id: &str, at: DateTime<Utc>) -> Option<StenoArc> 
         return None;
     }
     let lines = ArcLines::validate(doc.arc)?;
-    let transcript_changed = std::fs::read(record.join("state.json"))
+    let covered_through = doc
+        .covered
+        .turns
+        .as_deref()
+        .and_then(|turns| turns.last().copied());
+    let recorded = std::fs::read(record.join("state.json"))
         .ok()
         .and_then(|raw| serde_json::from_slice::<RecordState>(&raw).ok())
-        .and_then(|state| state.transcript)
-        .and_then(|transcript| std::fs::metadata(transcript).ok()?.modified().ok())
-        .map(DateTime::<Utc>::from);
+        .and_then(|state| state.turns);
     Some(StenoArc {
         lines,
         covered: doc.covered.text,
         at,
-        current: transcript_changed.is_some_and(|changed| at >= changed),
+        current: matches!((covered_through, recorded), (Some(through), Some(turns)) if through >= turns),
         path,
     })
 }
@@ -314,15 +405,22 @@ mod tests {
 
     const ARC: &str = r#"{"goal":"Ship the reducer [w5]","recent":"Ran the suite [w6]","pending":"Deploy [w6]","notes":"Unknown"}"#;
 
-    fn record(root: &Path, profile: &str, harness: &str, sid: &str, transcript: &Path) -> PathBuf {
+    /// A record whose `state.json` counts `turns` real turns, as the sweeper writes it.
+    fn record(root: &Path, profile: &str, harness: &str, sid: &str, turns: u64) -> PathBuf {
         let record = root.join(profile).join(harness).join(sid);
         std::fs::create_dir_all(record.join("derive")).unwrap();
+        set_turns(&record, turns);
+        record
+    }
+
+    fn set_turns(record: &Path, turns: u64) {
         std::fs::write(
             record.join("state.json"),
-            serde_json::json!({ "transcript": transcript }).to_string(),
+            serde_json::json!({ "state_version": 1, "turns": turns, "windows_done": 5,
+                                "transcript": record.join("t.jsonl") })
+            .to_string(),
         )
         .unwrap();
-        record
     }
 
     fn write_arc(record: &Path, body: &str, modified: SystemTime) {
@@ -336,36 +434,90 @@ mod tests {
             .unwrap();
     }
 
+    /// An arc covering turns 51-53 of `sid`.
     fn doc(sid: &str, arc: &str) -> String {
         format!(
-            r#"{{"arc_version":2,"arc":{arc},"covered":{{"session_id":"{sid}","text":"covered through w6 (turns 51-53, partial); reduced w1-w6","window":6}},"words":11}}"#
+            r#"{{"arc_version":2,"arc":{arc},"covered":{{"session_id":"{sid}","text":"covered through w6 (turns 51-53, partial); reduced w1-w6","window":6,"turns":[51,53],"partial":true}},"words":11}}"#
         )
     }
 
     #[test]
-    fn reads_the_newest_record_and_compares_it_with_the_transcript() {
+    fn reads_the_newest_record_and_compares_it_with_the_record_turns() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let transcript = root.join("t.jsonl");
-        std::fs::write(&transcript, "").unwrap();
-        let touched = std::fs::metadata(&transcript).unwrap().modified().unwrap();
-        let old = record(root, "work", "pi", "s1", &transcript);
-        let new = record(root, "personal", "pi", "s1", &transcript);
-        write_arc(&old, &doc("s1", ARC), touched - Duration::from_secs(60));
+        let now = SystemTime::now();
+        let old = record(root, "work", "pi", "s1", 53);
+        let new = record(root, "personal", "pi", "s1", 54);
+        write_arc(&old, &doc("s1", ARC), now - Duration::from_secs(60));
         write_arc(
             &new,
             &doc("s1", &ARC.replace("Ship", "Land")),
-            touched - Duration::from_secs(5),
+            now - Duration::from_secs(5),
         );
 
         let stale = read(root, "pi-hr", "s1").unwrap();
         assert_eq!(stale.lines.goal, "Land the reducer [w5]");
         assert_eq!(stale.path, new.join("derive/arc.json"));
         assert!(stale.covered.starts_with("covered through w6"));
-        assert!(!stale.current, "written before the last turn");
+        assert_eq!(stale.status(), super::super::ArcStatus::Stale);
+        assert!(
+            !stale.current,
+            "the record has a turn the arc does not cover"
+        );
 
-        write_arc(&new, &doc("s1", ARC), touched + Duration::from_secs(5));
+        set_turns(&new, 53);
         assert!(read(root, "pi", "s1").unwrap().current);
+    }
+
+    /// Claude Code appends housekeeping records to the transcript long after the last real
+    /// turn. The sweeper reads it, keeps the turn count, and rewrites state.json; the arc
+    /// still covers every real turn, so it is Current. A real turn makes it Stale.
+    #[test]
+    fn housekeeping_appended_to_the_transcript_does_not_make_the_arc_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let record = record(root, "personal", "claude", "s1", 53);
+        let transcript = record.join("t.jsonl");
+        let turn = |role: &str, i: u64| {
+            serde_json::json!({"type": role, "timestamp": format!("2026-11-23T12:0{}:00Z", i % 10),
+                               "message": {"role": role, "content": "…"}})
+            .to_string()
+                + "\n"
+        };
+        let mut lines: String = (1..=53)
+            .map(|i| turn(if i % 2 == 1 { "user" } else { "assistant" }, i))
+            .collect();
+        std::fs::write(&transcript, &lines).unwrap();
+        let arc_at = SystemTime::now() - Duration::from_secs(3 * 24 * 3600);
+        write_arc(&record, &doc("s1", ARC), arc_at);
+        assert!(read(root, "claude", "s1").unwrap().current);
+
+        // Three days later: housekeeping lines land, the transcript mtime moves, the
+        // sweeper rewrites state.json with the same turn count.
+        for kind in ["session-owner", "atis-latch", "mode", "queue-operation"] {
+            lines.push_str(&(serde_json::json!({"type": kind}).to_string() + "\n"));
+        }
+        std::fs::write(&transcript, &lines).unwrap();
+        set_turns(&record, 53);
+        assert!(
+            std::fs::metadata(&transcript).unwrap().modified().unwrap() > arc_at,
+            "the transcript is newer than the arc"
+        );
+        let arc = read(root, "claude", "s1").unwrap();
+        assert!(arc.current, "housekeeping records are not turns");
+        assert_eq!(arc.status(), super::super::ArcStatus::Current);
+
+        // A real turn the arc does not cover.
+        lines.push_str(&turn("user", 54));
+        std::fs::write(&transcript, &lines).unwrap();
+        set_turns(&record, 54);
+        assert!(!read(root, "claude", "s1").unwrap().current);
+
+        // No turn count in the record: freshness cannot be shown.
+        std::fs::write(record.join("state.json"), "{}").unwrap();
+        assert!(!read(root, "claude", "s1").unwrap().current);
+        std::fs::remove_file(record.join("state.json")).unwrap();
+        assert!(!read(root, "claude", "s1").unwrap().current);
     }
 
     #[test]
@@ -426,6 +578,45 @@ mod tests {
             current: true,
             path: record.join("derive/arc.json"),
         };
+        std::fs::write(
+            record.join("events.jsonl"),
+            [
+                serde_json::json!({"rid": 1, "kind": "user", "text": "before", "turn": 60,
+                                   "ts": "2026-11-21T10:00:00Z", "is_error": false}),
+                serde_json::json!({"rid": 2, "kind": "user", "text": "fix the parser", "turn": 61,
+                                   "ts": "2026-11-21T10:01:00Z", "is_error": false}),
+                serde_json::json!({"rid": 3, "kind": "tool_result", "text": "x".repeat(2000),
+                                   "turn": 62, "ts": "2026-11-21T10:02:00Z", "is_error": true}),
+                serde_json::json!({"rid": 4, "kind": "assistant", "text": "after", "turn": 71,
+                                   "ts": "2026-11-21T10:03:00Z", "is_error": false}),
+            ]
+            .iter()
+            .map(|e| e.to_string() + "\n")
+            .collect::<String>(),
+        )
+        .unwrap();
+        let transcript = arc.transcript_text(&[7]);
+        assert!(
+            transcript.starts_with("── w7 · turns 61-70 ──"),
+            "{transcript}"
+        );
+        assert!(
+            transcript.contains("turn 61 · user\nfix the parser"),
+            "{transcript}"
+        );
+        assert!(
+            transcript.contains("turn 62 · tool result (error)"),
+            "{transcript}"
+        );
+        assert!(transcript.contains("… 500 more characters"), "{transcript}");
+        assert!(
+            !transcript.contains("before") && !transcript.contains("after"),
+            "{transcript}"
+        );
+        assert_eq!(
+            arc.transcript_text(&[8]),
+            "No turn range is recorded for these windows."
+        );
         let text = arc.windows_text(&[7, 8]);
         assert!(
             text.starts_with("w7 · turns 61-70\n\nThe assistant fixed the parser."),
@@ -445,8 +636,7 @@ mod tests {
     fn rejects_what_aoe_would_not_render() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let transcript = root.join("t.jsonl");
-        let record = record(root, "personal", "claude", "s1", &transcript);
+        let record = record(root, "personal", "claude", "s1", 53);
         let now = SystemTime::now();
         let words = vec!["word"; 121].join(" ");
         for (case, body) in [

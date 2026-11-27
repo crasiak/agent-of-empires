@@ -425,6 +425,7 @@ async fn run(
             });
         }
         Some(Commands::Agents) => return exit_zero(cli::agents::run()),
+        Some(Commands::BreakoutAgent(args)) => return exit_zero(cli::breakout_agent::run(args)),
         Some(Commands::Logs(args)) => return exit_zero(cli::logs::run(args).await),
         Some(Commands::LogLevel(args)) => return exit_zero(cli::log_level::run(args).await),
         Some(Commands::Sounds { command }) => return exit_zero(cli::sounds::run(command).await),

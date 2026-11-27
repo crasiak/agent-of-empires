@@ -5,6 +5,7 @@
 
 pub mod acp;
 pub mod agents;
+pub mod breakout;
 pub mod build_info;
 pub mod claude_settings;
 pub mod cli;

@@ -52,6 +52,9 @@ pub struct Config {
     pub diff: DiffConfig,
 
     #[serde(default)]
+    pub breakout: BreakoutConfig,
+
+    #[serde(default)]
     pub hooks: HooksConfig,
 
     /// Host-side lifecycle hooks. Profile/global only; never honored from a
@@ -1910,8 +1913,8 @@ pub struct SessionConfig {
     )]
     pub new_session_mode: NewSessionMode,
 
-    /// Ctrl+1 through Ctrl+9 presets, keyed by number. Each selects an AoE profile,
-    /// optionally an agent and Ledger profile; sidebar context suggests the directory and group.
+    /// Ctrl+2 through Ctrl+9 presets select an AoE profile and optional agent/Ledger profile.
+    /// Slot 1 is retained but inactive: Ctrl+1 opens the Tailored launcher. Move it to 2..9.
     #[serde(default)]
     #[setting(
         label = "Quick Launch Presets",
@@ -2756,6 +2759,32 @@ impl Default for DiffConfig {
 
 fn default_context_lines() -> usize {
     3
+}
+
+/// Breakout: opening marked Sessions as terminal windows outside the TUI
+#[derive(Debug, Clone, Default, Serialize, Deserialize, SettingsSection)]
+#[setting_section(name = "breakout", category = "Interaction")]
+pub struct BreakoutConfig {
+    /// How Breakout arranges Sessions: one tiled window each, or one window split into a grid.
+    #[serde(default)]
+    #[setting(
+        label = "Breakout Layout",
+        widget = "select",
+        options = "windows:Separate windows,splits:One window with splits",
+        tui_only
+    )]
+    pub layout: crate::breakout::request::BreakoutLayout,
+
+    /// Hosts whose aoe may ask this machine's Breakout agent to open windows.
+    /// Each name is used as the ssh destination.
+    #[serde(default)]
+    #[setting(
+        label = "Breakout Agent Hosts",
+        widget = "list",
+        global_only,
+        web = "local_only:controls which hosts may open windows on this machine"
+    )]
+    pub agent_hosts: Vec<String>,
 }
 
 /// Web dashboard runtime configuration.
@@ -4844,6 +4873,25 @@ mod tests {
                 toml::from_str(&format!("[session]\npi_integration = '{policy}'\n")).unwrap();
             assert_eq!(config.session.pi_integration, expected);
         }
+    }
+
+    #[test]
+    fn breakout_section_defaults_and_parses() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(
+            config.breakout.layout,
+            crate::breakout::request::BreakoutLayout::Windows
+        );
+        assert!(config.breakout.agent_hosts.is_empty());
+
+        let config: Config =
+            toml::from_str("[breakout]\nlayout = \"splits\"\nagent_hosts = [\"bender\"]\n")
+                .unwrap();
+        assert_eq!(
+            config.breakout.layout,
+            crate::breakout::request::BreakoutLayout::Splits
+        );
+        assert_eq!(config.breakout.agent_hosts, ["bender"]);
     }
 
     #[test]

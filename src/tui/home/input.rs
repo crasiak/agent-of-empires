@@ -662,7 +662,14 @@ impl HomeView {
         }
         self.mouse_forward_btn = None;
         self.hover_forward_cell = None;
-        self.send_message_dialog = None;
+        // Bulk surfaces act on the Marked set, not the cursor row, so they stay open.
+        // A send dialog is the bulk one only while the single-Session slot is empty.
+        let bulk_send_open =
+            self.pending_bulk_send.is_some() && self.pending_send_session.is_none();
+        if !bulk_send_open {
+            self.send_message_dialog = None;
+            self.pending_bulk_send = None;
+        }
         self.pending_send_session = None;
         self.permission_response_dialog = None;
         self.pending_permission_response = None;
@@ -692,7 +699,7 @@ impl HomeView {
         if self
             .context_menu
             .as_ref()
-            .is_some_and(|menu| !menu.is_read_only_session_menu())
+            .is_some_and(|menu| !menu.is_read_only_session_menu() && !menu.is_marks_menu())
         {
             self.context_menu = None;
         }
@@ -1574,6 +1581,17 @@ impl HomeView {
                 self.apply_highlight_bulk();
                 None
             }
+            "bulk_restart" => {
+                let checked = std::mem::take(&mut self.confirm_checked);
+                self.start_bulk_restart(
+                    checked.contains(&super::bulk_restart::BULK_RESTART_IDLE_ONLY),
+                );
+                None
+            }
+            "breakout" => {
+                self.run_breakout();
+                None
+            }
             "empty_trash" => {
                 let checked = std::mem::take(&mut self.confirm_checked);
                 self.empty_trash_all(
@@ -1915,6 +1933,8 @@ impl HomeView {
                         self.pending_force_remove_session = None;
                         self.pending_trash_session = None;
                         self.pending_highlight_bulk = None;
+                        self.pending_bulk_restart = false;
+                        self.pending_breakout = false;
                         self.pending_image_pull = None;
                         self.pending_archive_group_ids = None;
                         // Mirrors the keyboard route: Cancel means "don't discard", so
@@ -2295,12 +2315,18 @@ impl HomeView {
         // it would point at unrelated content. Covers the live-send branch below too.
         self.clear_preview_selection();
         self.enforce_trash_read_only();
+        if super::bindings::is_launcher_shortcut(&key)
+            && (self.tailored_window.is_some() || !self.has_non_live_send_overlay())
+        {
+            self.open_tailored_picker();
+            return None;
+        }
         if self.tailored_window.is_some() {
             self.handle_tailored_key(key);
             return None;
         }
         if super::bindings::is_tailored_shortcut(&key) && !self.has_non_live_send_overlay() {
-            self.open_tailored();
+            self.open_tailored_picker();
             return None;
         }
         if self.retained_reader_focused() && !self.has_non_live_send_overlay() {
@@ -2596,11 +2622,23 @@ impl HomeView {
         }
 
         if self.snooze_duration_dialog.is_none() || self.confirm_dialog.is_none() {
+            // A mouse-dismissed popup can leave its origin cached.
+            let window_popup = self
+                .info_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.title().starts_with("Window w"));
+            if key.code == KeyCode::Char('t') && window_popup {
+                if let Some((steno, windows)) = self.steno_windows.take() {
+                    self.open_steno_transcript(&steno, &windows);
+                    return None;
+                }
+            }
             if let Some(dialog) = &mut self.info_dialog {
                 match dialog.handle_key(key) {
                     DialogResult::Continue => {}
                     DialogResult::Cancel | DialogResult::Submit(_) => {
                         self.info_dialog = None;
+                        self.steno_windows = None;
                         if let Some(session_id) = self.pending_attach_after_warning.take() {
                             return Some(Action::AttachSession(session_id));
                         }
@@ -2793,6 +2831,8 @@ impl HomeView {
                     self.pending_force_remove_session = None;
                     self.pending_trash_session = None;
                     self.pending_highlight_bulk = None;
+                    self.pending_bulk_restart = false;
+                    self.pending_breakout = false;
                     self.pending_image_pull = None;
                     self.pending_archive_group_ids = None;
                 }
@@ -3097,10 +3137,15 @@ impl HomeView {
                 DialogResult::Cancel => {
                     self.send_message_dialog = None;
                     self.pending_send_session = None;
+                    self.pending_bulk_send = None;
                     self.pending_send_target = live_send::LiveSendTarget::Agent;
                 }
                 DialogResult::Submit(message) => {
                     self.send_message_dialog = None;
+                    if let Some(targets) = self.pending_bulk_send.take() {
+                        self.submit_bulk_send(targets, message);
+                        return None;
+                    }
                     if let Some(session_id) = self.pending_send_session.take() {
                         // Defer the work to execute_action so the loop can render a
                         // status indicator first: the send path may start a container or
@@ -3334,6 +3379,10 @@ impl HomeView {
                 self.view_mode = ViewMode::Structured;
                 return None;
             }
+            KeyCode::Esc if !self.marked.is_empty() => {
+                self.clear_marks();
+                return None;
+            }
             _ => {}
         }
 
@@ -3359,8 +3408,6 @@ impl HomeView {
 
         // Navigation / structural keys: identical in both modes, never relocate.
         match key.code {
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => self.move_cursor(-10),
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => self.move_cursor(10),
             KeyCode::Char('{') => self.move_cursor(-10),
             KeyCode::Char('}') => self.move_cursor(10),
             KeyCode::Up | KeyCode::Char('k') => self.move_cursor(-1),
@@ -3529,6 +3576,21 @@ impl HomeView {
         id: ActionId,
         update_info: Option<&crate::update::UpdateInfo>,
     ) -> Option<Action> {
+        // With Marks present, restart and send act on the Marked set, whatever the
+        // cursor is on.
+        if !self.marked.is_empty() {
+            match id {
+                ActionId::Restart => {
+                    self.open_bulk_restart_confirm();
+                    return None;
+                }
+                ActionId::SendMessage => {
+                    self.open_bulk_send_dialog();
+                    return None;
+                }
+                _ => {}
+            }
+        }
         // A row still being created has no runtime to command yet. The
         // keyboard dispatcher and the command palette both route here, so they
         // cannot diverge on what an action does.
@@ -3572,6 +3634,11 @@ impl HomeView {
                     | ActionId::PreviewScrollUp
                     | ActionId::PreviewScrollDown
                     | ActionId::DismissUpdateBanner
+                    | ActionId::ExtendMarkUp
+                    | ActionId::ExtendMarkDown
+                    | ActionId::ClearMarks
+                    | ActionId::BulkMenu
+                    | ActionId::CloseBreakout
             )
         {
             return None;
@@ -3628,6 +3695,7 @@ impl HomeView {
             }
             ActionId::NewSession => self.open_new_session_dialog(),
             ActionId::TailoredSessions => self.open_tailored(),
+            ActionId::Intake => self.open_intake(),
             ActionId::NewFromSelection => self.open_new_from_selection(),
             ActionId::NewFromProject => self.open_project_session_picker(),
             ActionId::AttachTerminal => return self.attach_terminal_for_selected(),
@@ -3645,6 +3713,19 @@ impl HomeView {
                         return Some(action);
                     }
                 }
+            }
+            ActionId::ToggleMark => self.toggle_mark_at_cursor(),
+            ActionId::ExtendMarkUp => self.extend_marks(-1),
+            ActionId::ExtendMarkDown => self.extend_marks(1),
+            ActionId::ClearMarks => {
+                if !self.clear_marks() {
+                    self.flash_status("No sessions marked");
+                }
+            }
+            ActionId::CloseBreakout => self.close_breakout(),
+            ActionId::BulkMenu => {
+                let anchor = self.cursor_row_anchor();
+                self.open_bulk_menu(anchor);
             }
             ActionId::SendMessage => {
                 if let Some(id) = self.selected_structured_session() {
@@ -5742,6 +5823,15 @@ impl HomeView {
                 self.flash_status("Still creating this session; it has no runtime yet");
                 return true;
             }
+            // A right-click on a marked row offers the Bulk actions for the whole set.
+            if matches!(self.flat_items.get(idx), Some(Item::Session { id, .. }) if self.marked.contains(id))
+            {
+                self.context_menu = Some(ContextMenuDialog::for_marks(
+                    anchor,
+                    super::breakout::close_offered(),
+                ));
+                return true;
+            }
             // Mirror the web sidebar's row-aware copy so a group row reads as "Rename
             // Group / Delete Group".
             // The synthetic Trash / Archived headers are `Item::Group` rows but not user
@@ -5951,7 +6041,11 @@ impl HomeView {
                 return;
             }
         }
+        // Bulk actions target the Marked set, not the cursor row, so the row's own
+        // state cannot refuse them.
+        let bulk = action.is_bulk();
         if self.selected_is_trashed()
+            && !bulk
             && !matches!(
                 action,
                 ContextMenuAction::Restore
@@ -5967,7 +6061,7 @@ impl HomeView {
         // The creating stub has no actions yet, so opening a menu whose every
         // entry would refuse it is worse than saying why. Same refusal as
         // `run_action`, which the menu is the second dispatcher for.
-        if self.is_creating_stub_selected() {
+        if !bulk && self.is_creating_stub_selected() {
             self.flash_status("Still creating this session; it has no runtime yet");
             return;
         }
@@ -6046,6 +6140,14 @@ impl HomeView {
                 Some(SidebarSection::Archived) => self.toggle_archived_section(),
                 None => {}
             },
+            ContextMenuAction::BulkSend => self.open_bulk_send_dialog(),
+            ContextMenuAction::BulkRestart => self.open_bulk_restart_confirm(),
+            ContextMenuAction::BulkBreakout => self.start_breakout(),
+            ContextMenuAction::CloseBreakout => self.close_breakout(),
+            ContextMenuAction::BulkShowSkipped => self.show_bulk_skips(),
+            ContextMenuAction::ClearMarks => {
+                self.clear_marks();
+            }
         }
     }
 
@@ -7168,6 +7270,7 @@ impl HomeView {
         // Losing dictation is worse than silently catching it.
         if let Some((id, title, target)) = self.resolve_send_target() {
             let label = live_send::format_target_label(&title, &target);
+            self.pending_bulk_send = None;
             self.pending_send_session = Some(id);
             self.pending_send_target = target;
             let mut dialog = SendMessageDialog::new(&label);
@@ -7842,6 +7945,7 @@ impl HomeView {
             return;
         };
         let label = live_send::format_target_label(&title, &target);
+        self.pending_bulk_send = None;
         self.pending_send_session = Some(id);
         self.pending_send_target = target;
         let mut dialog = SendMessageDialog::new(&label);
@@ -7931,6 +8035,7 @@ impl HomeView {
 
         if let Some((id, title, target)) = self.resolve_send_target() {
             let label = live_send::format_target_label(&title, &target);
+            self.pending_bulk_send = None;
             self.pending_send_session = Some(id);
             self.pending_send_target = target;
             let mut dialog = SendMessageDialog::new(&label);
@@ -8656,6 +8761,7 @@ mod tests {
             scratch: false,
             fork_seed: None,
             structured: false,
+            intake: false,
         }
     }
 

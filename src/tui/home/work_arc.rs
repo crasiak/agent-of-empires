@@ -436,12 +436,13 @@ impl HomeView {
     }
 
     pub(super) fn toggle_work_arc(&mut self) {
-        let Some(before) = self
-            .selected_session
-            .as_ref()
-            .and_then(|id| self.get_instance(id))
-            .cloned()
-        else {
+        if let Some(id) = self.selected_session.clone() {
+            self.toggle_work_arc_for(&id);
+        }
+    }
+
+    pub(super) fn toggle_work_arc_for(&mut self, id: &str) {
+        let Some(before) = self.get_instance(id).cloned() else {
             return;
         };
         if !arc::supported(&before) && !arc::steno::readable(&before) {
@@ -529,12 +530,33 @@ impl HomeView {
             return;
         };
         let names: Vec<_> = windows.iter().map(|w| format!("w{w}")).collect();
+        let text = format!(
+            "{}\n\nPress t for the transcript of these turns.",
+            steno.windows_text(windows)
+        );
+        self.steno_windows = Some((steno.clone(), windows.to_vec()));
         self.info_dialog = Some(
             InfoDialog::new(
-                &format!("Window {} (Up/Down to scroll)", names.join(", ")),
-                &steno.windows_text(windows),
+                &format!(
+                    "Window {} (Up/Down to scroll, t: transcript)",
+                    names.join(", ")
+                ),
+                &text,
             )
             .with_size(90, 30)
+            .scrollable(),
+        );
+    }
+
+    /// The record's events for the windows' turns, replacing their popup.
+    pub(super) fn open_steno_transcript(&mut self, steno: &arc::StenoArc, windows: &[u32]) {
+        let names: Vec<_> = windows.iter().map(|w| format!("w{w}")).collect();
+        self.info_dialog = Some(
+            InfoDialog::new(
+                &format!("Transcript {} (Up/Down to scroll)", names.join(", ")),
+                &steno.transcript_text(windows),
+            )
+            .with_size(110, 40)
             .scrollable(),
         );
     }

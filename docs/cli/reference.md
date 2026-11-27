@@ -145,6 +145,7 @@ This document contains the help content for the `aoe` command-line program.
 * [`aoe daemon status`↴](#aoe-daemon-status)
 * [`aoe daemon restart`↴](#aoe-daemon-restart)
 * [`aoe url`↴](#aoe-url)
+* [`aoe breakout-agent`↴](#aoe-breakout-agent)
 * [`aoe acp`↴](#aoe-acp)
 * [`aoe acp doctor`↴](#aoe-acp-doctor)
 * [`aoe acp agents`↴](#aoe-acp-agents)
@@ -211,6 +212,7 @@ Run without arguments to launch the TUI dashboard.
 * `serve` — Start the aoe daemon: REST/WebSocket API, plus the web dashboard in builds that embed it
 * `daemon` — Control the background aoe daemon; each verb is the matching `aoe serve` flag (`--daemon`, `--stop`, `--status`, `--restart`)
 * `url` — Print the URL of a running `aoe serve` daemon
+* `breakout-agent` — Open Breakout windows on this machine for aoe running on another host
 * `acp` — Manage the ACP structured-view workers (doctor, ps, logs, prompt, approve, ...)
 * `uninstall` — Uninstall Agent of Empires
 * `update` — Update aoe to the latest release
@@ -2274,6 +2276,14 @@ Print the URL of a running `aoe serve` daemon
 
 * `--all` — Print every labeled URL (Tailscale / LAN / localhost) on its own line. The primary URL is printed first as `primary\t<url>`; alternates use `<label>\t<url>`. The tab-separated format makes the output easy to parse from shell scripts
 * `--token-only` — Print only the auth token from the primary URL's `?token=` query parameter. Useful for scripted login flows or pasting into the PWA. Exits non-zero when the URL has no token (e.g. `--no-auth` server)
+
+
+
+## `aoe breakout-agent`
+
+Open Breakout windows on this machine for aoe running on another host
+
+**Usage:** `aoe breakout-agent`
 
 
 

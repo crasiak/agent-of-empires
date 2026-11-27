@@ -9,6 +9,129 @@ pub(super) use super::unix::{
     restore_environment_value, terminate_process_group, try_wait_status_hook,
 };
 
+/// Read an already-running Ghostty's window names without activating it.
+#[cfg(not(test))]
+pub(crate) fn ghostty_window_titles() -> Result<Vec<String>, String> {
+    if !ghostty_automation_allowed()? {
+        return Ok(Vec::new());
+    }
+    let script = r#"with timeout of 10 seconds
+if application id "com.mitchellh.ghostty" is running then
+    tell application id "com.mitchellh.ghostty"
+        set windowNames to get name of every window
+    end tell
+    set quotedNames to {}
+    repeat with windowName in windowNames
+        set end of quotedNames to quoted form of (windowName as text)
+    end repeat
+    set AppleScript's text item delimiters to linefeed
+    return quotedNames as text
+end if
+return ""
+end timeout
+"#;
+    let output = super::run_with_bounded_stdout(
+        Command::new("/usr/bin/osascript").args(["-e", script]),
+        std::time::Duration::from_secs(15),
+        128 * 1024,
+    )
+    .map_err(|error| format!("Ghostty window discovery: {error}"))?
+    .ok_or_else(|| "Ghostty window discovery timed out or exceeded its output limit".to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "Ghostty window discovery failed ({}); check macOS Automation permission",
+            output.status
+        ));
+    }
+    parse_window_titles(&output.stdout)
+}
+
+#[cfg(not(test))]
+fn ghostty_automation_allowed() -> Result<bool, String> {
+    // AEDataModel.h packs AEDesc to two-byte alignment.
+    #[repr(C, packed(2))]
+    struct AddressDesc {
+        descriptor_type: u32,
+        data_handle: *mut std::ffi::c_void,
+    }
+    #[link(name = "CoreServices", kind = "framework")]
+    unsafe extern "C" {
+        fn AECreateDesc(
+            kind: u32,
+            bytes: *const std::ffi::c_void,
+            size: isize,
+            result: *mut AddressDesc,
+        ) -> i16;
+        fn AEDisposeDesc(descriptor: *mut AddressDesc) -> i16;
+        fn AEDeterminePermissionToAutomateTarget(
+            target: *const AddressDesc,
+            event_class: u32,
+            event_id: u32,
+            ask_user: u8,
+        ) -> i32;
+    }
+    let bundle = b"com.mitchellh.ghostty";
+    let mut descriptor = std::mem::MaybeUninit::<AddressDesc>::zeroed();
+    // SAFETY: bundle bytes and descriptor storage are valid for their supplied lengths.
+    let created = unsafe {
+        AECreateDesc(
+            u32::from_be_bytes(*b"bund"),
+            bundle.as_ptr().cast(),
+            bundle.len() as isize,
+            descriptor.as_mut_ptr(),
+        )
+    };
+    if created != 0 {
+        return Err(format!("Ghostty Automation target: {created}"));
+    }
+    // SAFETY: AECreateDesc initialized the descriptor; the query never requests consent.
+    let status = unsafe {
+        let status = AEDeterminePermissionToAutomateTarget(
+            descriptor.as_ptr(),
+            u32::from_be_bytes(*b"core"),
+            u32::from_be_bytes(*b"getd"),
+            0,
+        );
+        AEDisposeDesc(descriptor.as_mut_ptr());
+        status
+    };
+    match status {
+        0 => Ok(true),
+        -600 => Ok(false), // Ghostty is not running.
+        status => Err(format!(
+            "Ghostty Automation unavailable without prompting ({status})"
+        )),
+    }
+}
+
+fn parse_window_titles(stdout: &[u8]) -> Result<Vec<String>, String> {
+    let text = std::str::from_utf8(stdout)
+        .map_err(|error| format!("Ghostty window names are not UTF-8: {error}"))?;
+    // AppleScript quotes each name as one POSIX word; no shell executes it.
+    shell_words::split(text).map_err(|error| format!("Invalid Ghostty window names: {error}"))
+}
+
+#[cfg(test)]
+mod window_title_tests {
+    use super::parse_window_titles;
+
+    #[test]
+    fn quoted_window_names_preserve_boundaries_and_reject_invalid_output() {
+        let input = "'aoe breakout · a, b · 01234567'\n'quote'\\''s\\path\nnext'\n'$(touch /tmp/nope); `false`'\n";
+        assert_eq!(
+            parse_window_titles(input.as_bytes()).unwrap(),
+            [
+                "aoe breakout · a, b · 01234567",
+                "quote's\\path\nnext",
+                "$(touch /tmp/nope); `false`",
+            ]
+        );
+        assert!(parse_window_titles(b"\n").unwrap().is_empty());
+        assert!(parse_window_titles(b"'unterminated").is_err());
+        assert!(parse_window_titles(&[0xff]).is_err());
+    }
+}
+
 pub(crate) const HAS_CODEX_MANAGED_PREFERENCES: bool = true;
 
 const CODEX_PREFERENCES_DOMAIN: &str = "com.openai.codex";

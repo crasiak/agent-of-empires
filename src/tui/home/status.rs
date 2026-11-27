@@ -474,6 +474,7 @@ impl HomeView {
         &mut self,
         errors: Vec<crate::tui::session_feed::SessionCommandError>,
     ) -> bool {
+        self.note_bulk_restart_errors(&errors);
         if errors.is_empty() {
             return false;
         }

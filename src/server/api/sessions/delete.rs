@@ -478,7 +478,7 @@ pub(crate) async fn reconcile_worktree_paths(
     if *state.canonical_health.read().await != crate::daemon::RuntimeHealth::Healthy {
         return failed;
     }
-    let candidates: Vec<String> = state
+    let rows: Vec<_> = state
         .instances
         .read()
         .await
@@ -488,8 +488,21 @@ pub(crate) async fn reconcile_worktree_paths(
                 .as_ref()
                 .is_some_and(|info| info.managed_by_aoe)
         })
-        .map(|row| row.id.clone())
+        .cloned()
         .collect();
+    let ids: Vec<_> = rows.iter().map(|row| row.id.clone()).collect();
+    let candidates = match tokio::task::spawn_blocking(move || {
+        crate::session::worktree_reconcile::relocation_candidates(&rows)
+    })
+    .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(target: "http.api.sessions", %error, "worktree inventory join failed");
+            failed.extend(ids);
+            return failed;
+        }
+    };
     for id in candidates {
         let lock = state.instance_lock(&id).await;
         let _guard = lock.lock().await;

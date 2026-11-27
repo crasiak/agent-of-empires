@@ -1131,30 +1131,11 @@ pub(crate) async fn create_session_with(
         }
     }
 
-    // Only the authenticated Unix owner may bypass the shell-metacharacter policy.
-    let mut shell_checks: Vec<(&str, &str)> = Vec::new();
-    if body.cli.is_some() {
-        let args = match shell_words::split(&body.extra_args) {
-            Ok(args) => args,
-            Err(error) => {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "validation_failed",
-                    error.to_string(),
-                )
-            }
-        };
-        if !local_owner {
-            for arg in &args {
-                if let Err(msg) = super::validate_shell_fields(&[(arg.as_str(), "extra_args")]) {
-                    return api_error(StatusCode::BAD_REQUEST, "validation_failed", msg);
-                }
-            }
-        }
-        body.extra_args = shell_words::join(args);
-    } else {
-        shell_checks.push((body.extra_args.as_str(), "extra_args"));
+    match super::normalize_extra_args(&body.extra_args, local_owner) {
+        Ok(args) => body.extra_args = args,
+        Err(msg) => return api_error(StatusCode::BAD_REQUEST, "validation_failed", msg),
     }
+    let mut shell_checks: Vec<(&str, &str)> = Vec::new();
     if !body.scratch && (!local_owner || body.cli.is_none()) {
         shell_checks.push((body.path.as_str(), "path"));
     }

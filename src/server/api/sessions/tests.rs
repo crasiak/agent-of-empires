@@ -2191,6 +2191,7 @@ async fn restart_refusal_preserves_authoritative_launch_fields() -> anyhow::Resu
         let response = restart_session(
             State(state.clone()),
             Path(id.clone()),
+            None,
             Ok(Some(Json(crate::daemon::RestartSessionBody {
                 profile: match refusal {
                     "profile_collision" => Some("target".into()),
@@ -2294,6 +2295,7 @@ async fn running_restart_respawns_while_start_remains_idempotent() -> anyhow::Re
     let restarted = restart_session(
         State(state.clone()),
         Path(id.clone()),
+        None,
         Ok(Some(Json(crate::daemon::RestartSessionBody {
             wake_message: Some(String::new()),
             ..Default::default()
@@ -2400,6 +2402,7 @@ async fn restart_delivers_requested_wake_message_to_new_pane() -> anyhow::Result
         let response = restart_session(
             State(state.clone()),
             Path(id),
+            None,
             Ok(Some(Json(crate::daemon::RestartSessionBody {
                 wake_message: Some("wake-message-verified".into()),
                 ..Default::default()
@@ -13416,6 +13419,74 @@ async fn cli_shell_validation_preserves_owner_literals_and_remote_word_boundarie
         assert_eq!(std::fs::read_to_string(&observed).unwrap(), expected);
         assert!(!injected.exists());
     }
+    // CRA-1798: TUI presets send a quoted prompt without `cli`.
+    let prompt = "--append-system-prompt 'hello world'";
+    for (index, (peer, extra_args, expected)) in [
+        (
+            ConnectionPeer::UnixOwner {
+                uid: nix::unistd::geteuid().as_raw(),
+            },
+            prompt,
+            Some("--append-system-prompt\nhello world\n"),
+        ),
+        (
+            ConnectionPeer::Tcp("192.0.2.1:4521".parse().unwrap()),
+            prompt,
+            Some("--append-system-prompt\nhello world\n"),
+        ),
+        (
+            ConnectionPeer::Tcp("192.0.2.1:4521".parse().unwrap()),
+            "'a;b'",
+            None,
+        ),
+        (
+            ConnectionPeer::Tcp("192.0.2.1:4521".parse().unwrap()),
+            args.as_str(),
+            None,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = app
+            .clone()
+            .oneshot(request(
+                peer,
+                serde_json::json!({
+                    "path": root.path(), "tool": "lenovo-claude", "profile": "test",
+                    "title": format!("quoted prompt {index}"),
+                    "extra_args": extra_args,
+                }),
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let Some(expected) = expected else {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{peer:?}: {result}");
+            assert!(result["message"].as_str().unwrap().contains("extra_args"));
+            continue;
+        };
+        assert_eq!(status, StatusCode::CREATED, "{peer:?}: {result}");
+        let row = state
+            .instances
+            .read()
+            .await
+            .iter()
+            .find(|row| row.id == result["id"].as_str().unwrap())
+            .unwrap()
+            .clone();
+        let launched = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("{} {}", row.command, row.extra_args)])
+            .status()
+            .unwrap();
+        assert!(launched.success());
+        assert_eq!(std::fs::read_to_string(&observed).unwrap(), expected);
+    }
+    assert!(!injected.exists());
     for cli in [serde_json::Value::Null, serde_json::json!({})] {
         let response = app
             .clone()
@@ -14172,6 +14243,7 @@ async fn restart_admission_decides_on_the_incoming_tool() -> anyhow::Result<()> 
             let response = restart_session(
                 State(state.clone()),
                 Path(row.id.clone()),
+                None,
                 Ok(Some(Json(crate::daemon::RestartSessionBody {
                     tool: Some(incoming.into()),
                     command_override: Some(incoming.into()),
@@ -14296,6 +14368,7 @@ async fn restart_admission_decides_an_account_swap_on_the_incoming_account() -> 
             let response = restart_session(
                 State(state.clone()),
                 Path(row.id.clone()),
+                None,
                 Ok(Some(Json(crate::daemon::RestartSessionBody {
                     tool: Some("claude-2".into()),
                     command_override: Some("claude".into()),
@@ -16032,5 +16105,21 @@ async fn send_router_accepts_worst_case_stdin_json_without_raising_its_wire_limi
             .unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), expected);
+    }
+}
+
+#[test]
+fn extra_args_gate_checks_each_word_not_the_quoting() {
+    use super::normalize_extra_args;
+    let prompt = "--append-system-prompt 'Capture an idea, keep it short'";
+    for owner in [true, false] {
+        assert_eq!(normalize_extra_args(prompt, owner).unwrap(), prompt);
+        assert!(normalize_extra_args("'unterminated", owner).is_err());
+    }
+    for literal in ["'a;b'", "'$(touch x)'"] {
+        assert!(normalize_extra_args(literal, false)
+            .unwrap_err()
+            .contains("extra_args"));
+        assert!(normalize_extra_args(literal, true).is_ok());
     }
 }

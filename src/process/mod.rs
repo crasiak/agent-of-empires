@@ -20,6 +20,8 @@ mod linux;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(all(not(test), target_os = "macos"))]
+pub(crate) use macos::ghostty_window_titles;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix;
 pub(crate) fn validate_recovery_file(file: &std::fs::File) -> anyhow::Result<()> {

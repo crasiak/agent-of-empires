@@ -33,7 +33,8 @@ jobs:
     name: Cargo Test (linux, ${{ matrix.leg }})
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'release-plz-')
     runs-on: ${{ (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires' || vars.RUNS_ON_DISABLED == 'true') && 'ubuntu-latest' || format('runs-on={0}-cargo-{1}-{2}/runner=8cpu-linux-x64/family=m8a+c8i+m8i/image=ubuntu26-full-x64/volume=80gb/extras=s3-cache', github.run_id, matrix.leg, github.run_attempt) }}
-    timeout-minutes: 40
+    # Cacheless hosted web/e2e builds need a larger cold-build budget.
+    timeout-minutes: ${{ matrix.leg == 'web-e2e' && (github.event.pull_request.head.repo.fork || github.repository != 'agent-of-empires/agent-of-empires' || vars.RUNS_ON_DISABLED == 'true') && 90 || 40 }}
     permissions:
       contents: read
       id-token: write
@@ -110,7 +111,7 @@ jobs:
       # trade wall time for flake risk on tests that wait on an ACP handshake.
       - name: Build tests (web, e2e)
         if: matrix.leg == 'web-e2e'
-        run: cargo test --features web,e2e-tests --test e2e --test integration --lib --no-run
+        run: python3 .github/scripts/nix-build-diagnostics.py cargo test --features web,e2e-tests --test e2e --test integration --lib --no-run
       - name: Cargo test (web, e2e only)
         if: matrix.leg == 'web-e2e'
         env:

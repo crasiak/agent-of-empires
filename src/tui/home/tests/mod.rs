@@ -202,6 +202,7 @@ fn key(code: KeyCode) -> KeyEvent {
 mod afk;
 mod apply_session_id_updates;
 mod archive_restart_grouping;
+mod bulk_actions;
 mod click_to_select;
 mod command_errors;
 mod creation_fence;
@@ -216,6 +217,7 @@ mod keys_and_nav;
 mod live_send_boot_size_tests;
 mod live_send_mode;
 mod local_write_guard;
+mod marks;
 mod permission_response_dialog;
 mod pickers_groups_sort;
 mod post_create_attach_mode;
@@ -931,6 +933,7 @@ fn creation_data(project_dir: &std::path::Path, title: &str, group: &str) -> New
         scratch: false,
         fork_seed: None,
         structured: false,
+        intake: false,
     }
 }
 

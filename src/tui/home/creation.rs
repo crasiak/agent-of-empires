@@ -535,7 +535,16 @@ impl HomeView {
                 }
             }
         }
-        match self.reveal_session(&row.id, true) {
+        let intake = pending.request.data.intake;
+        match self.reveal_session(&row.id, !intake) {
+            Ok(_) if intake => {
+                if self.info_dialog.is_some() {
+                    self.record_runtime_message("Intake Session created; enable Arc from the Session menu after reviewing setup warnings".into());
+                } else {
+                    self.toggle_work_arc_for(&row.id);
+                }
+                None
+            }
             Ok(_) => self.take_created_attach(),
             Err(error) => {
                 self.record_runtime_message(format!(

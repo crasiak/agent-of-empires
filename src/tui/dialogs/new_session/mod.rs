@@ -142,6 +142,8 @@ pub struct NewSessionData {
     /// Create in the structured (ACP) view instead of a tmux terminal. Only
     /// true for ACP-capable tools; `validate_structured_choice` enforces it.
     pub structured: bool,
+    /// Offer the existing Arc consent after this reviewed intake creation commits.
+    pub intake: bool,
 }
 
 /// The one conversion from wizard output to builder input, so a new field
@@ -184,6 +186,7 @@ impl From<NewSessionData> for crate::session::builder::InstanceParams {
 }
 
 pub struct NewSessionDialog {
+    pub(super) intake: Option<crate::session::tailored::intake::IntakeBrief>,
     pub(super) profile: String,
     pub(super) ledger_profile: Option<Input>,
     pub(super) available_profiles: Vec<String>,
@@ -600,6 +603,7 @@ impl NewSessionDialog {
 
         Self {
             profile: profile.to_string(),
+            intake: None,
             ledger_profile: None,
             available_profiles,
             profile_descriptions,
@@ -689,6 +693,14 @@ impl NewSessionDialog {
             let config = self.resolve_config_for_path(self.selected_profile());
             self.refresh_path_agent_config(&config);
         }
+    }
+
+    pub fn set_intake(&mut self, brief: crate::session::tailored::intake::IntakeBrief) {
+        self.set_tool("pi");
+        self.set_sandbox_enabled(false);
+        self.sandbox_dirty = true;
+        self.set_structured(false);
+        self.intake = Some(brief);
     }
 
     pub fn set_ledger_profile(&mut self, profile: String) {
@@ -1245,6 +1257,7 @@ impl NewSessionDialog {
 
         Self {
             profile: "default".to_string(),
+            intake: None,
             available_profiles: vec!["default".to_string()],
             profile_descriptions: vec![None],
             profile_index: 0,
@@ -1330,6 +1343,7 @@ impl NewSessionDialog {
     pub(super) fn new_with_tools(tools: Vec<&str>, path: String) -> Self {
         Self {
             profile: "default".to_string(),
+            intake: None,
             available_profiles: vec!["default".to_string()],
             profile_descriptions: vec![None],
             profile_index: 0,
@@ -2414,6 +2428,30 @@ impl NewSessionDialog {
     /// capable), surfacing a refusal inline. Runs before any worktree, scratch
     /// or container work, so a refusal cannot orphan resources.
     fn validate_structured(&mut self) -> bool {
+        if let Some(brief) = &self.intake {
+            let error = if self
+                .available_tools
+                .get(self.tool_index)
+                .is_none_or(|tool| tool != "pi")
+                || self.sandbox_enabled
+                || self.structured_enabled
+            {
+                Some("Intake currently requires terminal Pi on the host; review Agent, Sandbox and Structured settings".to_string())
+            } else {
+                brief
+                    .launch_args(
+                        self.extra_args.value(),
+                        self.selected_profile(),
+                        self.group.value(),
+                    )
+                    .err()
+                    .map(|error| error.to_string())
+            };
+            if let Some(error) = error {
+                self.error_message = Some(error);
+                return false;
+            }
+        }
         if let Err(error) = self.launch_command_override() {
             self.error_message = Some(error);
             return false;
@@ -2510,7 +2548,17 @@ impl NewSessionDialog {
             } else {
                 Vec::new()
             },
-            extra_args: self.extra_args.value().trim().to_string(),
+            extra_args: match &self.intake {
+                Some(brief) => match brief.launch_args(
+                    self.extra_args.value(),
+                    self.selected_profile(),
+                    self.group.value().trim(),
+                ) {
+                    Ok(args) => args,
+                    Err(_) => return DialogResult::Continue,
+                },
+                None => self.extra_args.value().trim().to_string(),
+            },
             command_override: match self.launch_command_override() {
                 Ok(command) => command,
                 Err(_) => return DialogResult::Continue,
@@ -2518,6 +2566,7 @@ impl NewSessionDialog {
             scratch: self.scratch,
             fork_seed: self.fork_seed.clone(),
             structured: self.structured_enabled && self.structured_capable,
+            intake: self.intake.is_some(),
         })
     }
 

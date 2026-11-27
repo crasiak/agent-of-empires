@@ -43,6 +43,8 @@ const NON_SUFFIX_HOST_STATE: Record<string, string> = {
   AOE_E2E_PROMPT_COMPLETED_FILE: `${HOST}/prompt-completed`,
   AOE_E2E_STORAGE_LOCK_CONTENDED: `${HOST}/lock-contended`,
   AOE_LEDGER_FIXTURE_ROOT: `${HOST}/ledger-fixture`,
+  AOE_KEYBOARD_TEST_PROBE: "host-keyboard-probe",
+  AOE_KEYBOARD_TEST_ROOT: `${HOST}/keyboard-probe`,
   AOE_PROJECT_FIFO_TEST_CHILD: "host-test-child",
   AOE_PROJECT_FIFO_TEST_ENTERED: `${HOST}/fifo-test-entered`,
   AOE_HOOK_ATOMIC_UMASK_CHILD_BASE: `${HOST}/hook-umask-fixture`,

@@ -1,6 +1,10 @@
 //! Home view - main session list and navigation
 
 pub(crate) mod bindings;
+mod breakout;
+mod bulk;
+mod bulk_restart;
+mod bulk_send;
 mod config_refresh;
 mod creation;
 mod dialogs;
@@ -15,6 +19,7 @@ mod layout;
 mod lifecycle;
 mod live_send;
 mod live_send_prep;
+mod marks;
 mod operations;
 mod overlays;
 pub(in crate::tui) mod panes;
@@ -65,9 +70,9 @@ use super::diff::DiffView;
 use super::settings::SettingsView;
 
 use self::icons::{
-    ICON_ARCHIVED_SECTION, ICON_COLLAPSED, ICON_DELETING, ICON_DORMANT, ICON_ERROR, ICON_EXPANDED,
-    ICON_FAVORITE, ICON_IDLE, ICON_PINNED, ICON_STOPPED, ICON_TERMINAL, ICON_TRASH_SECTION,
-    ICON_UNKNOWN, ICON_UNREAD, UNREAD_DWELL,
+    ICON_ARCHIVED_SECTION, ICON_BREAKOUT, ICON_COLLAPSED, ICON_DELETING, ICON_DORMANT, ICON_ERROR,
+    ICON_EXPANDED, ICON_FAVORITE, ICON_IDLE, ICON_MARK, ICON_PINNED, ICON_STOPPED, ICON_TERMINAL,
+    ICON_TRASH_SECTION, ICON_UNKNOWN, ICON_UNREAD, UNREAD_DWELL,
 };
 use self::preview::{PreviewCache, PreviewSelection, PreviewTextView, PreviewTimings};
 use self::rows::project_group_key;
@@ -388,6 +393,10 @@ pub struct HomeView {
     pub(super) pending_permission_response: Option<PermissionResponseTarget>,
     pub(super) pending_send_session: Option<String>,
     pub(super) pending_send_target: live_send::LiveSendTarget,
+    /// Targets of the open bulk send dialog. Set instead of `pending_send_session`.
+    pending_bulk_send: Option<Vec<bulk_send::BulkSendTarget>>,
+    /// The bulk send being delivered, if any. Dropped when its result arrives.
+    bulk_send_worker: Option<bulk_send::BulkSendWorker>,
     pub(super) pending_live_send_target: live_send::LiveSendTarget,
     pending_native_attachment: Option<panes::PendingNativeAttachment>,
     pub(super) live_send: Option<live_send::LiveSendState>,
@@ -443,6 +452,29 @@ pub struct HomeView {
     pub(super) pending_trash_session: Option<TrashDialogTarget>,
     /// Sessions and the color a confirmed bulk highlight change sets on them.
     pub(super) pending_highlight_bulk: Option<(Vec<String>, Option<&'static str>)>,
+    /// A bulk-restart confirm is open. Eligibility is recomputed when it is confirmed.
+    pending_bulk_restart: bool,
+    /// A Breakout confirm (more than six Sessions) is open.
+    pending_breakout: bool,
+    /// Existing desktop windows queried once at startup.
+    breakout_discovery_job: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
+    /// Sessions closed before the startup inventory arrives.
+    breakout_discovery_closes: Vec<String>,
+    /// The Breakout being opened off the event loop.
+    breakout_job:
+        Option<std::sync::mpsc::Receiver<Result<crate::breakout::BreakoutOutcome, String>>>,
+    /// "Close breakout windows" sweeping every Breakout window off the event loop.
+    breakout_close_job: Option<std::sync::mpsc::Receiver<Result<usize, String>>>,
+    /// The close of windows whose Sessions were stopped, trashed or deleted.
+    breakout_session_close_job: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// Window titles waiting to close with their Sessions while another job runs.
+    breakout_close_queue: Vec<String>,
+    /// Titles the running open job will give its windows.
+    breakout_opening_titles: Vec<String>,
+    /// Titles of opened or rediscovered Breakout windows.
+    breakout_titles: Vec<String>,
+    /// The bulk restart in progress, if any.
+    bulk_restart: Option<bulk_restart::BulkRestartRun>,
     pub(super) pending_dialog_click_action: Option<crate::tui::app::Action>,
     pub(super) search_active: bool,
     pub(super) search_query: Input,
@@ -477,6 +509,8 @@ pub struct HomeView {
     pub(super) diagnostics_hovered: bool,
     /// The selected session and the arc line under the pointer, for its tooltip.
     pub(super) arc_hover: Option<(String, usize)>,
+    /// The popup's record and windows, independent of later selection changes.
+    pub(super) steno_windows: Option<(crate::session::work_arc::StenoArc, Vec<u32>)>,
     pub(super) system_health_tip_high_samples: u8,
     pub(super) system_health_tip_earned: bool,
     pub(super) system_health_discovered: bool,
@@ -500,6 +534,8 @@ pub struct HomeView {
     // snapshot drives the row; see `apply_restart_results`.
     /// Sessions awaiting a daemon start snapshot (see `apply_restart_results`).
     pub(super) restart_in_flight: std::collections::HashSet<String>,
+    /// Sessions carrying a Mark. Local to this TUI; never persisted.
+    pub(super) marked: std::collections::HashSet<String>,
 
     /// The creation this view submitted to the daemon and still displays. The
     /// daemon owns provisioning, hooks, and the committed row.

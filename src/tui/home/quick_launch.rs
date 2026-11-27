@@ -6,7 +6,7 @@ use crate::tui::dialogs::{InfoDialog, NewSessionDialog};
 
 pub(super) fn shortcut_slot(key: &KeyEvent) -> Option<char> {
     match key.code {
-        KeyCode::Char(slot @ '1'..='9')
+        KeyCode::Char(slot @ '2'..='9')
             if key.modifiers == KeyModifiers::CONTROL && key.kind == KeyEventKind::Press =>
         {
             Some(slot)

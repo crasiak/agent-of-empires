@@ -1,5 +1,6 @@
 mod document;
 mod history;
+mod intake;
 mod research;
 mod workshop;
 
@@ -21,6 +22,8 @@ use crate::tui::styles::Theme;
 
 pub(in crate::tui) struct TailoredWindow {
     picker: HistoryPicker,
+    intake: Option<intake::IntakeWindow>,
+    intake_draft: Option<intake::IntakeWindow>,
     research: Option<research::ResearchWindow>,
     workshop: Option<workshop::WorkshopWindow>,
     document: Option<document::DocumentWindow>,
@@ -68,6 +71,8 @@ pub(super) enum WindowAction {
     Close,
     Open(String),
     Quick(QuickPreset),
+    Intake,
+    ConfigureIntake(crate::session::tailored::intake::IntakeBrief),
     Visibility { id: String, hidden: bool },
 }
 
@@ -84,9 +89,16 @@ enum TailoredStart {
 
 impl TailoredStart {
     fn data(self, profile: String) -> anyhow::Result<crate::tui::dialogs::NewSessionData> {
-        let (title, path, scratch, launch) = match self {
-            Self::Capture(request) => ("Capture an idea", String::new(), true, request.launch()?),
+        let (profile, title, path, scratch, launch) = match self {
+            Self::Capture(request) => (
+                profile,
+                "Capture an idea",
+                String::new(),
+                true,
+                request.launch()?,
+            ),
             Self::Quick(plan) => (
+                plan.preset.aoe_profile().into(),
                 plan.preset.title(),
                 plan.cwd.to_string_lossy().into_owned(),
                 false,
@@ -116,6 +128,7 @@ impl TailoredStart {
             scratch,
             fork_seed: None,
             structured: false,
+            intake: false,
         })
     }
 }
@@ -168,6 +181,8 @@ impl TailoredWindow {
     pub(super) fn new(account: CaptureAccount) -> Self {
         Self {
             picker: HistoryPicker::default(),
+            intake: None,
+            intake_draft: None,
             research: None,
             workshop: None,
             document: None,
@@ -219,6 +234,13 @@ impl TailoredWindow {
         self.history_refreshed = Some(Instant::now());
     }
 
+    fn pi_launch_pending(&self) -> bool {
+        self.checking_quick.is_some()
+            || self.starting_quick.is_some()
+            || self.checking.is_some()
+            || self.starting_document.is_some()
+    }
+
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> WindowAction {
         if key.kind == KeyEventKind::Release || self.hidden {
             return WindowAction::Continue;
@@ -232,6 +254,20 @@ impl TailoredWindow {
             } else {
                 WindowAction::Continue
             };
+        }
+        if self.intake.is_some() {
+            if key.kind == KeyEventKind::Press {
+                if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::CONTROL {
+                    return WindowAction::Close;
+                }
+                if key.code == KeyCode::F(2) {
+                    self.park_forms();
+                    self.composing = false;
+                    self.picker.recent();
+                    return WindowAction::Continue;
+                }
+            }
+            return self.intake.as_mut().unwrap().key(key);
         }
         let capture_editing = self.composing
             && self.focus == 0
@@ -257,6 +293,7 @@ impl TailoredWindow {
                 return WindowAction::Continue;
             }
             if editing
+                && !(key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL))
                 && key.code != KeyCode::Tab
                 && key.code != KeyCode::BackTab
                 && !matches!(key.code, KeyCode::F(_) | KeyCode::Esc)
@@ -282,13 +319,7 @@ impl TailoredWindow {
             return WindowAction::Close;
         }
         if key.code == KeyCode::F(2) && self.checking.is_none() {
-            self.terminal = None;
-            self.starting_document_foreground = false;
-            self.park_forms();
-            self.composing = false;
-            self.picker.recent();
-            self.history_refreshed = None;
-            self.error = None;
+            self.show_picker();
             return WindowAction::Continue;
         }
         if key.modifiers.is_empty()
@@ -392,6 +423,7 @@ impl TailoredWindow {
         match action {
             HistoryAction::None => WindowAction::Continue,
             HistoryAction::Quick(preset) => WindowAction::Quick(preset),
+            HistoryAction::Intake => WindowAction::Intake,
             HistoryAction::Document => {
                 self.open_document(self.document_account);
                 WindowAction::Continue
@@ -424,6 +456,10 @@ impl TailoredWindow {
         if self.hidden || self.checking_quick.is_some() || self.starting_quick.is_some() {
             return;
         }
+        if let Some(intake) = &mut self.intake {
+            intake.paste(text);
+            return;
+        }
         if let Some(workshop) = &mut self.workshop {
             workshop.paste(text);
             return;
@@ -454,6 +490,9 @@ impl TailoredWindow {
     pub(super) fn handle_click(&mut self, col: u16, row: u16) -> WindowAction {
         if self.hidden || self.checking_quick.is_some() || self.starting_quick.is_some() {
             return WindowAction::Continue;
+        }
+        if let Some(intake) = &mut self.intake {
+            return intake.click(col, row);
         }
         if self
             .document
@@ -509,7 +548,20 @@ impl TailoredWindow {
         self.error = None;
     }
 
+    fn show_picker(&mut self) {
+        self.terminal = None;
+        self.starting_document_foreground = false;
+        self.park_forms();
+        self.composing = false;
+        self.picker.recent();
+        self.history_refreshed = None;
+        self.error = None;
+    }
+
     fn park_forms(&mut self) {
+        if let Some(form) = self.intake.take() {
+            self.intake_draft = Some(form);
+        }
         if let Some(form) = self.research.take() {
             self.research_drafts.push(form);
         }
@@ -579,6 +631,8 @@ impl TailoredWindow {
         let width = area.width.saturating_sub(4).min(
             if self.terminal.is_some() || self.research.is_some() || self.workshop.is_some() {
                 140
+            } else if self.intake.is_none() && self.document.is_none() && !self.composing {
+                112
             } else {
                 84
             },
@@ -586,6 +640,8 @@ impl TailoredWindow {
         let height = area.height.saturating_sub(4).min(
             if self.terminal.is_some() || self.research.is_some() || self.workshop.is_some() {
                 48
+            } else if self.intake.is_some() {
+                36
             } else if self.composing || self.document.is_some() {
                 20
             } else {
@@ -610,6 +666,10 @@ impl TailoredWindow {
         self.account_rect = Rect::default();
         self.immediately_rect = Rect::default();
         self.submit_rect = Rect::default();
+        if let Some(intake) = &mut self.intake {
+            intake.render(frame, inner, theme);
+            return;
+        }
         if let Some(document) = &mut self.document {
             document.render(frame, inner, theme);
             return;
@@ -734,7 +794,7 @@ impl TailoredWindow {
             Paragraph::new(if self.checking.is_some() {
                 "Checking minimal Ledger profile…"
             } else {
-                "Enter newline · Ctrl+Enter capture · Tab controls · F2 history · Esc/Ctrl+Q close"
+                "Enter newline · Tab to Capture, Enter · Ctrl+Enter capture · F2 history · Esc close"
             })
             .style(style(self.focus == 3)),
             rows[5],
@@ -761,6 +821,10 @@ impl HomeView {
     }
 
     pub(super) fn open_tailored(&mut self) {
+        self.open_tailored_window(true);
+    }
+
+    fn open_tailored_window(&mut self, resume_terminal: bool) {
         if self.tailored_window.is_some() {
             return;
         }
@@ -775,10 +839,44 @@ impl HomeView {
         window.profile = profile;
         let terminal = window.suspended_terminal.take();
         self.tailored_window = Some(window);
-        if let Some(id) = terminal {
+        if let Some(id) = terminal.filter(|_| resume_terminal) {
             self.apply_tailored_action(WindowAction::Open(id));
         }
         self.refresh_tailored_history();
+    }
+
+    pub(super) fn open_tailored_picker(&mut self) {
+        self.open_tailored_window(false);
+        if let Some(window) = &mut self.tailored_window {
+            if window.checking.is_some()
+                || window.checking_quick.is_some()
+                || window.starting_quick.is_some()
+            {
+                window.error =
+                    Some("Wait for the pending Tailored launch before changing forms".into());
+                return;
+            }
+            window.show_picker();
+        }
+    }
+
+    pub(super) fn open_intake(&mut self) {
+        self.open_tailored_window(false);
+        if let Some(window) = &mut self.tailored_window {
+            if window.checking.is_some()
+                || window.checking_quick.is_some()
+                || window.starting_quick.is_some()
+            {
+                window.error =
+                    Some("Wait for the accepted Tailored launch before opening intake".into());
+                return;
+            }
+            window.terminal = None;
+            window.starting_document_foreground = false;
+            window.park_forms();
+            window.intake = Some(intake::IntakeWindow::default());
+            window.composing = false;
+        }
     }
 
     pub(super) fn handle_tailored_key(&mut self, key: KeyEvent) {
@@ -803,6 +901,13 @@ impl HomeView {
         match action {
             WindowAction::Continue => {}
             WindowAction::Quick(preset) => self.prepare_quick(preset),
+            WindowAction::Intake => {
+                if let Some(window) = &mut self.tailored_window {
+                    window.park_forms();
+                    window.intake = Some(window.intake_draft.take().unwrap_or_default());
+                }
+            }
+            WindowAction::ConfigureIntake(brief) => self.configure_intake(brief),
             WindowAction::Close => {
                 if let Some(mut window) = self.tailored_window.take() {
                     window.hidden = true;
@@ -937,19 +1042,36 @@ impl HomeView {
     }
 
     fn prepare_quick(&mut self, preset: QuickPreset) {
-        let Some(window) = &mut self.tailored_window else {
-            return;
-        };
-        if window.checking_quick.is_some()
-            || window.starting_quick.is_some()
-            || window.checking.is_some()
-            || window.starting_document.is_some()
+        if self
+            .tailored_window
+            .as_ref()
+            .is_none_or(TailoredWindow::pi_launch_pending)
         {
             return;
         }
+        let selected = (|| -> anyhow::Result<()> {
+            preset.verify_profile()?;
+            if self.active_profile.as_deref() != Some(preset.aoe_profile()) {
+                self.switch_profile(Some(preset.aoe_profile().into()))?;
+                self.open_tailored_window(false);
+            }
+            Ok(())
+        })();
+        if let Err(error) = selected {
+            self.open_tailored_window(false);
+            if let Some(window) = &mut self.tailored_window {
+                window.error = Some(format!("Quick profile selection failed: {error:#}"));
+            }
+            return;
+        }
+        let window = self.tailored_window.as_mut().expect("Quick owner");
+        if window.pi_launch_pending() {
+            return;
+        }
+        window.show_picker();
         let (tx, rx) = mpsc::channel();
         window.checking_quick = Some(rx);
-        window.error = Some(format!("Checking {} Ledger profile…", preset.title()));
+        window.error = Some(format!("Checking {} AoE profile…", preset.title()));
         std::thread::spawn(move || {
             let result = (|| -> anyhow::Result<QuickPlan> {
                 let home = dirs::home_dir()
@@ -1272,7 +1394,11 @@ impl HomeView {
             match result {
                 Err(mpsc::TryRecvError::Empty) => return refreshed,
                 ready => {
-                    let previous = self.selected_session.clone();
+                    let previous = self
+                        .tailored_window
+                        .as_ref()
+                        .filter(|window| !window.hidden)
+                        .and_then(|_| self.selected_session.clone());
                     let result = ready
                         .unwrap_or_else(|_| Err("Quick profile check stopped unexpectedly".into()))
                         .map_err(anyhow::Error::msg)
@@ -1361,13 +1487,13 @@ impl HomeView {
     }
 
     fn create_tailored_pi(&mut self, start: TailoredStart) -> anyhow::Result<String> {
-        let profile = self
-            .tailored_window
-            .as_ref()
-            .expect("Tailored owner")
-            .profile
-            .clone();
-        self.create_session(start.data(profile)?)
+        if let TailoredStart::Quick(plan) = &start {
+            plan.preset.verify_profile()?;
+        }
+        let window = self.tailored_window.as_ref().expect("Tailored owner");
+        let profile = window.profile.clone();
+        let reveal = !window.hidden || matches!(&start, TailoredStart::Capture(_));
+        self.create_session_with_reveal(start.data(profile)?, reveal)
     }
 
     fn start_quick_terminal(&mut self, id: &str, foreground: bool) -> anyhow::Result<()> {
@@ -1388,7 +1514,7 @@ impl HomeView {
             window.terminal = None;
             window.composing = false;
             window.error = Some(
-                "Starting Quick conversation; guarded Ledger qualification is running…".into(),
+                "Starting Quick conversation with the profile's configured Pi launcher…".into(),
             );
         }
         #[cfg(test)]
@@ -1496,20 +1622,23 @@ mod tests {
     }
 
     #[test]
-    fn quick_start_uses_knowledge_without_repurposing_capture_or_storage_account() {
-        for preset in [QuickPreset::Work, QuickPreset::Personal] {
+    fn quick_start_uses_knowledge_and_the_existing_account_profile_not_the_picker_owner() {
+        for (preset, expected_profile) in [
+            (QuickPreset::Work, "work-headroom-ledger"),
+            (QuickPreset::Personal, "personal-sub-headroom-ledger"),
+        ] {
             let data =
                 TailoredStart::Quick(preset.plan(std::path::Path::new("/home/test")).unwrap())
                     .data("aoe-storage-owner".into())
                     .unwrap();
-            assert_eq!(data.profile, "aoe-storage-owner");
+            assert_eq!(data.profile, expected_profile);
             assert_eq!(data.path, "/home/test/knowledge");
             assert_eq!(data.title, preset.title());
             assert!(!data.scratch && !data.workspace && !data.worktree_enabled && !data.sandbox);
             assert!(data.extra_repo_paths.is_empty());
-            assert_eq!(
-                crate::session::ledger_pi::profile(&data.tool, &data.command_override).as_deref(),
-                Some(preset.profile())
+            assert!(
+                data.command_override.is_empty(),
+                "Quick bypassed the account profile's configured Pi launcher"
             );
         }
         let data = TailoredStart::Capture(TailoredRequest {
@@ -1521,9 +1650,297 @@ mod tests {
         })
         .data("aoe-storage-owner".into())
         .unwrap();
+        assert_eq!(data.profile, "aoe-storage-owner");
         assert!(data.scratch);
         assert!(data.path.is_empty());
         assert!(data.command_override.contains("aoe-capture-personal"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn quick_creation_switches_to_existing_owner_without_background_focus_or_draft_transfer() {
+        use crate::session::{Instance, Storage};
+        for (preset, owner, launcher) in [
+            (
+                QuickPreset::Work,
+                "work-headroom-ledger",
+                "configured-work-pi",
+            ),
+            (
+                QuickPreset::Personal,
+                "personal-sub-headroom-ledger",
+                "configured-personal-pi",
+            ),
+        ] {
+            for (background, selected_foreground) in [(false, false), (true, false), (true, true)] {
+                let root = tempfile::tempdir().unwrap();
+                let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+                let knowledge = root.path().join("knowledge");
+                std::fs::create_dir(&knowledge).unwrap();
+                let _ledger = crate::session::test_support::install_login_shell_path_command(
+                    root.path(),
+                    "ledger",
+                    "#!/bin/sh\nexit 99\n",
+                );
+                let path = crate::session::get_profile_dir_path(owner).unwrap();
+                std::fs::create_dir_all(&path).unwrap();
+                let config = format!("[session.agent_command_override]\npi = \"{launcher}\"\n");
+                std::fs::write(path.join("config.toml"), &config).unwrap();
+                let mut view = HomeView::new_for_test(
+                    Some("picker-owner".into()),
+                    crate::tmux::AvailableTools::with_tools(&["pi"]),
+                    crate::file_watch::FileWatchService::noop(),
+                )
+                .unwrap();
+                view.open_tailored();
+                view.tailored_window
+                    .as_mut()
+                    .unwrap()
+                    .idea
+                    .insert_str("original draft");
+                view.prepare_quick(preset);
+                let prepared = view
+                    .tailored_window
+                    .as_mut()
+                    .unwrap()
+                    .checking_quick
+                    .take()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                assert_eq!(view.active_profile.as_deref(), Some(owner));
+                let plan = prepared.unwrap();
+                let (release, pending) = mpsc::channel();
+                let (started, arrivals) = mpsc::channel();
+                let window = view.tailored_window.as_mut().unwrap();
+                assert_eq!(window.profile, owner);
+                assert!(window.idea.lines().join("\n").is_empty());
+                window.checking_quick = Some(pending);
+                window.quick_starter = Some(Box::new(move |instance| {
+                    let (finish, pending) = mpsc::channel();
+                    started.send((instance.id, finish)).unwrap();
+                    document::StartWorker::from_receiver_for_test(pending)
+                }));
+                if background {
+                    let storage = Storage::new_unwatched("other-profile").unwrap();
+                    let mut foreground = Instance::new("Foreground", knowledge.to_str().unwrap());
+                    foreground.source_profile = "other-profile".into();
+                    foreground.tool = "pi".into();
+                    foreground.command = "configured-foreground-pi".into();
+                    foreground.group_path = "foreground-group".into();
+                    let rows = if selected_foreground {
+                        storage
+                            .update(|rows, _| {
+                                rows.push(foreground.clone());
+                                Ok(())
+                            })
+                            .unwrap();
+                        vec![
+                            crate::server::api::sessions::session_response_from_instance(
+                                &foreground,
+                                false,
+                            ),
+                        ]
+                    } else {
+                        Vec::new()
+                    };
+                    let snapshot = super::super::tests::fixture_snapshot(rows, owner, "test", 1);
+                    view.session_feed.publish_for_test(
+                        crate::tui::session_feed::SessionFeedResult::Snapshot(std::sync::Arc::new(
+                            snapshot,
+                        )),
+                    );
+                    view.apply_session_feed();
+                    view.switch_profile(Some("other-profile".into())).unwrap();
+                    if selected_foreground {
+                        view.select_session_by_id(&foreground.id);
+                        assert_eq!(
+                            view.selected_session.as_deref(),
+                            Some(foreground.id.as_str())
+                        );
+                    }
+                    view.open_tailored();
+                    view.tailored_window
+                        .as_mut()
+                        .unwrap()
+                        .idea
+                        .insert_str("other profile draft");
+                }
+                assert!(
+                    view.info_dialog.is_none(),
+                    "fixture already has a foreground modal"
+                );
+                let foreground_state = |view: &HomeView| {
+                    (
+                        view.cursor,
+                        view.selected_session.clone(),
+                        view.selected_group.clone(),
+                        view.selected_group_profile.clone(),
+                        view.preview_scroll_offset,
+                        view.retained_scroll_offset,
+                        format!("{:?}", view.flat_items),
+                    )
+                };
+                let before = foreground_state(&view);
+                release.send(Ok(plan)).unwrap();
+                view.tick_tailored();
+                let (id, finish) = arrivals.recv_timeout(Duration::from_secs(5)).unwrap();
+                let storage = Storage::new_unwatched(owner).unwrap();
+                let stored = storage.load().unwrap();
+                assert_eq!(stored.len(), 1);
+                assert_eq!(stored[0].id, id);
+                assert_eq!(stored[0].effective_profile(), owner);
+                assert_eq!(stored[0].command, launcher);
+                assert_eq!(
+                    crate::session::tailored::quick::preset(&stored[0]),
+                    Some(preset)
+                );
+                assert_eq!(
+                    stored[0].project_path,
+                    knowledge.canonicalize().unwrap().to_string_lossy()
+                );
+                if background {
+                    assert!(
+                        view.info_dialog.is_none(),
+                        "background Quick opened a global modal"
+                    );
+                    assert_eq!(
+                        foreground_state(&view),
+                        before,
+                        "background Quick changed the foreground model or selection"
+                    );
+                }
+                finish
+                    .send((id.clone(), Err("injected native start refusal".into())))
+                    .unwrap();
+                view.tick_tailored();
+                if background {
+                    assert!(
+                        view.info_dialog.is_none(),
+                        "background Quick completion opened a global modal"
+                    );
+                    assert_eq!(
+                        foreground_state(&view),
+                        before,
+                        "background native completion changed the foreground"
+                    );
+                }
+                assert_eq!(
+                    view.active_profile.as_deref(),
+                    Some(if background { "other-profile" } else { owner })
+                );
+                let origin = view
+                    .retained_tailored_windows
+                    .iter()
+                    .find(|window| window.profile == "picker-owner")
+                    .unwrap();
+                assert_eq!(origin.idea.lines().join("\n"), "original draft");
+                if background {
+                    assert_eq!(
+                        view.tailored_window
+                            .as_ref()
+                            .unwrap()
+                            .idea
+                            .lines()
+                            .join("\n"),
+                        "other profile draft"
+                    );
+                }
+                let owner_window = view
+                    .tailored_window
+                    .iter()
+                    .chain(&view.retained_tailored_windows)
+                    .find(|window| window.profile == owner)
+                    .unwrap();
+                assert!(owner_window.starting_quick.is_none());
+                assert!(owner_window.error.as_ref().unwrap().contains(&id));
+                assert_eq!(
+                    storage.load().unwrap().len(),
+                    1,
+                    "Quick created a replacement"
+                );
+                assert!(Storage::new_unwatched("picker-owner")
+                    .unwrap()
+                    .load()
+                    .unwrap()
+                    .is_empty());
+                assert_eq!(
+                    std::fs::read_to_string(path.join("config.toml")).unwrap(),
+                    config
+                );
+                for window in view
+                    .tailored_window
+                    .iter_mut()
+                    .chain(&mut view.retained_tailored_windows)
+                {
+                    if let Some((_, pending)) = window.workshop_history.take() {
+                        let _ = pending.recv_timeout(Duration::from_secs(5)).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn quick_selection_parks_the_restored_destination_form_without_discarding_its_draft() {
+        for preset in [QuickPreset::Work, QuickPreset::Personal] {
+            let root = tempfile::tempdir().unwrap();
+            let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+            std::fs::create_dir(root.path().join("knowledge")).unwrap();
+            std::fs::create_dir_all(
+                crate::session::get_profile_dir_path(preset.aoe_profile()).unwrap(),
+            )
+            .unwrap();
+            let mut view = HomeView::new_for_test(
+                Some("picker-owner".into()),
+                crate::tmux::AvailableTools::with_tools(&["pi"]),
+                crate::file_watch::FileWatchService::noop(),
+            )
+            .unwrap();
+            view.open_tailored();
+            let mut destination = TailoredWindow::new(preset.account());
+            destination.profile = preset.aoe_profile().into();
+            destination.hidden = true;
+            destination.open_document(preset.account());
+            destination
+                .document
+                .as_mut()
+                .unwrap()
+                .paste("https://example.org/retained.md");
+            view.retained_tailored_windows.push(destination);
+            view.prepare_quick(preset);
+            view.tailored_window
+                .as_mut()
+                .unwrap()
+                .checking_quick
+                .take()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            for window in view
+                .tailored_window
+                .iter_mut()
+                .chain(&mut view.retained_tailored_windows)
+            {
+                if let Some((_, pending)) = window.workshop_history.take() {
+                    let _ = pending.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            }
+            let destination = view.tailored_window.as_ref().unwrap();
+            assert!(
+                destination.document.is_none(),
+                "restored Document form hides Quick"
+            );
+            assert_eq!(destination.document_drafts.len(), 1);
+            assert_eq!(
+                destination.document_drafts[0].url_text_for_test(),
+                "https://example.org/retained.md"
+            );
+            assert!(!destination.composing);
+            assert!(destination.error.as_ref().unwrap().contains("Checking"));
+        }
     }
 
     #[test]
@@ -1559,6 +1976,88 @@ mod tests {
             window.handle_key(key(KeyCode::Esc)),
             WindowAction::Close
         ));
+    }
+
+    #[test]
+    fn picker_details_distinguish_same_title_sessions_at_eighty_by_twenty_four() {
+        let mut window = TailoredWindow::new(CaptureAccount::Personal);
+        let first = crate::session::tailored::history::HistoryEntry {
+            id: "first".into(),
+            profile: "personal-profile".into(),
+            title: "Saved capture".into(),
+            account: CaptureAccount::Personal,
+            input_preview: "First task preview".into(),
+            status: "idle".into(),
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            hidden: false,
+            research: false,
+            workshop: false,
+        };
+        let mut second = first.clone();
+        second.id = "second".into();
+        second.input_preview = "Second task preview".into();
+        let history_template = first.clone();
+        window.picker.replace_rows(vec![first, second]);
+        window.picker.handle_paste("Saved capture");
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut draw = |window: &mut TailoredWindow| {
+            terminal
+                .draw(|frame| window.render(frame, frame.area(), &Theme::default()))
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .chunks(80)
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let first = draw(&mut window);
+        assert!(first.contains("First task preview"));
+        assert!(first.contains("Created:"));
+        assert!(first.contains("AoE Profile: personal-profile"));
+        assert!(!first.contains("Second task preview"));
+        window.handle_key(key(KeyCode::Down));
+        let second = draw(&mut window);
+        assert!(second.contains("Second task preview"));
+        assert!(!second.contains("First task preview"));
+        assert!(
+            matches!(window.handle_key(key(KeyCode::Enter)), WindowAction::Open(id) if id == "second")
+        );
+        window.picker = HistoryPicker::default();
+        window.picker.handle_paste(QuickPreset::Work.title());
+        let quick = draw(&mut window);
+        assert!(quick.contains("Blank conversation at ~/knowledge."));
+        assert!(quick.contains("Uses this profile's configured Pi launcher."));
+        assert!(quick.contains("AoE Profile: work-headroom-ledger"));
+        let mut first = history_template;
+        first.id = "long-first".into();
+        first.input_preview = format!("{}FIRST-END", "界".repeat(150));
+        let mut second = first.clone();
+        second.id = "long-second".into();
+        second.input_preview = format!("{}SECOND-END", "界".repeat(150));
+        window.picker = HistoryPicker::default();
+        window.picker.replace_rows(vec![first, second]);
+        window.picker.handle_paste("Saved capture");
+        assert!(!draw(&mut window).contains("FIRST-END"));
+        window.handle_key(key(KeyCode::PageDown));
+        assert!(draw(&mut window).contains("FIRST-END"));
+        for _ in 0..8 {
+            window.handle_key(key(KeyCode::PageDown));
+        }
+        assert!(draw(&mut window).contains("FIRST-END"));
+        window.handle_key(key(KeyCode::PageUp));
+        assert!(!draw(&mut window).contains("FIRST-END"));
+        window.handle_key(key(KeyCode::PageDown));
+        window.handle_key(key(KeyCode::Down));
+        let reset = draw(&mut window);
+        assert!(!reset.contains("FIRST-END") && !reset.contains("SECOND-END"));
+        window.handle_key(key(KeyCode::PageDown));
+        assert!(draw(&mut window).contains("SECOND-END"));
+        assert!(
+            matches!(window.handle_key(key(KeyCode::Enter)), WindowAction::Open(id) if id == "long-second")
+        );
     }
 
     #[test]
@@ -1620,7 +2119,7 @@ esac
         let form = render(&mut view);
         let rendered: String = form.content().iter().map(|cell| cell.symbol()).collect();
         assert!(rendered.contains("Tailored Sessions"));
-        assert!(rendered.contains("Enter newline · Ctrl+Enter capture"));
+        assert!(rendered.contains("Tab to Capture, Enter · Ctrl+Enter capture"));
         assert!(!rendered.contains("Verify idea"));
         let idea_border = form
             .content()
@@ -1715,6 +2214,12 @@ esac
             assert!(retained.terminal.is_none());
             assert_eq!(retained.idea.lines().join("\n"), expected);
             view.handle_key(shortcut, None);
+            assert!(!view.tailored_window.as_ref().unwrap().composing);
+            view.handle_key(key(KeyCode::Enter), None);
+            let window = view.tailored_window.as_ref().unwrap();
+            assert!(window.composing);
+            assert_eq!(window.idea.lines().join("\n"), expected);
+            assert!(window.checking.is_none());
         }
 
         for confirm in 0..3 {
@@ -1825,31 +2330,36 @@ esac
     }
 
     #[test]
-    fn capture_ctrl_enter_still_submits_on_press_from_every_control() {
-        for focus in 0..4 {
-            for kind in [KeyEventKind::Press, KeyEventKind::Release] {
-                let mut window = TailoredWindow::new(CaptureAccount::Personal);
-                window.picker_action(HistoryAction::New);
-                window.handle_paste("invalid\0idea");
-                window.focus = focus;
-                window.handle_key(KeyEvent::new_with_kind(
-                    KeyCode::Enter,
-                    KeyModifiers::CONTROL,
-                    kind,
-                ));
-                assert_eq!(window.idea.lines().join("\n"), "invalid\0idea");
-                assert!(window.checking.is_none());
-                assert_eq!(window.focus, focus);
-                assert_eq!(window.account, CaptureAccount::Personal);
-                assert!(!window.immediately);
-                assert_eq!(
-                    window.error.as_deref(),
-                    if kind == KeyEventKind::Press {
-                        Some("Enter an idea between 1 and 16384 bytes, without NUL characters")
-                    } else {
-                        None
-                    }
-                );
+    fn capture_ignores_highlight_key_and_only_submits_on_control_enter_press() {
+        for (code, modifiers, submits) in [
+            (KeyCode::Enter, KeyModifiers::CONTROL, true),
+            (KeyCode::F(4), KeyModifiers::NONE, false),
+        ] {
+            for focus in 0..4 {
+                for kind in [
+                    KeyEventKind::Press,
+                    KeyEventKind::Repeat,
+                    KeyEventKind::Release,
+                ] {
+                    let mut window = TailoredWindow::new(CaptureAccount::Personal);
+                    window.picker_action(HistoryAction::New);
+                    window.handle_paste("invalid\0idea");
+                    window.focus = focus;
+                    window.handle_key(KeyEvent::new_with_kind(code, modifiers, kind));
+                    assert_eq!(window.idea.lines().join("\n"), "invalid\0idea");
+                    assert!(window.checking.is_none());
+                    assert_eq!(window.focus, focus);
+                    assert_eq!(window.account, CaptureAccount::Personal);
+                    assert!(!window.immediately);
+                    assert_eq!(
+                        window.error.as_deref(),
+                        if submits && kind == KeyEventKind::Press {
+                            Some("Enter an idea between 1 and 16384 bytes, without NUL characters")
+                        } else {
+                            None
+                        }
+                    );
+                }
             }
         }
     }
@@ -1919,6 +2429,7 @@ esac
             (KeyCode::Enter, KeyModifiers::ALT),
             (KeyCode::Char('j'), KeyModifiers::CONTROL),
             (KeyCode::Enter, KeyModifiers::CONTROL),
+            (KeyCode::F(4), KeyModifiers::NONE),
             (KeyCode::Backspace, KeyModifiers::NONE),
             (KeyCode::Delete, KeyModifiers::NONE),
             (KeyCode::Left, KeyModifiers::NONE),

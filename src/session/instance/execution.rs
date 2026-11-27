@@ -1985,6 +1985,12 @@ impl Instance {
         } else {
             self.extra_args.clone()
         };
+        let extra = if self.tool == "pi" {
+            // The renderer owns the intake turn; only configured flags enter attestation.
+            crate::session::tailored::intake::split_launch_args(&extra).0
+        } else {
+            extra
+        };
         if Self::contains_active_shell_syntax(&extra) {
             return Err(anyhow::anyhow!(
                 "managed conversation cannot use active shell syntax in arguments"
@@ -1999,9 +2005,14 @@ impl Instance {
             );
             return Ok(None);
         }
-        if crate::session::ledger_pi::profile(&self.tool, &self.get_tool_command()).is_some() {
+        if let Some(profile) =
+            crate::session::ledger_pi::profile(&self.tool, &self.get_tool_command())
+        {
             let arguments = shell_words::split(&extra)
                 .map_err(|_| anyhow::anyhow!("Ledger Pi launch arguments cannot be parsed"))?;
+            if crate::session::tailored::is_capture_launch_arguments(&profile, &arguments) {
+                return Ok(None);
+            }
             return validate_managed_arguments(agent, &arguments).map_err(|_| {
                 anyhow::anyhow!(
                     "Ledger Pi arguments are not supported by the guarded launch contract"
@@ -3829,7 +3840,7 @@ mod tests {
         let quote =
             |p: &std::path::Path| crate::session::environment::shell_escape(p.to_str().unwrap());
         let executable = std::env::current_exe().unwrap();
-        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nprintf '%s\\0' \"$@\" > {}\nAOE_LEDGER_FIXTURE_ROOT={} {} --exact session::instance::execution::tests::ledger_pi_metadata_helper --ignored > {} 2>&1 || exit 94\n/bin/cat {}\n", quote(&calls), quote(&root.join("argv")), quote(&root), quote(&executable), quote(&root.join("helper.log")), quote(&root.join("response.json")));
+        let script = format!("#!/bin/sh\nif [ \"$1\" = run ]; then\n    printf '%s\\0' \"$@\" > {}\n    exit 0\nfi\nprintf '%s\\n' \"$*\" >> {}\nprintf '%s\\0' \"$@\" > {}\nAOE_LEDGER_FIXTURE_ROOT={} {} --exact session::instance::execution::tests::ledger_pi_metadata_helper --ignored > {} 2>&1 || exit 94\n/bin/cat {}\n", quote(&root.join("run-argv")), quote(&calls), quote(&root.join("argv")), quote(&root), quote(&executable), quote(&root.join("helper.log")), quote(&root.join("response.json")));
         let _ledger = install_login_shell_path_command(
             &root,
             "ledger",
@@ -4016,6 +4027,150 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("Ledger Pi arguments"), "{message}");
         assert!(!message.contains("private-argv-detail"), "{message}");
+        for (account, immediately) in [
+            (crate::session::tailored::CaptureAccount::Personal, false),
+            (crate::session::tailored::CaptureAccount::Work, true),
+        ] {
+            let request = crate::session::tailored::TailoredRequest {
+                preset: "capture-idea".into(),
+                account,
+                idea: "A 'quoted' idea; $(not-a-command)\r\n--session stolen --extension /outside"
+                    .into(),
+                immediately,
+                document: None,
+            };
+            let launch = request.launch().unwrap();
+            let prompt = shell_words::split(&launch.extra_args).unwrap().remove(0);
+            let mut capture =
+                crate::session::instance::test_helpers::tool_instance("pi", cwd.to_str().unwrap());
+            capture.command = launch
+                .command
+                .replacen("ledger", &quote(&selected_ledger), 1);
+            capture.extra_args = launch.extra_args.clone();
+            let mut capture_lock = lock.clone();
+            capture_lock["profile"]["name"] = serde_json::json!(account.ledger_profile());
+            let mut capture_description = stale.clone();
+            capture_description["profile"] = serde_json::json!(account.ledger_profile());
+            capture_description["state"] = serde_json::json!("current");
+            std::fs::write(&lock_file, serde_json::to_vec(&capture_lock).unwrap()).unwrap();
+            std::fs::write(
+                &description_file,
+                serde_json::to_vec(&capture_description).unwrap(),
+            )
+            .unwrap();
+            let prepared = capture
+                .prepare_launch_command(capture.conversation_state())
+                .unwrap_or_else(|error| panic!("Capture {account:?}: {error:#}"));
+            assert_eq!(
+                prepared.execution.as_ref().unwrap().binding.stores,
+                vec![runtime.join("sessions")]
+            );
+            let command = prepared.command.unwrap();
+            let inspected = std::fs::read(root.join("argv")).unwrap();
+            let words = inspected
+                .split(|byte| *byte == 0)
+                .filter(|word| !word.is_empty())
+                .map(|word| std::str::from_utf8(word).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(words[..2], ["launch", "describe"]);
+            let boundary = words.iter().position(|word| *word == "--").unwrap();
+            let words = &words[boundary + 1..];
+            assert_eq!(
+                words
+                    .iter()
+                    .filter(|word| **word == prompt.as_str())
+                    .count(),
+                1
+            );
+            assert_eq!(command.matches("--expect-launch").count(), 1);
+            assert!(command.contains(&"b".repeat(64)));
+            assert_eq!(
+                words
+                    .iter()
+                    .filter(|word| **word == "--session-dir")
+                    .count(),
+                1
+            );
+            assert!(!words
+                .iter()
+                .any(|word| *word == "--session" || *word == "/outside"));
+            assert!(uuid::Uuid::parse_str(capture.agent_session_id.as_ref().unwrap()).is_ok());
+            let mut shell = std::process::Command::new("/bin/sh");
+            shell.arg("-c").arg(&command).current_dir(&cwd);
+            let output = crate::process::run_with_bounded_stdout(
+                &mut shell,
+                std::time::Duration::from_secs(10),
+                128 * 1024,
+            )
+            .unwrap()
+            .expect("fixture launch timed out");
+            assert!(
+                output.status.success(),
+                "Capture {account:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let executed = std::fs::read(root.join("run-argv")).unwrap();
+            let executed = executed
+                .strip_suffix(&[0])
+                .expect("fixture argv must end with NUL")
+                .split(|byte| *byte == 0)
+                .map(|word| std::str::from_utf8(word).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                executed[..5],
+                [
+                    "run",
+                    "pi",
+                    "--profile",
+                    account.ledger_profile(),
+                    "--expect-launch",
+                ]
+            );
+            assert_eq!(executed[5], "b".repeat(64));
+            assert_eq!(executed[6], "--");
+            assert_eq!(
+                &executed[7..],
+                words,
+                "Capture {account:?}: executed arguments differ from guarded Describe"
+            );
+            let agent = crate::agents::get_agent("pi").unwrap();
+            for invalid in [
+                "auth".to_owned(),
+                "private-argv-detail".to_owned(),
+                format!("{} --session-dir /outside", launch.extra_args),
+                shell_words::quote(&prompt.replace("capture-idea skill", "another skill"))
+                    .into_owned(),
+                shell_words::quote(&prompt.replace(
+                    if immediately {
+                        "Immediately is ON"
+                    } else {
+                        "Immediately is OFF"
+                    },
+                    "Immediately is undecided",
+                ))
+                .into_owned(),
+            ] {
+                capture.extra_args = invalid;
+                assert!(capture.managed_user_argv(agent).is_err());
+            }
+            capture.extra_args = launch.extra_args;
+            capture.command = format!("{} run pi --profile personal --", quote(&selected_ledger));
+            assert!(capture.managed_user_argv(agent).is_err());
+            let other = match account {
+                crate::session::tailored::CaptureAccount::Personal => {
+                    crate::session::tailored::CaptureAccount::Work
+                }
+                crate::session::tailored::CaptureAccount::Work => {
+                    crate::session::tailored::CaptureAccount::Personal
+                }
+            };
+            capture.command = format!(
+                "{} run pi --profile {} --",
+                quote(&selected_ledger),
+                other.ledger_profile()
+            );
+            assert!(capture.managed_user_argv(agent).is_err());
+        }
         let calls = std::fs::read_to_string(calls).unwrap();
         assert!(
             !calls.lines().any(|line| line.starts_with("run ")),

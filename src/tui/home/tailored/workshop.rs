@@ -197,6 +197,12 @@ impl WorkshopWindow {
         if self.pending.is_some() {
             return;
         }
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.error.get_or_insert_with(|| {
+                "Workshop uses Ctrl+Alt+S to create, then separate review/approval controls; Ctrl+Enter never approves effects".into()
+            });
+            return;
+        }
         let revision = self.request.as_ref().map_or(0, |r| r.revision);
         match key.code {
             KeyCode::F(8) => {
@@ -803,7 +809,10 @@ mod tests {
         window.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
         assert_eq!(window.fields[0].cursor(), (2, 4));
         window.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        let before = window.value(0);
         window.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(window.value(0), before);
+        assert!(window.error.as_deref().unwrap().contains("Ctrl+Alt+S"));
         assert!(window.pending.is_none());
         assert!(window.create.is_none());
     }

@@ -219,6 +219,8 @@ impl HomeView {
             pending_permission_response: None,
             pending_send_session: None,
             pending_send_target: live_send::LiveSendTarget::Agent,
+            pending_bulk_send: None,
+            bulk_send_worker: None,
             pending_live_send_target: live_send::LiveSendTarget::Agent,
             pending_native_attachment: None,
             live_send: None,
@@ -264,6 +266,17 @@ impl HomeView {
             pending_force_remove_session: None,
             pending_trash_session: None,
             pending_highlight_bulk: None,
+            pending_bulk_restart: false,
+            pending_breakout: false,
+            breakout_discovery_job: super::breakout::spawn_discovery(),
+            breakout_discovery_closes: Vec::new(),
+            breakout_job: None,
+            breakout_close_job: None,
+            breakout_session_close_job: None,
+            breakout_close_queue: Vec::new(),
+            breakout_opening_titles: Vec::new(),
+            breakout_titles: Vec::new(),
+            bulk_restart: None,
             pending_dialog_click_action: None,
             search_active: false,
             search_query: Input::default(),
@@ -293,6 +306,7 @@ impl HomeView {
             diagnostics_area: Rect::default(),
             diagnostics_hovered: false,
             arc_hover: None,
+            steno_windows: None,
             system_health_tip_high_samples: 0,
             system_health_tip_earned: user_config
                 .as_ref()
@@ -312,6 +326,7 @@ impl HomeView {
             runtime_failure_reason: None,
             offline_attention: crate::tui::dialogs::DaemonAttention::Offline,
             restart_in_flight: std::collections::HashSet::new(),
+            marked: std::collections::HashSet::new(),
             pending_creation: None,
             structured_transcript_painted: false,
             creating_hook_progress: HashMap::new(),
@@ -614,6 +629,7 @@ impl HomeView {
 
         let prev_selected_session = self.selected_session.clone();
 
+        self.prune_marks();
         self.rebuild_flat_items_keeping_cursor();
 
         // Storage rebuilds and search re-scoring must not move the live-send

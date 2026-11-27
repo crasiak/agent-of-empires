@@ -73,9 +73,8 @@ pub use update::*;
 pub use usage::*;
 pub use workshop::*;
 
-/// Shell-metacharacter gate for the free-form spawn fields a client can set
-/// on a session, shared by the create and restart routes so the two cannot
-/// drift.
+/// Shell-metacharacter gate for free-form spawn fields other than
+/// `extra_args`, which goes through [`normalize_extra_args`].
 ///
 /// `command_override` is deliberately absent: it is an `argv[0]` program path
 /// rather than shell input, and the create route gates it on the agent
@@ -85,6 +84,19 @@ pub(super) fn validate_shell_fields(checks: &[(&str, &str)]) -> Result<(), Strin
         .iter()
         .find_map(|(value, name)| validate_no_shell_injection(value, name).err())
         .map_or(Ok(()), Err)
+}
+
+/// Splits `extra_args` into words and returns them re-quoted for the spawn
+/// shell. Callers other than the local Unix owner may not put shell
+/// metacharacters inside a word; quoting between words is not checked.
+pub(super) fn normalize_extra_args(raw: &str, local_owner: bool) -> Result<String, String> {
+    let args = shell_words::split(raw).map_err(|error| format!("Invalid extra_args: {error}"))?;
+    if !local_owner {
+        for arg in &args {
+            validate_no_shell_injection(arg, "extra_args")?;
+        }
+    }
+    Ok(shell_words::join(args))
 }
 
 #[cfg(test)]
