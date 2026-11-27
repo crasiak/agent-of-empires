@@ -28,8 +28,8 @@ mod session_feed;
 pub mod settings;
 pub(crate) mod structured_view;
 pub(crate) mod styles;
-mod usage_poller;
 mod telemetry;
+mod usage_poller;
 mod worker;
 
 pub use app::*;

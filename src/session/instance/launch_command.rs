@@ -2969,7 +2969,7 @@ sandbox = "unsupported"
             std::fs::create_dir(&store).unwrap();
             let transcript = publish_host_pi_transcript(&instance.id, &sid, &store);
             native.pi_transcript_path = Some(transcript.to_str().unwrap().into());
-            instance.started_at = Some(chrono::Utc::now());
+            instance.started_at = Some(crate::time::Timestamp::now());
             let resumed = instance
                 .build_host_command(
                     instance.resolved_agent(),

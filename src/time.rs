@@ -235,6 +235,13 @@ impl From<SystemTime> for Timestamp {
     }
 }
 
+impl From<Timestamp> for chrono::DateTime<chrono::Utc> {
+    fn from(value: Timestamp) -> Self {
+        Self::from_timestamp(value.0.unix_timestamp(), value.0.nanosecond())
+            .expect("Timestamp is within chrono's UTC range")
+    }
+}
+
 impl Add<Duration> for Timestamp {
     type Output = Self;
     fn add(self, rhs: Duration) -> Self {
@@ -304,6 +311,23 @@ mod tests {
     fn at(secs: i64, nanos: u32) -> Timestamp {
         let nanos = i128::from(secs) * 1_000_000_000 + i128::from(nanos);
         Timestamp(UtcDateTime::from_unix_timestamp_nanos(nanos).unwrap())
+    }
+
+    #[test]
+    fn fork_chrono_boundary_keeps_the_instant_and_fractional_seconds() {
+        for source in [
+            "-0001-01-01T00:00:00Z",
+            "1969-12-31T23:59:59.123456789Z",
+            "2026-11-27T12:34:56.987654321+01:30",
+            "9999-12-31T23:59:59.999999999Z",
+        ] {
+            let timestamp = Timestamp::parse_rfc3339(source).unwrap();
+            let fork: chrono::DateTime<chrono::Utc> = timestamp.into();
+            assert_eq!(
+                fork.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+                timestamp.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+            );
+        }
     }
 
     /// Expected strings were captured from chrono 0.4.45.

@@ -141,10 +141,11 @@ pub struct StructuredViewState {
     /// or `None` when off or the fetch failed. Read from the daemon's `/api/about`,
     /// not local config, so a remote-attached view honours that daemon (#3253).
     pub compaction_reminder_percent: Option<u8>,
+    /// Transcript-wide tool-card fold; `None` keeps per-outcome defaults.
+    pub tool_fold: Option<ToolFold>,
     /// Prompts the daemon took from this view. A caller replaying buffered input
     /// advances only when this grows: a rejected prompt comes back to the
     /// composer, and Enter can be consumed by the view without a submit.
-    pub tool_fold: Option<ToolFold>,
     pub accepted_submits: u64,
     /// True when the last submit was refused and its text put back in the
     /// composer, so a replay knows that text is not lost.
@@ -231,7 +232,8 @@ impl StructuredViewState {
             _ => ToolFold::Folded,
         });
         if let Some(anchor) = anchor {
-            self.scroll_offset.set(super::render::restore_scroll(self, &anchor));
+            self.scroll_offset
+                .set(super::render::restore_scroll(self, &anchor));
         }
     }
 

@@ -129,6 +129,9 @@ mod window_title_tests {
         assert!(parse_window_titles(b"\n").unwrap().is_empty());
         assert!(parse_window_titles(b"'unterminated").is_err());
         assert!(parse_window_titles(&[0xff]).is_err());
+    }
+}
+
 /// A fixed-size disk image. The caller owns the recovery marker and must settle
 /// every Git writer before calling `close`. Deliberately no Drop cleanup: an
 /// interrupted attach or detach must leave its image available for recovery.

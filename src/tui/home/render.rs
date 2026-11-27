@@ -3551,7 +3551,7 @@ impl HomeView {
                 if id == selected && summary.tracked {
                     sections.push(usage_overlay::usage_rows(
                         summary,
-                        instance.created_at,
+                        instance.created_at.into(),
                         now,
                         theme,
                     ));
@@ -3584,7 +3584,7 @@ impl HomeView {
         };
         let layout = preview::PreviewLayout::compute(
             self.preview_area,
-            self.preview_outer_area.width < responsive::STACKED_BREAKPOINT,
+            responsive::is_narrow(self.preview_outer_area.width, self.narrow_breakpoint),
             self.show_preview_info,
             metadata + arc,
         );

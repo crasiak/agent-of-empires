@@ -20,8 +20,8 @@ use super::reducer::{
     AcpTranscript, NoteKind, PendingApproval, ToolCallRow, ToolCompletion, ToolOutcome,
 };
 use super::state::{
-    FileIndex, PickerKind, PickerTarget, ScrollAnchor, StructuredViewState, TranscriptTextCache,
-    ToolFold, ViewLayout,
+    FileIndex, PickerKind, PickerTarget, ScrollAnchor, StructuredViewState, ToolFold,
+    TranscriptTextCache, ViewLayout,
 };
 use crate::acp::approvals::{tool_target, ToolTarget, CMD_KEYS, PATH_KEYS};
 use crate::acp::session_paths::{relative_display_path, SessionPathRoots};
@@ -1392,7 +1392,11 @@ fn wrap_transcript(
         groups.resize(wrapped.len(), group);
     }
     starts.push(wrapped.len());
-    let items = text.items.into_iter().map(|item| starts[item.start]..starts[item.end]).collect();
+    let items = text
+        .items
+        .into_iter()
+        .map(|item| starts[item.start]..starts[item.end])
+        .collect();
     (Text::from(wrapped), groups, items)
 }
 
@@ -1402,7 +1406,14 @@ fn wrapped_transcript_items(
     width: u16,
     tool_output: ToolOutputMode,
 ) -> (Text<'static>, Vec<Range<usize>>) {
-    let text = transcript_lines(&state.transcript, theme, state.path_roots.as_ref(), state.show_full_thinking, tool_output, state.tool_fold);
+    let text = transcript_lines(
+        &state.transcript,
+        theme,
+        state.path_roots.as_ref(),
+        state.show_full_thinking,
+        tool_output,
+        state.tool_fold,
+    );
     let (text, _, items) = wrap_transcript(text, width);
     (text, items)
 }
@@ -1417,19 +1428,32 @@ pub(super) fn scroll_anchor(state: &StructuredViewState) -> Option<ToolScrollAnc
     if state.scroll_offset.get() == u16::MAX || width == 0 {
         return None;
     }
-    let (_, items) = wrapped_transcript_items(state, &Theme::default(), width, ToolOutputMode::Compact);
+    let (_, items) =
+        wrapped_transcript_items(state, &Theme::default(), width, ToolOutputMode::Compact);
     let first = state.scroll_offset.get().min(state.last_scroll_max.get()) as usize;
-    let item = items.partition_point(|item| item.start <= first).checked_sub(1)?;
-    Some(ToolScrollAnchor { item, row: first - items[item].start })
+    let item = items
+        .partition_point(|item| item.start <= first)
+        .checked_sub(1)?;
+    Some(ToolScrollAnchor {
+        item,
+        row: first - items[item].start,
+    })
 }
 
 pub(super) fn restore_scroll(state: &StructuredViewState, anchor: &ToolScrollAnchor) -> u16 {
     let (width, height) = state.last_text_size.get();
-    let (text, items) = wrapped_transcript_items(state, &Theme::default(), width, ToolOutputMode::Compact);
-    let Some(item) = items.get(anchor.item) else { return u16::MAX; };
+    let (text, items) =
+        wrapped_transcript_items(state, &Theme::default(), width, ToolOutputMode::Compact);
+    let Some(item) = items.get(anchor.item) else {
+        return u16::MAX;
+    };
     let first = item.start + anchor.row.min(item.end.saturating_sub(item.start + 1));
     let max = text.lines.len().saturating_sub(height as usize);
-    if first >= max { u16::MAX } else { first as u16 }
+    if first >= max {
+        u16::MAX
+    } else {
+        first as u16
+    }
 }
 
 /// Transcript rows paired with the identity each row's lines came from.
@@ -4055,7 +4079,15 @@ mod tests {
             chunk("ing now", "m-c"),
         ]));
         let out = joined(
-            &transcript_lines(&t, &Theme::default(), None, false, ToolOutputMode::Compact, None).lines,
+            &transcript_lines(
+                &t,
+                &Theme::default(),
+                None,
+                false,
+                ToolOutputMode::Compact,
+                None,
+            )
+            .lines,
         );
         assert!(!out.contains("#4656.The waiter"), "{out:?}");
         assert!(
@@ -4079,13 +4111,19 @@ mod tests {
             thought("options\nsecond line", "t-a"),
             thought(&long, "t-b"),
         ]));
-        let lines: Vec<String> =
-            transcript_lines(&t, &Theme::default(), None, false, ToolOutputMode::Compact, None)
-                .lines
-                .iter()
-                .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
-                .filter(|line: &String| !line.is_empty())
-                .collect();
+        let lines: Vec<String> = transcript_lines(
+            &t,
+            &Theme::default(),
+            None,
+            false,
+            ToolOutputMode::Compact,
+            None,
+        )
+        .lines
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .filter(|line: &String| !line.is_empty())
+        .collect();
         assert_eq!(
             lines,
             [
@@ -4125,7 +4163,15 @@ mod tests {
             "t-a",
         )]));
         let body = joined(
-            &transcript_lines(&t, &Theme::default(), None, true, ToolOutputMode::Compact).lines,
+            &transcript_lines(
+                &t,
+                &Theme::default(),
+                None,
+                true,
+                ToolOutputMode::Compact,
+                None,
+            )
+            .lines,
         );
         assert!(body.contains("Compare both alternatives."), "{body:?}");
     }
@@ -4436,7 +4482,15 @@ mod tests {
             },
         ]));
         let out = joined(
-            &transcript_lines(&t, &Theme::default(), None, false, ToolOutputMode::Compact, None).lines,
+            &transcript_lines(
+                &t,
+                &Theme::default(),
+                None,
+                false,
+                ToolOutputMode::Compact,
+                None,
+            )
+            .lines,
         );
         assert_eq!(out.matches("Compaction summary").count(), 1, "{out:?}");
         for want in [
@@ -4492,12 +4546,19 @@ mod tests {
     }
 
     fn tool_lines(t: &AcpTranscript) -> Vec<String> {
-        transcript_lines(t, &Theme::default(), None, false, ToolOutputMode::Compact, None)
-            .lines
-            .iter()
-            .map(line_text)
-            .filter(|line| !line.is_empty())
-            .collect()
+        transcript_lines(
+            t,
+            &Theme::default(),
+            None,
+            false,
+            ToolOutputMode::Compact,
+            None,
+        )
+        .lines
+        .iter()
+        .map(line_text)
+        .filter(|line| !line.is_empty())
+        .collect()
     }
 
     /// Children indent under their parent card; orphans and unparented rows

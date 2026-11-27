@@ -774,6 +774,8 @@ impl HomeView {
         }
         self.keep_steno_arcs(&mut next);
         self.instances = next;
+        self.badge_identities
+            .retain(|id, _| self.instances.contains_key(id));
         self.group_trees = trees;
         self.storages.extend(opened_storages);
         self.storages.retain(|name, _| {

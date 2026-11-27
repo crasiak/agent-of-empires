@@ -1135,7 +1135,7 @@ fn click_on_shared_group_toggles_locally_without_changing_profiles() {
     assert_eq!(stored("alpha"), before_a);
     assert_eq!(stored("beta"), before_b);
 
-    view.reload().unwrap();
+    view.reload();
     assert!(shared_group_row(&view).1, "local collapse survives reload");
     view.handle_key(key(KeyCode::Enter), None);
     assert!(!shared_group_row(&view).1);
@@ -1155,7 +1155,7 @@ fn reload_keeps_cursor_on_unified_group() {
     view.update_selected();
     assert!(view.selected_group_profile.is_none());
 
-    view.reload().unwrap();
+    view.reload();
 
     assert_eq!(view.cursor, shared_group_row(&view).0);
     assert!(view.selected_group_profile.is_none());

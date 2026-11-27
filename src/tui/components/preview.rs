@@ -1151,7 +1151,7 @@ mod tests {
             branch: "feature/x".into(),
             main_repo_path: "/repo".into(),
             managed_by_aoe: true,
-            created_at: chrono::Utc::now(),
+            created_at: crate::time::Timestamp::now(),
             base_branch: Some("main".into()),
         });
         let rows = info_rows(&session, 140);
@@ -1452,7 +1452,7 @@ mod tests {
                     branch: "feature/x".into(),
                     main_repo_path: "/repo".into(),
                     managed_by_aoe: true,
-                    created_at: chrono::Utc::now(),
+                    created_at: crate::time::Timestamp::now(),
                     base_branch,
                 });
                 let area = Rect::new(0, 0, 100, 40);

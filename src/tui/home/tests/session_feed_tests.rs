@@ -3871,7 +3871,7 @@ fn sidebar_badge_cache_does_not_label_error_rows() {
 
 #[test]
 #[serial]
-fn storage_reload_prunes_badge_identities_of_removed_sessions() {
+fn canonical_reload_prunes_badge_identities_of_removed_sessions() {
     let mut env = create_test_env_with_sessions(2);
     let kept = env
         .view
@@ -3886,7 +3886,13 @@ fn storage_reload_prunes_badge_identities_of_removed_sessions() {
             .insert(id.to_string(), (0, pi_ledger_identity()));
     }
 
-    env.view.load_storage_projection().unwrap();
+    let rows = env
+        .view
+        .instances()
+        .map(|row| daemon_row(row, "Stopped"))
+        .collect();
+    env.view.session_feed.publish_for_test(snapshot_of(rows));
+    env.view.apply_session_feed();
 
     assert!(env.view.instances.contains_key(&kept), "fixture row kept");
     assert!(env.view.badge_identities.contains_key(&kept));

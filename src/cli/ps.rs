@@ -127,8 +127,8 @@ struct Signals {
     attention: Option<AttentionJson>,
 }
 
-fn rfc3339(at: chrono::DateTime<chrono::Utc>) -> String {
-    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+fn rfc3339(at: crate::time::Timestamp) -> String {
+    at.to_rfc3339_opts(crate::time::SecondsFormat::Secs, true)
 }
 
 impl Signals {
@@ -138,12 +138,12 @@ impl Signals {
         window_activity: Option<i64>,
         unread: Option<bool>,
         status: Status,
-        idle_entered_at: Option<chrono::DateTime<chrono::Utc>>,
+        idle_entered_at: Option<crate::time::Timestamp>,
         attention: Option<crate::hooks::HookAttention>,
     ) -> Self {
         Self {
             last_activity: window_activity
-                .and_then(|epoch| chrono::DateTime::from_timestamp(epoch, 0))
+                .and_then(|epoch| crate::time::Timestamp::from_unix_secs(epoch))
                 .map(rfc3339),
             unread,
             idle_since: idle_entered_at
@@ -571,7 +571,11 @@ fn pane_pid_for(
     lookup: impl Fn(&str) -> Option<u32>,
 ) -> Option<u32> {
     pane_pid_or(meta.get(name), || {
-        if exists(name) == Some(false) { None } else { lookup(name) }
+        if exists(name) == Some(false) {
+            None
+        } else {
+            lookup(name)
+        }
     })
 }
 
@@ -1371,7 +1375,7 @@ mod tests {
     fn row_json_appends_live_signals_and_omits_unknown_ones() {
         const OLD_KEYS: [&str; 6] = ["session", "substrate", "state", "pid", "age_secs", "agent"];
         let instances = vec![inst("abcd1234ef567890", "My Session")];
-        let idle_entered = chrono::DateTime::from_timestamp(1_700_000_050, 123_000_000).unwrap();
+        let idle_entered = crate::time::Timestamp::from_millis(1_700_000_050_123).unwrap();
         let asked = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_100);
         let attention = || crate::hooks::HookAttention {
             summary: "Ship it?".to_string(),

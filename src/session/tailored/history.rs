@@ -103,7 +103,7 @@ pub fn entry(instance: &Instance, hidden: &HiddenSessions) -> Option<HistoryEntr
         account,
         input_preview: input_preview(instance),
         status: instance.status.wire_str().into(),
-        created_at: instance.created_at,
+        created_at: instance.created_at.into(),
     })
 }
 
@@ -193,7 +193,7 @@ mod tests {
         }
         instance.scratch = false;
         assert!(super::entry(&instance, &HiddenSessions::new()).is_some());
-        instance.archived_at = Some(Utc::now());
+        instance.archived_at = Some(crate::time::Timestamp::now());
         assert!(super::entry(&instance, &HiddenSessions::new()).is_none());
     }
 

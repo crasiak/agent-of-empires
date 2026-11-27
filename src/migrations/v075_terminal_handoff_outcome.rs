@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn an_upgrade_from_before_v046_records_the_outcome_after_v059() -> Result<()> {
+    fn an_upgrade_from_before_v061_records_the_outcome_after_v074() -> Result<()> {
         let home = tempfile::tempdir()?;
         let _home = crate::session::test_support::isolate_app_dir_at(home.path());
         let app = crate::session::get_app_dir()?;
@@ -420,7 +420,7 @@ mod tests {
         let intent = pending(&row, TerminalHandoffContext::Discard);
         let bytes = serde_json::to_vec(&json!([written_before(&row, &intent)?]))?;
         std::fs::write(storage.sessions_path(), &bytes)?;
-        std::fs::write(app.join(".schema_version"), "45")?;
+        std::fs::write(app.join(".schema_version"), "60")?;
         // Whether the handoff has its outcome as each migration finishes.
         let finished = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (seen, path) = (finished.clone(), storage.sessions_path().to_path_buf());
@@ -438,8 +438,8 @@ mod tests {
         let expected: Vec<_> = crate::migrations::MIGRATIONS
             .iter()
             .map(|(version, ..)| *version)
-            .filter(|version| *version > 45)
-            .map(|version| (version, version >= 60))
+            .filter(|version| *version > 60)
+            .map(|version| (version, version >= 75))
             .collect();
         assert_eq!(finished, expected);
         let loaded = storage.load()?;

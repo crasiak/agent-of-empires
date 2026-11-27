@@ -672,7 +672,11 @@ mod tests {
         fs::create_dir_all(&profile).unwrap();
         let config = "default_profile = 'personal'\n[session]\nshow_session_colors = true\n[sandbox]\ndefault_image = 'ghcr.io/agent-of-empires/aoe-sandbox:latest'\n";
         fs::write(app.join("config.toml"), config).unwrap();
-        fs::write(profile.join("config.toml"), "[sandbox]\ndefault_image = 'my-private-image:1'\n").unwrap();
+        fs::write(
+            profile.join("config.toml"),
+            "[sandbox]\ndefault_image = 'my-private-image:1'\n",
+        )
+        .unwrap();
         let state = b"[repo_appearances]\nalias = 'Keep my alias'\ncolor = 'purple'\n";
         fs::write(app.join("state.toml"), state).unwrap();
         fs::write(app.join("afk-retained"), b"retained authority").unwrap();
@@ -697,20 +701,43 @@ mod tests {
         for _ in 0..2 {
             run_migrations().unwrap();
             assert_eq!(get_current_version(), 77);
-            let migrated: serde_json::Value = serde_json::from_slice(&fs::read(&sessions).unwrap()).unwrap();
+            let migrated: serde_json::Value =
+                serde_json::from_slice(&fs::read(&sessions).unwrap()).unwrap();
             let mut expected = row.clone();
-            expected["terminal_handoff"]["outcome"] = serde_json::to_value(&intent.outcome).unwrap();
+            expected["terminal_handoff"]["outcome"] =
+                serde_json::to_value(&intent.outcome).unwrap();
             assert_eq!(migrated, serde_json::json!([expected]));
             assert_eq!(fs::read(app.join("state.toml")).unwrap(), state);
-            assert_eq!(fs::read(app.join("afk-retained")).unwrap(), b"retained authority");
+            assert_eq!(
+                fs::read(app.join("afk-retained")).unwrap(),
+                b"retained authority"
+            );
             assert_eq!(fs::read(&log).unwrap(), b"retained event log backup");
-            assert_eq!(fs::metadata(&log).unwrap().permissions().mode() & 0o777, 0o600);
-            let config: toml::Table = fs::read_to_string(app.join("config.toml")).unwrap().parse().unwrap();
-            assert_eq!(config["session"]["show_session_colors"].as_bool(), Some(true));
+            assert_eq!(
+                fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let config: toml::Table = fs::read_to_string(app.join("config.toml"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(
+                config["session"]["show_session_colors"].as_bool(),
+                Some(true)
+            );
             assert!(config["sandbox"].get("default_image").is_none());
-            let profile_config: toml::Table = fs::read_to_string(profile.join("config.toml")).unwrap().parse().unwrap();
-            assert_eq!(profile_config["sandbox"]["default_image"].as_str(), Some("my-private-image:1"));
-            assert_eq!(fs::read(app.join(crate::plugin::install::STAGING_MARKER)).unwrap(), evidence);
+            let profile_config: toml::Table = fs::read_to_string(profile.join("config.toml"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(
+                profile_config["sandbox"]["default_image"].as_str(),
+                Some("my-private-image:1")
+            );
+            assert_eq!(
+                fs::read(app.join(crate::plugin::install::STAGING_MARKER)).unwrap(),
+                evidence
+            );
             assert!(app.join(crate::plugin::install::RECOVERY_MARKER).is_file());
         }
     }
