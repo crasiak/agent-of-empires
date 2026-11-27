@@ -128,6 +128,7 @@ import { normalizeProjectPathKey } from "./lib/registeredProjects";
 import { IdleDecayWindowContext, parseIdleDecayWindowMs } from "./lib/idleDecay";
 import { parseUnreadIndicatorEnabled, UnreadIndicatorContext, useUnreadIndicatorEnabled } from "./lib/unreadIndicator";
 import { parseSessionRowTagMode, SessionRowTagContext, type SessionRowTagMode } from "./lib/sessionRowTag";
+import { parseSessionColorsEnabled, SessionColorsContext } from "./lib/sessionColors";
 import { PanelDefaultsContext, parsePanelDefaults, usePanelDefaults, type PanelDefaults } from "./lib/panelDefaults";
 import { settleSettingsIntrosReadOnly } from "./lib/settingsIntros";
 import { onSettingsChanged } from "./lib/settingsEvents";
@@ -246,6 +247,7 @@ export default function App() {
   const [idleDecayWindowMs, setIdleDecayWindowMs] = useState(IDLE_DECAY_WINDOW_MS);
   const [unreadIndicatorEnabled, setUnreadIndicatorEnabled] = useState(true);
   const [sessionRowTagMode, setSessionRowTagMode] = useState<SessionRowTagMode>("branch");
+  const [sessionColorsEnabled, setSessionColorsEnabled] = useState(true);
   const [systemHealthEnabled, setSystemHealthEnabled] = useState(false);
   const [panelDefaults, setPanelDefaults] = useState<PanelDefaults>(() => parsePanelDefaults(null));
 
@@ -253,6 +255,7 @@ export default function App() {
     setIdleDecayWindowMs(parseIdleDecayWindowMs(settings));
     setUnreadIndicatorEnabled(parseUnreadIndicatorEnabled(settings));
     setSessionRowTagMode(parseSessionRowTagMode(settings));
+    setSessionColorsEnabled(parseSessionColorsEnabled(settings));
     setSystemHealthEnabled(parseSystemHealthEnabled(settings));
     setPanelDefaults(parsePanelDefaults(settings));
   }, []);
@@ -345,17 +348,19 @@ export default function App() {
     <IdleDecayWindowContext.Provider value={idleDecayWindowMs}>
       <UnreadIndicatorContext.Provider value={unreadIndicatorEnabled}>
         <SessionRowTagContext.Provider value={sessionRowTagMode}>
-          <SystemHealthEnabledContext.Provider value={systemHealthEnabled}>
-            <PanelDefaultsContext.Provider value={panelDefaults}>
-              {/* PluginUiProvider must sit above AppContent: AppContent itself reads
+          <SessionColorsContext.Provider value={sessionColorsEnabled}>
+            <SystemHealthEnabledContext.Provider value={systemHealthEnabled}>
+              <PanelDefaultsContext.Provider value={panelDefaults}>
+                {/* PluginUiProvider must sit above AppContent: AppContent itself reads
                   the plugin UI snapshot (usePluginPanes), so the provider can't live
                   inside its own return. */}
-              <PluginUiProvider>
-                <AppContent loginRequired={loginRequired} onLogout={handleLogout} resolvedTheme={resolvedTheme} />
-              </PluginUiProvider>
-              <ElevationPrompt />
-            </PanelDefaultsContext.Provider>
-          </SystemHealthEnabledContext.Provider>
+                <PluginUiProvider>
+                  <AppContent loginRequired={loginRequired} onLogout={handleLogout} resolvedTheme={resolvedTheme} />
+                </PluginUiProvider>
+                <ElevationPrompt />
+              </PanelDefaultsContext.Provider>
+            </SystemHealthEnabledContext.Provider>
+          </SessionColorsContext.Provider>
         </SessionRowTagContext.Provider>
       </UnreadIndicatorContext.Provider>
     </IdleDecayWindowContext.Provider>
@@ -607,6 +612,7 @@ function AppContent({
     groups: repoGroups,
     savedProjects,
     toggleRepoCollapsed,
+    updateRepoAppearance,
     reorderRepoGroups,
   } = useRepoGroups(
     workspaces,
@@ -632,7 +638,7 @@ function AppContent({
     pluginAttention,
   );
   // The nested `repo+group` axis reuses the already-built repo groups for
-  // its top level (so repo collapse and ordering are shared
+  // its top level (so repo collapse, appearance, and ordering are shared
   // with the repo axis) and splits each repo by `group_path` underneath.
   // See #1720.
   const { groups: nestedGroups, toggleSubgroupCollapsed } = useNestedSidebarGroups(
@@ -1588,10 +1594,10 @@ function AppContent({
     (session: SessionResponse): NewSessionLike | undefined => {
       if (caps.readOnly) return undefined;
       const repoPath = session.main_repo_path || session.project_path;
-      // Named as its sidebar header is: the folder name.
+      // Named as its sidebar header is: the alias, else the folder name.
       const groupId = (session.main_repo_path ?? session.project_path).replace(/\/+$/, "");
       return {
-        project: groupId.split("/").pop() || groupId,
+        project: repoGroups.find((group) => group.id === groupId)?.displayName ?? (groupId.split("/").pop() || groupId),
         open: () => {
           const profile = session.profile || requireProjectProfile();
           if (!profile) return;
@@ -1609,7 +1615,7 @@ function AppContent({
         },
       };
     },
-    [caps.readOnly, projects, requireProjectProfile],
+    [caps.readOnly, projects, repoGroups, requireProjectProfile],
   );
 
   const handlePinProject = useCallback(
@@ -2829,6 +2835,7 @@ function AppContent({
                 onOpenChange={setSidebarOpen}
                 onSelect={handleSelectWorkspace}
                 onToggleGroup={toggleSidebarGroup}
+                onUpdateRepoAppearance={updateRepoAppearance}
                 onNew={(prefill) => {
                   setWizardPrefill(prefill?.group ? { group: prefill.group } : undefined);
                   setShowSessionWizard(true);

@@ -1,6 +1,7 @@
 import type { ComponentProps, ReactNode } from "react";
 import { DndContext, MouseSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { SortableContext, arrayMove, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import type { RepoAppearanceUpdate } from "../../lib/repoAppearance";
 import {
   nestedSidebarGroupShouldRender,
   orgNestedGroupShouldRender,
@@ -29,6 +30,7 @@ export interface ListContext {
   displayedActiveSessionId: string | null;
   onNew: (prefill?: { group?: string }) => void;
   onCreateSession: (repoPath: string) => void;
+  onUpdateAppearance: (repoId: string, update: RepoAppearanceUpdate) => void;
   onPinProject?: (repoPath: string) => void;
   onUnpinProject?: (group: SidebarGroup) => void;
   onEditProjectSettings?: (group: SidebarGroup) => void;
@@ -80,6 +82,7 @@ function GroupHeader({
       group={{ ...full, collapsed: !expanded }}
       hasActiveChild={!expanded && containsActive(visible, ctx.displayedActiveId, ctx.displayedActiveSessionId)}
       onClick={() => !ctx.hasFilter && onToggle()}
+      onUpdateAppearance={ctx.onUpdateAppearance}
       onArchiveAll={locked ? undefined : () => ctx.onArchiveGroup(full)}
       onPin={locked || !pinnable ? undefined : ctx.onPinProject}
       onUnpin={locked || !pinnable ? undefined : ctx.onUnpinProject}

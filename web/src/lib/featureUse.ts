@@ -17,6 +17,7 @@ export type FeatureUse =
   | "unread_toggle"
   | "row_reorder"
   | "attention_jump"
+  | "session_color"
   | "focus_mode"
   | "fork"
   | "auto_name"

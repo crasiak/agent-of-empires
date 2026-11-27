@@ -473,6 +473,9 @@ impl Instance {
         if pre.base_branch_override != post.base_branch_override {
             self.base_branch_override = post.base_branch_override.clone();
         }
+        if pre.color != post.color {
+            self.color = post.color.clone();
+        }
         if pre.sort_index != post.sort_index {
             self.sort_index = post.sort_index;
         }
