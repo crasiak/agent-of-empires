@@ -1228,7 +1228,7 @@ impl HomeView {
                     let storage = crate::session::Storage::new(&profile, self.file_watch.clone())?;
                     self.storages.insert(profile, storage);
                 }
-                self.reload()?;
+                self.reload();
                 outcome.map_err(anyhow::Error::msg)?;
                 if foreground {
                     self.ready_capture_terminal(&id).map(Some)
@@ -1278,7 +1278,7 @@ impl HomeView {
                 })
             };
             let result = storage
-                .and_then(|()| self.reload())
+                .map(|()| self.reload())
                 .and_then(|()| outcome.map_err(anyhow::Error::msg))
                 .and_then(|()| {
                     if foreground {
@@ -3048,7 +3048,7 @@ esac
         assert!(capture_target_available(Some(&instance), "Capture"));
         assert!(!capture_target_available(None, "Capture"));
         assert!(!capture_target_available(Some(&instance), "Previous title"));
-        instance.trashed_at = Some(chrono::Utc::now());
+        instance.trashed_at = Some(crate::time::Timestamp::now());
         assert!(!capture_target_available(Some(&instance), "Capture"));
     }
 

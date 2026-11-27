@@ -44,8 +44,9 @@ fn a_trashed_session_loses_its_mark_on_prune() {
     env.view.handle_key(space(), None);
     let id = session_id_at(&env.view, 0).unwrap();
 
-    env.view
-        .mutate_instance(&id, |inst| inst.trashed_at = Some(chrono::Utc::now()));
+    env.view.mutate_instance(&id, |inst| {
+        inst.trashed_at = Some(crate::time::Timestamp::now())
+    });
     env.view.prune_marks();
     assert!(env.view.marked.is_empty());
 }
@@ -332,8 +333,9 @@ fn switching_profile_drops_marks_on_sessions_it_no_longer_shows() {
 fn the_footer_hides_esc_clear_marks_while_the_retained_reader_is_focused() {
     let mut env = create_test_env_with_sessions(2);
     let id = env.view.instance_at(0).id.clone();
-    env.view
-        .mutate_instance(&id, |inst| inst.trashed_at = Some(chrono::Utc::now()));
+    env.view.mutate_instance(&id, |inst| {
+        inst.trashed_at = Some(crate::time::Timestamp::now())
+    });
     env.view.trashed_section_collapsed = false;
     env.view.rebuild_flat_items();
     env.view.select_session_by_id(&id);

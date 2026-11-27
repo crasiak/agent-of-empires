@@ -709,7 +709,7 @@ impl Preview {
         }
         let inner = output;
 
-        if let Some(error) = &instance.last_error {
+        if let Some(error) = instance.last_error.as_deref() {
             let mut error_lines: Vec<Line> = vec![
                 Line::from(Span::styled(
                     "Error:",
@@ -1151,7 +1151,7 @@ mod tests {
             branch: "feature/x".into(),
             main_repo_path: "/repo".into(),
             managed_by_aoe: true,
-            created_at: chrono::Utc::now(),
+            created_at: crate::time::Timestamp::now(),
             base_branch: Some("main".into()),
         });
         let rows = info_rows(&session, 140);
@@ -1452,7 +1452,7 @@ mod tests {
                     branch: "feature/x".into(),
                     main_repo_path: "/repo".into(),
                     managed_by_aoe: true,
-                    created_at: chrono::Utc::now(),
+                    created_at: crate::time::Timestamp::now(),
                     base_branch,
                 });
                 let area = Rect::new(0, 0, 100, 40);
@@ -1470,14 +1470,14 @@ mod tests {
     mod agent_info_height {
         use super::super::agent_info_height;
         use crate::session::{Instance, SandboxInfo, WorktreeInfo};
-        use chrono::Utc;
+        use crate::time::Timestamp;
 
         fn worktree(base_branch: Option<&str>) -> WorktreeInfo {
             WorktreeInfo {
                 branch: "feature/x".into(),
                 main_repo_path: "/repo".into(),
                 managed_by_aoe: true,
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
                 base_branch: base_branch.map(str::to_string),
             }
         }
@@ -1544,7 +1544,7 @@ mod tests {
     mod terminal_info_height {
         use super::super::terminal_info_height;
         use crate::session::{Instance, SandboxInfo, WorktreeInfo};
-        use chrono::Utc;
+        use crate::time::Timestamp;
 
         fn enabled_sandbox() -> SandboxInfo {
             SandboxInfo {
@@ -1592,7 +1592,7 @@ mod tests {
                 branch: "feature/x".into(),
                 main_repo_path: "/repo".into(),
                 managed_by_aoe: true,
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
                 base_branch: Some("main".into()),
             });
             assert_eq!(terminal_info_height(&inst), 3);

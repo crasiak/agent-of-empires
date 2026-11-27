@@ -87,7 +87,7 @@ dependencies = [
 
 [[package]]
 name = "agent-of-empires"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "aes-gcm",
  "agent-client-protocol",
@@ -158,6 +158,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tokio-util",
@@ -175,6 +176,7 @@ dependencies = [
  "unicode-width",
  "uuid",
  "vt100",
+ "vte",
  "webauthn-authenticator-rs",
  "webauthn-rs",
  "webbrowser",
@@ -310,7 +312,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "aoe-plugin-api"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "semver",
  "serde",
@@ -323,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "aoe-settings-derive"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6374,7 +6376,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "1.25.0"
+version = "1.26.0"
 dependencies = [
  "agent-of-empires",
  "aoe-plugin-api",

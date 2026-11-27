@@ -266,6 +266,7 @@ mod tests {
             pane_current_command: None,
             pane_start_command_is_protected: false,
             pane_pid: None,
+            first_window: true,
             pane_title: None,
             window_activity: None,
             window_size: None,

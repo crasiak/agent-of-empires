@@ -391,6 +391,8 @@ pub(super) const CITYHALL_MUTATION_ALLOW: &[(&str, &str)] = &[
     ("PATCH", "/api/sessions/{id}/diff-base"),
     ("PATCH", "/api/sessions/{id}/favorite"),
     ("PATCH", "/api/sessions/{id}/group"),
+    ("PATCH", "/api/sessions/{id}/ignored"),
+    ("POST", "/api/sessions/{id}/reclaim-ownership"),
     ("PATCH", "/api/groups"),
     ("POST", "/api/groups"),
     ("DELETE", "/api/groups"),
@@ -433,6 +435,7 @@ pub(super) const CITYHALL_MUTATION_ALLOW: &[(&str, &str)] = &[
     ("POST", "/api/telemetry/consent"),
     ("POST", "/api/telemetry/reset-id"),
     ("POST", "/api/telemetry/seen"),
+    ("POST", "/api/telemetry/feature-use"),
     ("POST", "/api/telemetry/structured-interaction"),
     // Ephemeral foreground-presence heartbeat. Does not mutate user data.
     ("POST", "/api/presence"),
@@ -472,6 +475,7 @@ pub(super) const CITYHALL_MUTATION_DENY: &[(&str, &str)] = &[
     // The setup wizard never shows in CityHall mode.
     ("PATCH", "/api/setup"),
     ("POST", "/api/sandbox/image-pull"),
+    ("POST", "/api/sandbox/image-pull/cancel"),
     ("POST", "/api/sandbox/image-dismiss"),
     ("POST", "/api/sessions/creation-trust"),
     ("POST", "/api/sessions/empty-trash"),
@@ -540,6 +544,7 @@ pub(super) const CITYHALL_MUTATION_DENY: &[(&str, &str)] = &[
     ("POST", "/api/sessions/{id}/acp/switch-provider"),
     // Global settings / ops / shared workspace ordering.
     ("PATCH", "/api/settings"),
+    ("PUT", "/api/profiles/{name}/acp-defaults/{agent}/model"),
     ("PATCH", "/api/log-level"),
     ("PUT", "/api/workspace-ordering"),
 ];
@@ -894,7 +899,7 @@ pub(super) async fn cityhall_gate(
 ///   plugin detail endpoint (#2484).
 /// - `media-src 'self' blob:`: browser sounds are fetched with auth and
 ///   played from a blob URL, since `<audio src>` bypasses the fetch interceptor.
-/// - `font-src 'self'`: Geist fonts are bundled under /fonts/.
+/// - `font-src 'self'`: the dashboard's fonts are bundled under /fonts/.
 /// - `connect-src 'self' ws: wss:`: REST + PTY WebSocket to same origin.
 /// - `frame-ancestors 'none'`: CSP-native equivalent of X-Frame-Options.
 /// - `base-uri 'self'`, `form-action 'self'`, `object-src 'none'`: tighten

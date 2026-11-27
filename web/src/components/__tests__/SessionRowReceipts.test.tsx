@@ -57,6 +57,8 @@ function Harness({
             onArchiveToggle={() => {}}
             onSnooze={() => {}}
             onUnreadToggle={() => {}}
+            onIgnoreToggle={() => {}}
+            onReclaimOwnership={() => {}}
             bulkApi={{ prepareScope: () => ({ kind: "single" }), pin: () => {}, archive: () => {}, snooze: () => {} }}
           />
         ))}

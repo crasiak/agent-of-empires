@@ -1,4 +1,6 @@
+import { flushSync } from "react-dom";
 import { useEffect, useRef, useState } from "react";
+import { isImeComposing } from "../lib/ime";
 import { fetchGroups } from "../lib/api";
 import { CancelButton, ConfirmButton, Dialog } from "./Dialog";
 import { useConfirmKeys, useDialogFocus } from "./dialogHooks";
@@ -11,16 +13,21 @@ const groupLabel = (path: string) =>
 interface Props {
   sessionTitle: string;
   currentGroup: string;
+  profile?: string;
   /** Resolves false on failure so the modal stays open with an error. */
   onSave: (group: string) => Promise<boolean>;
   onClose: () => void;
 }
 
-export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose }: Props) {
+export function SessionGroupModal({ sessionTitle, currentGroup, profile, onSave, onClose }: Props) {
   const [value, setValue] = useState(currentGroup);
   const [manual, setManual] = useState(false);
-  const [groups, setGroups] = useState<string[]>([]);
-  const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
+  const [loaded, setLoaded] = useState<{ profile?: string; groups: string[]; status: "loading" | "loaded" | "error" }>({
+    groups: [],
+    status: "loading",
+  });
+  const groups = loaded.profile === profile ? loaded.groups : [];
+  const loadState = loaded.profile === profile ? loaded.status : "loading";
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -30,21 +37,20 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
   useEffect(() => {
     mounted.current = true;
     let active = true;
-    void fetchGroups({ throwOnError: true }).then(
+    void fetchGroups({ profile, throwOnError: true }).then(
       (loaded) => {
         if (!active) return;
-        setGroups(loaded.map((group) => group.path).filter(Boolean));
-        setLoadState("loaded");
+        setLoaded({ profile, groups: loaded.map((group) => group.path).filter(Boolean), status: "loaded" });
       },
       () => {
-        if (active) setLoadState("error");
+        if (active) setLoaded({ profile, groups: [], status: "error" });
       },
     );
     return () => {
       active = false;
       mounted.current = false;
     };
-  }, []);
+  }, [profile]);
 
   const options = [...new Set([currentGroup, ...groups].filter(Boolean))];
   const handleSave = async () => {
@@ -57,8 +63,10 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
     const saved = await onSave(next);
     if (!mounted.current) return;
     if (saved) return onClose();
-    setSaving(false);
-    setError(next ? "Failed to update group." : "Failed to clear group.");
+    flushSync(() => {
+      setSaving(false);
+      setError(next ? "Failed to update group." : "Failed to clear group.");
+    });
     inputRef.current?.focus();
   };
   useConfirmKeys(
@@ -72,7 +80,7 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
       id={DIALOG_ID}
       title="Edit group"
       describedBy={PROMPT_ID}
-      bodyClassName="px-5 py-4 space-y-3"
+      bodyClassName="px-5 py-4 space-y-3 max-h-[calc(100vh-13rem)] overflow-y-auto"
       onDismiss={() => !saving && onClose()}
       footer={
         <>
@@ -139,7 +147,7 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
           setError(null);
         }}
         onKeyDown={(e) => {
-          if (e.key === "Enter") {
+          if (e.key === "Enter" && !e.defaultPrevented && !isImeComposing(e)) {
             e.preventDefault();
             if (!saving) void handleSave();
           }

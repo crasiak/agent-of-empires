@@ -581,7 +581,7 @@ fn purple_and_teal_highlights_persist_and_draw_fixed_hue_dots() {
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
             terminal
-                .draw(|f| env.view.render(f, f.area(), &theme, None, None, None))
+                .draw(|f| env.view.render(f, f.area(), &theme, None))
                 .unwrap();
             // Status icons share the glyph, so count only dots in the highlight hue.
             let dots = terminal

@@ -44,7 +44,7 @@ session_search_supervise = false
     std::fs::write(config_dir.join("config.toml"), config_content).expect("write live-send config");
 }
 
-fn agent_session_on(socket: &std::path::Path) -> String {
+pub(crate) fn agent_session_on(socket: &std::path::Path) -> String {
     let output = Command::new("tmux")
         .arg("-S")
         .arg(socket)

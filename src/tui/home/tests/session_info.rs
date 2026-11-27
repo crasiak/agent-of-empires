@@ -6,7 +6,7 @@ use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 fn render(view: &mut HomeView, width: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
     terminal
-        .draw(|f| view.render(f, f.area(), &Theme::default(), None, None, None))
+        .draw(|f| view.render(f, f.area(), &Theme::default(), None))
         .unwrap();
     terminal.backend().buffer().clone()
 }
@@ -134,4 +134,42 @@ fn session_info_contains_badges_and_only_selected_agent_resources() {
         assert!(!text.contains("75.0%"));
         assert!(!text.contains("clr 12"));
     }
+}
+
+#[test]
+#[serial]
+fn custom_narrow_breakpoint_keeps_visible_arc_interactive() {
+    use crate::session::work_arc::steno::{ArcLines, StenoArc};
+    let mut env = create_test_env_with_sessions(1);
+    let id = env.view.instance_at(0).id.clone();
+    env.view.select_session_by_id(&id);
+    env.view.show_preview_info = true;
+    env.view.show_diagnostics = false;
+    env.view.sidebar_collapsed = true;
+    env.view.narrow_breakpoint = 60;
+    env.view.view_mode = ViewMode::Structured;
+    env.view.mutate_instance(&id, |row| {
+        row.work_arc_enabled = true;
+        row.steno_arc = Some(Box::new(StenoArc {
+            lines: ArcLines {
+                goal: "Retained goal".into(),
+                recent: "Recent work".into(),
+                pending: "Pending checks".into(),
+                notes: "Verified layout".into(),
+            },
+            covered: "covered through w1".into(),
+            at: chrono::Utc::now(),
+            current: true,
+            path: "/unused/derive/arc.json".into(),
+        }));
+    });
+    let buffer = render(&mut env.view, 70);
+    let row = env.view.get_instance(&id).unwrap();
+    let areas = env
+        .view
+        .info_areas(row)
+        .expect("painted info remains interactive");
+    assert!(rows(&buffer, areas.arc.y, areas.arc.bottom()).contains("Retained goal"));
+    assert!(env.view.handle_arc_click(areas.arc.x + 12, areas.arc.y + 1));
+    assert!(env.view.info_dialog.is_some());
 }

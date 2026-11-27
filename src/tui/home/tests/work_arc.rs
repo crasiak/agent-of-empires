@@ -493,7 +493,7 @@ async fn queued_projection_cannot_rollback_canonical_peer_state() {
                     Ok(())
                 })
                 .unwrap();
-            env.view.reload_storage_only().unwrap();
+            env.view.reload_storage_only();
             env.view.selected_session = Some(id.clone());
             let canonical = env.view.get_instance(&id).unwrap().clone();
             assert_eq!(
@@ -545,7 +545,7 @@ async fn identical_canonical_reload_still_accepts_useful_updates() {
                     .unwrap()
                     .unwrap();
             if transition == "loading" {
-                env.view.reload_storage_only().unwrap();
+                env.view.reload_storage_only();
                 env.view.selected_session = Some(id.clone());
                 assert!(env.view.tick_work_arc());
                 assert_eq!(
@@ -566,7 +566,7 @@ async fn identical_canonical_reload_still_accepts_useful_updates() {
             .await
             .unwrap()
             .unwrap();
-        env.view.reload_storage_only().unwrap();
+        env.view.reload_storage_only();
         env.view.selected_session = Some(id.clone());
         let canonical = env.view.get_instance(&id).unwrap().work_arc.clone();
         assert!(env.view.tick_work_arc(), "{transition}");
@@ -1189,7 +1189,7 @@ async fn work_arc_loading_survives_production_reload_only_with_unchanged_provena
         arc::projection(env.view.get_instance(&id).unwrap()),
         ArcStatus::Loading
     );
-    env.view.reload_storage_only().unwrap();
+    env.view.reload_storage_only();
     assert_eq!(
         arc::projection(env.view.get_instance(&id).unwrap()),
         ArcStatus::Loading
@@ -1241,7 +1241,7 @@ async fn work_arc_loading_survives_production_reload_only_with_unchanged_provena
                 Ok(())
             })
             .unwrap();
-        env.view.reload_storage_only().unwrap();
+        env.view.reload_storage_only();
         assert_eq!(
             env.view.get_instance(&id).unwrap().work_arc_status,
             None,
@@ -1270,7 +1270,7 @@ fn steno_arc_survives_a_reload_from_disk() {
         path: "/tmp/arc.json".into(),
     };
     env.view.instances.get_mut(&id).unwrap().steno_arc = Some(Box::new(steno.clone()));
-    env.view.reload().unwrap();
+    env.view.reload();
     assert_eq!(
         env.view.get_instance(&id).unwrap().steno_arc.as_deref(),
         Some(&steno)

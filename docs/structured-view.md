@@ -1,4 +1,4 @@
-# Structured View (Web Dashboard)
+# Structured View
 
 The **structured view** renders agent state as plans, tool-call cards, diffs and approvals instead of terminal output. It is the web dashboard's default view and is also available in the native TUI, with mobile and multi-pane desktop layouts.
 
@@ -33,7 +33,7 @@ Gemini CLI is deprecated upstream for individual accounts since 2026-06-18. Ente
 
 The global npm installs above are optional. `aoe acp doctor --fix` can install Claude, Codex, Pi and `aoe-agent` adapters into the data directory; use `--adapter <name>` or `--all-adapters` to choose. See [Requirements](#requirements).
 
-Tools outside the registry (aider, cursor, copilot, droid, hermes and kiro) use terminal view. Custom agents opt in with `agent_acp_cmd`, or inherit a supported base adapter through `agent_detect_as`. The inherited adapter does not execute the wrapper; pass account overrides explicitly. See [Configuration](guides/configuration.md#running-a-custom-agent-in-the-structured-view).
+Tools outside the registry (cursor, copilot, droid, hermes, kiro, qwen, antigravity and settl) use terminal view. Custom agents opt in with `agent_acp_cmd`, or inherit a supported base adapter through `agent_detect_as`. The inherited adapter does not execute the wrapper; pass account overrides explicitly. See [Configuration](guides/configuration.md#running-a-custom-agent-in-the-structured-view).
 
 ### Provider credentials
 
@@ -64,7 +64,7 @@ Container images must provide Bash and GNU grep for scoped process inspection, p
 
 On Apple Container, worker descriptor snapshots are streamed as a tar archive by the guest Python helper. Symlinks and non-regular descriptors are refused; no host copy destination is used.
 
-CLI stop and kill persist a stop intent before signalling. Reattachment, automatic respawn, queued turns, and runner publication respect that fence. Only an explicit resume after settled retirement can clear the stop intent it observed; a newer stop remains authoritative. A stopped session with queued prompts shows a startup banner saying the prompts wait until the session is started again. For a tracked runtime that cannot prove settlement, externally stop only that execution on its original host or pinned container and retry `aoe acp stop <id>`.
+CLI stop and kill persist a stop intent before signalling. Reattachment, automatic respawn, queued turns, and runner publication respect that fence. Only an explicit resume after settled retirement can clear the stop intent it observed; a newer stop remains authoritative. A message typed into a stopped session from the dashboard, TUI or CLI starts it as an explicit resume; already-queued prompts and MCP, plugin or automated prompts keep waiting behind the fence and a stopped session with queued prompts shows a startup banner saying so, while `no_revive` senders are refused. For a tracked runtime that cannot prove settlement, externally stop only that execution on its original host or pinned container and retry `aoe acp stop <id>`.
 
 A legacy Prime record without an attested native cleanup route cannot be retired automatically. Upgrades pin an existing control receipt only when it matches the recorded execution route; otherwise the route and ownership record remain intact with an unknown control path. First identify its original host or container and externally stop every native worker and service belonging to that execution. If that scope cannot be identified or its shutdown cannot be confirmed, retain the record. Do not use a global Prime shutdown that would affect unrelated executions.
 
@@ -110,7 +110,7 @@ Capabilities depend on channels the adapter advertises; unavailable mode, slash-
 
 ## Quickstart
 
-In the web dashboard or TUI, create a session and choose an ACP-capable agent; **Structured** defaults on. Set `acp.structured_view` to `terminal` to preselect terminal view, or `off` to hide the option. The CLI defaults to terminal view; opt in with:
+In the web dashboard, create a session and choose an ACP-capable agent; **Structured** defaults on. In the TUI dialog the default is terminal view; tick Structured there. Set `acp.structured_view` to `terminal` to preselect terminal view, or `off` to hide the option. The CLI defaults to terminal view; opt in with:
 
 ```bash
 aoe acp doctor
@@ -145,7 +145,7 @@ It exits 1 if Node is missing, 2 if some agents are unreachable, else 0. Pass `-
 
 - **Web wizard and TUI dialog:** `acp.structured_view = "auto"` defaults to structured in the web wizard and terminal in the TUI. Set it to `terminal` or `structured` to preselect that view in both, or `off` to hide the option. The per-session choice wins.
 - **CLI:** defaults to the terminal view; opt in with `--structured-view` or `--agent`.
-- Either way, an existing active session can switch views: the web sidebar's right-click menu (**Switch to terminal** / **Switch to structured view**) or the TUI's right-click context menu (requires a healthy runtime; archived, trashed, and still-creating rows are excluded until they leave that state). Both surfaces confirm first. The worktree, open files, and commits are always preserved. For a **claude** session, the conversation is kept in both directions only when AoE can resolve a shared native store. A terminal switch whose store cannot be resolved, or which the structured worker does not share, is refused with HTTP 409 and `set-session-id --store` recovery guidance. Every other agent starts fresh on the target surface.
+- Either way, an existing active session can switch views: the web sidebar's right-click menu (**Switch to terminal** / **Switch to structured view**) or the TUI's right-click context menu (requires a healthy runtime; archived, trashed, and still-creating rows are excluded until they leave that state). Both surfaces confirm first. The worktree, open files, and commits are always preserved. For a **claude** session, the conversation is kept in both directions only when AoE can resolve a shared native store. A terminal switch whose store cannot be resolved, or which the structured worker does not share, is refused with HTTP 409 and `set-session-id --store` recovery guidance. Every other agent starts fresh on the target surface. A session whose command or arguments carry the agent's own session flag (`--resume <id>`, for example) lets that flag pick the conversation. A switch that also chooses a conversation is refused with 409 `command_selects_conversation`, and one where AoE also holds a conversation for the session with 409 `command_selector_conflict`; remove the flag to switch. A switch owed from before that refusal ends in Terminal view with the session in Error: restart it with the flag removed, or run `aoe session set-session-id <session> ""` and restart it to run its command as written.
 
 If the agent cannot resume a prior conversation, the transcript reports a context reset before assigning a fresh conversation. Recorded terminal context and an explicitly selected conversation count as prior context. Reattaching to the same live conversation does not add a reset.
 
@@ -281,7 +281,7 @@ Every structured-view operation has a matching `aoe acp <verb>` against the same
 
 | Verb | What it does |
 |------|--------------|
-| `aoe acp history <id>` | Dump the persisted transcript |
+| `aoe acp history <id>` | Print the transcript: whole agent messages, user prompts, one line per tool call. `--last N` and `--role user,agent,tool,notice` select entries; `--json` emits raw frames |
 | `aoe acp status <id>` | Print highest/lowest seq and the daemon source |
 | `aoe acp prompt <id> <text>` | Send a prompt (`-` reads stdin) |
 | `aoe acp approve <id> <nonce> [--always\|--deny\|--option <id>]` | Resolve a pending approval |

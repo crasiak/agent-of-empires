@@ -354,7 +354,7 @@ mod tests {
                 branch: branch.to_string(),
                 main_repo_path: repo.to_str().unwrap().to_string(),
                 managed_by_aoe: true,
-                created_at: chrono::Utc::now(),
+                created_at: crate::time::Timestamp::now(),
                 base_branch: None,
             });
             row
@@ -373,7 +373,7 @@ mod tests {
         unmanaged.worktree_info.as_mut().unwrap().managed_by_aoe = false;
         rows.push(unmanaged);
         let mut trashed = make_row("trashed", &main, "moved");
-        trashed.trashed_at = Some(chrono::Utc::now());
+        trashed.trashed_at = Some(crate::time::Timestamp::now());
         rows.push(trashed);
         let mut queries = HashMap::new();
         let candidates = relocation_candidates_with(&rows, |repo| {
@@ -425,7 +425,7 @@ mod tests {
             branch: "work".into(),
             main_repo_path: main.to_str().unwrap().into(),
             managed_by_aoe: true,
-            created_at: chrono::Utc::now(),
+            created_at: crate::time::Timestamp::now(),
             base_branch: None,
         });
         storage

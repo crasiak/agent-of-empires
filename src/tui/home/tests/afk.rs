@@ -128,11 +128,21 @@ fn afk_paste_stays_in_review(session_count: usize) {
     assert_eq!(env.view.selected_session.is_some(), session_count > 0);
     env.view.pending_send_session = Some("existing compose target".into());
     env.view.pending_paste = Some("existing paste".into());
-    env.view
-        .pending_paste_for_structured_view
-        .insert("other".into(), "existing structured text".into());
+    env.view.pending_paste_for_structured_view.insert(
+        "other".into(),
+        crate::tui::home::PendingStructuredInput::from_parts(
+            Vec::new(),
+            "existing structured text".into(),
+        ),
+    );
     let original_target = env.view.pending_send_target.clone();
-    let original_structured = env.view.pending_paste_for_structured_view.clone();
+    let buffered_text = |view: &HomeView| {
+        view.pending_paste_for_structured_view
+            .iter()
+            .map(|(id, input)| (id.clone(), input.text()))
+            .collect::<std::collections::HashMap<_, _>>()
+    };
+    let original_structured = buffered_text(&env.view);
     let report = Report {
         version: 1,
         capture_started_at_ms: 1,
@@ -169,7 +179,7 @@ fn afk_paste_stays_in_review(session_count: usize) {
         );
         assert_eq!(view.pending_send_target, original_target);
         assert_eq!(view.pending_paste.as_deref(), Some("existing paste"));
-        assert_eq!(view.pending_paste_for_structured_view, original_structured);
+        assert_eq!(buffered_text(view), original_structured);
         assert!(view.live_send.is_none());
         assert!(view.live_send_worker.is_none());
     };

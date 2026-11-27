@@ -311,7 +311,7 @@ pub(super) async fn acp_event_listener(state: Arc<AppState>) {
                     });
                 if let Some(agent) = agent {
                     let options = options.clone();
-                    let now = chrono::Utc::now().to_rfc3339();
+                    let now = crate::time::Timestamp::now().to_rfc3339();
                     let recorded = tokio::task::spawn_blocking(move || {
                         if let Err(e) = crate::acp::option_catalog::record(&agent, &options, now) {
                             tracing::warn!(
@@ -445,22 +445,11 @@ pub(super) async fn acp_event_listener(state: Arc<AppState>) {
             }
             (Some(policy), _) => match frame.sidebar_status {
                 Some(projected) => Some((policy, projected)),
-                None => {
-                    // Hydrates once; frames published after it carry a status.
-                    let fold = state
-                        .session_service
-                        .fold_control_state(&frame.session_id)
-                        .await;
-                    if fold.last_seq == frame.seq {
-                        Some(fold.sidebar_status())
-                    } else {
-                        state
-                            .session_service
-                            .sidebar_status_at(&frame.session_id, frame.seq)
-                            .await
-                    }
-                    .map(|projected| (policy, projected))
-                }
+                None => state
+                    .session_service
+                    .sidebar_status_at(&frame.session_id, frame.seq)
+                    .await
+                    .map(|projected| (policy, projected)),
             },
             (None, _) => None,
         };
@@ -703,14 +692,13 @@ pub(super) async fn acp_event_listener(state: Arc<AppState>) {
 /// matched explicitly so a new variant is a compile error here.
 fn record_approval_decision(state: &AppState, decision: crate::acp::approvals::ApprovalDecision) {
     use crate::acp::approvals::ApprovalDecision;
-    use std::sync::atomic::Ordering::Relaxed;
     let counter = match decision {
         ApprovalDecision::Allow => &state.telemetry_structured.approvals_allow,
         ApprovalDecision::AllowAlways => &state.telemetry_structured.approvals_allow_always,
         ApprovalDecision::Deny => &state.telemetry_structured.approvals_deny,
         ApprovalDecision::Cancelled => return,
     };
-    counter.fetch_add(1, Relaxed);
+    crate::telemetry::consent::bump(counter);
 }
 
 /// Seed each acp-enabled session's `Instance.status` from the most
@@ -833,7 +821,7 @@ pub(crate) fn apply_status_intent(
     }
     let prev = inst.status;
     inst.status = target;
-    let now = chrono::Utc::now();
+    let now = crate::time::Timestamp::now();
     // last_accessed_at is deliberately NOT stamped here (#3465 residual).
     inst.idle_entered_at = if target == Status::Idle {
         Some(now)
@@ -1053,8 +1041,8 @@ pub(super) fn apply_acp_session_change(
                 "clearing stored ACP session id after a context reset (session/load or session/fork failure)"
             );
             inst.acp_session_id = None;
-            // A structured fork that failed (or was refused by a resume-only agent) reaches
-            // here via SessionContextReset.
+            // A failed structured fork fails its spawn and keeps the marker; a reset
+            // that still finds one pending drops it with the conversation it seeded.
             if inst.fork_pending.take().is_some() {
                 inst.import_pending = None;
             }
@@ -1539,6 +1527,7 @@ mod tests {
             prompt_id: None,
             synthesized: false,
             origin_plugin: None,
+            origin: crate::daemon::PromptOrigin::Unknown,
         };
         let stopped = || Event::Stopped {
             reason: "prompt_complete".into(),
@@ -1555,7 +1544,7 @@ mod tests {
                         prompt: "do it".into(),
                         model: "claude-opus-4-8".into(),
                         output_file: "/tmp/bg-1.output".into(),
-                        started_at: chrono::Utc::now(),
+                        started_at: crate::time::Timestamp::now(),
                         workflow: None,
                     },
                     stopped(),
@@ -1790,7 +1779,7 @@ mod tests {
             inst.source_profile = "listener-retired-identity".into();
             inst.view = crate::session::View::Structured;
             inst.status = Status::Stopped;
-            inst.idle_dormant_since = Some(chrono::Utc::now());
+            inst.idle_dormant_since = Some(crate::time::Timestamp::now());
             let id = inst.id.clone();
             let storage = crate::session::Storage::new_unwatched(&inst.source_profile).unwrap();
             storage
@@ -1993,7 +1982,7 @@ mod tests {
                 name: "shell".into(),
                 kind: "execute".into(),
                 args_preview: "{}".into(),
-                started_at: chrono::Utc::now(),
+                started_at: crate::time::Timestamp::now(),
                 parent_tool_call_id: None,
                 memory_recall: None,
                 diffs: Vec::new(),
@@ -2094,7 +2083,7 @@ mod tests {
                 name: "shell".into(),
                 kind: "execute".into(),
                 args_preview: "{}".into(),
-                started_at: chrono::Utc::now(),
+                started_at: crate::time::Timestamp::now(),
                 parent_tool_call_id: None,
                 memory_recall: None,
                 diffs: Vec::new(),
@@ -2231,7 +2220,7 @@ mod tests {
             tools: Vec::new(),
             result: Some("done".into()),
             warning: None,
-            ended_at: chrono::Utc::now(),
+            ended_at: crate::time::Timestamp::now(),
         };
         let stopped = Event::Stopped {
             reason: "prompt_complete".into(),
@@ -2266,6 +2255,7 @@ mod tests {
                     prompt_id: None,
                     synthesized: false,
                     origin_plugin: None,
+                    origin: crate::daemon::PromptOrigin::Unknown,
                 },
                 Event::BackgroundAgentLaunched {
                     agent_id: "bg-1".into(),
@@ -2274,7 +2264,7 @@ mod tests {
                     prompt: "do it".into(),
                     model: "claude-opus-4-8".into(),
                     output_file: "/tmp/bg-1.output".into(),
-                    started_at: chrono::Utc::now(),
+                    started_at: crate::time::Timestamp::now(),
                     workflow: None,
                 },
                 live_frame.clone(),
@@ -2359,7 +2349,7 @@ mod tests {
         let mut inst = Instance::new("seed", "/tmp/seed");
         inst.view = crate::session::View::Structured;
         inst.acp_session_id = Some("sid-1".to_string());
-        inst.idle_dormant_since = Some(chrono::Utc::now());
+        inst.idle_dormant_since = Some(crate::time::Timestamp::now());
 
         // Same id as already stored: the only reason to persist is the
         // stale-dormant clear, so the function must return Some(profile).
@@ -2445,11 +2435,10 @@ mod tests {
         );
     }
 
-    // A SessionContextReset from a FAILED structured fork must clear the
-    // one-shot fork marker (and its paired import marker) so neither the
-    // reconciler nor the supervisor re-issues the same failing session/fork on
-    // the next reattach. This is the reducer side of the fork-failure retry-loop
-    // fix; the reset carries no new id, so acp_session_id is cleared too.
+    // A SessionContextReset that finds a structured fork still pending clears the
+    // one-shot fork marker (and its paired import marker) with the conversation it
+    // seeded. A refused session/fork emits no reset (the spawn fails and keeps the
+    // seed); the reset carries no new id, so acp_session_id is cleared too.
     #[test]
     fn reset_clears_fork_pending_and_import_pending() {
         let mut inst = Instance::new("seed", "/tmp/seed");
@@ -2461,7 +2450,7 @@ mod tests {
         let profile = apply_acp_session_change(
             &mut inst,
             "sess-1",
-            Some(&AcpSessionChange::Reset("fork_failed: boom".into())),
+            Some(&AcpSessionChange::Reset("context reset".into())),
             true,
         );
 
@@ -2683,7 +2672,7 @@ mod tests {
             tools: Vec::new(),
             result: None,
             warning: None,
-            ended_at: chrono::Utc::now(),
+            ended_at: crate::time::Timestamp::now(),
         };
         let progress = |status| Event::BackgroundAgentProgress {
             agent_id: "bg-1".into(),
@@ -2692,7 +2681,7 @@ mod tests {
             tools: Vec::new(),
             last_tool: None,
             last_text: None,
-            at: chrono::Utc::now(),
+            at: crate::time::Timestamp::now(),
         };
         let cases = [
             (prompt("hi"), Some(Authoritative)),
@@ -2732,7 +2721,7 @@ mod tests {
                         model: None,
                         background: true,
                     },
-                    at: chrono::Utc::now(),
+                    at: crate::time::Timestamp::now(),
                 },
                 Some(Background),
             ),
@@ -2820,7 +2809,7 @@ mod tests {
     #[test]
     fn relayed_intent_stamp_wipes_concurrent_archive() {
         // Full #3465 residual chain on structured rows.
-        let user_touch = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let user_touch = crate::time::Timestamp::now() - crate::time::Duration::seconds(60);
 
         let mut daemon_row = stopped_structured_instance();
         daemon_row.status = Status::Idle;
@@ -2856,7 +2845,7 @@ mod tests {
     fn apply_status_intent_matrix() {
         use Status::{Creating, Deleting, Error, Idle, Running, Stopped, Waiting};
         use StatusPolicy::{Authoritative, Background, Heal};
-        let user_touch = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let user_touch = crate::time::Timestamp::now() - crate::time::Duration::seconds(60);
         // (from, trashed, policy, target, want)
         let cases = [
             (Stopped, false, Heal, Idle, Idle),
@@ -2912,6 +2901,7 @@ mod tests {
                     attachments: Vec::new(),
                     synthesized: false,
                     origin_plugin: None,
+                    origin: crate::daemon::PromptOrigin::Unknown,
                 },
                 Status::Running,
             ),
@@ -2956,6 +2946,7 @@ mod tests {
                     attachments: Vec::new(),
                     synthesized: false,
                     origin_plugin: None,
+                    origin: crate::daemon::PromptOrigin::Unknown,
                 },
                 crate::acp::Event::BackgroundTaskStarted {
                     task_id: "task-1".into(),
@@ -3143,7 +3134,7 @@ mod tests {
                         name: "curl -H 'Authorization: Bearer SECRET_SENTINEL_9f3'".into(),
                         kind: "execute".into(),
                         args_preview: String::new(),
-                        started_at: chrono::Utc::now(),
+                        started_at: crate::time::Timestamp::now(),
                         parent_tool_call_id: None,
                         memory_recall: None,
                         diffs: Vec::new(),
@@ -3152,7 +3143,7 @@ mod tests {
                     options: Vec::new(),
                     choice: false,
                     plan: None,
-                    requested_at: chrono::Utc::now(),
+                    requested_at: crate::time::Timestamp::now(),
                     resolved: None,
                 },
             }),

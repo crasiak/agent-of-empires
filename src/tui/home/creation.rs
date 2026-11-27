@@ -109,7 +109,7 @@ impl HomeView {
                 branch,
                 main_repo_path: data.path.clone(),
                 managed_by_aoe: false,
-                created_at: chrono::Utc::now(),
+                created_at: crate::time::Timestamp::now(),
                 base_branch: data.base_branch.clone(),
             });
         }
@@ -476,7 +476,8 @@ impl HomeView {
         {
             self.switch_profile(Some(row.profile.clone()))
         } else {
-            self.reload()
+            self.reload();
+            Ok(())
         };
         let failure = match loaded {
             Err(error) => Some(format!(
@@ -495,7 +496,6 @@ impl HomeView {
             self.pending_creation = Some(pending);
             return None;
         }
-        crate::tui::app::record_session_create();
         self.clear_creation_tracking(&pending.request_key);
         self.rebuild_group_trees();
         self.rebuild_flat_items();
@@ -614,9 +614,10 @@ impl HomeView {
     /// checkbox that flips `confirm_before_quit` off when ticked (#1569).
     pub fn show_quit_confirm(&mut self) {
         self.confirm_dialog = Some(
-            ConfirmDialog::new(
+            self.confirm_by_repeating(
+                crate::tui::home::bindings::ActionId::Quit,
                 "Quit Agent of Empires",
-                "Quit?\nYour sessions persist in the background.",
+                "Quit? Your sessions persist in the background.",
                 "quit",
             )
             .neutral()
@@ -691,6 +692,7 @@ fn wizard_create_body(
         repo_bases: Vec::new(),
         command_override: data.command_override.clone(),
         custom_instruction: None,
+        initial_prompt: None,
         profile: Some(data.profile.clone()),
         view: if data.structured {
             crate::session::View::Structured

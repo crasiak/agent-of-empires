@@ -100,7 +100,7 @@ fn bulk_confirm_lists_skipped_sessions() {
     let archived = session_id_at(&env.view, 1).unwrap();
     let title = env.view.get_instance(&archived).unwrap().title.clone();
     env.view.mutate_instance(&archived, |inst| {
-        inst.archived_at = Some(chrono::Utc::now())
+        inst.archived_at = Some(crate::time::Timestamp::now())
     });
 
     env.view.handle_key(key(KeyCode::Char('e')), None);
@@ -500,8 +500,9 @@ fn trashed_cursor_env() -> TestEnv {
         session_id_at(&env.view, 2).expect("a Session row"),
     ]);
     make_sendable(&mut env);
-    env.view
-        .mutate_instance(&trashed, |inst| inst.trashed_at = Some(chrono::Utc::now()));
+    env.view.mutate_instance(&trashed, |inst| {
+        inst.trashed_at = Some(crate::time::Timestamp::now())
+    });
     env.view.select_session_by_id(&trashed);
     assert!(env.view.selected_is_trashed());
     env
@@ -1353,7 +1354,7 @@ fn the_preview_header_says_a_session_is_in_a_breakout_window() {
         terminal
             .draw(|f| {
                 let area = f.area();
-                view.render(f, area, &theme, None, None, None);
+                view.render(f, area, &theme, None);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();

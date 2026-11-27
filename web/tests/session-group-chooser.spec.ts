@@ -17,7 +17,7 @@ test("existing group paths stay distinct through selection, Save, and keyboard c
   await installSidebarMocks(page, {
     sessions: [{ id: "s1", title: "group-source", project_path: "/tmp/repo", branch: null, group: "stale" }],
   });
-  await page.route("**/api/groups", (route) =>
+  await page.route(/\/api\/groups(\?.*)?$/, (route) =>
     route.fulfill({ json: choices.map(({ path }) => ({ path, session_count: 1 })) }),
   );
   const patches: unknown[] = [];
