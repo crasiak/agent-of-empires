@@ -8,12 +8,14 @@ The structured view renders in both the TUI and the web dashboard. This page cov
 
 Both surfaces consume the same `aoe serve` daemon over the same HTTP and WebSocket API, so the conversation log, pending approvals, and worker state stay in sync.
 
-- Structured sessions show a `[structured]` badge in the TUI session list, and Enter opens the native view. The local TUI starts a same-host Daemon without a web listener during bootstrap or explicit reconnect, unless `--no-autostart` or `AOE_NO_AUTOSTART=1` is set. It reuses an existing daemon and reports unavailable runtimes without opening TCP. An explicit `AOE_DAEMON_URL` selects the remote daemon instead.
+- Structured sessions show a `[structured]` badge in the TUI session list, and Enter opens the native view. `session.show_structured_badge = false` hides the badge and returns its width to the title and plugin row badges. The local TUI starts a same-host Daemon without a web listener during bootstrap or explicit reconnect, unless `--no-autostart` or `AOE_NO_AUTOSTART=1` is set. It reuses an existing daemon and reports unavailable runtimes without opening TCP. An explicit `AOE_DAEMON_URL` selects the remote daemon instead.
 - Terminal sessions work in both surfaces: the TUI attaches to the pane and the dashboard streams it (see [Terminal view](../guides/web/terminal.md)).
 - Switching views keeps the worktree, files, and commits. Claude can resume its native transcript in terminal view only when AoE can bind the ACP ID to a shared native store. An explicit [native-store assertion](../guides/session-resume.md#pinning-or-resetting-a-conversation) can name another store. An ACP ID alone is not store provenance: an unresolved or unshared store is refused before worker teardown. Switching back can reload the Claude transcript. Other agents start fresh under the new view.
 - A healthy structured session shows Idle or Active in the session list, observed through the ACP event stream rather than tmux pane probing.
 - The local TUI and local `aoe acp` commands use the same-host daemon's owner-verified Unix socket, not TCP loopback. Kernel peer identity authorizes them without a bearer token or passphrase exchange, including with `--behind-proxy`. TCP loopback grants no local-owner exemption; see [dashboard authentication](../guides/web-dashboard.md#authentication). For explicitly configured TCP or remote endpoints, see [Cross-machine attach](../structured-view.md#cross-machine-attach).
 - Same-UID processes are trusted. Namespace, tmux, and protocol checks reject accidental mismatches, not a malicious process running as that user; see the [native transport trust model](../api.md#authentication).
+
+![A narrow TUI session list with the structured badge on, truncating a long title, and off, showing it in full](../assets/structured-view/structured-badge.png)
 
 ### TUI keybinds
 
@@ -36,15 +38,18 @@ The view opens with the composer ready. The transcript stays scrollable from the
 | Transcript  | `i`             | Focus the composer |
 | Transcript  | `Tab`           | Cycle to a pending approval card |
 | Transcript  | `m`             | Open the permission-mode picker |
+| Transcript  | `t`             | Flip Fast mode or Ultracode, when the agent offers them |
 | Transcript  | `a`             | Answer a pending question (single-select forms) |
 | Transcript  | `s` / `c`       | Skip / cancel a pending question |
 | Transcript  | `o`             | Open this session in the web dashboard |
+| Transcript  | `z`             | Fold every tool call to one line, then expand them all |
 | Transcript  | `Esc`           | Close the structured view |
 | Approval    | `a` / `Shift+A` / `d` | Allow once / allow always / deny |
 | Approval    | `Esc`           | Stop the in-flight turn |
 | Any         | `Ctrl+C`        | Cancel the in-flight prompt |
 | Any         | `Ctrl+O`        | Open the session in the web dashboard |
 | Any         | `Ctrl+X`        | Clear every queued prompt |
+| Any         | `Ctrl+T`        | Stop the newest running subagent; the turn continues |
 
 Approval keys resolve only while the approval card has focus, so typing "always allow" into the composer can never approve a tool.
 
@@ -52,11 +57,11 @@ The **slash-command picker** appears once the composer holds a single-word slash
 
 ### What the TUI renders
 
-Successful tool calls collapse to one line with their target and, for edits, added and removed line counts; running and failed calls stay expanded. The latest plan is pinned as a single progress summary rather than a new checklist per update. Agent messages render as styled markdown using text attributes only (bold, italic, dim), so they track your theme; syntax highlighting is deferred, and `o` opens the dashboard for full fidelity.
+Successful tool calls collapse to one line with their target and, for edits, added and removed line counts; running and failed calls stay expanded. `z` in the transcript folds every call to one line, failed and running ones included; pressing it again expands every call, and it keeps alternating. The latest plan is pinned as a single progress summary rather than a new checklist per update. Agent messages render as styled markdown using text attributes only (bold, italic, dim), so they track your theme; syntax highlighting is deferred, and `o` opens the dashboard for full fidelity.
 
 ## Tool cards
 
-Tool calls render per kind rather than as one generic line: an edit or write shows the path and a compact diff in your theme's diff colors, an execute shows the command and a bounded output preview, a read shows the path and a content preview, a delete shows the target. Diffs cap at 20 changed lines and previews at 12, with a "+N more" footer. A single patch touching several files shows each file in one card. In the dashboard, Claude's harness tools get dedicated cards too (a tool search shows its query, a background monitor its description and command, a task stop the stopped task id). Other kinds fall back to a generic one-liner.
+Tool calls render per kind rather than as one generic line: an edit or write shows the path and a compact diff in your theme's diff colors, an execute shows the command and a bounded output preview, a read shows the path and a content preview, a delete shows the target. Diffs cap at 20 changed lines and previews at 12, with a "+N more" footer. A single patch touching several files shows each file in one card. In the dashboard, Claude's harness tools get dedicated cards too (a tool search shows its query, a background monitor its description and command, a task stop the stopped task id, a send message its target and summary). Other kinds fall back to a generic one-liner.
 
 When a tool returns images, audio, or resources they render inline on the card (a textual placeholder in the TUI), and anything that cannot be shown degrades to a labelled placeholder rather than being dropped.
 
@@ -77,6 +82,8 @@ The paperclip is disabled with a tooltip when the agent accepts no attachments, 
 Attachments persist with the transcript and queue alongside the prompt text, so sending one mid-turn parks the whole message until the session resumes. A full page reload drops a queued row carrying an attachment (reattach and resend). Audio and embedded resources are stored and sent but render as a labelled chip.
 
 ### Queued prompts
+
+Queued prompts can drain between turns while background tasks or sub-agents continue running. A queued `/clear` waits for that background work to finish before resetting the conversation.
 
 The composer keeps messages the session cannot accept yet:
 
@@ -106,3 +113,5 @@ Folding only fires on an unbroken run of the same shape, and the threshold is th
 In the dashboard, **Jump to latest** immediately moves to the newest output and keeps following through folds and streaming updates. Scroll away to read earlier content without being pulled back by streaming text; reopening the page keeps that reading position. Folding preserves an opened tool card's position; focus the transcript to scroll with the keyboard.
 
 The **Compact tools** toggle at the top of the transcript collapses every tool card to its header for scanning, and new cards arrive collapsed while it is on. The agent's narration stays visible, errored cards stay open, and you can still expand a single card. It is a per-browser preference.
+
+**Fold all** beside it folds every tool card to its header, errored cards included, and becomes **Unfold all**, which opens every card. Each press overrides any card you toggled before it, and you can still toggle a single card afterwards. Changing **Compact tools** clears the fold. It lasts until the page reloads or the view is closed.

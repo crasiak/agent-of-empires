@@ -35,6 +35,8 @@ interface Props {
   /** Snoozed sessions auto-wake on send; archived ones refuse it. */
   archivedAt?: string | null;
   snoozedUntil?: string | null;
+  /** The session list's `queued_count`, so a queue changed elsewhere is re-listed. */
+  queuedCount?: number;
   /** Render rows before the latest `/clear` instead of folding them. */
   showClearedTurns?: boolean;
   children: (ctx: AcpContext) => ReactNode;
@@ -61,11 +63,12 @@ export interface AcpContext {
   pendingAttachments: PromptAttachmentInput[];
   setPendingAttachments: React.Dispatch<React.SetStateAction<PromptAttachmentInput[]>>;
   forceEndTurn: () => Promise<void>;
+  cancelSubagent: (childId: string) => Promise<void>;
   lastActivityRef: Session["lastActivityRef"];
   dismissError: () => void;
   dismissPrimer: () => void;
   /** After this dashboard's restart of a start in progress succeeds. */
-  markRestartStarted: (epoch: number, stoppedSent: boolean) => void;
+  markRestartStarted: (epoch: number, stoppedSent: boolean, retriedError?: string) => void;
   /** After this dashboard's restart fails once it has stopped the Worker. */
   markRestartFailed: (epoch: number, message: string, stoppedSent: boolean) => void;
   dismissCompactionReminder: () => void;
@@ -150,10 +153,11 @@ export function AcpRuntime({
   acpWorkerState = "running",
   archivedAt = null,
   snoozedUntil = null,
+  queuedCount,
   showClearedTurns = false,
   children,
 }: Props) {
-  const acp = useAcpSession(sessionId, acpWorkerState, archivedAt, snoozedUntil);
+  const acp = useAcpSession(sessionId, acpWorkerState, archivedAt, snoozedUntil, queuedCount);
   const agentProfile = useAgentProfile();
   const { pendingAttachments, setPendingAttachments, pendingAttachmentsRef } = usePendingAttachments(sessionId);
   const onCancel = useCancelEscalation(
@@ -247,6 +251,7 @@ export function AcpRuntime({
         pendingAttachments,
         setPendingAttachments,
         forceEndTurn: acp.forceEndTurn,
+        cancelSubagent: acp.cancelSubagent,
         lastActivityRef: acp.lastActivityRef,
         dismissError: acp.dismissError,
         dismissPrimer: acp.dismissPrimer,

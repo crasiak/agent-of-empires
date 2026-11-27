@@ -46,6 +46,8 @@ pub enum Intent {
     CancelElicitation,
     /// Cancel the in-flight prompt (Ctrl-C style).
     CancelInFlight,
+    /// Stop the newest running subagent without ending the root turn.
+    StopSubagent,
     /// Drop every queued (not-yet-sent) prompt.
     ClearQueue,
     /// Hide a session notice in this view, `None` meaning the oldest visible
@@ -61,6 +63,8 @@ pub enum Intent {
     RecallCancel,
     /// Open the daemon URL for this session in the user's browser.
     OpenInBrowser,
+    /// Fold every tool card to one line, or expand them all (transcript `z`).
+    ToggleToolFold,
     /// Move focus to the named region.
     SetFocus(Focus),
     /// Move the slash-picker highlight by one row (positive = down).
@@ -82,6 +86,9 @@ pub enum Intent {
     /// Open the permission-mode picker (transcript `m`, when the agent
     /// advertised modes).
     OpenModePicker,
+    /// Open the Fast mode / Ultracode toggle picker (transcript `t`, when the
+    /// agent advertised any).
+    OpenToggles,
     /// Open the answer picker for the oldest pending elicitation (transcript
     /// `a`). The view decides whether the form is natively answerable.
     AnswerElicitation,
@@ -128,6 +135,8 @@ pub struct InputContext {
     pub choice_numbered: bool,
     /// The agent advertised permission modes; gates the transcript `m` key.
     pub has_modes: bool,
+    /// The agent advertised `model_config` on/off toggles; gates the transcript `t` key.
+    pub has_toggles: bool,
     /// Whether any undismissed session notice is on screen, gating `x`.
     pub has_notices: bool,
     /// The agent is generating. Gates `Esc` in the composer: it interrupts the
@@ -152,6 +161,10 @@ pub fn dispatch(focus: Focus, key: &KeyEvent, ctx: InputContext) -> Intent {
     // typing "no" into the composer doesn't open a tab.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('o') {
         return Intent::OpenInBrowser;
+    }
+    // Universal: Ctrl-t stops the newest running subagent; the root turn goes on.
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+        return Intent::StopSubagent;
     }
     // Universal: Ctrl-x drops every queued prompt, intercepted before the
     // composer sees it so a backlog can always be abandoned. No-op when empty.
@@ -369,6 +382,7 @@ fn transcript_keys(key: &KeyEvent, ctx: InputContext) -> Intent {
         (m, KeyCode::Char('x')) if m.is_empty() && ctx.has_notices => Intent::DismissNotice(None),
         // Permission-mode picker, when the agent advertised modes.
         (m, KeyCode::Char('m')) if m.is_empty() && ctx.has_modes => Intent::OpenModePicker,
+        (m, KeyCode::Char('t')) if m.is_empty() && ctx.has_toggles => Intent::OpenToggles,
         // Esc backs out one level to the composer (the home base) rather than
         // leaving the view.
         (m, KeyCode::Esc) if m.is_empty() => Intent::SetFocus(Focus::Composer),
@@ -395,6 +409,8 @@ fn transcript_keys(key: &KeyEvent, ctx: InputContext) -> Intent {
         // Plain 'p' opens the plugin pane panel. Transcript-only (like 'o'),
         // so typing 'p' in the composer never opens it.
         (m, KeyCode::Char('p')) if m.is_empty() => Intent::SetFocus(Focus::Pane),
+        // Vim's fold prefix.
+        (m, KeyCode::Char('z')) if m.is_empty() => Intent::ToggleToolFold,
         _ => Intent::Ignore,
     }
 }
@@ -539,10 +555,11 @@ mod tests {
                 Is(Intent::CancelInFlight),
             );
             check(focus, Char('x'), CTRL, ctx(), Is(Intent::ClearQueue));
+            check(focus, Char('t'), CTRL, ctx(), Is(Intent::StopSubagent));
             check(focus, Char('q'), CTRL, ctx_pending(), Is(Intent::Exit));
         }
         // Unmodified, the same letters are ordinary composer text.
-        for ch in "cxqo".chars() {
+        for ch in "cxqot".chars() {
             check(Focus::Composer, Char(ch), NONE, ctx(), Composes);
         }
     }
@@ -636,6 +653,15 @@ mod tests {
             (Focus::Composer, Char('p'), NONE, ctx(), Composes),
             (
                 Focus::Transcript,
+                Char('z'),
+                NONE,
+                ctx(),
+                Is(Intent::ToggleToolFold),
+            ),
+            (Focus::Composer, Char('z'), NONE, ctx(), Composes),
+            (Focus::Pane, Char('z'), NONE, ctx(), Is(Intent::Ignore)),
+            (
+                Focus::Transcript,
                 Char('j'),
                 NONE,
                 ctx(),
@@ -664,6 +690,23 @@ mod tests {
                 Is(Intent::Ignore),
             ),
             (Focus::Composer, Char('m'), NONE, ctx_modes(), Composes),
+            (
+                Focus::Transcript,
+                Char('t'),
+                NONE,
+                InputContext {
+                    has_toggles: true,
+                    ..InputContext::default()
+                },
+                Is(Intent::OpenToggles),
+            ),
+            (
+                Focus::Transcript,
+                Char('t'),
+                NONE,
+                ctx(),
+                Is(Intent::Ignore),
+            ),
             (
                 Focus::Transcript,
                 Char('a'),

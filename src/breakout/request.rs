@@ -122,7 +122,11 @@ fn sh_quote(arg: &str) -> String {
 
 /// The surfaces a validated request opens. `local_exe` is the running aoe binary,
 /// used when the Sessions are on this machine. Call only after `validate` passed.
-pub fn surfaces(request: &BreakoutRequest, local_exe: &str) -> Vec<Surface> {
+pub fn surfaces(
+    request: &BreakoutRequest,
+    local_exe: &str,
+    local_path: Option<&str>,
+) -> Vec<Surface> {
     request
         .sessions
         .iter()
@@ -132,18 +136,28 @@ pub fn surfaces(request: &BreakoutRequest, local_exe: &str) -> Vec<Surface> {
                 &display_title(&session.title),
                 &session.id,
             ),
-            command: attach_command(request.host.as_deref(), session, local_exe),
+            command: attach_command(request.host.as_deref(), session, local_exe, local_path),
         })
         .collect()
 }
 
-/// The one place the attach command line is built. Ids, profiles and hosts are
-/// validated to a shell-safe alphabet with no leading `-`, so only the local
-/// binary path needs quoting.
-fn attach_command(host: Option<&str>, session: &BreakoutSession, local_exe: &str) -> String {
+/// Validated names form the ssh command; local binary and PATH values are quoted.
+fn attach_command(
+    host: Option<&str>,
+    session: &BreakoutSession,
+    local_exe: &str,
+    local_path: Option<&str>,
+) -> String {
     let mut command = match host {
         Some(host) => format!("ssh -t {host} aoe"),
-        None => sh_quote(local_exe),
+        None => match local_path {
+            Some(path) => format!(
+                "/usr/bin/env {} {}",
+                sh_quote(&format!("PATH={path}")),
+                sh_quote(local_exe)
+            ),
+            None => sh_quote(local_exe),
+        },
     };
     if !session.profile.is_empty() {
         command.push_str(&format!(" --profile {}", session.profile));
@@ -394,7 +408,7 @@ mod tests {
                 session("ffff", "Celts", ""),
             ],
         );
-        let got = surfaces(&r, "/Users/me/my bin/aoe");
+        let got = surfaces(&r, "/Users/me/my bin/aoe", None);
         assert_eq!(
             got[0].command,
             "'/Users/me/my bin/aoe' --profile work session attach a1b2c3d4e5f60718"
@@ -407,10 +421,58 @@ mod tests {
         assert_eq!(got[1].title, "aoe breakout \u{b7} Celts \u{b7} ffff");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn local_attach_preserves_path_without_forwarding_it_over_ssh() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let terminal_path = root.path().join("terminal-path");
+        std::fs::create_dir(&terminal_path).unwrap();
+        let exe = root.path().join("aoe 'fixture'");
+        std::fs::write(&exe, "#!/bin/sh\nexec tmux \"$@\"\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sessions = vec![session("a1b2c3d4e5f60718", "Vikings", "work")];
+        for directory in [
+            "tools with spaces",
+            "tools 'quoted' $literal",
+            "tools\nnewline",
+        ] {
+            let path = root.path().join(directory);
+            std::fs::create_dir(&path).unwrap();
+            let tmux = path.join("tmux");
+            std::fs::write(&tmux, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+            std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let path = path.to_str().unwrap();
+            let local = request(None, sessions.clone());
+            let surface = surfaces(&local, exe.to_str().unwrap(), Some(path)).remove(0);
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", &surface.command])
+                .env_clear()
+                .env("PATH", &terminal_path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{directory:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                "--profile\nwork\nsession\nattach\na1b2c3d4e5f60718\n"
+            );
+            let remote = request(Some("bender"), sessions.clone());
+            assert_eq!(
+                surfaces(&remote, exe.to_str().unwrap(), Some(path))[0].command,
+                "ssh -t bender aoe --profile work session attach a1b2c3d4e5f60718"
+            );
+        }
+    }
+
     #[test]
     fn every_title_starts_with_the_title_prefix() {
         let r = request(None, vec![session("abc", "T", "")]);
-        let title = &surfaces(&r, "aoe")[0].title;
+        let title = &surfaces(&r, "aoe", None)[0].title;
         assert!(title.starts_with(super::super::TITLE_PREFIX), "{title}");
         assert_eq!(super::super::TITLE_PREFIX, "aoe breakout \u{b7} ");
     }
@@ -421,7 +483,7 @@ mod tests {
             Some("bender"),
             vec![session("a1b2c3d4e5f60718", "Vikings", "work")],
         );
-        let got = surfaces(&r, "/ignored/aoe");
+        let got = surfaces(&r, "/ignored/aoe", None);
         assert_eq!(
             got[0].command,
             "ssh -t bender aoe --profile work session attach a1b2c3d4e5f60718"
@@ -431,7 +493,7 @@ mod tests {
     #[test]
     fn a_binary_path_with_a_single_quote_is_quoted() {
         let r = request(None, vec![session("abc", "T", "")]);
-        let got = surfaces(&r, "/Users/o'brien/bin/aoe");
+        let got = surfaces(&r, "/Users/o'brien/bin/aoe", None);
         assert_eq!(
             got[0].command,
             r"'/Users/o'\''brien/bin/aoe' session attach abc"
@@ -465,7 +527,7 @@ mod tests {
     fn the_title_never_reaches_the_command() {
         let title = "$(touch /tmp/p) `id` ; rm -rf / '\"";
         let r = request(Some("bender"), vec![session("abc", title, "work")]);
-        let got = surfaces(&r, "aoe");
+        let got = surfaces(&r, "aoe", None);
         assert_eq!(
             got[0].command,
             "ssh -t bender aoe --profile work session attach abc"
@@ -480,7 +542,7 @@ mod tests {
     fn titles_are_made_printable() {
         let r = request(None, vec![session("abc", "a\u{1b}[31mb\n", "")]);
         assert_eq!(
-            surfaces(&r, "aoe")[0].title,
+            surfaces(&r, "aoe", None)[0].title,
             "aoe breakout \u{b7} a[31mb \u{b7} abc"
         );
     }
@@ -489,6 +551,6 @@ mod tests {
     fn long_titles_are_cut_by_character() {
         let r = request(None, vec![session("abc", &"\u{e9}".repeat(100), "")]);
         let want = format!("aoe breakout \u{b7} {} \u{b7} abc", "\u{e9}".repeat(60));
-        assert_eq!(surfaces(&r, "aoe")[0].title, want);
+        assert_eq!(surfaces(&r, "aoe", None)[0].title, want);
     }
 }

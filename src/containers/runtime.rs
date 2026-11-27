@@ -8,6 +8,7 @@ use super::container_interface::{
     ContainerConfig, InspectedContainer, InspectedMount, VolumeMount,
 };
 use super::error::{DockerError, Result};
+use super::image_pull;
 use super::image_update::LocalDigest;
 use super::runtime_base::RuntimeBase;
 
@@ -115,7 +116,38 @@ impl ContainerRuntime {
     }
 
     pub fn pull_image(&self, image: &str) -> Result<()> {
-        self.base.pull_image(image)
+        self.join_pull(image)
+            .wait(&tokio_util::sync::CancellationToken::new())
+    }
+
+    /// [`Self::pull_image`]; when `cancel` fires this caller stops waiting, and the pull is
+    /// killed if no other caller is waiting on it.
+    pub fn pull_image_until_cancelled(
+        &self,
+        image: &str,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        self.join_pull(image).wait(cancel)
+    }
+
+    /// Joins this process's running pull of `image`, or starts one.
+    pub(crate) fn join_pull(&self, image: &str) -> image_pull::Waiter {
+        let base = self.base;
+        let pulled = image.to_string();
+        image_pull::join_with(self.pull_key(image), move |kill| {
+            base.pull_until_cancelled(&pulled, kill)
+        })
+    }
+
+    pub(crate) fn pull_state(&self, image: &str) -> image_pull::PullState {
+        image_pull::state(&self.pull_key(image))
+    }
+
+    fn pull_key(&self, image: &str) -> image_pull::PullKey {
+        image_pull::PullKey {
+            runtime: self.display_name(),
+            image: image.to_string(),
+        }
     }
 
     /// The command [`Self::pull_image`] runs, for a user to copy when the dashboard can't pull.
@@ -142,7 +174,12 @@ impl ContainerRuntime {
         image: &str,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<()> {
-        self.base.ensure_image(image, cancel)
+        if self.base.image_exists_locally(image) {
+            tracing::info!(target: "containers.runtime", "Using local {} image '{}'", self.base.name, image);
+            return Ok(());
+        }
+        tracing::info!(target: "containers.runtime", "Pulling {} image '{}'", self.base.name, image);
+        self.pull_image_until_cancelled(image, cancel)
     }
 
     pub fn default_sandbox_image(&self) -> &'static str {
@@ -162,6 +199,24 @@ impl ContainerRuntime {
         name: &str,
         command: &mut std::process::Command,
     ) -> Result<bool> {
+        self.container_exists_via(name, command, None)
+    }
+
+    /// [`Self::does_container_exist`] that kills the probe once `cancel` fires.
+    pub fn does_container_exist_until_cancelled(
+        &self,
+        name: &str,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<bool> {
+        self.container_exists_via(name, &mut self.base.command(), Some(cancel))
+    }
+
+    fn container_exists_via(
+        &self,
+        name: &str,
+        command: &mut std::process::Command,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<bool> {
         match self.kind {
             RuntimeKind::Docker | RuntimeKind::Podman => {
                 command.args(["container", "inspect", name]);
@@ -171,7 +226,10 @@ impl ContainerRuntime {
                 command.args(["logs", name]);
             }
         }
-        let output = self.base.probe_output(command)?;
+        let output = match cancel {
+            Some(cancel) => self.base.probe_output_until_cancelled(command, cancel)?,
+            None => self.base.probe_output(command)?,
+        };
         if !output.status.success() {
             return self
                 .base

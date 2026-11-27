@@ -306,7 +306,8 @@ const PROMPT_SUPPRESS_ENV: &[(&str, &str)] = &[
 ];
 
 /// Local hooks run in `$SHELL`, container hooks in `bash` via `exec`, where env
-/// must be passed as `-e` because host env does not propagate.
+/// must be named with `-e` because host env does not propagate. The runtime reads
+/// each value from its own env, keeping it out of argv.
 fn build_hook_command(
     cmd: &str,
     target: &HookTarget,
@@ -347,10 +348,10 @@ fn build_hook_command(
             command.arg("exec").arg("--workdir").arg(workdir);
             let pairs = extra_env
                 .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .chain(prompt_env.map(|(k, v)| format!("{}={}", k, v)));
-            for pair in pairs {
-                command.arg("-e").arg(pair);
+                .map(|(k, v)| (*k, v.as_str()))
+                .chain(prompt_env.map(|(k, v)| (*k, *v)));
+            for (key, value) in pairs {
+                command.arg("-e").arg(key).env(key, value);
             }
             command
                 .arg(container_name)
@@ -702,7 +703,17 @@ pub fn run_before_session_hooks(
     )
 }
 
-/// Stdout carries secrets: it is never logged or included in errors.
+/// A host hook that ran and exited unsuccessfully; carried in the error chain so a caller
+/// can classify the failure without reading the message, which names the command and the
+/// hook's stderr.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[error("hook exited unsuccessfully (status {code:?})")]
+pub struct HookExit {
+    pub code: Option<i32>,
+}
+
+/// Stdout carries secrets: it is never logged or included in errors. The command string is
+/// not logged either, and a timeout names only the hook's label.
 fn run_env_minting_hooks(
     commands: &[String],
     project_path: &Path,
@@ -714,9 +725,8 @@ fn run_env_minting_hooks(
     for cmd in commands {
         tracing::info!(
             target: "session.store",
-            "Running {} host hook (stdout not logged): {}",
+            "Running {} host hook (stdout and command not logged)",
             label,
-            cmd
         );
         let opts = HookSpawnOpts {
             merge_stderr: false,
@@ -725,7 +735,7 @@ fn run_env_minting_hooks(
         let mut command =
             build_hook_command(cmd, &HookTarget::Local { project_path }, opts, extra_env);
         command.envs(session_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-        let output = run_hook_output(&mut command, cmd, || {
+        let output = run_hook_output(&mut command, label, || {
             format!("Failed to execute {} hook: {}", label, cmd)
         })?;
 
@@ -736,13 +746,16 @@ fn run_env_minting_hooks(
             } else {
                 format!("\nstderr:\n{}", stderr.trim_end())
             };
-            anyhow::bail!(
+            return Err(anyhow::Error::new(HookExit {
+                code: output.status.code(),
+            })
+            .context(format!(
                 "{} hook failed with exit code {}: {}{}",
                 label,
                 output.status.code().unwrap_or(-1),
                 cmd,
                 stderr_detail
-            );
+            )));
         }
         for (key, value) in parse_env_kv_lines(&String::from_utf8_lossy(&output.stdout)) {
             collected.retain(|(k, _)| k != &key);
@@ -913,12 +926,19 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
-    fn container_args(opts: HookSpawnOpts, env: &[(&'static str, String)]) -> Vec<String> {
+    fn container_command(
+        opts: HookSpawnOpts,
+        env: &[(&'static str, String)],
+    ) -> std::process::Command {
         let target = HookTarget::Container {
             container_name: "test_container",
             workdir: "/work",
         };
         build_hook_command("true", &target, opts, env)
+    }
+
+    fn container_args(opts: HookSpawnOpts, env: &[(&'static str, String)]) -> Vec<String> {
+        container_command(opts, env)
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
@@ -1245,22 +1265,29 @@ mod tests {
     }
 
     #[test]
-    fn container_hook_forwards_env_as_single_dash_e_args() {
-        let has_pair =
-            |args: &[String], pair: &str| args.windows(2).any(|w| w[0] == "-e" && w[1] == pair);
-        let detached = container_args(
-            HookSpawnOpts {
-                merge_stderr: true,
-                detach_tty: true,
-            },
-            &[],
-        );
-        for pair in [
-            "GIT_TERMINAL_PROMPT=0",
-            "GIT_ASKPASS=true",
-            "SSH_ASKPASS=true",
+    fn container_hook_names_env_in_argv_and_carries_values_on_the_child() {
+        let has_name =
+            |args: &[String], name: &str| args.windows(2).any(|w| w[0] == "-e" && w[1] == name);
+        let child_value = |command: &std::process::Command, name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        let detach = HookSpawnOpts {
+            merge_stderr: true,
+            detach_tty: true,
+        };
+        let detached = container_args(detach, &[]);
+        let command = container_command(detach, &[]);
+        for (name, value) in [
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("GIT_ASKPASS", "true"),
+            ("SSH_ASKPASS", "true"),
         ] {
-            assert!(has_pair(&detached, pair), "{pair}: {detached:?}");
+            assert!(has_name(&detached, name), "{name}: {detached:?}");
+            assert_eq!(child_value(&command, name).as_deref(), Some(value));
         }
         let attached = container_args(HookSpawnOpts::default(), &[]);
         assert!(!attached.iter().any(|a| a == "-e"), "{attached:?}");
@@ -1270,8 +1297,12 @@ mod tests {
             ("AOE_SESSION_TITLE", "My Title".to_string()),
         ];
         let args = container_args(HookSpawnOpts::default(), &env);
-        assert!(has_pair(&args, "AOE_SESSION_ID=s_abc"), "{args:?}");
-        assert!(has_pair(&args, "AOE_SESSION_TITLE=My Title"), "{args:?}");
+        let command = container_command(HookSpawnOpts::default(), &env);
+        for (name, value) in &env {
+            assert!(has_name(&args, name), "{args:?}");
+            assert!(!args.iter().any(|a| a.contains(value.as_str())), "{args:?}");
+            assert_eq!(child_value(&command, name).as_deref(), Some(value.as_str()));
+        }
     }
 
     #[test]

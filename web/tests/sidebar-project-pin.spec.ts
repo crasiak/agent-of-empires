@@ -86,13 +86,15 @@ async function mockApis(page: Page, sessions: MockSession[], projects: MockProje
     await page.route(`**/api/${path}`, (r) =>
       r.fulfill({
         json:
-          path === "about"
-            ? { profile: "default" }
-            : path === "profiles"
-              ? [{ name: "default", is_default: true }]
-              : path === "docker/status"
-                ? {}
-                : [],
+          path === "settings"
+            ? { session: { hide_empty_groups: false } }
+            : path === "about"
+              ? { profile: "default" }
+              : path === "profiles"
+                ? [{ name: "default", is_default: true }]
+                : path === "docker/status"
+                  ? {}
+                  : [],
       }),
     );
   }

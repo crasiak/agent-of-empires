@@ -893,7 +893,8 @@ fn validate_agent_key_value(text: &str) -> Result<(), String> {
         return Err("Value cannot be empty".to_string());
     }
 
-    if crate::agents::get_agent(key).is_none() {
+    // A retained native identity stays addressable while a declaration offers it.
+    if crate::agents::get_agent(key).is_none() && crate::agents::native_definition(key).is_none() {
         let names = crate::agents::agent_names().join(", ");
         return Err(format!(
             "'{}' is not a known agent. Known agents: {}",
@@ -919,7 +920,7 @@ fn validate_custom_agent_entry(text: &str) -> Result<(), String> {
     }
     if crate::agents::get_agent(key).is_some() {
         return Err(format!(
-            "'{}' is a built-in agent. Use Agent Command Override to override built-in agents.",
+            "'{}' is a built-in agent. Use Replace start command to change how a built-in agent starts.",
             key
         ));
     }
@@ -962,7 +963,9 @@ fn validate_detect_as_entry(text: &str) -> Result<(), String> {
     if value.is_empty() {
         return Err("Built-in agent name cannot be empty".to_string());
     }
-    if crate::agents::get_agent(value).is_none() {
+    if crate::agents::get_agent(value).is_none()
+        && crate::agents::native_definition(value).is_none()
+    {
         let names = crate::agents::agent_names().join(", ");
         return Err(format!(
             "'{}' is not a known built-in agent. Known agents: {}",
@@ -975,6 +978,25 @@ fn validate_detect_as_entry(text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Entries naming a tool a declaration took over stay editable, while
+    /// genuinely unknown tools are still refused.
+    #[test]
+    #[serial_test::serial]
+    fn retained_native_identities_stay_valid_after_takeover() {
+        let dir = tempfile::tempdir().unwrap();
+        // Declared first so it reloads after the app directory is restored.
+        let _reload = crate::plugin::ReloadRegistryOnDrop;
+        let _app = crate::session::test_support::isolate_app_dir_at(dir.path());
+        crate::session::test_support::install_omp_takeover("omp-next");
+        assert!(crate::agents::get_agent("omp").is_none());
+
+        assert_eq!(validate_agent_key_value("omp=--verbose"), Ok(()));
+        assert_eq!(validate_agent_key_value("omp=omp-next --verbose"), Ok(()));
+        assert_eq!(validate_detect_as_entry("my-wrapper=omp"), Ok(()));
+        assert!(validate_agent_key_value("not-a-tool=--verbose").is_err());
+        assert!(validate_detect_as_entry("my-wrapper=not-a-tool").is_err());
+    }
 
     #[test]
     fn list_entry_validators() {
@@ -1011,7 +1033,7 @@ mod tests {
             (
                 custom,
                 "claude=my-wrapper",
-                &["built-in agent", "Agent Command Override"],
+                &["built-in agent", "Replace start command"],
             ),
             (detect_as, "lenovo-claude=claude", &[]),
             (detect_as, "just-a-name", &["name=builtin"]),
@@ -1071,17 +1093,17 @@ mod tests {
             }
             type_text(&mut view, "live");
             assert!(view.search_hits.len() < unfiltered, "a query narrows hits");
-            assert!(view.search_hits.iter().any(|h| h
-                .field_label
-                .to_lowercase()
-                .contains("live-send exit chord")));
+            assert!(view
+                .search_hits
+                .iter()
+                .any(|h| h.field_label.to_lowercase().contains("exit live-send with")));
             press(&mut view, KeyCode::Esc);
             assert!(view.search_input.is_none());
             assert_eq!(view.selected_category, cat_before);
             assert_eq!(view.selected_field, field_before);
         }
 
-        /// Default Tool lives on the Agents tab, so the jump also has to
+        /// Default Agent lives on the Agents tab, so the jump also has to
         /// cross categories cleanly.
         #[test]
         #[serial]
@@ -1099,13 +1121,13 @@ mod tests {
             );
             press(&mut view, KeyCode::Esc);
             press(&mut view, KeyCode::Char('/'));
-            type_text(&mut view, "default tool");
-            assert!(!view.search_hits.is_empty(), "no hits for 'default tool'");
+            type_text(&mut view, "default agent");
+            assert!(!view.search_hits.is_empty(), "no hits for 'default agent'");
             let target_idx = view
                 .search_hits
                 .iter()
-                .position(|h| h.field_label == "Default Tool")
-                .expect("Default Tool should appear in hits");
+                .position(|h| h.field_label == "Default Agent")
+                .expect("Default Agent should appear in hits");
             view.search_selected = target_idx;
             press(&mut view, KeyCode::Enter);
 
@@ -1116,12 +1138,12 @@ mod tests {
             assert_eq!(
                 view.current_category(),
                 crate::tui::settings::SettingsCategory::Agents,
-                "must jump to the Agents tab (where Default Tool lives)"
+                "must jump to the Agents tab (where Default Agent lives)"
             );
             assert_eq!(
                 view.fields[view.selected_field].ident(),
                 "session.default_tool",
-                "must position the field cursor on Default Tool"
+                "must position the field cursor on Default Agent"
             );
         }
 

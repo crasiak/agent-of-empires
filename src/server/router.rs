@@ -118,7 +118,12 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
             "/api/sessions/{id}/diff/file/raw",
             get(api::session_diff_file_raw),
         )
-        .route("/api/sessions/{id}/file", get(api::session_file))
+        .route(
+            "/api/sessions/{id}/file",
+            get(api::session_file)
+                .put(api::save_session_file)
+                .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
         .route("/api/sessions/{id}/file/raw", get(api::session_file_raw))
         // Read-only runtime read: one Hello, one Snapshot, one clean close.
         .route("/api/runtime/read/ws", get(runtime_ws::runtime_ws))
@@ -196,6 +201,10 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
             post(api::force_smart_rename),
         )
         .route("/api/sessions/{id}/summarize", post(api::summarize_session))
+        .route(
+            "/api/sessions/{id}/account-targets",
+            get(api::session_account_targets),
+        )
         .route("/api/sessions/{id}/start", post(api::start_session))
         .route(
             "/api/sessions/{id}/restart",
@@ -293,7 +302,8 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/app-state/tip-seen", post(api::mark_tip_seen))
         // Plugin management.
         .route("/api/plugins", get(api::list_plugins))
-        .route("/api/plugins/{id}/icon", get(api::serve_plugin_icon))
+        // A live login session needs no device binding here; see `auth::UnboundClaim`.
+        .route("/plugin-icons/{id}", get(api::serve_plugin_icon))
         .route(
             "/api/plugins/{id}/pages/{page_id}",
             get(api::serve_plugin_page),
@@ -354,6 +364,8 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
             "/api/app-state/web-tour-seen",
             post(api::mark_web_tour_seen),
         )
+        .route("/api/setup", get(api::get_setup).patch(api::patch_setup))
+        .route("/api/setup/runtimes", get(api::get_setup_runtimes))
         .route("/api/app-state/dismiss-update", post(api::dismiss_update))
         .route(
             "/api/app-state/repo-appearances/import",
@@ -492,6 +504,14 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/sessions/{id}/acp/cancel", post(api::acp_cancel))
         .route(
+            "/api/sessions/{id}/acp/tasks/{task_id}/output",
+            get(api::acp_task_output),
+        )
+        .route(
+            "/api/sessions/{id}/acp/subagents/{child_id}/cancel",
+            post(api::acp_cancel_subagent),
+        )
+        .route(
             "/api/sessions/{id}/acp/force_end_turn",
             post(api::acp_force_end_turn),
         )
@@ -512,6 +532,10 @@ pub(super) fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/sessions/{id}/acp/enable", post(api::acp_enable))
         .route("/api/sessions/{id}/acp/disable", post(api::acp_disable))
+        .route(
+            "/api/sessions/{id}/acp/terminal-check",
+            get(api::acp_terminal_check),
+        )
         .route(
             "/api/sessions/{id}/queue",
             post(api::queue_enqueue)

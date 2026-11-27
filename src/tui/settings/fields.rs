@@ -123,6 +123,10 @@ pub enum FieldKind {
         widget: WidgetKind,
         validation: ValidationKind,
         profile_overridable: bool,
+        /// Shown as a "Needs restart" tag after the label.
+        restart: bool,
+        /// Shown as a "Web dashboard only" tag after the label.
+        web_only: bool,
     },
     /// Profile-only description (no global counterpart to inherit).
     ProfileDescription,
@@ -190,6 +194,23 @@ impl SettingField {
     /// True when this entry is a non-interactive section divider.
     pub fn is_section_header(&self) -> bool {
         matches!(self.value, FieldValue::SectionHeader)
+    }
+
+    /// Schema tags shown after the label.
+    pub fn tags(&self) -> Vec<&'static str> {
+        let FieldKind::Schema {
+            restart, web_only, ..
+        } = &self.kind
+        else {
+            return Vec::new();
+        };
+        [
+            (*restart, "Needs restart"),
+            (*web_only, "Web dashboard only"),
+        ]
+        .into_iter()
+        .filter_map(|(on, tag)| on.then_some(tag))
+        .collect()
     }
 
     /// Human-readable rendering of the current value (for read-only displays).
@@ -390,6 +411,7 @@ fn is_map_list(section: &str, field: &str) -> bool {
                 | "custom_agents"
                 | "agent_detect_as"
                 | "agent_acp_cmd"
+                | "agent_clear_alias"
                 | "agent_config_dir"
                 | "agent_execution_as"
         )
@@ -473,15 +495,47 @@ fn json_to_list(current: &Value) -> Vec<String> {
 
 /// Render from the last availability snapshot without waiting for background probes.
 fn installed_oneshot_agents() -> Vec<String> {
-    let defs: Vec<&crate::agents::AgentDef> = crate::agents::oneshot_capable_names()
+    let defs: Vec<&crate::agents::AgentDef<'_>> = crate::agents::oneshot_capable_names()
         .into_iter()
         .filter_map(crate::agents::get_agent)
         .collect();
     let available = crate::tmux::agent_availability_snapshot(&defs);
-    defs.iter()
+    let mut names: Vec<String> = defs
+        .iter()
         .filter(|d| available.contains(d.name))
         .map(|d| d.name.to_string())
-        .collect()
+        .collect();
+    let config = crate::session::Config::load_or_warn();
+    let registry = crate::plugin::registry();
+    for plugin in crate::plugin::agent_integration::catalog(
+        &registry,
+        crate::agents::AGENTS.iter().map(|agent| agent.name),
+        config
+            .session
+            .custom_agents
+            .iter()
+            .filter(|(_, command)| !command.trim().is_empty())
+            .map(|(name, _)| name.as_str()),
+    ) {
+        let has_oneshot = registry.get(plugin.plugin).is_some_and(|owner| {
+            owner.manifest.agent_integrations.iter().any(|entry| {
+                entry.tool == plugin.tool
+                    && entry
+                        .launch
+                        .as_ref()
+                        .is_some_and(|launch| launch.oneshot_flag.is_some())
+                    && entry
+                        .command
+                        .as_deref()
+                        .and_then(aoe_plugin_api::agent_integration::direct_launch_words)
+                        .is_some()
+            })
+        });
+        if has_oneshot && crate::tmux::plugin_command_on_path(plugin.command) {
+            names.push(plugin.tool.to_owned());
+        }
+    }
+    names
 }
 
 /// Build a `FieldValue` for a `custom:*` widget from its current JSON.
@@ -834,6 +888,8 @@ fn build_schema_row(
             widget: desc.widget.clone(),
             validation: desc.validation.clone(),
             profile_overridable: desc.profile_overridable,
+            restart: desc.restart,
+            web_only: desc.web_only,
         },
         label: desc.label.clone(),
         description: desc.description.clone(),
@@ -914,7 +970,7 @@ fn build_host_environment_row(ctx: &BuildCtx) -> SettingField {
              (passthrough from host), KEY=$$literal (escape a leading $), or bare KEY \
              (passthrough). All forms resolve to a literal `KEY=value` arg in the spawned \
              process, visible in `ps`; for secrets you want hidden from argv, configure \
-             Sandbox > Sandbox Environment instead. Profile value replaces the global list."
+             Sandbox > Environment variables instead. Profile value replaces the global list."
             .to_string(),
         value,
         category: SettingsCategory::Session,
@@ -1145,6 +1201,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn agent_clear_alias_entries_round_trip_as_a_map_not_an_array() {
+        assert!(is_map_list("session", "agent_clear_alias"));
+        let items = vec!["bridge=/clear".to_string(), "other=/new".to_string()];
+        let value = parse_key_value_object(&items);
+        assert_eq!(value, json!({ "bridge": "/clear", "other": "/new" }));
+        // The settings struct accepts the map the TUI writes, so the entry is not discarded.
+        let config: crate::session::SessionConfig =
+            serde_json::from_value(json!({ "agent_clear_alias": value })).unwrap();
+        assert_eq!(
+            config.agent_clear_alias.get("bridge").map(String::as_str),
+            Some("/clear")
+        );
+    }
+
+    #[test]
     #[serial_test::serial]
     fn smart_rename_picker_retains_a_configured_agent_until_discovery_finishes() {
         let _home = crate::session::test_support::isolate_app_dir();
@@ -1201,6 +1272,8 @@ mod tests {
                 widget: WidgetKind::OptionalText { mono: false },
                 validation: ValidationKind::MemoryLimit,
                 profile_overridable: true,
+                restart: false,
+                web_only: false,
             },
             label: "Memory Limit".to_string(),
             description: String::new(),
@@ -1264,6 +1337,7 @@ mod tests {
             "session.agent_command_override",
             "session.agent_extra_args",
             "session.agent_acp_cmd",
+            "session.agent_clear_alias",
             "session.default_tool",
             "session.agent_config_dir",
             "session.agent_execution_as",

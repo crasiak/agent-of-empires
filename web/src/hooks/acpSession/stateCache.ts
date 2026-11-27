@@ -6,16 +6,13 @@ import {
   emptyAcpState,
   normaliseTurnState,
   type AcpState,
+  type ActivityRow,
   type BackgroundAgent,
+  type BackgroundShell,
+  type SubagentRecord,
   type WorkflowRun,
 } from "../../lib/acpTypes";
-import {
-  STORAGE_KEY_PREFIX,
-  STATE_TTL_MS,
-  clearQueueCount,
-  setQueueCount,
-  type PersistedEntry,
-} from "../../lib/acpStateStorage";
+import { STORAGE_KEY_PREFIX, STATE_TTL_MS, type PersistedEntry } from "../../lib/acpStateStorage";
 import { safeSetItem } from "../../lib/safeStorage";
 
 const STATE_CACHE_CAP = 32;
@@ -81,7 +78,8 @@ function toPersistedState(state: AcpState): AcpState {
     state.inflightPromptIds.length > 0 ||
     state.restartInFlight ||
     state.restartStoppedSent ||
-    state.restartFailure !== null
+    state.restartFailure !== null ||
+    state.retriedError !== null
       ? {
           ...state,
           optimisticRows: [],
@@ -89,6 +87,7 @@ function toPersistedState(state: AcpState): AcpState {
           restartInFlight: false,
           restartStoppedSent: false,
           restartFailure: null,
+          retriedError: null,
         }
       : state;
   if (!base.queuedPrompts.some((q) => q.attachments?.length)) return base;
@@ -99,9 +98,7 @@ export function persistState(sessionId: string, state: AcpState): void {
   const key = storageKey(sessionId);
   const body = JSON.stringify({ savedAt: Date.now(), state: toPersistedState(state) } satisfies PersistedEntry);
   // On a quota failure evict one entry and retry once; the cache is best effort.
-  if (safeSetItem(key, body) || (evictOldestPersistedAcpState(key) && safeSetItem(key, body))) {
-    setQueueCount(sessionId, state.queuedPrompts.length);
-  }
+  if (!safeSetItem(key, body) && evictOldestPersistedAcpState(key)) safeSetItem(key, body);
 }
 
 // Rows with no user prompt and older history pending would open mid-turn. Drop the rows and cursor so replay
@@ -200,8 +197,11 @@ function subscribeAcpState(sessionId: string, cb: () => void): () => void {
   };
 }
 
+const EMPTY_ACTIVITY: ActivityRow[] = [];
 const EMPTY_BACKGROUND_AGENTS: BackgroundAgent[] = [];
 const EMPTY_BACKGROUND_TASKS: string[] = [];
+const EMPTY_SUBAGENTS: SubagentRecord[] = [];
+const EMPTY_BACKGROUND_SHELLS: BackgroundShell[] = [];
 const EMPTY_WORKFLOW_RUNS: Record<string, WorkflowRun> = {};
 
 /** One field of a session's cached state, so sibling panels need no second WebSocket. */
@@ -217,16 +217,31 @@ function useCachedField<T>(sessionId: string | null, pick: (state: AcpState) => 
   return useSyncExternalStore(subscribe, getSnapshot);
 }
 
+const pickActivity = (s: AcpState) => s.activity;
 const pickBackgroundAgents = (s: AcpState) => s.backgroundAgents;
+const pickSubagents = (s: AcpState) => s.subagents;
 const pickBackgroundTasks = (s: AcpState) => s.backgroundTasks;
+const pickBackgroundShells = (s: AcpState) => s.backgroundShells;
 const pickWorkflowRuns = (s: AcpState) => s.workflowRuns;
+
+export function useActivity(sessionId: string | null): ActivityRow[] {
+  return useCachedField(sessionId, pickActivity, EMPTY_ACTIVITY);
+}
 
 export function useBackgroundAgents(sessionId: string | null): BackgroundAgent[] {
   return useCachedField(sessionId, pickBackgroundAgents, EMPTY_BACKGROUND_AGENTS);
 }
 
+export function useSubagents(sessionId: string | null): SubagentRecord[] {
+  return useCachedField(sessionId, pickSubagents, EMPTY_SUBAGENTS);
+}
+
 export function useBackgroundTasks(sessionId: string | null): string[] {
   return useCachedField(sessionId, pickBackgroundTasks, EMPTY_BACKGROUND_TASKS);
+}
+
+export function useBackgroundShells(sessionId: string | null): BackgroundShell[] {
+  return useCachedField(sessionId, pickBackgroundShells, EMPTY_BACKGROUND_SHELLS);
 }
 
 export function useWorkflowRuns(sessionId: string | null): Record<string, WorkflowRun> {
@@ -242,5 +257,4 @@ export function clearAcpCache(sessionId?: string): void {
     stateCache.delete(sessionId);
     removePersisted(() => [storageKey(sessionId)]);
   }
-  clearQueueCount(sessionId);
 }

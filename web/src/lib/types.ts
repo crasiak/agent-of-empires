@@ -30,6 +30,11 @@ export interface SessionResponse {
   /** Worker auto-stopped for inactivity (resumable), unlike a deliberate Stop. */
   dormant: boolean;
   lifecycle_generation: number;
+  lifecycle_reservation?: {
+    op: "launch" | "capture" | "stop" | "purge" | "restore" | "trash";
+    generation: number;
+    at: string;
+  } | null;
   yolo_mode: boolean;
   created_at: string;
   last_accessed_at: string | null;
@@ -51,6 +56,8 @@ export interface SessionResponse {
   launch_identity?: LaunchIdentity | null;
   /** The Working directory is not a Repository, so Diff does not auto-open. */
   outside_repository?: boolean;
+  /** Created with its `on_create` hooks skipped, so their setup never ran. */
+  created_without_setup?: boolean;
   /** True when the session was created in scratch mode (`aoe add
    *  --scratch` or the wizard toggle). The `project_path` points
    *  at an auto-provisioned directory under `<app_dir>/scratch/<id>/`,
@@ -92,6 +99,12 @@ export interface SessionResponse {
   /** The provider rate limit the daemon has this session parked on. */
   rate_limit?: RateLimitInfo;
   rate_limit_auto_resume?: boolean;
+  /** Account tool name the daemon is about to fail this parked session over to; absent when none. */
+  rate_limit_failover_to?: string;
+  /** Messages on the Daemon's queue; absent when none. */
+  queued_count?: number;
+  /** What the Daemon's queue waits on, as a prompt sent now would be told. Only the list sets it. */
+  queue_reason?: QueueReasonWire;
   smart_rename?: "inactive" | "pending" | "running";
   /** Still carries its auto-generated name (more reliable than `smart_rename`). */
   default_name?: boolean;
@@ -329,7 +342,8 @@ export interface AgentInfo {
   acp_capable: boolean;
   /** The ACP adapter resolves on the host now; `on_create`/`on_launch` hooks don't count. Import and usage-limit alternatives need this. */
   acp_installed: boolean;
-  /** A non-sandboxed structured create in the served profile will accept this agent; its own hooks count. */
+  /** A non-sandboxed structured create will accept this agent, in the requested profile and project
+   *  (`path`, or `scratch`), counting their config and hooks. Without a project only the profile's count. */
   acp_create_ready?: boolean;
   /** Allowed by `[acp] allowed_agents`; `acp_capable` stays the intrinsic fact. Absent means permitted. */
   acp_allowed?: boolean;
@@ -338,6 +352,10 @@ export interface AgentInfo {
   acp_args?: string[];
   /** Omitted for Active agents. Mirrors `AgentLifecycle` in src/agents.rs. */
   lifecycle?: AgentLifecycleInfo;
+  /** Resolved binary on the daemon's PATH, for installed built-in agents. */
+  path?: string;
+  /** Installs the missing ACP adapter, when known. */
+  acp_install_command?: string;
 }
 
 export interface ProfileInfo {
@@ -438,6 +456,8 @@ export interface CreateSessionRequest {
   worktree_enabled?: boolean;
   worktree_branch?: string;
   create_new_branch?: boolean;
+  /** Start in a workspace directory even with no `extra_repo_paths`. Requires worktree mode. */
+  workspace?: boolean;
   /** Only honored when `create_new_branch` is true; empty means repo default. */
   base_branch?: string;
   sandbox?: boolean;
@@ -462,6 +482,10 @@ export interface CreateSessionRequest {
   trust_hooks?: boolean;
   /** Fingerprint of the exact hook/MCP configuration reviewed before approval. */
   trust_review?: CreationTrustFingerprint;
+  /** Skip every `on_create` hook; the session is tagged `created_without_setup` when there were any. */
+  skip_on_create?: boolean;
+  /** Force-pull the Sandbox image before the create; needs `sandbox`. */
+  pull_latest_image?: boolean;
   /** Claude Code session id to import; `path` must be its original cwd. */
   import_acp_session_id?: string;
   /** Agent or ACP session id to fork from. */
@@ -473,7 +497,7 @@ export interface CreateSessionRequest {
   retry_origin?: string;
 }
 
-export type CreateStage = "preparing" | "starting_container" | "running_hooks" | "starting";
+export type CreateStage = "preparing" | "pulling_image" | "starting_container" | "running_hooks" | "starting";
 
 export interface CreateProgress {
   stage: CreateStage;
@@ -501,6 +525,9 @@ export interface ImportableSession {
 }
 
 export type AcpWorkerState = "absent" | "resuming" | "running" | "stopping";
+
+/** Why a session's server queue is waiting (the Daemon's `QueueReason`). */
+export type QueueReasonWire = "turn_active" | "cancelling" | "compacting" | "worker_down" | "integration_lost";
 
 // Settings schema mirrors `crate::session::config::settings_schema` (`GET /api/settings/schema`).
 
@@ -598,8 +625,14 @@ export interface SettingsFieldDescriptor {
   profile_overridable: boolean;
   validation: SettingsValidation;
   advanced: boolean;
+  /** One plain line for users; absent on fields without one and on plugin fields. */
+  summary?: string;
   /** Read only by the TUI; folded apart from the dashboard's own settings. */
   tui_only?: boolean;
+  /** Read only by the dashboard; sent only when set. */
+  web_only?: boolean;
+  /** Read once when an AoE process starts; sent only when set. */
+  restart?: boolean;
   /** Present only on plugin fields, which have no stored value until saved. */
   default?: unknown;
   /** Plugin field that can also be set per registered project. */

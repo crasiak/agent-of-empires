@@ -127,10 +127,12 @@ impl GitWorktree {
     }
 
     pub fn find_main_repo(path: &Path) -> Result<PathBuf> {
-        let Ok(repo) = open_repo_at(path) else {
-            return Self::find_main_repo_from_linked_worktree_gitfile(path)
-                .ok_or(GitError::NotAGitRepo);
-        };
+        // Opening a linked worktree parses the shared repo config, which is costly in a repo
+        // with many worktrees, so read the gitdir file first.
+        if let Some(main_repo) = Self::find_main_repo_from_linked_worktree_gitfile(path) {
+            return Ok(main_repo);
+        }
+        let repo = open_repo_at(path).map_err(|_| GitError::NotAGitRepo)?;
         if let Some(main_repo) = Self::find_main_repo_from_worktree_gitdir(repo.path()) {
             return Ok(main_repo);
         }
@@ -159,14 +161,19 @@ impl GitWorktree {
             return None;
         }
         let content = std::fs::read_to_string(&git_file).ok()?;
+        Self::find_main_repo_from_worktree_gitdir(&Self::gitfile_target(dir, &content)?)
+    }
+
+    /// The canonical gitdir a `.git` file at `dir` with `content` points to.
+    pub(crate) fn gitfile_target(dir: &Path, content: &str) -> Option<PathBuf> {
         let gitdir = content
             .lines()
             .find_map(|line| line.strip_prefix("gitdir:").map(str::trim))?;
-        let gitdir = git_file.parent()?.join(gitdir).canonicalize().ok()?;
-        Self::find_main_repo_from_worktree_gitdir(&gitdir)
+        dir.join(gitdir).canonicalize().ok()
     }
 
-    fn find_main_repo_from_worktree_gitdir(gitdir: &Path) -> Option<PathBuf> {
+    /// The main repo of a linked worktree's canonical `gitdir`, or `None` if it is not one.
+    pub(crate) fn find_main_repo_from_worktree_gitdir(gitdir: &Path) -> Option<PathBuf> {
         let worktrees_dir = gitdir.parent()?;
         if worktrees_dir.file_name() != Some(OsStr::new("worktrees")) {
             return None;

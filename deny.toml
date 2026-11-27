@@ -8,7 +8,8 @@ no-default-features = false
 [advisories]
 # Deny any crate with a known security vulnerability
 version = 2
-ignore = []
+# Owner-approved informational chrono exception; replacement is tracked in CRA-1759.
+ignore = ["RUSTSEC-2026-0543"]
 
 # License policy
 [licenses]

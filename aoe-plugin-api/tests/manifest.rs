@@ -35,6 +35,139 @@ fn minimal_manifest_parses_and_round_trips() {
 }
 
 #[test]
+fn agent_declarations_require_api_21() {
+    let declarations = [
+        "[agent_integrations.launch]\noneshot_flag = \"-p\"\n",
+        "[agent_integrations.detection]\nmode = \"native_only\"\n",
+        "[agent_integrations.reply_fallback]\nallow = []\ndeny = []\n",
+    ];
+    for declaration in declarations {
+        let body = format!(
+            "[[agent_integrations]]\ntool = \"example\"\ncommand = \"example\"\n{declaration}"
+        );
+        let errors = invalid(20, &body);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("api_version >= 21")),
+            "{errors:?}"
+        );
+    }
+    parse(
+        21,
+        "[[agent_integrations]]\ntool = \"example\"\ncommand = \"example\"\n[agent_integrations.launch]\noneshot_flag = \"-p\"\n",
+    );
+    parse(
+        20,
+        "[[agent_integrations]]\ntool = \"example\"\ncommand = \"example\"\n",
+    );
+}
+
+#[test]
+fn agent_contract_rejects_unsafe_or_unsupported_declarations() {
+    let valid = r#"
+capabilities = ["session.integration"]
+[[agent_integrations]]
+tool = "example"
+command = "example"
+provider_versions = ["^1"]
+[agent_integrations.launch]
+oneshot_flag = "-p"
+instruction_flag = "--instruction {}"
+[agent_integrations.launch.container_env]
+EXAMPLE_HOME = "/state"
+[agent_integrations.launch.resume]
+kind = "flag"
+flag = "--resume"
+[agent_integrations.launch.capture]
+backend = "omp"
+host = "pane_scoped"
+sandbox = "pane_scoped"
+[agent_integrations.detection]
+mode = "native_only"
+[agent_integrations.reply_fallback]
+allow = [{ kind = "named", value = "Enter" }]
+deny = [{ kind = "literal", value = "n" }]
+"#;
+    let check = |body: &str| {
+        let parsed: PluginManifest = toml::from_str(&manifest(21, body)).unwrap();
+        match parsed.validate() {
+            Err(ManifestError::Invalid(errors)) => errors,
+            result => panic!("expected invalid declaration: {result:?}"),
+        }
+    };
+    parse(21, valid);
+    for body in [
+        valid.replace("host = \"pane_scoped\"", "host = \"unsupported\""),
+        valid.replace("sandbox = \"pane_scoped\"", "sandbox = \"unsupported\""),
+    ] {
+        parse(21, &body);
+    }
+    for (body, expected) in [
+        (
+            valid.replace("--instruction {}", "--instruction '{}'"),
+            "instruction_flag",
+        ),
+        (
+            valid.replace("--instruction {}", "--instruction {}suffix"),
+            "instruction_flag",
+        ),
+        (
+            valid.replace("oneshot_flag = \"-p\"", "oneshot_flag = \"-p\u{202e}\""),
+            "oneshot_flag",
+        ),
+        (
+            valid.replace("--instruction {}", "--instruction\u{200b} {}"),
+            "instruction_flag",
+        ),
+        (
+            valid.replace("flag = \"--resume\"", "flag = \"--resume\u{200b}\""),
+            "launch.resume",
+        ),
+        (
+            valid.replace("value = \"n\"", "value = \"n\u{202e}\""),
+            "invalid key",
+        ),
+        (valid.replace("EXAMPLE_HOME", "HOME"), "container_env"),
+        (
+            valid.replace(
+                "[agent_integrations.launch.capture]\nbackend = \"omp\"\nhost = \"pane_scoped\"\nsandbox = \"pane_scoped\"\n",
+                "",
+            ),
+            "resume requires OMP capture",
+        ),
+        (
+            valid.replace(
+                "host = \"pane_scoped\"\nsandbox = \"pane_scoped\"",
+                "host = \"unsupported\"\nsandbox = \"unsupported\"",
+            ),
+            "resume requires OMP capture",
+        ),
+        (
+            valid.replace("backend = \"omp\"", "backend = \"codex\""),
+            "capture combination",
+        ),
+        (
+            valid.replace(
+                "sandbox = \"pane_scoped\"",
+                "sandbox = \"managed_exclusive_store\"",
+            ),
+            "capture combination",
+        ),
+        (
+            valid.replace("value = \"Enter\"", "value = \"F01\""),
+            "invalid key",
+        ),
+    ] {
+        let errors = check(&body);
+        assert!(
+            errors.iter().any(|error| error.contains(expected)),
+            "{expected}: {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn agent_integrations_require_api_capability_and_unique_valid_tools() {
     let base = r#"
 id = "acme.session-agent"
@@ -256,12 +389,22 @@ id = "nolabel"
     assert_eq!(m.status[1].label, "");
 
     assert!(m.host_compat("0.11.0").is_ok());
+    assert!(m.host_compat("0.11.1-nightly.20261108").is_ok());
+    assert!(m.host_compat("0.13.0-nightly.20261108").is_err());
+    assert!(m.host_compat("0.10.0-rc.1").is_err());
+    assert!(m.host_compat("0.11.0-rc.1").is_err());
+    assert!(m.host_compat("0.12.0-nightly.20261108").is_err());
+    assert!(m.host_compat("0.12.1-nightly.20261108").is_err());
     let err = m.host_compat("0.13.0").unwrap_err();
     assert!(
         err.contains("plugin requires aoe") && err.contains("0.13.0"),
         "{err}"
     );
     assert!(parse(4, "").host_compat("99.0.0").is_ok());
+    // A nightly is the stable it builds on, not the unreleased next patch.
+    let next = parse(4, "aoe_version = \">=0.11.1\"\n");
+    assert!(next.host_compat("0.11.1-nightly.20261108").is_err());
+    assert!(next.host_compat("0.11.2-nightly.20261108").is_ok());
 }
 
 #[test]
@@ -287,6 +430,150 @@ fn runtime_requires_worker_capability() {
         }
     }
     parse(2, "capabilities = [\"runtime.worker\"]\n");
+}
+
+#[test]
+fn send_keys_enter_delay_requires_api_22_and_caps_at_two_seconds() {
+    let declaration = "[[agent_integrations]]\ntool = \"example\"\ncommand = \"example\"\n\
+                       [agent_integrations.launch]\n\
+                       send_keys_enter_delay_ms = 150\n";
+
+    let parsed = parse(22, declaration);
+    assert_eq!(
+        parsed.agent_integrations[0]
+            .launch
+            .as_ref()
+            .and_then(|launch| launch.send_keys_enter_delay_ms),
+        Some(150)
+    );
+    assert_eq!(
+        PluginManifest::from_toml_str(&toml::to_string(&parsed).unwrap())
+            .expect("round-trips")
+            .agent_integrations[0]
+            .launch
+            .as_ref()
+            .and_then(|launch| launch.send_keys_enter_delay_ms),
+        Some(150)
+    );
+
+    let errors = invalid(21, declaration);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("send_keys_enter_delay_ms requires api_version >= 22")),
+        "{errors:?}"
+    );
+
+    let errors = invalid(22, &declaration.replace("150", "2001"));
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("send_keys_enter_delay_ms must be at most 2000")),
+        "{errors:?}"
+    );
+
+    parse(22, &declaration.replace("150", "2000"));
+}
+
+#[test]
+fn session_id_capture_requires_api_22_and_a_worker_runtime() {
+    let runtime = "capabilities = [\"runtime.worker\"]\n\
+                   [runtime]\n\
+                   kind = \"command\"\n\
+                   command = [\".venv/bin/worker\"]\n";
+    let declaration = "[[agent_integrations]]\ntool = \"example\"\ncommand = \"example\"\n\
+                       [agent_integrations.session_id]\n\
+                       method = \"example.session_id\"\n";
+    let body = format!("{runtime}{declaration}");
+
+    let parsed = parse(22, &body);
+    let session_id = parsed.agent_integrations[0]
+        .session_id
+        .as_ref()
+        .expect("declared");
+    assert_eq!(session_id.timeout_ms, 5_000);
+    assert!(session_id.launch_method.is_none());
+    assert_eq!(
+        PluginManifest::from_toml_str(&toml::to_string(&parsed).unwrap())
+            .expect("round-trips")
+            .agent_integrations[0]
+            .session_id,
+        parsed.agent_integrations[0].session_id
+    );
+
+    let errors = invalid(21, &body);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("session_id requires api_version >= 22")),
+        "{errors:?}"
+    );
+
+    let errors = invalid(22, declaration);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error
+                .contains("session_id requires the plugin to declare a [runtime] worker")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn session_id_rejects_invalid_methods_and_timeouts() {
+    let runtime = "capabilities = [\"runtime.worker\"]\n\
+                   [runtime]\n\
+                   kind = \"command\"\n\
+                   command = [\".venv/bin/worker\"]\n";
+    let body = |session_id: &str| {
+        format!(
+            "{runtime}[[agent_integrations]]\ntool = \"example\"\ncommand = \"example\"\n\
+             [agent_integrations.session_id]\n{session_id}"
+        )
+    };
+
+    for method in [
+        "\"\"",
+        "\"example session\"",
+        "\"1example\"",
+        "\"example..id\"",
+    ] {
+        let errors = invalid(22, &body(&format!("method = {method}\n")));
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("session_id.method must be a worker RPC method name")),
+            "{method}: {errors:?}"
+        );
+    }
+    let errors = invalid(
+        22,
+        &body("method = \"example.session_id\"\nlaunch_method = \"example launch\"\n"),
+    );
+    assert!(
+        errors.iter().any(
+            |error| error.contains("session_id.launch_method must be a worker RPC method name")
+        ),
+        "{errors:?}"
+    );
+    for timeout in [0, 249, 30_001] {
+        let errors = invalid(
+            22,
+            &body(&format!(
+                "method = \"example.session_id\"\ntimeout_ms = {timeout}\n"
+            )),
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("session_id.timeout_ms must be")),
+            "{timeout}: {errors:?}"
+        );
+    }
+    parse(
+        22,
+        &body("method = \"example.session_id\"\nlaunch_method = \"example.session_id.launch\"\ntimeout_ms = 1000\n"),
+    );
 }
 
 #[test]

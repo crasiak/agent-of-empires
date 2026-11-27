@@ -14,6 +14,7 @@ interface MockSession {
   project_path: string;
   branch: string | null;
   status?: string;
+  color?: string | null;
 }
 
 const ROW_TAG_SCHEMA = [
@@ -46,6 +47,11 @@ async function mockApis(
   options: { rowTag?: "none" | "auto" | "profile" | "sandbox" | "branch" } = {},
 ) {
   let rowTag = options.rowTag ?? "branch";
+  let revision = 1;
+  const canonical: Array<ReturnType<typeof sessionResponse> & { color?: string | null }> = sessions.map((session) =>
+    sessionResponse({ ...session }),
+  );
+  const cursor = () => ({ "aoe-runtime-epoch": "mock-runtime", "aoe-runtime-revision": String(revision) });
   await mockStaticApis(page, { profiles: [{ name: "default", is_default: true }] });
   await page.route("**/api/settings**", (r) => {
     const pathname = new URL(r.request().url()).pathname;
@@ -63,14 +69,24 @@ async function mockApis(
   await page.route(/\/api\/sessions(\?.*)?$/, (r) => {
     if (r.request().method() !== "GET") return r.fulfill({ status: 400 });
     return r.fulfill({
-      headers: { "aoe-runtime-epoch": "mock-runtime", "aoe-runtime-revision": "1" },
+      headers: cursor(),
       json: {
-        sessions: sessions.map((s) => sessionResponse({ ...s })),
+        sessions: canonical,
         workspace_ordering: [],
       },
     });
   });
-  await page.route("**/api/sessions/*/color", (r) => r.fulfill({ json: { id: "session-color" } }));
+  await page.route("**/api/sessions/*/color", (route) => {
+    expect(route.request().method()).toBe("PATCH");
+    const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/").at(-2)!);
+    const session = canonical.find((session) => session.id === id);
+    if (!session) return route.fulfill({ status: 404 });
+    const body = route.request().postDataJSON() as { color: string | null };
+    expect(Object.keys(body)).toEqual(["color"]);
+    session.color = body.color;
+    revision += 1;
+    return route.fulfill({ headers: cursor(), json: session });
+  });
 }
 
 test.describe("Sidebar multi-session (#956)", () => {

@@ -6,6 +6,50 @@ use std::fs;
 
 const TEST_PATH: &str = ".";
 
+#[test]
+fn intake_review_uses_final_setup_and_refuses_unsupported_launch_modes() {
+    use crate::session::tailored::intake::{split_launch_args, IntakeBrief};
+    let mut dialog = NewSessionDialog::new_with_tools(vec!["pi"], TEST_PATH.into());
+    dialog.command_override = Input::new("pi".into());
+    dialog.extra_args = Input::new("--thinking high".into());
+    let ordinary_yolo = submitted(dialog.build_submit_result()).yolo_mode;
+    dialog.set_intake(IntakeBrief::new("Keep this original task".into()).unwrap());
+    dialog.set_group("changed/group".into());
+    assert!(dialog.validate_structured());
+    let data = submitted(dialog.build_submit_result());
+    assert!(data.intake);
+    assert_eq!(data.command_override, "pi");
+    assert_eq!(
+        data.yolo_mode, ordinary_yolo,
+        "intake must preserve the selected agent's permission behavior"
+    );
+    assert!(!data.sandbox && !data.structured);
+    let (args, prompt) = split_launch_args(&data.extra_args);
+    assert!(args.contains("--thinking high"));
+    let prompt = prompt.unwrap();
+    assert!(prompt.contains("Keep this original task"));
+    assert!(prompt.contains("Group: \"changed/group\""));
+    for (sandbox, structured) in [(true, false), (false, true)] {
+        dialog.sandbox_enabled = sandbox;
+        dialog.structured_enabled = structured;
+        assert!(!dialog.validate_structured());
+        assert!(dialog
+            .error_message
+            .as_ref()
+            .unwrap()
+            .contains("terminal Pi"));
+    }
+    dialog.sandbox_enabled = false;
+    dialog.structured_enabled = false;
+    dialog.extra_args = Input::new("--resume other".into());
+    assert!(!dialog.validate_structured());
+    assert!(dialog
+        .error_message
+        .as_ref()
+        .unwrap()
+        .contains("fresh interactive"));
+}
+
 /// Field layout with one tool and one profile: path 0, title 1, yolo 2,
 /// worktree 3, group 4.
 fn single_tool_dialog() -> NewSessionDialog {
@@ -955,6 +999,193 @@ fn the_structured_row_appears_only_for_an_acp_capable_tool() {
     dialog.set_structured_capable(false);
     assert!(!dialog.structured_enabled);
     assert!(!submitted(dialog.build_submit_result()).structured);
+}
+
+#[test]
+fn a_custom_agent_locks_yolo_only_in_the_views_that_run_an_always_yolo_base() {
+    // (terminal locked, structured locked), with a Yolo the user turned on beforehand.
+    for (name, expected) in [
+        ("my-pi", (true, true)),
+        ("own-pi", (true, false)),
+        ("my-claude", (false, false)),
+    ] {
+        let mut dialog = NewSessionDialog::new_with_tools(vec![name], TEST_PATH.to_string());
+        let base = name.trim_start_matches("my-").trim_start_matches("own-");
+        dialog
+            .agent_detect_as
+            .insert(name.to_string(), base.to_string());
+        dialog
+            .agent_acp_cmd
+            .insert("own-pi".to_string(), "own-pi-acp".to_string());
+        dialog.set_structured_capable(true);
+        dialog.yolo_mode = true;
+        let locked = |d: &NewSessionDialog| d.field_indices().yolo == FieldIndices::ABSENT;
+        assert_eq!(locked(&dialog), expected.0, "{name} terminal");
+
+        dialog.focused_field = dialog.field_indices().structured;
+        dialog.handle_key(key(KeyCode::Char(' ')));
+        assert!(dialog.structured_enabled, "{name}");
+        assert_eq!(locked(&dialog), expected.1, "{name} structured");
+        // Leaving the lock resets Yolo to the default; an unchanged lock keeps the choice.
+        let yolo = expected.1 || expected.0 == expected.1;
+        assert_eq!(dialog.yolo_mode, yolo, "{name}");
+        assert_eq!(
+            submitted(dialog.build_submit_result()).yolo_mode,
+            yolo,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn declared_always_yolo_does_not_overwrite_the_submitted_preference() {
+    let home = tempfile::tempdir().unwrap();
+    // Declared first so it drops last: the registry reloads after HOME is
+    // restored, never while it still points at the temporary fixture.
+    let _reload = crate::plugin::ReloadRegistryOnDrop;
+    let _home = crate::session::test_support::isolate_home(home.path());
+    let manifest = r#"
+id = "acme.yolo"
+name = "Yolo"
+version = "1.0.0"
+api_version = 21
+[[agent_integrations]]
+tool = "yolo-helper"
+command = "yolo-helper"
+[agent_integrations.launch.yolo]
+kind = "always"
+"#;
+    let dir = crate::plugin::plugins_dir().unwrap().join("acme.yolo");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("aoe-plugin.toml"), manifest).unwrap();
+    crate::session::update_config(|config| {
+        config.plugins.insert(
+            "acme.yolo".into(),
+            crate::session::PluginConfig {
+                grant: Some(crate::session::CapabilityGrant {
+                    manifest_hash: aoe_plugin_api::PluginManifest::hash_bytes(manifest.as_bytes()),
+                    capabilities: Vec::new(),
+                    granted_at: chrono::Utc::now(),
+                }),
+                ..Default::default()
+            },
+        );
+    })
+    .unwrap();
+    crate::plugin::reload_registry();
+    let mut dialog = NewSessionDialog::new_with_tools(vec!["yolo-helper"], TEST_PATH.to_string());
+    dialog.yolo_mode_default = false;
+    dialog.reset_yolo();
+    assert_eq!(dialog.field_indices().yolo, FieldIndices::ABSENT);
+    assert!(!submitted(dialog.build_submit_result()).yolo_mode);
+}
+
+#[test]
+#[serial_test::serial]
+fn moving_between_repos_that_map_the_agent_differently_refreshes_its_lock_and_view() {
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _home = crate::session::test_support::isolate_home(temp_home.path());
+    let repo_mapping = |base: &str| {
+        let repo = tempfile::tempdir().expect("repo dir");
+        fs::create_dir_all(repo.path().join(".agent-of-empires")).expect("repo config dir");
+        fs::write(
+            repo.path().join(".agent-of-empires/config.toml"),
+            format!("[session]\nagent_detect_as = {{ wrap = \"{base}\" }}\n"),
+        )
+        .expect("repo config");
+        repo
+    };
+    let (pi, claude) = (repo_mapping("pi"), repo_mapping("claude"));
+    type Arrive = fn(&mut NewSessionDialog, String);
+    let arrivals: &[(&str, Arrive)] = &[
+        ("typed", |d, path| {
+            d.focused_field = d.path_field();
+            d.path = Input::new(String::new());
+            type_str(d, &path);
+            d.handle_key(key(KeyCode::Tab));
+        }),
+        ("picked", |d, path| {
+            d.focused_field = d.path_field();
+            d.path = Input::new(path);
+            d.handle_key(ctrl_key(KeyCode::Char('p')));
+            d.handle_key(key(KeyCode::Enter));
+            assert!(!d.dir_picker.is_active());
+        }),
+        ("clicked away", |d, path| {
+            d.focused_field = d.path_field();
+            d.path = Input::new(path);
+            let worktree = d.field_indices().worktree;
+            d.focusable_rects
+                .push((worktree, ratatui::layout::Rect::new(0, 9, 30, 1)));
+            d.handle_click(10, 9);
+            assert!(d.worktree_enabled, "the click must toggle the row it hit");
+        }),
+        ("sandbox env edited", |d, path| {
+            d.extra_env_overridden = true;
+            d.set_path(path);
+        }),
+        ("back-tabbed", |d, path| {
+            d.focused_field = d.path_field();
+            d.path = Input::new(path);
+            d.handle_key(key(KeyCode::BackTab));
+            assert_eq!(
+                d.focused_field,
+                d.field_indices().group,
+                "BackTab wraps to Group"
+            );
+        }),
+        ("scratch", |d, _| {
+            d.focused_field = d.field_indices().worktree;
+            d.handle_key(ctrl_key(KeyCode::Char('t')));
+            assert_eq!(
+                d.focused_field,
+                d.field_indices().worktree,
+                "focus stays on Worktree"
+            );
+        }),
+    ];
+    let locked = |d: &NewSessionDialog| d.field_indices().yolo == FieldIndices::ABSENT;
+    // Leaving the `pi` lock must drop the forced Yolo, not submit it.
+    for (from, to, to_locked) in [(&pi, &claude, false), (&claude, &pi, true)] {
+        for (name, arrive) in arrivals {
+            let mut dialog = NewSessionDialog::new_with_tools(vec!["wrap"], TEST_PATH.to_string());
+            dialog.set_path(from.path().to_string_lossy().to_string());
+            assert!(dialog.structured_capable, "{name}");
+            assert_eq!(locked(&dialog), !to_locked, "{name}");
+            arrive(&mut dialog, to.path().to_string_lossy().to_string());
+            // Scratch has no repo, so `wrap` is an unknown agent again.
+            let (lock, capable) = if *name == "scratch" {
+                (false, false)
+            } else {
+                (to_locked, true)
+            };
+            assert_eq!(
+                dialog.structured_capable, capable,
+                "{name} to_locked={to_locked}"
+            );
+            assert_eq!(locked(&dialog), lock, "{name} to_locked={to_locked}");
+            assert_eq!(
+                submitted(dialog.build_submit_result()).yolo_mode,
+                lock,
+                "{name} to_locked={to_locked}"
+            );
+        }
+    }
+
+    // A clicked row the move hides activates nothing in its place.
+    let mut dialog = NewSessionDialog::new_with_tools(vec!["wrap"], TEST_PATH.to_string());
+    dialog.set_path(claude.path().to_string_lossy().to_string());
+    dialog.focused_field = dialog.path_field();
+    dialog.path = Input::new(pi.path().to_string_lossy().to_string());
+    let (yolo, worktree) = (dialog.field_indices().yolo, dialog.worktree_enabled);
+    dialog
+        .focusable_rects
+        .push((yolo, ratatui::layout::Rect::new(0, 9, 30, 1)));
+    dialog.handle_click(10, 9);
+    assert!(locked(&dialog));
+    assert_eq!(dialog.focused_field, dialog.path_field());
+    assert_eq!(dialog.worktree_enabled, worktree);
 }
 
 #[test]
@@ -1998,4 +2229,87 @@ fn inherited_modes_stop_where_the_form_does() {
         !dialog.sandbox_enabled,
         "no container runtime to sandbox in"
     );
+}
+
+#[test]
+fn workspace_toggle_follows_config_and_is_forced_by_extra_repos() {
+    for default in [false, true] {
+        let mut config = Config::default();
+        config.worktree.enabled = true;
+        config.worktree.workspace_by_default = default;
+        let dialog = NewSessionDialog::new_with_config(vec!["claude"], TEST_PATH.into(), config);
+        assert_eq!(dialog.workspace, default);
+    }
+
+    let mut dialog = worktree_config_dialog(TEST_PATH.to_string());
+    for _ in 0..WT_WORKSPACE_FIELD {
+        dialog.handle_key(key(KeyCode::Tab));
+    }
+    assert_eq!(dialog.worktree_config_focused_field, WT_WORKSPACE_FIELD);
+    dialog.handle_key(key(KeyCode::Char(' ')));
+    assert!(screen_text(&draw(&mut dialog)).contains("Workspace: [x]"));
+    dialog.handle_key(key(KeyCode::Esc));
+    let data = submitted(dialog.handle_key(key(KeyCode::Enter)));
+    assert!(data.workspace);
+    assert!(data.extra_repo_paths.is_empty());
+
+    let mut dialog = worktree_config_dialog(TEST_PATH.to_string());
+    let (col, row) = find(&draw(&mut dialog), "Workspace:");
+    dialog.handle_click(col, row);
+    assert!(dialog.workspace);
+    dialog.handle_click(col, row);
+    assert!(!dialog.workspace);
+
+    // Extra repos need a workspace, so the toggle reads on and ignores input.
+    dialog.workspace_repos = vec!["/repo/one".into()];
+    dialog.worktree_config_focused_field = WT_WORKSPACE_FIELD;
+    dialog.handle_key(key(KeyCode::Char(' ')));
+    assert!(!dialog.workspace);
+    assert!(screen_text(&draw(&mut dialog)).contains("required by extra repos"));
+    dialog.handle_key(key(KeyCode::Esc));
+    let data = submitted(dialog.handle_key(key(KeyCode::Enter)));
+    assert!(data.workspace);
+
+    // Without a worktree there is no workspace to make.
+    let mut dialog = single_tool_dialog();
+    dialog.workspace = true;
+    dialog.title = Input::new("t".to_string());
+    let data = submitted(dialog.handle_key(key(KeyCode::Enter)));
+    assert!(!data.workspace);
+}
+
+#[test]
+fn workspace_is_unavailable_when_attaching_an_existing_branch() {
+    let mut dialog = worktree_config_dialog(TEST_PATH.to_string());
+    dialog.workspace = true;
+    dialog.create_new_branch = false;
+    dialog.worktree_config_focused_field = WT_WORKSPACE_FIELD;
+    dialog.handle_key(key(KeyCode::Char(' ')));
+    assert!(dialog.workspace, "the toggle ignores input while attaching");
+    let screen = screen_text(&draw(&mut dialog));
+    assert!(screen.contains("Workspace: [ ]"), "{screen}");
+    assert!(screen.contains("new branches only"), "{screen}");
+    dialog.handle_key(key(KeyCode::Esc));
+    assert!(!screen_text(&draw(&mut dialog)).contains("workspace)"));
+    dialog.worktree_branch = Input::new("feat/existing".to_string());
+    let data = submitted(dialog.handle_key(key(KeyCode::Enter)));
+    assert!(!data.workspace);
+
+    // Extra repos make a fresh worktree per repo, so they still need one.
+    let mut dialog = worktree_config_dialog(TEST_PATH.to_string());
+    dialog.create_new_branch = false;
+    dialog.workspace_repos = vec!["/repo/one".into()];
+    dialog.worktree_branch = Input::new("feat/existing".to_string());
+    assert!(screen_text(&draw(&mut dialog)).contains("Workspace: [x]"));
+    dialog.handle_key(key(KeyCode::Esc));
+    let data = submitted(dialog.handle_key(key(KeyCode::Enter)));
+    assert!(data.workspace);
+
+    // The choice comes back with New Branch.
+    let mut dialog = worktree_config_dialog(TEST_PATH.to_string());
+    dialog.workspace = true;
+    dialog.create_new_branch = false;
+    assert!(screen_text(&draw(&mut dialog)).contains("Workspace: [ ]"));
+    dialog.create_new_branch = true;
+    assert!(screen_text(&draw(&mut dialog)).contains("Workspace: [x]"));
 }

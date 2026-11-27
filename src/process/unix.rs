@@ -16,6 +16,34 @@ pub(super) fn close_frozen_payload() -> std::io::Result<()> {
     nix::unistd::close(4).map_err(std::io::Error::from)
 }
 
+pub(super) fn inherit_file_at_fd(
+    command: &mut Command,
+    file: std::fs::File,
+    target: std::os::fd::RawFd,
+) {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+
+    // SAFETY: lseek, dup2 and fcntl are async-signal-safe, the only pre_exec requirement.
+    unsafe {
+        command.pre_exec(move || {
+            let source = file.as_raw_fd();
+            // macOS `/dev/fd/N` shares this offset instead of reopening the file.
+            let result = if libc::lseek(source, 0, libc::SEEK_SET) < 0 {
+                -1
+            } else if source == target {
+                libc::fcntl(target, libc::F_SETFD, 0)
+            } else {
+                libc::dup2(source, target)
+            };
+            if result < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
 pub(super) fn exec_command(command: &mut Command) -> std::io::Error {
     use std::os::unix::process::CommandExt;
     command.exec()
@@ -48,23 +76,40 @@ pub(super) fn kill_process_group(child: &Child) {
 pub(super) fn try_wait_status_hook(
     child: &mut Child,
 ) -> std::io::Result<Option<std::process::ExitStatus>> {
+    if !child_exited_unreaped(child.id())? {
+        return Ok(None);
+    }
+    // Keep the original process group reserved until the cleanup signal.
+    kill_process_group(child);
+    child.wait().map(Some)
+}
+
+pub(super) fn child_exited_unreaped(pid: u32) -> std::io::Result<bool> {
     use nix::libc;
-    // nix gates `waitid` off on macOS, so call libc directly on every Unix.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
-    if unsafe { libc::waitid(libc::P_PID, child.id() as libc::id_t, &mut info, flags) } < 0 {
+    if unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, flags) } < 0 {
         let error = std::io::Error::last_os_error();
         if error.kind() == std::io::ErrorKind::Interrupted {
-            return Ok(None);
+            return Ok(false);
         }
         return Err(error);
     }
-    if unsafe { info.si_pid() } == 0 {
-        return Ok(None);
+    let observed = unsafe { info.si_pid() };
+    if observed == 0 {
+        return Ok(false);
     }
-    // Retain the exited leader until cleanup so its group ID cannot be reused.
-    kill_process_group(child);
-    child.wait().map(Some)
+    if observed != pid as libc::pid_t
+        || !matches!(
+            info.si_code,
+            libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+        )
+    {
+        return Err(std::io::Error::other(
+            "unexpected owned-child wait observation",
+        ));
+    }
+    Ok(true)
 }
 
 fn signal_process_group(child: &Child, signal: nix::sys::signal::Signal) {

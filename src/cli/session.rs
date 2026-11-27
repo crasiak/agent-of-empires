@@ -714,27 +714,23 @@ async fn archive_session(profile: &str, args: ArchiveArgs) -> Result<()> {
         !inst.has_pending_trash(),
         crate::session::LifecycleReservationError::Busy(crate::session::LifecycleOperation::Trash)
     );
+    if inst.is_trashed() {
+        return Err(crate::session::StartBlocked::Trashed.into());
+    }
     if !args.no_kill {
         inst.kill_all_tmux_sessions_locked()?;
     }
 
-    let landed = storage.update(|instances, _groups| {
-        if let Some(stored) = instances.iter_mut().find(|i| i.id == id) {
-            anyhow::ensure!(
-                !stored.has_pending_trash(),
-                crate::session::LifecycleReservationError::Busy(
-                    crate::session::LifecycleOperation::Trash
-                )
-            );
-            stored.archive();
-            stored.lifecycle_generation = stored.lifecycle_generation.saturating_add(1);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    })?;
-    if landed {
+    let archived_structured = archive_row(&storage, &id)?;
+    if let Some(structured) = archived_structured {
         println!("Archived: {}", title);
+        if structured {
+            super::acp::stop_runner(&id).await.map_err(|error| {
+                anyhow::anyhow!(
+                    "{title} is archived, but its agent runner could not be stopped: {error:#}"
+                )
+            })?;
+        }
         Ok(())
     } else {
         bail!(
@@ -742,6 +738,28 @@ async fn archive_session(profile: &str, args: ArchiveArgs) -> Result<()> {
             title
         );
     }
+}
+
+/// Archives the stored row; `Some(structured)` is that row's view at the moment it was
+/// archived, so a view switch between the caller's snapshot and the lock is not missed.
+fn archive_row(storage: &Storage, id: &str) -> Result<Option<bool>> {
+    storage.update(|instances, _groups| {
+        let Some(stored) = instances.iter_mut().find(|i| i.id == id) else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            !stored.has_pending_trash(),
+            crate::session::LifecycleReservationError::Busy(
+                crate::session::LifecycleOperation::Trash
+            )
+        );
+        if stored.is_trashed() {
+            return Err(crate::session::StartBlocked::Trashed.into());
+        }
+        stored.archive();
+        stored.lifecycle_generation = stored.lifecycle_generation.saturating_add(1);
+        Ok(Some(stored.is_structured()))
+    })
 }
 
 async fn restore_session(profile: &str, args: SessionIdArgs) -> Result<()> {
@@ -1996,41 +2014,16 @@ async fn capture_session(profile: &str, args: CaptureArgs) -> Result<()> {
         (String::new(), "stopped".to_string())
     } else {
         let raw = tmux_session.capture_pane(args.lines)?;
-        let hook_alias =
-            crate::tmux::status_rules::effective_detect_as(profile, &inst.tool, &inst.detect_as);
-        let manifest_tool: &str = if hook_alias.is_empty() {
-            &inst.tool
-        } else {
-            &hook_alias
-        };
         let rules_tool =
             crate::tmux::status_rules::detection_tool(profile, &inst.tool, &inst.detect_as);
-        let hook = inst.hook_observation();
-        let status = if let Some(plan) =
-            crate::tmux::DetectionPlan::for_manifest(profile, &rules_tool, manifest_tool)
+        let status = if let Some((status, _)) =
+            inst.detect_pane_now(profile, &tmux_session, Some((&raw, args.lines)))
         {
-            let policy = plan.capture_policy();
-            let status_raw = if policy.scope.can_reuse(args.lines) {
-                None
-            } else {
-                tmux_session.capture_pane(policy.scope.lines()).ok()
-            };
-            let status_content = status_raw.as_deref().unwrap_or(&raw);
-            let osc_title = crate::tmux::utils::pane_title(tmux_session.name()).unwrap_or_default();
-            let observation = crate::tmux::Observation::new(
-                &osc_title,
-                hook,
-                !policy.observe_ownership
-                    || inst.live_pane_owned(&tmux_session, None, tmux_session.is_pane_dead()),
-            );
-            plan.detect(
-                &crate::tmux::utils::strip_ansi(status_content),
-                &observation,
-            )
-            .status
-            .unwrap_or(inst.status)
+            status.unwrap_or(inst.status)
         } else {
-            let hook = hook.filter(|_| !crate::tmux::status_rules::has_rules(profile, &rules_tool));
+            let hook = inst
+                .hook_observation()
+                .filter(|_| !crate::tmux::status_rules::has_rules(profile, &rules_tool));
             match hook {
                 Some(hook) => hook.status,
                 None => tmux_session
@@ -3348,15 +3341,22 @@ fn resolve_base_target(inst: &crate::session::Instance, repo: Option<&str>) -> R
             ),
             None => bail!("Unknown repo '{}'. This session has: {}", name, names()),
         },
-        None if inst.workspace_info.is_some() => bail!(
-            "This session is a multi-repo workspace, and each repo has its own diff base.\nPass \
-             --repo <name> to pick one. Available: {}",
-            names()
-        ),
-        None => Ok(BaseTarget {
-            repo_name: None,
-            validate_path: inst.project_path.clone(),
-        }),
+        None => match inst.all_repos() {
+            // A single-repo workspace has one unambiguous entry.
+            [only] => Ok(BaseTarget {
+                repo_name: Some(only.name.clone()),
+                validate_path: only.worktree_path.clone(),
+            }),
+            _ if inst.workspace_info.is_some() => bail!(
+                "This session is a multi-repo workspace, and each repo has its own diff base.\nPass \
+                 --repo <name> to pick one. Available: {}",
+                names()
+            ),
+            _ => Ok(BaseTarget {
+                repo_name: None,
+                validate_path: inst.project_path.clone(),
+            }),
+        },
     }
 }
 
@@ -3525,6 +3525,15 @@ mod set_base_target_tests {
     }
 
     #[test]
+    fn single_repo_workspace_needs_no_repo_name() {
+        let mut inst = workspace_instance();
+        inst.workspace_info.as_mut().unwrap().repos.truncate(1);
+        let target = resolve_base_target(&inst, None).expect("the only repo resolves");
+        assert_eq!(target.repo_name.as_deref(), Some("api"));
+        assert_eq!(target.validate_path, "/ws/api");
+    }
+
+    #[test]
     fn single_repo_session_targets_its_own_checkout() {
         let inst = Instance::new("solo", "/tmp/solo");
         let target = resolve_base_target(&inst, None).expect("single repo resolves");
@@ -3620,7 +3629,10 @@ mod target_filter_tests {
 /// #4116: CLI start and restart refuse an archived or trashed session.
 #[cfg(test)]
 mod start_blocked_tests {
-    use super::{restart_session, send_restart_wake, start_session, SessionIdArgs};
+    use super::{
+        archive_session, restart_session, send_restart_wake, start_session, ArchiveArgs,
+        SessionIdArgs,
+    };
     use crate::session::{Instance, Storage};
     use serial_test::serial;
 
@@ -3709,6 +3721,48 @@ mod start_blocked_tests {
                 let tmux = crate::tmux::Session::new(&id, &inst.title).unwrap();
                 assert!(!tmux.exists());
             }
+        }
+    }
+
+    /// #5346: CLI archive refuses a trashed row, leaving the flags Trash preserves for restore.
+    #[tokio::test]
+    #[serial]
+    async fn archive_refuses_trashed_session_and_keeps_preserved_flags() {
+        for no_kill in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = crate::session::test_support::isolate_app_dir_at(temp.path());
+            let profile = "archive-trashed";
+            let project = temp.path().join("project");
+            let mut inst = Instance::new("trashed", project.to_str().unwrap());
+            inst.pinned_at = Some(chrono::Utc::now());
+            inst.trash();
+            let id = inst.id.clone();
+            let storage = Storage::new_unwatched(profile).unwrap();
+            storage
+                .update(|rows, _| {
+                    *rows = vec![inst.clone()];
+                    Ok(())
+                })
+                .unwrap();
+
+            let err = archive_session(
+                profile,
+                ArchiveArgs {
+                    identifier: id,
+                    no_kill,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "session is in trash; restore it first",
+                "no_kill={no_kill}"
+            );
+            let row = &storage.load().unwrap()[0];
+            assert!(row.is_trashed());
+            assert!(!row.is_archived());
+            assert!(row.pinned_at.is_some());
         }
     }
 }
@@ -4352,5 +4406,41 @@ mod focus_tests {
             (std::process::id(), "/dev/ttys042")
         );
         control.remove();
+    }
+}
+
+#[cfg(test)]
+mod archive_row_tests {
+    use super::archive_row;
+    use crate::session::{Instance, Storage, View};
+
+    #[test]
+    #[serial_test::serial]
+    fn archive_row_reports_the_view_of_the_row_it_archives() {
+        let _home = crate::session::test_support::isolate_app_dir();
+        let storage = Storage::new_unwatched("archive-row").unwrap();
+        let mut row = Instance::new("switching", "/tmp/archive-row");
+        row.source_profile = "archive-row".into();
+        let id = row.id.clone();
+        storage
+            .update(|rows, _| {
+                rows.push(row);
+                Ok(())
+            })
+            .unwrap();
+        let snapshot = storage.load().unwrap().remove(0);
+        assert!(!snapshot.is_structured());
+
+        // A completed Terminal to Structured switch lands after the caller's snapshot.
+        storage
+            .update(|rows, _| {
+                rows[0].view = View::Structured;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(archive_row(&storage, &id).unwrap(), Some(true));
+        assert!(storage.load().unwrap()[0].is_archived());
+        assert_eq!(archive_row(&storage, "no-such-row").unwrap(), None);
     }
 }

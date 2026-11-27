@@ -41,8 +41,9 @@ A new Session seeded from a parent Session's Agent conversation.
 A Session with no Project. It runs in a temporary directory AoE owns.
 
 **Tailored Session**:
-A Session launched from a purpose-scoped preset with its own minimal Ledger profile,
-shown in an overlay without leaving the current Session. See
+A Session launched from a purpose-scoped preset, usually with its own minimal Ledger
+profile and an overlay. Intake instead reviews the existing profile and creates one
+task Session through the normal launch form. See
 [the capture workflow](docs/guides/tailored-sessions.md).
 
 **Group**:
@@ -154,6 +155,16 @@ Agent Client Protocol. The JSON-RPC protocol AoE speaks to an Agent in Structure
 **ACP adapter**:
 The ACP-speaking program for an Agent, either native or a bundled shim.
 _Avoid_: ACP server, agent (for the adapter process)
+
+**Proxy**:
+A plugin-shipped per-session process between the Worker and an ACP adapter that translates the adapter's own `_meta` into Primitives. It announces itself with a hello on `initialize`.
+
+**Primitive**:
+A generic, versioned `_meta.aoe` annotation core consumes in place of any agent-specific `_meta`.
+
+**Lease**:
+An expiring hold in a Primitive that keeps a Session working with no further frames; it drains on its own if the Proxy dies.
+_Avoid_: lock
 
 **Agent capability**:
 A feature an Agent advertises over ACP: models, modes, thinking levels.

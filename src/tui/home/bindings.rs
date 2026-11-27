@@ -47,6 +47,7 @@ pub enum ActionId {
     SearchNext,
     NewSession,
     TailoredSessions,
+    Intake,
     NewFromSelection,
     NewFromProject,
     AttachTerminal,
@@ -122,6 +123,8 @@ pub enum ActionId {
     AutoName,
     /// Permanently purge every trashed session after a confirm (palette only; no chord).
     EmptyTrash,
+    RestoreTrash,
+    RetryTrash,
     ToggleSplitTerminal,
     /// Open the command palette (any hotkey mode).
     OpenCommandPalette,
@@ -150,6 +153,8 @@ impl ActionId {
                 | Self::RespondToPermission
                 | Self::Stop
                 | Self::Delete
+                | Self::RestoreTrash
+                | Self::RetryTrash
                 | Self::Rename
                 | Self::SetWorktreeName
                 | Self::AddProject
@@ -200,9 +205,17 @@ const fn ctrl(c: char) -> Chord {
 }
 
 const TAILORED_CHORD: Chord = ctrl('y');
+const LAUNCHER_CHORD: Chord = ctrl('1');
+
+pub(in crate::tui) fn is_launcher_shortcut(key: &KeyEvent) -> bool {
+    key.kind == crossterm::event::KeyEventKind::Press && chord_matches(&LAUNCHER_CHORD, key)
+}
 
 pub(in crate::tui) fn is_tailored_shortcut(key: &KeyEvent) -> bool {
-    key.kind == crossterm::event::KeyEventKind::Press && chord_matches(&TAILORED_CHORD, key)
+    key.kind == crossterm::event::KeyEventKind::Press
+        && [LAUNCHER_CHORD, TAILORED_CHORD]
+            .iter()
+            .any(|chord| chord_matches(chord, key))
 }
 
 const fn f(n: u8) -> Chord {
@@ -344,7 +357,9 @@ fn context_holds(context: Context, ctx: &Ctx) -> bool {
 /// are listed before the unguarded entries that share their chord.
 pub fn resolve(key: &KeyEvent, strict: bool, ctx: &Ctx) -> Option<ActionId> {
     for b in BINDINGS {
-        if b.id == ActionId::TailoredSessions && key.kind != crossterm::event::KeyEventKind::Press {
+        if matches!(b.id, ActionId::TailoredSessions | ActionId::Intake)
+            && key.kind != crossterm::event::KeyEventKind::Press
+        {
             continue;
         }
         let chords = if strict { b.strict } else { b.non_strict };
@@ -896,8 +911,8 @@ pub static BINDINGS: &[Binding] = &[
     },
     Binding {
         id: ActionId::TailoredSessions,
-        non_strict: &[TAILORED_CHORD],
-        strict: &[TAILORED_CHORD],
+        non_strict: &[LAUNCHER_CHORD, TAILORED_CHORD],
+        strict: &[LAUNCHER_CHORD, TAILORED_CHORD],
         context: Context::Always,
         help: Some(HelpMeta {
             section: HelpSection::Actions,
@@ -906,6 +921,18 @@ pub static BINDINGS: &[Binding] = &[
         palette: Some(PaletteMeta {
             title: "Tailored Sessions",
             keywords: &["capture", "idea", "preset"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
+        id: ActionId::Intake,
+        non_strict: &[],
+        strict: &[],
+        context: Context::Always,
+        help: None,
+        palette: Some(PaletteMeta {
+            title: "Intake task brief",
+            keywords: &["intake", "brief", "task", "tailored"],
             group: PaletteGroup::Actions,
         }),
     },
@@ -1498,6 +1525,30 @@ pub static BINDINGS: &[Binding] = &[
             group: PaletteGroup::Actions,
         }),
     },
+    Binding {
+        id: ActionId::RestoreTrash,
+        non_strict: &[],
+        strict: &[],
+        context: Context::Always,
+        help: None,
+        palette: Some(PaletteMeta {
+            title: "Restore selected Trash session",
+            keywords: &["trash", "restore", "recovery"],
+            group: PaletteGroup::Actions,
+        }),
+    },
+    Binding {
+        id: ActionId::RetryTrash,
+        non_strict: &[],
+        strict: &[],
+        context: Context::Always,
+        help: None,
+        palette: Some(PaletteMeta {
+            title: "Retry selected unfinished Trash session",
+            keywords: &["trash", "retry", "recovery"],
+            group: PaletteGroup::Actions,
+        }),
+    },
     // The mnemonic keys (a/A, n/N, r/R, t/T) are taken and the home keyspace is saturated
     // (see Fork), so "Auto-name now" lands on the free v/V pair. Gated to a
     // still-default-named session by the daemon handler.
@@ -1545,6 +1596,7 @@ pub fn palette_id(id: ActionId) -> &'static str {
     match id {
         ActionId::NewSession => "new-session",
         ActionId::TailoredSessions => "tailored-sessions",
+        ActionId::Intake => "intake",
         ActionId::NewFromSelection => "new-from-selection",
         ActionId::NewFromProject => "new-from-project",
         ActionId::AttachTerminal => "attach-terminal",
@@ -1604,6 +1656,8 @@ pub fn palette_id(id: ActionId) -> &'static str {
         ActionId::Fork => "fork",
         ActionId::AutoName => "auto-name",
         ActionId::EmptyTrash => "empty-trash",
+        ActionId::RestoreTrash => "restore-trash",
+        ActionId::RetryTrash => "retry-trash",
         ActionId::OpenCommandPalette => "command-palette",
         ActionId::DismissUpdateBanner => "dismiss-update-banner",
         ActionId::PreviewScrollUp => "preview-scroll-up",

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::github::{
     GitHubClient, GitHubClientConfig, GitHubCompareCommit, GitHubError, GitHubRelease,
@@ -15,7 +15,7 @@ const RELEASES_CAP: usize = 20;
 const COMMITS_CAP: usize = 50;
 const BODY_CAP: usize = 8 * 1024;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateChangelog {
     pub entries: Vec<ChangelogEntry>,
     pub truncated: bool,
@@ -23,7 +23,7 @@ pub struct UpdateChangelog {
     pub more_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChangelogEntry {
     Release {
@@ -253,6 +253,7 @@ mod tests {
     fn release(tag: &str, body: Option<&str>, prerelease: bool, draft: bool) -> GitHubRelease {
         GitHubRelease {
             tag_name: tag.to_string(),
+            name: None,
             body: body.map(str::to_string),
             published_at: Some("2026-01-01T00:00:00Z".to_string()),
             draft,

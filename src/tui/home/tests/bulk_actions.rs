@@ -1078,6 +1078,149 @@ fn a_finished_breakout_marks_its_sessions_until_closed() {
 
 #[test]
 #[serial]
+fn restarting_home_rediscovers_existing_local_breakout_windows() {
+    use crate::tui::home::breakout::test_support::DISCOVERY;
+    use crate::tui::home::icons::ICON_BREAKOUT;
+
+    let _forced = ForcedSupport::on();
+    let env = create_test_env_with_sessions(4);
+    let ids: Vec<_> = (0..4).map(|i| env.view.instance_at(i).id.clone()).collect();
+    let separate = crate::breakout::window_title(None, "existing, 'window'", &ids[0]);
+    let splits = crate::breakout::splits_title(None, ids[1..3].iter().map(String::as_str));
+    let remote = crate::breakout::window_title(Some("other-host"), "remote", &ids[3]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    DISCOVERY.with(|job| *job.borrow_mut() = Some(rx));
+    let mut restarted = HomeView::new_for_test(
+        Some("test".into()),
+        AvailableTools::with_tools(&["claude"]),
+        crate::file_watch::FileWatchService::noop(),
+    )
+    .unwrap();
+    restarted.group_by = crate::session::config::GroupByMode::Manual;
+    restarted.flat_items = restarted.build_flat_items();
+    assert!(restarted.breakout_discovery_job.is_some());
+    assert!(!restarted.is_broken_out(&ids[0]));
+    let cursor = restarted.cursor;
+    let profile = restarted.active_profile.clone();
+    restarted.marked.insert(ids[3].clone());
+    // Native inventory may arrive before the runtime's first session snapshot.
+    let instances = std::mem::take(&mut restarted.instances);
+    tx.send(Ok(vec![
+        separate.clone(),
+        splits.clone(),
+        remote,
+        separate.clone(),
+        "ordinary Ghostty window".into(),
+    ]))
+    .unwrap();
+    restarted.tick_breakout();
+    restarted.instances = instances;
+
+    assert!(
+        restarted.is_broken_out(&ids[0]),
+        "existing window must regain its marker"
+    );
+    assert!(restarted.is_broken_out(&ids[1]));
+    assert!(restarted.is_broken_out(&ids[2]));
+    assert!(
+        !restarted.is_broken_out(&ids[3]),
+        "another host is not local"
+    );
+    assert_eq!(restarted.breakout_titles, [separate, splits]);
+    let row = restarted
+        .flat_items
+        .iter()
+        .find(|item| {
+            matches!(
+                item, Item::Session { id, .. } if id == &ids[0]
+            )
+        })
+        .unwrap();
+    let rendered = rendered_row_text(&restarted, row);
+    assert!(
+        rendered.starts_with(&format!("  {ICON_BREAKOUT} ")),
+        "{rendered:?}"
+    );
+    assert_eq!(restarted.cursor, cursor);
+    assert_eq!(restarted.active_profile, profile);
+    assert!(restarted.marked.contains(&ids[3]));
+    assert!(restarted.info_dialog.is_none());
+    assert!(restarted.breakout_job.is_none());
+    assert!(restarted.breakout_close_job.is_none());
+    assert!(restarted.breakout_session_close_job.is_none());
+    assert!(restarted.breakout_close_queue.is_empty());
+    assert!(restarted.breakout_discovery_job.is_none());
+}
+
+#[test]
+#[serial]
+fn startup_discovery_serializes_window_actions_and_recovers_after_failure() {
+    let _forced = ForcedSupport::on();
+    for reply in [Some(Ok(Vec::new())), Some(Err("denied".into())), None] {
+        let mut env = create_test_env_with_sessions(1);
+        mark_all(&mut env);
+        make_sendable(&mut env);
+        let marks = env.view.marked.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        env.view.breakout_discovery_job = Some(rx);
+        env.view.info_dialog = Some(InfoDialog::new("Keep this", "unrelated dialog"));
+        env.view.start_breakout();
+        env.view.close_breakout();
+        assert!(env.view.breakout_job.is_none());
+        assert!(env.view.breakout_close_job.is_none());
+        assert!(
+            !env.view.tick_breakout(),
+            "an empty channel is not completion"
+        );
+        if let Some(reply) = reply {
+            tx.send(reply).unwrap();
+        }
+        drop(tx);
+        assert!(env.view.tick_breakout());
+        assert!(env.view.breakout_discovery_job.is_none());
+        assert!(env.view.breakout_titles.is_empty());
+        assert_eq!(env.view.info_dialog.as_ref().unwrap().title(), "Keep this");
+        assert_eq!(env.view.marked, marks);
+        env.view.info_dialog = None;
+        env.view.start_breakout();
+        assert!(
+            env.view.breakout_job.is_some(),
+            "discovery cannot leave Breakout busy"
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn stopping_during_discovery_closes_only_the_sessions_separate_window() {
+    use crate::tui::home::breakout::test_support::CLOSED;
+    let _forced = ForcedSupport::on();
+    let mut env = create_test_env_with_sessions(3);
+    let ids: Vec<_> = (0..3).map(|i| env.view.instance_at(i).id.clone()).collect();
+    let separate = crate::breakout::window_title(None, "existing", &ids[0]);
+    let splits = crate::breakout::splits_title(None, ids[1..3].iter().map(String::as_str));
+    let (tx, rx) = std::sync::mpsc::channel();
+    env.view.breakout_discovery_job = Some(rx);
+    CLOSED.with(|closed| closed.borrow_mut().clear());
+    let _respond = env.view.session_feed.command_driver_for_test();
+    assert!(env.view.submit_daemon_stop(&ids[0]).unwrap());
+    assert!(env.view.submit_daemon_stop(&ids[1]).unwrap());
+    assert!(env.view.breakout_session_close_job.is_none());
+    tx.send(Ok(vec![separate.clone(), splits.clone()])).unwrap();
+    env.view.tick_breakout();
+    assert!(!env.view.is_broken_out(&ids[0]));
+    assert!(
+        env.view.is_broken_out(&ids[1]),
+        "shared splits retain their marker"
+    );
+    assert!(env.view.is_broken_out(&ids[2]));
+    assert_eq!(env.view.breakout_titles, [splits]);
+    CLOSED.with(|closed| assert_eq!(*closed.borrow(), [separate]));
+    assert!(env.view.breakout_discovery_closes.is_empty());
+}
+
+#[test]
+#[serial]
 fn close_breakout_windows_sweeps_even_with_nothing_tracked() {
     let _forced = ForcedSupport::on();
     let mut env = create_test_env_with_sessions(1);

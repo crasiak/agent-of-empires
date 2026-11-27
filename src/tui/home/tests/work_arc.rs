@@ -1249,3 +1249,111 @@ async fn work_arc_loading_survives_production_reload_only_with_unchanged_provena
         );
     }
 }
+
+#[test]
+#[serial]
+fn steno_arc_survives_a_reload_from_disk() {
+    let mut claude = observed_fork_parent("claude");
+    claude.source_profile = "test".into();
+    let id = claude.id.clone();
+    let mut env = seeded_env(test_home(), &[claude], true);
+    let steno = arc::StenoArc {
+        lines: arc::steno::ArcLines {
+            goal: "Goal [w1]".into(),
+            recent: "Recent [w2]".into(),
+            pending: "Next [w2]".into(),
+            notes: "Unknown".into(),
+        },
+        covered: "covered through w2 (turns 11-20); reduced w1-w2".into(),
+        at: chrono::Utc::now(),
+        current: false,
+        path: "/tmp/arc.json".into(),
+    };
+    env.view.instances.get_mut(&id).unwrap().steno_arc = Some(Box::new(steno.clone()));
+    env.view.reload().unwrap();
+    assert_eq!(
+        env.view.get_instance(&id).unwrap().steno_arc.as_deref(),
+        Some(&steno)
+    );
+}
+
+#[test]
+#[serial]
+fn a_cited_window_opens_and_t_drills_into_its_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let record = |name: &str, narrative: &str, text: &str| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(path.join("windows")).unwrap();
+        std::fs::write(
+            path.join("windows/03.json"),
+            serde_json::json!({"window": 3, "turns": [21, 30], "narrative": narrative, "fields": {}})
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            path.join("events.jsonl"),
+            serde_json::json!({"kind": "user", "text": text, "turn": 22,
+                "ts": "2026-11-21T10:00:00Z"})
+            .to_string(),
+        )
+        .unwrap();
+        arc::StenoArc {
+            lines: arc::steno::ArcLines {
+                goal: "Goal [w3]".into(),
+                recent: "Unknown".into(),
+                pending: "Unknown".into(),
+                notes: "Unknown".into(),
+            },
+            covered: String::new(),
+            at: chrono::Utc::now(),
+            current: true,
+            path: path.join("derive/arc.json"),
+        }
+    };
+    let original = record("original", "Fixed the parser.", "fix the parser");
+    let other_record = record("other", "Another record.", "wrong record");
+    for drift in ["unchanged", "selection", "record"] {
+        let claude = observed_fork_parent("claude");
+        let id = claude.id.clone();
+        let mut other = Instance::new("other", "/tmp/repo");
+        other.source_profile = "test".into();
+        let other_id = other.id.clone();
+        let mut env = seeded_env(test_home(), &[claude, other], true);
+        env.view.selected_session = Some(id.clone());
+        env.view.instances.get_mut(&id).unwrap().steno_arc = Some(Box::new(original.clone()));
+        env.view.instances.get_mut(&other_id).unwrap().steno_arc =
+            Some(Box::new(other_record.clone()));
+        env.view.open_steno_windows(&[3]);
+        match drift {
+            "selection" => {
+                env.view.select_session_by_id(&other_id);
+                assert_eq!(env.view.selected_session.as_ref(), Some(&other_id));
+            }
+            "record" => {
+                env.view.instances.get_mut(&id).unwrap().steno_arc =
+                    Some(Box::new(other_record.clone()));
+            }
+            _ => {}
+        }
+        let dialog = env.view.info_dialog.as_ref().unwrap();
+        assert!(dialog.title().starts_with("Window w3"));
+        assert!(dialog.message().contains("Fixed the parser."));
+        env.view.handle_key(key(KeyCode::Char('t')), None);
+        let dialog = env.view.info_dialog.as_ref().unwrap();
+        assert!(dialog.title().starts_with("Transcript w3"));
+        assert!(
+            dialog.message().contains("turn 22 · user\nfix the parser"),
+            "{drift}: {}",
+            dialog.message()
+        );
+        assert!(!dialog.message().contains("wrong record"));
+        env.view.handle_key(key(KeyCode::Char('t')), None);
+        assert!(env
+            .view
+            .info_dialog
+            .as_ref()
+            .unwrap()
+            .title()
+            .starts_with("Transcript w3"));
+    }
+}

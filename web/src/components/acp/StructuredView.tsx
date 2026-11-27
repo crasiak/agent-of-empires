@@ -1,7 +1,7 @@
 // Structured view conversation surface. assistant-ui renders the thread shell;
 // state lives in AcpRuntime and is only fed to assistant-ui, never owned by it.
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ThreadPrimitive } from "@assistant-ui/react";
 import { ChevronDown } from "lucide-react";
 
@@ -11,7 +11,7 @@ import { useWebSettings } from "../../hooks/useWebSettings";
 import { lastClearIndex } from "../../lib/acpHistoryWindow";
 import { visibleSessionNotices } from "../../lib/acpTypes";
 import { useAgentDisplayNames } from "../../lib/agentDisplayName";
-import { isNewSessionStarting } from "./startupWait";
+import { isNewSessionStarting, notRunningCopy } from "./startupWait";
 import { AgentProfileProvider, useClearAliases, useCompactAliases } from "../../lib/agentProfileContext";
 import { queuedReason } from "./queuedReason";
 import { conversationFontSizeRem } from "../../lib/conversationFontSize";
@@ -28,14 +28,25 @@ import { Composer } from "./Composer";
 import { ContextPrimerBanner } from "./ContextPrimerBanner";
 import { PlanStrip } from "./PlanStrip";
 import { ModeSwitchFailedNotice, QueuedPromptsStrip, RejectedPromptsStrip, SessionNoticesStrip } from "./PromptStrips";
+import type { NewSessionLike } from "./ContainerGoneBanner";
 import { SessionBanners } from "./SessionBanners";
+import { composerBlockedReason, containerGoneRemedy } from "./containerGone";
+import type { RecreateContainerBlock } from "../sidebar/sessionActionTargets";
 import { ConfigOptionSwitchFailedNotice } from "./SessionConfigControls";
 import { StartupErrorScreen } from "./StartupErrorScreen";
 import { SystemNotices } from "./SystemNotices";
 import { AssistantMessage, UserMessage } from "./ThreadMessages";
 import { UsageLimitSection } from "./UsageLimitBanner";
 import { ToolExpansionProvider } from "./ToolExpansion";
-import { ToolDensityToggle, ToolDisplayModeProvider, useToolDensityPref } from "./ToolDisplayMode";
+import {
+  ToolDensityToggle,
+  ToolDisplayModeProvider,
+  ToolFoldToggle,
+  useToolDensityPref,
+  useToolFold,
+  type ToolDensity,
+  type ToolFold,
+} from "./ToolDisplayMode";
 import { useTranscriptScroll } from "./useTranscriptScroll";
 import { WorkingSpinner } from "./WorkingSpinner";
 import type { ShellMode } from "../PairedTerminal";
@@ -52,6 +63,8 @@ interface Props {
   acpWorkerState: WorkerState;
   /** Whether rate-limit auto-resume is on for this session's profile. */
   rateLimitAutoResume?: boolean;
+  /** `SessionResponse.rate_limit_failover_to`: the account the daemon is moving this limited session to. */
+  rateLimitFailoverTo?: string;
   /** The profile's Structured view settings; null where Settings can't be edited. */
   settingsHref?: string | null;
   /** Session `tool` registry key; selects the AgentProfile. */
@@ -68,6 +81,7 @@ interface Props {
   onStartSession?: () => void;
   archivedAt: string | null;
   snoozedUntil: string | null;
+  queuedCount?: number;
   /** Trashed sessions are read-only: no composer or queue strips. */
   trashedAt: string | null;
   /** Restore the trashed workspace; resolves false on failure. */
@@ -75,13 +89,21 @@ interface Props {
   onOpenFileRef?: (ref: FileRef) => void;
   fileRefSession?: FileRefSession | null;
   isSandboxed?: boolean;
-  onOpenAgentsPane?: () => void;
+  /** The Session's title when the dashboard may recreate its container. */
+  recreateContainerTitle?: string;
+  /** Why the dashboard can't recreate its container, or null when it can. */
+  recreateContainerBlock: RecreateContainerBlock | null;
+  onOpenAgentsPane?: (agentId?: string) => void;
+  /** The server is read-only, so the session cannot be interrupted. */
+  serverReadOnly?: boolean;
   /** Opens the switch-view confirmation; omitted on a read-only server. */
   onSwitchToTerminal?: () => void;
   /** Shows this Session's paired shell; omitted where the terminal can't be used. */
   onOpenTerminal?: (mode: ShellMode) => void;
   /** Whether the server lets the dashboard restart the Agent. */
   canRestartAgent?: boolean;
+  /** Opens the wizard for a Session like this one; omitted on a read-only server. */
+  newSessionLike?: NewSessionLike;
 }
 
 const STARTER_PROMPTS = [
@@ -99,30 +121,42 @@ export function StructuredView(props: Props) {
     compactAliases,
     archivedAt,
     snoozedUntil,
+    queuedCount,
     onOpenFileRef,
     fileRefSession,
   } = props;
   const [showClearedTurns, setShowClearedTurns] = useState(false);
   const [toolDensity, toggleToolDensity] = useToolDensityPref();
+  const [toolFold, toggleToolFold, resetToolFold] = useToolFold();
+  // A density change is a fresh baseline, so it ends any fold-all override.
+  const onToggleToolDensity = useCallback(() => {
+    resetToolFold();
+    toggleToolDensity();
+  }, [resetToolFold, toggleToolDensity]);
   return (
     <AcpFileRefContext.Provider value={{ onOpenFileRef, fileRefSession }}>
       <AgentProfileProvider toolKey={tool} clearAliases={clearAliases} compactAliases={compactAliases}>
-        <ToolDisplayModeProvider density={toolDensity}>
+        <ToolDisplayModeProvider density={toolDensity} fold={toolFold}>
           <ToolExpansionProvider>
             <AcpRuntime
               sessionId={sessionId}
               acpWorkerState={acpWorkerState}
               archivedAt={archivedAt}
               snoozedUntil={snoozedUntil}
+              queuedCount={queuedCount}
               showClearedTurns={showClearedTurns}
             >
               {(ctx) => (
                 <BackgroundAgentsContext.Provider
                   value={{
+                    sessionId,
                     agents: ctx.state.backgroundAgents,
+                    subagents: ctx.state.subagents,
+                    cancelSubagent: ctx.cancelSubagent,
                     workflowRuns: ctx.state.workflowRuns,
                     backgroundTasks: ctx.state.backgroundTasks,
                     openPane: props.onOpenAgentsPane,
+                    readOnly: !!props.serverReadOnly || !!props.trashedAt || !!props.archivedAt,
                   }}
                 >
                   <AcpChrome
@@ -131,7 +165,9 @@ export function StructuredView(props: Props) {
                     showClearedTurns={showClearedTurns}
                     onToggleClearedTurns={() => setShowClearedTurns((v) => !v)}
                     toolDensity={toolDensity}
-                    onToggleToolDensity={toggleToolDensity}
+                    onToggleToolDensity={onToggleToolDensity}
+                    toolFold={toolFold}
+                    onToggleToolFold={toggleToolFold}
                   />
                 </BackgroundAgentsContext.Provider>
               )}
@@ -178,8 +214,10 @@ interface ChromeProps {
   ctx: AcpContext;
   showClearedTurns: boolean;
   onToggleClearedTurns: () => void;
-  toolDensity: "detailed" | "compact";
+  toolDensity: ToolDensity;
   onToggleToolDensity: () => void;
+  toolFold: ToolFold;
+  onToggleToolFold: () => void;
 }
 
 function AcpChrome({
@@ -189,6 +227,8 @@ function AcpChrome({
   onToggleClearedTurns,
   toolDensity,
   onToggleToolDensity,
+  toolFold,
+  onToggleToolFold,
 }: ChromeProps) {
   const { sessionId, acpWorkerState, acpAgent } = view;
   const { state, status } = ctx;
@@ -196,6 +236,7 @@ function AcpChrome({
   const startingAgent = isNewSessionStarting(state, ctx, acpWorkerState, !!view.startedBefore)
     ? agentName(state.agent ?? acpAgent)
     : null;
+  const notRunning = notRunningCopy(state, agentName(state.agent ?? acpAgent));
   // Neither can start until restored or unarchived, so nothing here may send (#4116).
   const readOnly = !!view.trashedAt || !!view.archivedAt;
   // Rows before the latest `/clear` divider are the hidden history.
@@ -229,7 +270,12 @@ function AcpChrome({
   if (state.incompatibleAgent) {
     return (
       <div className="flex h-full flex-col bg-surface-900 text-text-primary">
-        <StartupErrorScreen detail={state.incompatibleAgent} sessionId={sessionId} isSandboxed={view.isSandboxed} />
+        <StartupErrorScreen
+          detail={state.incompatibleAgent}
+          sessionId={sessionId}
+          isSandboxed={view.isSandboxed}
+          recreateContainerTitle={view.recreateContainerTitle}
+        />
       </div>
     );
   }
@@ -274,6 +320,9 @@ function AcpChrome({
         canRestart={!!view.canRestartAgent}
         onRestarted={ctx.markRestartStarted}
         onRestartFailed={ctx.markRestartFailed}
+        recreateContainerTitle={view.recreateContainerTitle}
+        recreateContainerBlock={view.recreateContainerBlock}
+        newSession={view.newSessionLike}
       />
 
       <ThreadPrimitive.Root className="flex flex-1 flex-col min-h-0">
@@ -288,13 +337,14 @@ function AcpChrome({
             <div ref={messagesContentRef} className="mx-auto max-w-3xl xl:max-w-4xl 2xl:max-w-5xl px-4 py-6">
               {!readOnly && (
                 <ThreadPrimitive.Empty>
-                  <EmptyState onPick={ctx.sendPrompt} />
+                  <EmptyState onPick={ctx.sendPrompt} notRunning={notRunning} />
                 </ThreadPrimitive.Empty>
               )}
 
               {state.activity.length > 0 && (
                 <div className="mb-2 flex">
                   <ToolDensityToggle density={toolDensity} onToggle={onToggleToolDensity} />
+                  <ToolFoldToggle fold={toolFold} onToggle={onToggleToolFold} />
                 </div>
               )}
 
@@ -427,13 +477,21 @@ function ComposerDock({
   const compactAliases = useCompactAliases();
   // The Daemon's solo commands: they run as their own turn, never steered into one.
   const soloAliases = useMemo(() => [...clearAliases, ...compactAliases], [clearAliases, compactAliases]);
+  // A send would start the Session, which rebuilds the container without Recreate's warning.
+  const blockedReason =
+    state.startupError && state.startupCause?.kind === "container_missing"
+      ? composerBlockedReason(containerGoneRemedy(!!view.canRestartAgent, view.recreateContainerBlock))
+      : null;
   return (
     <>
       <UsageLimitSection
         sessionId={sessionId}
+        currentTool={view.tool ?? ""}
+        authStatus={state.authStatus}
         agent={state.agent ?? acpAgent}
         rateLimit={state.rateLimit}
         autoResume={view.rateLimitAutoResume}
+        failoverTo={view.rateLimitFailoverTo}
         retriesExhausted={state.rateLimitRetriesExhausted}
         settingsHref={view.settingsHref ?? null}
         onPrefill={(text) => setPrimerPrefill({ id: `rate-limit-recovery-${Date.now()}`, text })}
@@ -467,6 +525,7 @@ function ComposerDock({
         })}
         onStartAndSend={view.onStartSession}
         onStopTurn={ctx.stopTurn}
+        blockedReason={blockedReason}
         soloAliases={soloAliases}
         agent={agent}
       />
@@ -497,11 +556,13 @@ function ComposerDock({
         onDismiss={ctx.dismissPrimer}
       />
 
-      <CompactionReminderBanner
-        state={state}
-        onCompact={() => ctx.sendPrompt("/compact")}
-        onDismiss={ctx.dismissCompactionReminder}
-      />
+      {!blockedReason && (
+        <CompactionReminderBanner
+          state={state}
+          onCompact={() => ctx.sendPrompt("/compact")}
+          onDismiss={ctx.dismissCompactionReminder}
+        />
+      )}
 
       {collapsible && (
         <ChromeCollapseHandle
@@ -522,6 +583,7 @@ function ComposerDock({
           currentAgent={state.agent ?? acpAgent}
           currentProvider={acpProvider}
           waitingFor={startingAgent}
+          blockedReason={blockedReason}
           connecting={connecting}
           availableModes={state.availableModes}
           currentModeId={state.currentModeId}
@@ -555,7 +617,13 @@ function ComposerDock({
   );
 }
 
-function EmptyState({ onPick }: { onPick: (text: string) => Promise<void> }) {
+function EmptyState({ onPick, notRunning }: { onPick: (text: string) => Promise<void>; notRunning: string | null }) {
+  if (notRunning)
+    return (
+      <div data-testid="acp-empty-not-running" className="mt-12 text-center text-sm text-text-muted">
+        {notRunning}
+      </div>
+    );
   return (
     <div className="mt-12 flex flex-col items-center gap-4 text-center">
       <div className="text-sm text-text-muted">Ask the agent anything about this workspace.</div>

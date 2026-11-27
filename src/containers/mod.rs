@@ -1,6 +1,7 @@
 pub mod container_interface;
 pub mod error;
 mod execution;
+pub mod image_pull;
 pub mod image_update;
 mod runtime;
 pub(crate) mod runtime_base;
@@ -16,6 +17,7 @@ pub use container_interface::{
 };
 use error::Result;
 pub(crate) use execution::{ContainerExecutionSnapshot, RuntimeExecutionSnapshot};
+pub(crate) use runtime::RuntimeKind;
 pub use runtime::{ContainerRuntime, ContainerState};
 
 /// Returns the CLI binary name for the configured container runtime.
@@ -189,7 +191,7 @@ impl DockerContainer {
         // A created ID came from a command run with the config's inherited overrides (see
         // `RuntimeBase::run_create`); a reused one was inspected on the ambient transport.
         let inherited = create_config
-            .map(|config| container_interface::docker_env_args(&config.environment).1)
+            .map(|config| container_interface::docker_env_args(&config.environment).inherit)
             .unwrap_or_default();
         let fresh = RuntimeExecutionSnapshot::capture_with(&self.runtime, &inherited);
         if let Err(error) = &fresh {

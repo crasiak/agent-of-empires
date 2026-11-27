@@ -7,11 +7,11 @@ import { useIdleDecayWindowMs } from "../../lib/idleDecay";
 import { sessionRowChromeClass } from "../../lib/sessionRowChrome";
 import { useSessionColorsEnabled } from "../../lib/sessionColors";
 import { useSidebarCompact } from "../../lib/sidebarCompact";
-import { EMPTY_OPTIMISTIC, type OptimisticTriage } from "../../lib/sidebarOptimistic";
+import { EMPTY_OPTIMISTIC, type OptimisticTriage, type RowOptimistic } from "../../lib/sidebarOptimistic";
 import { sessionWorkspace } from "../../lib/sessionWorkspace";
 import { reportError, reportInfo } from "../../lib/toastBus";
 import { MARK_MEANING, meaningText } from "../../lib/sidebarMarks";
-import { statusMeaning } from "../../lib/statusLegend";
+import { glyphTooltip } from "../../lib/statusLegend";
 import { StatusGlyph } from "../StatusGlyph";
 import { Tooltip } from "../Tooltip";
 import { useContextMenu } from "../useContextMenu";
@@ -28,6 +28,8 @@ const NAVIGATE_ONLY: ClickModifiers = { metaKey: false, ctrlKey: false, shiftKey
 const SINGLE_SCOPE: RowContextScope = { kind: "single" };
 
 export interface SessionRowProps extends SessionActionHandlers {
+  /** Identity of this rendered row; a workspace split across buckets has one per bucket. */
+  rowKey: string;
   workspace: Workspace;
   observedById: Record<string, RuntimeCursor>;
   runtimeEpoch: string | null;
@@ -44,11 +46,11 @@ export interface SessionRowProps extends SessionActionHandlers {
   /** Only passed to rows that can expand, so a navigation does not re-render every other row. */
   activeSessionId?: string | null;
   /** Looks up an expanded sibling's own optimistic triage; only passed to rows that can expand. */
-  optimisticFor?: (workspaceId: string) => OptimisticTriage;
+  optimisticFor?: (workspace: Workspace) => RowOptimistic;
 }
 
 export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
-  const { workspace, isActive, isSelected, hasInputFocus, onActivate, readOnly, indented, bulkApi } = props;
+  const { rowKey, workspace, isActive, isSelected, hasInputFocus, onActivate, readOnly, indented, bulkApi } = props;
   const idleDecayWindowMs = useIdleDecayWindowMs();
   const sessionColorsEnabled = useSessionColorsEnabled();
   const compact = useSidebarCompact();
@@ -70,10 +72,11 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
   // focus target and is described by it.
   const [glyphTip, setGlyphTip] = useState<"hover" | "focus" | null>(null);
   const glyphTipId = useId();
+  const errorLineId = useId();
 
   const openedAtRef = useRef(0);
   const { menu, menuRef, openMenu, closeMenu } = useContextMenu<SessionMenuState>(openedAtRef);
-  const openMenuAt = (x: number, y: number) => openMenu({ x, y, scope: bulkApi.prepareScope(workspace) });
+  const openMenuAt = (x: number, y: number) => openMenu({ x, y, scope: bulkApi.prepareScope(rowKey) });
   const longPress = useLongPress(!!sessionId && !isDeleting, (x, y) => {
     openedAtRef.current = Date.now();
     openMenuAt(x, y);
@@ -130,12 +133,16 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
       : isActive
         ? "text-text-primary"
         : "text-text-secondary";
-  const glyphMeaning = model.showUnreadGlyph
-    ? MARK_MEANING.unread
-    : statusMeaning(model.status, {
+  const tooltip = model.showUnreadGlyph
+    ? { text: meaningText(MARK_MEANING.unread), detail: null }
+    : glyphTooltip(model.status, {
         dormant: model.dormant,
         fresh: isFreshIdle({ status: model.status, idle_entered_at: model.idleEnteredAt }, idleDecayWindowMs),
+        lastError: model.lastError,
+        structured: model.structuredError,
       });
+  // Only a recorded error's first line is a detail; the glyph's aria-label doesn't carry it.
+  const errorLine = tooltip.detail;
   const navigationSessionId = navigationSession?.id ?? null;
   const sessionPath = navigationSessionId ? `/session/${encodeURIComponent(navigationSessionId)}` : "/";
 
@@ -164,7 +171,7 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
           if (e.button !== 0 || e.altKey) return;
           e.preventDefault();
           if (isDeleting || longPress.fired.current) return;
-          onActivate(workspace.id, e, navigationSessionId);
+          onActivate(rowKey, e, navigationSessionId);
         }}
         onContextMenu={(e) => {
           if (isDeleting) return;
@@ -180,11 +187,12 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
         {isSelected && <span className="sr-only">Selected</span>}
         <div className="flex items-center gap-2">
           <Tooltip
-            text={meaningText(glyphMeaning)}
+            text={tooltip.text}
             detail={
               // The attention hint lost its `title`; the tooltip is where a mouse user reads it. Waiting
               // and Error already say it in the glyph's meaning, so only other attention adds a line.
               [
+                errorLine,
                 // `needsAttention`, not `attention`: an unread glyph can stand in for the attention one,
                 // and the reason still has to show.
                 model.needsAttention && model.status !== "Waiting" && model.status !== "Error"
@@ -197,6 +205,9 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
             }
             id={glyphTipId}
             open={glyphTip !== null}
+            // A recorded error's first line can be a long path or token.
+            multiline={errorLine !== null}
+            bubbleClassName={errorLine !== null ? "break-words" : ""}
           >
             <span
               className={`text-sm shrink-0 leading-none font-mono ${model.showUnreadGlyph ? "text-status-unread font-semibold" : model.textClass} ${
@@ -205,6 +216,7 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
               data-attention={attention ? "true" : undefined}
               data-testid="sidebar-status-glyph"
               aria-label={attention ? `${model.status} · ${model.attentionHint}` : undefined}
+              aria-describedby={errorLine ? errorLineId : undefined}
               // Only a mouse hover opens it; a tap fires emulated mouse events and must not.
               onPointerEnter={(e) => e.pointerType === "mouse" && setGlyphTip((tip) => tip ?? "hover")}
               onPointerLeave={() => setGlyphTip((tip) => (tip === "hover" ? null : tip))}
@@ -223,9 +235,14 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
               )}
             </span>
           </Tooltip>
+          {errorLine && (
+            <span id={errorLineId} hidden>
+              {errorLine}
+            </span>
+          )}
           <div className="min-w-0 flex-1">
             <span
-              className={`flex items-center gap-1.5 text-[13px] md:text-[14px] ${labelTone} ${model.effectivePinned ? "font-semibold" : ""} ${model.effectiveArchived || model.effectiveSnoozed ? "italic opacity-70" : ""}`}
+              className={`flex items-center gap-1.5 text-[13px] md:text-[14px] ${labelTone} ${model.effectivePinned ? "font-semibold" : ""} ${model.effectiveArchived || model.effectiveSnoozed ? "italic" : ""}`}
             >
               {sessionColorsEnabled && model.sessionColorDot && (
                 <span
@@ -300,7 +317,7 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
                 isSelected={false}
                 onActivate={activateSibling}
                 bulkApi={siblingBulkApi}
-                optimistic={props.optimisticFor?.(sibling.id) ?? EMPTY_OPTIMISTIC}
+                optimistic={props.optimisticFor?.(sibling) ?? EMPTY_OPTIMISTIC}
               />
             );
           })}

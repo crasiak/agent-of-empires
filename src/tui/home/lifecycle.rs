@@ -107,7 +107,9 @@ impl HomeView {
             row_tag_mode: resolved.session.row_tag,
             show_session_colors: resolved.session.show_session_colors,
             show_activity_age: resolved.session.show_activity_age,
+            show_structured_badge: resolved.session.show_structured_badge,
             sidebar_position: resolved.session.sidebar_position,
+            narrow_layout: resolved.session.narrow_layout,
             agent_clipboard_forward: resolved.tmux.clipboard
                 != crate::session::config::TmuxSettingMode::Disabled,
             hyperlink_cells: crate::tui::hyperlink::SharedHyperlinks::default(),
@@ -134,6 +136,16 @@ impl HomeView {
                         .collect()
                 })
                 .unwrap_or_default(),
+            status_group_collapsed: user_config
+                .as_ref()
+                .map(|c| {
+                    c.app_state
+                        .status_group_collapsed
+                        .iter()
+                        .map(|path| (path.clone(), true))
+                        .collect()
+                })
+                .unwrap_or_default(),
             remote_owner_cache: std::cell::RefCell::new(HashMap::new()),
             registered_projects: Vec::new(),
             show_help: false,
@@ -143,6 +155,7 @@ impl HomeView {
             retained_tailored_windows: Vec::new(),
             tailored_account: crate::session::tailored::CaptureAccount::Personal,
             confirm_dialog: None,
+            pending_archive_group_ids: None,
             unified_delete_dialog: None,
             group_delete_options_dialog: None,
             rename_dialog: None,
@@ -155,8 +168,11 @@ impl HomeView {
             repo_appearances: resolved.app_state.repo_appearances.clone(),
             group_rename_context: None,
             repo_trust_dialog: None,
+            create_hook_failed: None,
             pending_repo_trust_data: None,
             pending_repo_trust_fingerprint: None,
+            pending_repo_trust_skip_on_create: false,
+            pending_repo_trust_recovery: None,
             hooks_install_dialog: None,
             pending_hooks_install_data: None,
             volume_ignores_glob_dialog: None,
@@ -184,9 +200,12 @@ impl HomeView {
             command_palette: None,
             session_search: None,
             serve_view: None,
+            serve_jobs: super::super::dialogs::ServeJobs::default(),
             connections_view: None,
             pending_dashboard_launch: None,
+            pending_dashboard_stop: None,
             dashboard_launch: None,
+            dashboard_stop: None,
             update_confirm_dialog: None,
             telemetry_consent_dialog: None,
             tips_dialog: None,
@@ -216,6 +235,7 @@ impl HomeView {
             hover_cell: None,
             status_flash: None,
             live_send_ctrl_c_flash_until: None,
+            live_takeover: None,
             sidebar_collapsed: user_config
                 .as_ref()
                 .and_then(|c| c.app_state.home_sidebar_collapsed)
@@ -248,6 +268,8 @@ impl HomeView {
             pending_highlight_bulk: None,
             pending_bulk_restart: false,
             pending_breakout: false,
+            breakout_discovery_job: super::breakout::spawn_discovery(),
+            breakout_discovery_closes: Vec::new(),
             breakout_job: None,
             breakout_close_job: None,
             breakout_session_close_job: None,
@@ -283,6 +305,8 @@ impl HomeView {
             system_health_scroll: 0,
             diagnostics_area: Rect::default(),
             diagnostics_hovered: false,
+            arc_hover: None,
+            steno_windows: None,
             system_health_tip_high_samples: 0,
             system_health_tip_earned: user_config
                 .as_ref()
@@ -300,6 +324,7 @@ impl HomeView {
             runtime_outcome_messages: Vec::new(),
             sidebar_source: crate::tui::session_feed::SidebarSource::Disconnected,
             runtime_failure_reason: None,
+            offline_attention: crate::tui::dialogs::DaemonAttention::Offline,
             restart_in_flight: std::collections::HashSet::new(),
             marked: std::collections::HashSet::new(),
             pending_creation: None,
@@ -583,6 +608,7 @@ impl HomeView {
         {
             next.shift_remove(id);
         }
+        self.keep_steno_arcs(&mut next);
         self.instances = next;
         self.badge_identities
             .retain(|id, _| self.instances.contains_key(id));

@@ -3,7 +3,7 @@
 // persist-after-expand path lives in tests/settings-advanced-fold.spec.ts.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { SettingsView } from "../SettingsView";
 import * as api from "../../lib/api";
 
@@ -45,6 +45,14 @@ const ROWS: Row[] = [
   ["systemd", "survive_daemon_restart", "Sessions survive daemon restart", { kind: "toggle" }, false],
   ["systemd", "memory_max", "Session memory limit", { kind: "optional_text" }, true, false, "memory_limit"],
   ["systemd", "tasks_max", "Session task limit", { kind: "number", min: 0 }, true],
+  ["serve", "port", "Daemon port", { kind: "number", min: 1, max: 65535 }, false],
+  [
+    "serve",
+    "funnel_port",
+    "Funnel port",
+    { kind: "select", options: ["443", "8443", "10000"].map((value) => ({ value, label: value })) },
+    false,
+  ],
   ["acp", "show_tool_durations", "Show tool-call durations", { kind: "toggle" }, false],
   ["acp", "rate_limit_auto_resume", "Auto-resume after rate limit", { kind: "toggle" }, false],
   ["acp", "replay_events", "History cap (events)", { kind: "number", min: 0 }, false],
@@ -98,12 +106,9 @@ function fieldInputByLabel(
   label: string,
   type: "number" | "text",
 ): HTMLInputElement | HTMLTextAreaElement {
-  const labels = Array.from(container.querySelectorAll("label"));
-  const match = labels.find((l) => l.textContent === label);
-  const selector = type === "text" ? 'input[type="text"], textarea' : `input[type="${type}"]`;
-  const input = match?.parentElement?.querySelector(selector);
-  expect(input).toBeTruthy();
-  return input as HTMLInputElement | HTMLTextAreaElement;
+  return within(container).getByRole(type === "number" ? "spinbutton" : "textbox", { name: label }) as
+    | HTMLInputElement
+    | HTMLTextAreaElement;
 }
 
 function commit(input: HTMLInputElement | HTMLTextAreaElement, value: string) {
@@ -112,26 +117,16 @@ function commit(input: HTMLInputElement | HTMLTextAreaElement, value: string) {
   fireEvent.blur(input);
 }
 
-// ToggleField renders a label div next to a role=switch button inside a flex
-// row; click the switch that pairs with the given label.
 function clickToggle(container: HTMLElement, label: string) {
-  const labelDiv = Array.from(container.querySelectorAll("div")).find(
-    (d) => d.textContent === label && d.querySelector("*") === null,
-  );
-  const row = labelDiv?.parentElement?.parentElement;
-  const sw = row?.querySelector('button[role="switch"]') as HTMLButtonElement;
-  expect(sw).toBeTruthy();
-  fireEvent.click(sw);
+  fireEvent.click(within(container).getByRole("switch", { name: label }));
 }
 
-// ListField: open its add input, type a value, submit with Enter. Scoped to
-// the ListField whose header carries `label`.
+// ListField: open its add input unless a rejected entry left it open, type a value, submit with Enter.
 function addListItem(container: HTMLElement, label: string, value: string) {
-  const labelEl = Array.from(container.querySelectorAll("label")).find((l) => l.textContent === label);
-  const root = labelEl?.parentElement?.parentElement as HTMLElement;
-  const addBtn = labelEl?.parentElement?.querySelector("button");
-  if (addBtn) fireEvent.click(addBtn);
-  const input = root.querySelector('input[type="text"]') as HTMLInputElement;
+  const list = within(within(container).getByRole("group", { name: label }));
+  const add = list.queryByRole("button", { name: "+ Add" });
+  if (add) fireEvent.click(add);
+  const input = list.getByRole("textbox", { name: label });
   fireEvent.change(input, { target: { value } });
   fireEvent.keyDown(input, { key: "Enter" });
 }
@@ -148,6 +143,32 @@ function selectProfile(container: HTMLElement, name: string) {
 import { resetSettingsStore } from "../../lib/settingsStore";
 
 beforeEach(resetSettingsStore);
+
+describe("Settings daemon port", () => {
+  it("saves the serve port from the Updates tab", async () => {
+    const { container } = renderView("updates");
+    await screen.findByText("Daemon port");
+
+    commit(fieldInputByLabel(container, "Daemon port", "number"), "8090");
+
+    await waitFor(() => expect(vi.mocked(api.updateSettings)).toHaveBeenCalledWith({ serve: { port: 8090 } }, "main"));
+  });
+
+  // config.toml takes the port quoted, so the select must save a string, not a number.
+  it("saves the Funnel port as a quoted string", async () => {
+    const { container } = renderView("updates");
+    await screen.findByText("Funnel port");
+    const label = Array.from(container.querySelectorAll("label")).find((l) => l.textContent === "Funnel port");
+    const select = label?.parentElement?.querySelector("select") as HTMLSelectElement;
+    expect(select).toBeTruthy();
+
+    fireEvent.change(select, { target: { value: "8443" } });
+
+    await waitFor(() =>
+      expect(vi.mocked(api.updateSettings)).toHaveBeenCalledWith({ serve: { funnel_port: "8443" } }, "main"),
+    );
+  });
+});
 
 describe("Settings Advanced fold", () => {
   beforeEach(() => {

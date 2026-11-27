@@ -52,7 +52,8 @@ server, and the optional shared build cache.
 release notes. Maintenance types such as `build`, `chore`, `ci`, `docs`,
 `refactor`, `style`, and `test` do not. A web scope follows the same rule, so
 `feat(web)` is visible and `refactor(web)` is not. The PR title check enforces
-`<type>(<scope>)?: <lowercase subject>`.
+`<type>(<scope>)?: <lowercase subject>`. A `!` after the type or scope proposes
+a major release; use it only for breaking changes that warrant one.
 
 ## Pull requests
 
@@ -60,8 +61,9 @@ Open the PR against `main` and complete the template. Include:
 
 - what changed and why;
 - how it was tested;
-- screenshots or recordings for UI changes;
 - related issues.
+
+If it's a UI change, consider attaching screenshot(s), or certainly provide them if requested by the reviewer.
 
 AI agents propose; humans approve scope and implementation, review changes, and
 decide issue disposition or merge. You remain responsible for AI-assisted work:
@@ -84,7 +86,8 @@ potentially incomplete file data; when adding macOS-specific code or tests
 outside its covered paths, extend its sensitive-file list. To force a run, add
 `ci-macos` and re-run the `macOS gate` job.
 
-Releases are staged weekly. Maintainer instructions live in
+Releases ship from a release-plz PR, with daily nightlies of `main`.
+Maintainer instructions live in
 [docs/development/releases.md](docs/development/releases.md).
 
 Merge rules and area owners are in [MAINTAINERS.md](MAINTAINERS.md).
@@ -95,8 +98,20 @@ Reviewers tag each requested change with a priority:
 
 - **P1**: breaks behavior, security, or stored data. Blocks merge.
 - **P2**: a correctness, test, or maintainability gap this PR should close.
-  Blocks merge.
-- **P3**: a worthwhile improvement outside this PR. Becomes a follow-up issue,
-  not a blocker.
+  Blocks merge if it risks security or data loss, mistakes a migration or
+  stored data, regresses user-visible behavior, or is one of three or more P2s
+  in the review. Otherwise the reviewer approves and lists it as non-blocking.
+- **P3**: a nit or optional improvement. Never blocks merge and needs no
+  follow-up issue; mention it only when useful.
 
 Every requested change states what would satisfy it.
+
+When the findings are few, none blocks under this rubric, and each fix is small,
+the reviewer may push the fixes to the PR branch instead of waiting on the
+contributor. Push a normal commit on top of the branch and say in the review
+what was pushed. If the branch is behind `main` or conflicts, merge `main` into
+it with a merge commit. Never rebase or force-push. Pushing needs the PR's
+"Allow edits by maintainers" setting, which organisation-owned forks lack. For
+those forks, and for contributors on the [exclusion
+list](MAINTAINERS.md#reviewer-push-exclusions), leave the fixes to the
+contributor and apply the rubric as usual.

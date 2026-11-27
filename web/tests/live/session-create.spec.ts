@@ -195,7 +195,7 @@ test.describe("scratch sessions", () => {
     await page.keyboard.press("ControlOrMeta+KeyK");
     await expect(page.getByPlaceholder(PALETTE_PLACEHOLDER)).toBeVisible();
     await expect(page.getByRole("option", { name: /New scratch session/i })).toHaveCount(0);
-    // #2108: the "New Session Mode" setting entry also matches but opens settings.
+    // #2108: a setting entry can also match "New session" but opens settings.
     await expect(
       page.getByRole("option", { name: /New session/i }).filter({ hasNotText: "Opens settings" }),
     ).toHaveCount(0);
@@ -225,7 +225,8 @@ test("search surfaces a session by its conversation content", async ({ spawnServ
 test.describe("directory browser", () => {
   const option = (page: Page, text: string) => page.getByRole("option").filter({ hasText: text });
   async function openWizardWithShortcut(page: Page) {
-    await page.locator("body").click();
+    await expect(page.locator("html[data-shortcuts-ready]")).toBeAttached();
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press("n");
     await expect(page.getByRole("heading", { name: "New session" })).toBeVisible({ timeout: 10_000 });
   }

@@ -39,6 +39,7 @@ const WT_NAME_FIELD: usize = 0;
 const WT_NEW_BRANCH_FIELD: usize = 1;
 const WT_BASE_BRANCH_FIELD: usize = 2;
 const WT_EXTRA_REPOS_FIELD: usize = 3;
+const WT_WORKSPACE_FIELD: usize = 4;
 const SANDBOX_IMAGE_FIELD: usize = 0;
 const SANDBOX_ENV_FIELD: usize = 1;
 const SANDBOX_HOOK_ENV_FIELD: usize = 2;
@@ -82,7 +83,7 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
     FieldHelp {
         name: "Worktree",
         description:
-            "Create a git worktree (Ctrl+P to configure name, branch mode, and extra repos)",
+            "Create a git worktree (Ctrl+P to configure name, branch mode, extra repos, and workspace)",
     },
     FieldHelp {
         name: "Sandbox",
@@ -107,6 +108,7 @@ pub(super) const FIELD_HELP: &[FieldHelp] = &[
 ];
 
 #[derive(Clone)]
+#[cfg_attr(test, derive(Default))]
 pub struct NewSessionData {
     pub profile: String,
     pub title: String,
@@ -120,6 +122,8 @@ pub struct NewSessionData {
     /// `None` falls back to the repository's default branch.
     pub base_branch: Option<String>,
     pub extra_repo_paths: Vec<String>,
+    /// Create the worktree inside a workspace directory even with no extra repos.
+    pub workspace: bool,
     pub sandbox: bool,
     pub sandbox_image: String,
     pub yolo_mode: bool,
@@ -138,6 +142,8 @@ pub struct NewSessionData {
     /// Create in the structured (ACP) view instead of a tmux terminal. Only
     /// true for ACP-capable tools; `validate_structured_choice` enforces it.
     pub structured: bool,
+    /// Offer the existing Arc consent after this reviewed intake creation commits.
+    pub intake: bool,
 }
 
 /// The one conversion from wizard output to builder input, so a new field
@@ -165,6 +171,7 @@ impl From<NewSessionData> for crate::session::builder::InstanceParams {
             extra_args: data.extra_args,
             command_override: data.command_override,
             extra_repo_paths: data.extra_repo_paths,
+            workspace: data.workspace,
             // The dialog collects one base for the whole session; per-repo
             // bases are a CLI and web-wizard input.
             repo_base_branches: Vec::new(),
@@ -179,6 +186,7 @@ impl From<NewSessionData> for crate::session::builder::InstanceParams {
 }
 
 pub struct NewSessionDialog {
+    pub(super) intake: Option<crate::session::tailored::intake::IntakeBrief>,
     pub(super) profile: String,
     pub(super) ledger_profile: Option<Input>,
     pub(super) available_profiles: Vec<String>,
@@ -224,7 +232,15 @@ pub struct NewSessionDialog {
     /// every tool or profile change. Gates the Structured field's visibility
     /// like `has_yolo` / `has_sandbox`.
     pub(super) structured_capable: bool,
+    /// The profile's custom-agent maps, which decide whether a custom tool always
+    /// runs in Yolo mode in the chosen view.
+    pub(super) agent_acp_cmd: std::collections::HashMap<String, String>,
+    pub(super) agent_detect_as: std::collections::HashMap<String, String>,
+    pub(super) custom_agents: std::collections::HashMap<String, String>,
+    pub(super) agent_command_override: std::collections::HashMap<String, String>,
     pub(super) workspace_repos: Vec<String>,
+    /// Workspace toggle in the worktree overlay; extra repos force a workspace regardless.
+    pub(super) workspace: bool,
     pub(super) workspace_repos_expanded: bool,
     pub(super) workspace_repo_selected_index: usize,
     pub(super) workspace_repo_editing_input: Option<Input>,
@@ -232,7 +248,7 @@ pub struct NewSessionDialog {
     pub(super) workspace_repo_ghost: Option<path_input::PathGhostCompletion>,
     pub(super) workspace_repo_dir_picker_active: bool,
     pub(super) worktree_config_mode: bool,
-    /// Focused field within the worktree config overlay (0=name, 1=new_branch, 2=extra_repos)
+    /// Focused field within the worktree config overlay, one of the `WT_*` consts.
     pub(super) worktree_config_focused_field: usize,
     /// Session env: `KEY` passes through, `KEY=VALUE` sets.
     pub(super) extra_env: Vec<String>,
@@ -474,6 +490,25 @@ pub(super) struct FieldIndices {
 impl FieldIndices {
     /// Stands in for a field the current layout hides.
     pub const ABSENT: usize = usize::MAX;
+
+    /// Where the row at `index` in the `before` layout sits now, or `None` if it is hidden.
+    fn follow(&self, before: &FieldIndices, index: usize) -> Option<usize> {
+        [
+            (before.profile, self.profile),
+            (before.path, self.path),
+            (before.title, self.title),
+            (before.tool, self.tool),
+            (before.structured, self.structured),
+            (before.yolo, self.yolo),
+            (before.worktree, self.worktree),
+            (before.sandbox, self.sandbox),
+            (before.group, self.group),
+        ]
+        .into_iter()
+        .find(|(old, _)| *old == index)
+        .map(|(_, new)| new)
+        .filter(|new| *new != Self::ABSENT)
+    }
 }
 
 impl NewSessionDialog {
@@ -568,6 +603,7 @@ impl NewSessionDialog {
 
         Self {
             profile: profile.to_string(),
+            intake: None,
             ledger_profile: None,
             available_profiles,
             profile_descriptions,
@@ -585,6 +621,7 @@ impl NewSessionDialog {
             available_projects: Vec::new(),
             dir_picker: DirPicker::new(),
             worktree_enabled,
+            workspace: config.worktree.workspace_by_default,
             worktree_dirty: false,
             sandbox_dirty: false,
             overrides_unresolved,
@@ -610,6 +647,10 @@ impl NewSessionDialog {
             structured_default,
             structured_choice: None,
             structured_capable,
+            agent_acp_cmd: config.session.agent_acp_cmd.clone(),
+            agent_detect_as: config.session.agent_detect_as.clone(),
+            custom_agents: config.session.custom_agents.clone(),
+            agent_command_override: config.session.agent_command_override.clone(),
             extra_env,
             extra_env_overridden: false,
             env_list_expanded: false,
@@ -648,7 +689,18 @@ impl NewSessionDialog {
         self.path = Input::new(path);
         if !self.extra_env_overridden {
             self.reload_config_defaults();
+        } else {
+            let config = self.resolve_config_for_path(self.selected_profile());
+            self.refresh_path_agent_config(&config);
         }
+    }
+
+    pub fn set_intake(&mut self, brief: crate::session::tailored::intake::IntakeBrief) {
+        self.set_tool("pi");
+        self.set_sandbox_enabled(false);
+        self.sandbox_dirty = true;
+        self.set_structured(false);
+        self.intake = Some(brief);
     }
 
     pub fn set_ledger_profile(&mut self, profile: String) {
@@ -715,17 +767,30 @@ impl NewSessionDialog {
             return;
         }
         self.tool_index = index;
-        if self.selected_tool_always_yolo() {
-            self.yolo_mode = true;
-        } else {
-            self.yolo_mode = self.yolo_mode_default;
-        }
         if self.selected_tool_host_only() {
             self.sandbox_enabled = false;
             self.worktree_enabled = false;
             self.worktree_branch.reset();
         }
         self.reload_tool_config();
+        self.reset_yolo();
+    }
+
+    fn reset_yolo(&mut self) {
+        self.yolo_mode = self.yolo_mode_default
+            || (self.selected_tool_always_yolo()
+                && (self.structured_enabled || self.selected_declared_agent().is_none()));
+    }
+
+    /// The Yolo choice resets only when the view moves the session onto or off an
+    /// always-Yolo agent.
+    fn set_structured(&mut self, enabled: bool) {
+        let was_locked = self.selected_tool_always_yolo();
+        self.structured_enabled = enabled;
+        self.structured_choice = Some(enabled);
+        if self.selected_tool_always_yolo() != was_locked {
+            self.reset_yolo();
+        }
     }
 
     /// Carry a session's agent, view and sandbox, each only as far as this form allows.
@@ -740,8 +805,7 @@ impl NewSessionDialog {
 
     fn inherit_modes(&mut self, structured: bool, sandboxed: bool) {
         if self.structured_capable {
-            self.structured_enabled = structured;
-            self.structured_choice = Some(structured);
+            self.set_structured(structured);
         }
         if sandboxed && self.docker_available && !self.selected_tool_host_only() {
             self.set_sandbox_enabled(true);
@@ -872,12 +936,13 @@ impl NewSessionDialog {
             return;
         }
         let profile = self.selected_profile().to_string();
+        let config = self.resolve_config_for_path(&profile);
+        self.refresh_path_agent_config(&config);
         // Unknown overrides leave the toggles alone: a guess could disable a sandbox the project asks for.
         let ProjectOverridesLookup::Known(overrides) = self.resolve_overrides(&profile) else {
             return;
         };
         let host_only = self.selected_tool_host_only();
-        let config = self.resolve_config_for_path(&profile);
         if !self.worktree_dirty {
             let on = overrides
                 .as_ref()
@@ -958,6 +1023,33 @@ impl NewSessionDialog {
         }
     }
 
+    /// A path's repo config changes the agent only through `agent_detect_as`. When it does,
+    /// re-read whether the agent can run structured and re-check the Yolo lock.
+    fn refresh_path_agent_config(&mut self, config: &crate::session::Config) {
+        if config.session.agent_detect_as == self.agent_detect_as
+            && config.session.custom_agents == self.custom_agents
+            && config.session.agent_command_override == self.agent_command_override
+        {
+            return;
+        }
+        let was_locked = self.selected_tool_always_yolo();
+        let before = self.field_indices();
+        self.agent_detect_as = config.session.agent_detect_as.clone();
+        self.custom_agents = config.session.custom_agents.clone();
+        self.agent_command_override = config.session.agent_command_override.clone();
+        self.structured_capable = !self.terminal_fork()
+            && compute_structured_capable(&self.available_tools[self.tool_index], config);
+        self.apply_structured_default();
+        if self.selected_tool_always_yolo() != was_locked {
+            self.reset_yolo();
+        }
+        // Rows above focus can appear or vanish, so keep focus on its row, or its slot if hidden.
+        let after = self.field_indices();
+        self.focused_field = after
+            .follow(&before, self.focused_field)
+            .unwrap_or(self.focused_field.min(after.count - 1));
+    }
+
     fn refresh_inherited_sandbox_settings(&mut self) {
         if !self.sandbox_enabled || self.extra_env_overridden {
             return;
@@ -968,12 +1060,63 @@ impl NewSessionDialog {
     }
 
     fn selected_tool_always_yolo(&self) -> bool {
-        crate::agents::is_always_yolo(&self.available_tools[self.tool_index])
+        let view = if self.structured_enabled {
+            crate::session::View::Structured
+        } else {
+            crate::session::View::Terminal
+        };
+        if view == crate::session::View::Terminal {
+            if let Some(agent) = self.selected_declared_agent() {
+                return agent
+                    .contribution()
+                    .launch
+                    .as_ref()
+                    .and_then(|launch| launch.yolo.as_ref())
+                    .is_some_and(|mode| {
+                        matches!(
+                            mode,
+                            aoe_plugin_api::agent_integration::AgentYoloDeclaration::Always
+                        )
+                    });
+            }
+        }
+        crate::acp::runs_always_yolo(
+            &self.available_tools[self.tool_index],
+            view,
+            &self.agent_acp_cmd,
+            &self.agent_detect_as,
+        )
     }
 
     fn selected_tool_host_only(&self) -> bool {
         let tool_name = &self.available_tools[self.tool_index];
         crate::agents::get_agent(tool_name).is_some_and(|a| a.host_only)
+            || self.selected_declared_agent().is_some_and(|agent| {
+                agent
+                    .contribution()
+                    .launch
+                    .as_ref()
+                    .is_some_and(|launch| launch.host_only)
+            })
+    }
+
+    fn selected_declared_agent(&self) -> Option<crate::plugin::agent_integration::DeclaredAgent> {
+        let tool = &self.available_tools[self.tool_index];
+        if self
+            .agent_command_override
+            .get(tool)
+            .is_some_and(|command| !command.trim().is_empty())
+        {
+            return None;
+        }
+        crate::plugin::agent_integration::declared_agent(
+            crate::plugin::registry(),
+            tool,
+            self.custom_agents
+                .iter()
+                .filter(|(_, command)| !command.trim().is_empty())
+                .map(|(name, _)| name.as_str()),
+        )
     }
 
     /// Index of the path field, which precedes title. Shifts by one when the
@@ -1054,6 +1197,7 @@ impl NewSessionDialog {
             .and_then(|o| o.worktree_enabled)
             .unwrap_or(config.worktree.enabled)
             && !self.selected_tool_host_only();
+        self.workspace = config.worktree.workspace_by_default;
         self.worktree_dirty = false;
         self.sandbox_dirty = false;
 
@@ -1085,6 +1229,10 @@ impl NewSessionDialog {
         self.command_override = Input::new(config.session.resolve_tool_command(selected_tool));
         self.structured_capable =
             !self.terminal_fork() && compute_structured_capable(selected_tool, &config);
+        self.agent_acp_cmd = config.session.agent_acp_cmd.clone();
+        self.agent_detect_as = config.session.agent_detect_as.clone();
+        self.custom_agents = config.session.custom_agents.clone();
+        self.agent_command_override = config.session.agent_command_override.clone();
         self.apply_structured_default();
         self.tool_config_mode = false;
         self.tool_config_focused_field = 0;
@@ -1109,6 +1257,7 @@ impl NewSessionDialog {
 
         Self {
             profile: "default".to_string(),
+            intake: None,
             available_profiles: vec!["default".to_string()],
             profile_descriptions: vec![None],
             profile_index: 0,
@@ -1126,6 +1275,7 @@ impl NewSessionDialog {
             available_projects: Vec::new(),
             dir_picker: DirPicker::new(),
             worktree_enabled: config.worktree.enabled,
+            workspace: config.worktree.workspace_by_default,
             worktree_dirty: false,
             sandbox_dirty: false,
             overrides_unresolved: false,
@@ -1151,6 +1301,10 @@ impl NewSessionDialog {
             structured_default: false,
             structured_choice: None,
             structured_capable: false,
+            agent_acp_cmd: config.session.agent_acp_cmd.clone(),
+            agent_detect_as: config.session.agent_detect_as.clone(),
+            custom_agents: config.session.custom_agents.clone(),
+            agent_command_override: config.session.agent_command_override.clone(),
             extra_env: Vec::new(),
             extra_env_overridden: false,
             env_list_expanded: false,
@@ -1189,6 +1343,7 @@ impl NewSessionDialog {
     pub(super) fn new_with_tools(tools: Vec<&str>, path: String) -> Self {
         Self {
             profile: "default".to_string(),
+            intake: None,
             available_profiles: vec!["default".to_string()],
             profile_descriptions: vec![None],
             profile_index: 0,
@@ -1206,6 +1361,7 @@ impl NewSessionDialog {
             available_projects: Vec::new(),
             dir_picker: DirPicker::new(),
             worktree_enabled: false,
+            workspace: false,
             worktree_dirty: false,
             sandbox_dirty: false,
             overrides_unresolved: false,
@@ -1233,6 +1389,10 @@ impl NewSessionDialog {
             structured_default: false,
             structured_choice: None,
             structured_capable: false,
+            agent_acp_cmd: Default::default(),
+            agent_detect_as: Default::default(),
+            custom_agents: Default::default(),
+            agent_command_override: Default::default(),
             extra_env: Vec::new(),
             extra_env_overridden: false,
             env_list_expanded: false,
@@ -1334,9 +1494,15 @@ impl NewSessionDialog {
             return Some(self.handle_confirm_create_dir_key(KeyEvent::from(KeyCode::Char(key))));
         }
 
-        let hit_field = super::hit(&self.focusable_rects, col, row)?;
+        let mut hit_field = super::hit(&self.focusable_rects, col, row)?;
         if self.focused_field == self.path_field() && hit_field != self.focused_field {
+            let before = self.field_indices();
             self.seed_defaults_for_path();
+            // The refresh can show or hide rows, so act on the clicked row, not its old index.
+            let Some(moved) = self.field_indices().follow(&before, hit_field) else {
+                return Some(DialogResult::Continue);
+            };
+            hit_field = moved;
         }
         self.focused_field = hit_field;
         self.activate_focused_field();
@@ -1388,8 +1554,10 @@ impl NewSessionDialog {
                 self.workspace_repos_expanded = true;
                 self.workspace_repo_selected_index = 0;
             }
-            if field == WT_NEW_BRANCH_FIELD {
-                self.create_new_branch = !self.create_new_branch;
+            match field {
+                WT_NEW_BRANCH_FIELD => self.create_new_branch = !self.create_new_branch,
+                WT_WORKSPACE_FIELD => self.toggle_workspace(),
+                _ => {}
             }
             self.worktree_config_focused_field = field;
         }
@@ -1429,8 +1597,7 @@ impl NewSessionDialog {
         } else if self.focused_field == fields.tool {
             self.select_tool_index((self.tool_index + 1) % self.available_tools.len());
         } else if self.focused_field == fields.structured {
-            self.structured_enabled = !self.structured_enabled;
-            self.structured_choice = Some(self.structured_enabled);
+            self.set_structured(!self.structured_enabled);
         } else if self.focused_field == fields.yolo {
             self.yolo_mode = !self.yolo_mode;
         } else if self.focused_field == fields.worktree {
@@ -1513,6 +1680,7 @@ impl NewSessionDialog {
                 self.overrides_resolved_for = None;
                 let profile = self.selected_profile().to_string();
                 let config = self.resolve_config_for_path(&profile);
+                self.refresh_path_agent_config(&config);
                 self.seed_sandbox(&config, None);
             } else {
                 self.seed_defaults_for_path();
@@ -1616,6 +1784,8 @@ impl NewSessionDialog {
                     self.clear_path_ghost();
                     self.seed_defaults_for_path();
                 }
+                // The path refresh can show or hide rows, so wrap over the current layout.
+                let fields = self.field_indices();
                 if self.focused_field == fields.group {
                     self.clear_group_ghost();
                 }
@@ -1701,8 +1871,7 @@ impl NewSessionDialog {
             KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
                 if self.focused_field == fields.structured =>
             {
-                self.structured_enabled = !self.structured_enabled;
-                self.structured_choice = Some(self.structured_enabled);
+                self.set_structured(!self.structured_enabled);
                 DialogResult::Continue
             }
             _ => {
@@ -1919,8 +2088,22 @@ impl NewSessionDialog {
         }
     }
 
+    pub(super) fn workspace_forced(&self) -> bool {
+        !self.workspace_repos.is_empty()
+    }
+
+    pub(super) fn workspace_effective(&self) -> bool {
+        self.workspace_forced() || (self.workspace && self.create_new_branch)
+    }
+
+    fn toggle_workspace(&mut self) {
+        if !self.workspace_forced() && self.create_new_branch {
+            self.workspace = !self.workspace;
+        }
+    }
+
     fn handle_worktree_config_key(&mut self, key: KeyEvent) -> DialogResult<NewSessionData> {
-        const WT_MAX: usize = 4;
+        const WT_MAX: usize = 5;
 
         if self.branch_picker.is_active() {
             if let ListPickerResult::Selected(value) = self.branch_picker.handle_key(key) {
@@ -1995,6 +2178,12 @@ impl NewSessionDialog {
                 if self.worktree_config_focused_field == WT_NEW_BRANCH_FIELD =>
             {
                 self.create_new_branch = !self.create_new_branch;
+                DialogResult::Continue
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                if self.worktree_config_focused_field == WT_WORKSPACE_FIELD =>
+            {
+                self.toggle_workspace();
                 DialogResult::Continue
             }
             _ if self.worktree_config_focused_field == WT_NAME_FIELD => {
@@ -2193,6 +2382,10 @@ impl NewSessionDialog {
         self.command_override = Input::new(config.session.resolve_tool_command(tool));
         self.structured_capable =
             !self.terminal_fork() && compute_structured_capable(tool, &config);
+        self.agent_acp_cmd = config.session.agent_acp_cmd.clone();
+        self.agent_detect_as = config.session.agent_detect_as.clone();
+        self.custom_agents = config.session.custom_agents.clone();
+        self.agent_command_override = config.session.agent_command_override.clone();
         self.apply_structured_default();
     }
 
@@ -2235,6 +2428,30 @@ impl NewSessionDialog {
     /// capable), surfacing a refusal inline. Runs before any worktree, scratch
     /// or container work, so a refusal cannot orphan resources.
     fn validate_structured(&mut self) -> bool {
+        if let Some(brief) = &self.intake {
+            let error = if self
+                .available_tools
+                .get(self.tool_index)
+                .is_none_or(|tool| tool != "pi")
+                || self.sandbox_enabled
+                || self.structured_enabled
+            {
+                Some("Intake currently requires terminal Pi on the host; review Agent, Sandbox and Structured settings".to_string())
+            } else {
+                brief
+                    .launch_args(
+                        self.extra_args.value(),
+                        self.selected_profile(),
+                        self.group.value(),
+                    )
+                    .err()
+                    .map(|error| error.to_string())
+            };
+            if let Some(error) = error {
+                self.error_message = Some(error);
+                return false;
+            }
+        }
         if let Err(error) = self.launch_command_override() {
             self.error_message = Some(error);
             return false;
@@ -2264,6 +2481,7 @@ impl NewSessionDialog {
                     std::path::Path::new(&path),
                     self.scratch,
                     None,
+                    false,
                 )
             },
         };
@@ -2314,9 +2532,12 @@ impl NewSessionDialog {
             } else {
                 Vec::new()
             },
+            workspace: !self.scratch && self.worktree_enabled && self.workspace_effective(),
             sandbox: self.sandbox_enabled,
             sandbox_image: self.sandbox_image.value().trim().to_string(),
-            yolo_mode: self.yolo_mode || self.selected_tool_always_yolo(),
+            yolo_mode: self.yolo_mode
+                || (self.selected_tool_always_yolo()
+                    && (self.structured_enabled || self.selected_declared_agent().is_none())),
             extra_env: if self.sandbox_enabled && self.extra_env_overridden {
                 self.extra_env.clone()
             } else {
@@ -2327,7 +2548,17 @@ impl NewSessionDialog {
             } else {
                 Vec::new()
             },
-            extra_args: self.extra_args.value().trim().to_string(),
+            extra_args: match &self.intake {
+                Some(brief) => match brief.launch_args(
+                    self.extra_args.value(),
+                    self.selected_profile(),
+                    self.group.value().trim(),
+                ) {
+                    Ok(args) => args,
+                    Err(_) => return DialogResult::Continue,
+                },
+                None => self.extra_args.value().trim().to_string(),
+            },
             command_override: match self.launch_command_override() {
                 Ok(command) => command,
                 Err(_) => return DialogResult::Continue,
@@ -2335,6 +2566,7 @@ impl NewSessionDialog {
             scratch: self.scratch,
             fork_seed: self.fork_seed.clone(),
             structured: self.structured_enabled && self.structured_capable,
+            intake: self.intake.is_some(),
         })
     }
 

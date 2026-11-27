@@ -923,6 +923,10 @@ impl ToolSession {
             args.extend(["-y".to_string(), height.to_string()]);
         }
 
+        // Per-pane routing context overrides both caller and tmux-server inheritance.
+        for (key, value) in [("AOE_SESSION_ID", instance_id), ("AOE_PROFILE", profile)] {
+            args.extend(["-e".to_owned(), format!("{key}={value}")]);
+        }
         args.push(command.to_string());
 
         let target = format!("={}:", self.name);
@@ -992,6 +996,89 @@ mod tests {
 
     /// A session id long enough that `truncate_id(.., 8)` truncates.
     const ID: &str = "abc12345deadbeef";
+
+    #[test]
+    #[serial_test::serial]
+    fn tool_routing_environment_is_literal_and_overrides_inheritance() {
+        use crate::session::test_support::{isolate_app_dir, EnvGuard};
+        use crate::tmux::test_helpers::{only_pane_id, tmux_available, wait_for_pane_command};
+        if !tmux_available() {
+            return;
+        }
+        let _home = isolate_app_dir();
+        let _env = EnvGuard::set(&[
+            ("AOE_SESSION_ID", "inherited-wrong-id"),
+            ("AOE_PROFILE", "inherited-wrong-profile"),
+            ("AOE_DAEMON_URL", "https://unrelated.invalid"),
+            ("AOE_DAEMON_TOKEN", "unrelated-secret"),
+        ]);
+        let unique = TmuxTestSession::new("tool_context");
+        let sentinel = TmuxTestSession::new("tool_context_server");
+        assert!(crate::tmux::tmux_command()
+            .args(["new-session", "-d", "-s", sentinel.name(), "sleep 600"])
+            .status()
+            .unwrap()
+            .success());
+        struct ServerEnv(Vec<(String, Option<String>)>);
+        impl Drop for ServerEnv {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    let mut command = crate::tmux::tmux_command();
+                    command.args(["set-environment", "-g"]);
+                    match value {
+                        Some(value) => {
+                            command.args([key, value]);
+                        }
+                        None => {
+                            command.args(["-u", key]);
+                        }
+                    }
+                    let _ = command.status();
+                }
+            }
+        }
+        let mut server_env = ServerEnv(Vec::new());
+        for key in [
+            "AOE_SESSION_ID",
+            "AOE_PROFILE",
+            "AOE_DAEMON_URL",
+            "AOE_DAEMON_TOKEN",
+        ] {
+            let old = crate::tmux::tmux_command()
+                .args(["show-environment", "-g", key])
+                .output()
+                .unwrap();
+            let old = String::from_utf8(old.stdout).unwrap();
+            server_env.0.push((
+                key.into(),
+                old.trim_end_matches('\n')
+                    .split_once('=')
+                    .map(|(_, value)| value.into()),
+            ));
+            assert!(crate::tmux::tmux_command()
+                .args(["set-environment", "-g", key, "server-conflict"])
+                .status()
+                .unwrap()
+                .success());
+        }
+        let name = ToolSession::generate_name(ID, unique.name(), "annotate");
+        let guard = TmuxTestSession::from_name(&name);
+        let tool = ToolSession { name };
+        let profile = "literal ' \" $() ; profile";
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let captured = root.path().join("context");
+        let command = format!(
+            "printf '%s\\n' \"$AOE_SESSION_ID\" \"$AOE_PROFILE\" \"$AOE_DAEMON_URL\" \"$AOE_DAEMON_TOKEN\" > '{}'; exec sleep 600",
+            captured.display()
+        );
+        tool.create_with_size("/tmp", &command, None, profile, ID, "annotate")
+            .unwrap();
+        wait_for_pane_command(&only_pane_id(guard.name()), "sleep");
+        assert_eq!(
+            std::fs::read_to_string(captured).unwrap(),
+            format!("{ID}\n{profile}\nserver-conflict\nserver-conflict\n")
+        );
+    }
 
     fn legacy_metadata() -> crate::tmux::PaneMetadata {
         crate::tmux::PaneMetadata {
@@ -2090,7 +2177,8 @@ mod tests {
     #[serial_test::serial]
     fn legacy_dead_pane_consent_never_adopts_recycled_ids_from_a_replacement_server(
     ) -> anyhow::Result<()> {
-        if !tmux_available() {
+        #[cfg(unix)]
+        if crate::tmux::tests::run_probe_test_in_subprocess() {
             return Ok(());
         }
         let home = crate::session::test_support::isolate_app_dir();
@@ -2099,6 +2187,9 @@ mod tests {
             crate::tmux::TMUX_SOCKET_ENV,
             socket.as_os_str(),
         )]);
+        if !tmux_available() {
+            return Ok(());
+        }
         struct PrivateServer<'a>(&'a std::path::Path);
         impl Drop for PrivateServer<'_> {
             fn drop(&mut self) {
@@ -2158,6 +2249,11 @@ mod tests {
         let original_server =
             crate::tmux::configured_tmux_server_identity(&crate::tmux::TmuxCommandDeadline::new())?
                 .expect("original private server");
+        let original_birth = crate::process::process_birth_identity(original_server.1)?
+            .expect("original private server is alive");
+        let original_process =
+            crate::process::CapturedProcess::capture(original_server.1, &original_birth)?
+                .expect("original private server remains alive");
         let adoption = crate::session::LegacyToolAdoption {
             tmux_session: name.clone(),
             identity: ToolSession::legacy_identity(original.get(&name).unwrap())?,
@@ -2174,6 +2270,14 @@ mod tests {
             .arg("kill-server")
             .status()?
             .success());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !original_process.exited()? {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "original private server did not exit"
+            );
+            std::thread::yield_now();
+        }
         let replacement = create_dead()?;
         let replacement_server =
             crate::tmux::configured_tmux_server_identity(&crate::tmux::TmuxCommandDeadline::new())?

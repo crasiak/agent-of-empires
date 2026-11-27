@@ -1,7 +1,8 @@
 //! Structured view render: transcript, approval shelf, queue, composer, and
 //! status line, with pickers floating above the composer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -18,10 +19,14 @@ use super::input::{Focus, Intent};
 use super::reducer::{
     AcpTranscript, NoteKind, PendingApproval, ToolCallRow, ToolCompletion, ToolOutcome,
 };
-use super::state::{FileIndex, PickerKind, PickerTarget, StructuredViewState, ViewLayout};
+use super::state::{
+    FileIndex, PickerKind, PickerTarget, StructuredViewState, ToolFold, ViewLayout,
+};
 use crate::acp::approvals::{tool_target, ToolTarget, CMD_KEYS, PATH_KEYS};
 use crate::acp::session_paths::{relative_display_path, SessionPathRoots};
-use crate::acp::state::{AuthStatusKind, SessionUsage, ToolOutputBlock};
+use crate::acp::state::{
+    AuthStatusKind, SessionUsage, SubagentRecord, SubagentState, ToolOutputBlock,
+};
 use crate::acp::transcript::{TranscriptRow, TranscriptRowKind};
 use crate::tui::components::hover::paint_hover_bg;
 use crate::tui::plugin_ui;
@@ -571,6 +576,12 @@ fn render_slash_picker(
         &matches,
         |cmd| {
             let mut spans = vec![Span::raw(format!("/{}", cmd.name))];
+            if let Some(hint) = &cmd.input_hint {
+                spans.push(Span::styled(
+                    format!(" {hint}"),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+            }
             if !cmd.description.is_empty() {
                 spans.push(Span::styled(
                     format!("  {}", cmd.description),
@@ -725,6 +736,9 @@ fn render_transcript(
     let max = total.saturating_sub(text_area.height);
     // Lets a scroll step resolve the stick-to-bottom sentinel first.
     state.last_scroll_max.set(max);
+    state
+        .last_text_size
+        .set((text_area.width, text_area.height));
     let first = state.scroll_offset.min(max);
     let para = Paragraph::new(text).scroll((first, 0));
     frame.render_widget(para, text_area);
@@ -881,17 +895,78 @@ pub(super) fn wrapped_transcript(
     width: u16,
     tool_output: ToolOutputMode,
 ) -> Text<'static> {
-    let lines = transcript_lines(
+    wrapped_transcript_items(state, theme, width, tool_output).0
+}
+
+/// Wrapped line ranges of visible messages, cards and notes.
+fn wrapped_transcript_items(
+    state: &StructuredViewState,
+    theme: &Theme,
+    width: u16,
+    tool_output: ToolOutputMode,
+) -> (Text<'static>, Vec<Range<usize>>) {
+    let (lines, items) = transcript_lines(
         &state.transcript,
         theme,
         state.path_roots.as_ref(),
         tool_output,
+        state.tool_fold,
     );
     let mut wrapped: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    let mut line_starts = Vec::with_capacity(lines.len() + 1);
     for line in lines {
+        line_starts.push(wrapped.len());
         wrap_line_into(own_line(line), width, &mut wrapped);
     }
-    Text::from(wrapped)
+    line_starts.push(wrapped.len());
+    let items = items
+        .into_iter()
+        .map(|item| line_starts[item.start]..line_starts[item.end])
+        .collect();
+    (Text::from(wrapped), items)
+}
+
+/// A visible item's preorder index and intra-item wrapped row.
+pub(super) struct ScrollAnchor {
+    item: usize,
+    row: usize,
+}
+
+/// Anchor on the item at the top of the last render, or `None` while following
+/// the latest output or before the first render.
+pub(super) fn scroll_anchor(state: &StructuredViewState) -> Option<ScrollAnchor> {
+    let (width, _) = state.last_text_size.get();
+    if state.scroll_offset == u16::MAX || width == 0 {
+        return None;
+    }
+    let (_, items) =
+        wrapped_transcript_items(state, &Theme::default(), width, ToolOutputMode::Compact);
+    let first = state.scroll_offset.min(state.last_scroll_max.get()) as usize;
+    let item = items
+        .partition_point(|item| item.start <= first)
+        .checked_sub(1)?;
+    Some(ScrollAnchor {
+        item,
+        row: first - items[item].start,
+    })
+}
+
+/// The scroll offset that keeps `anchor` at the top after the lines changed;
+/// `u16::MAX` when that reaches the end, which resumes following the latest output.
+pub(super) fn restore_scroll(state: &StructuredViewState, anchor: &ScrollAnchor) -> u16 {
+    let (width, height) = state.last_text_size.get();
+    let (text, items) =
+        wrapped_transcript_items(state, &Theme::default(), width, ToolOutputMode::Compact);
+    let Some(item) = items.get(anchor.item) else {
+        return u16::MAX;
+    };
+    let first = item.start + anchor.row.min(item.end.saturating_sub(item.start + 1));
+    let max = text.lines.len().saturating_sub(height as usize);
+    if first >= max {
+        u16::MAX
+    } else {
+        first as u16
+    }
 }
 
 fn plan_summary_line(plan: &[super::reducer::PlanLine], theme: &Theme) -> Line<'static> {
@@ -940,25 +1015,141 @@ fn own_line(line: Line<'_>) -> Line<'static> {
     Line::from(spans).style(line.style)
 }
 
-/// Word-wrap a styled line at the last space, hard-breaking long words.
-/// Unlike `markdown::wrap_line_into`, tabs are not expanded.
+/// Keep each grapheme in its first scalar's style without copying unaffected spans.
+fn join_split_graphemes(line: &mut Line<'static>) {
+    use std::borrow::Cow;
+    use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
+
+    let spans = &line.spans;
+    if spans.len() < 2 {
+        return;
+    }
+    let total = spans.iter().map(|span| span.content.len()).sum();
+    let Some(mut chunk) = spans.iter().position(|span| !span.content.is_empty()) else {
+        return;
+    };
+    let mut cursor = GraphemeCursor::new(0, total, true);
+    let mut chunk_start = 0;
+    let mut previous_chunk = chunk;
+    let mut first = chunk;
+    let mut crossings = Vec::new();
+    let mut bridge = [0; 8];
+    let mut bridge_len = 0;
+    let mut bridge_start = 0;
+    let mut backward_context = None;
+    loop {
+        let (text, start) = if bridge_len == 0 {
+            (spans[chunk].content.as_ref(), chunk_start)
+        } else {
+            (
+                std::str::from_utf8(&bridge[..bridge_len]).expect("encoded scalars"),
+                bridge_start,
+            )
+        };
+        match cursor.next_boundary(text, start) {
+            Ok(Some(end)) => {
+                backward_context = None;
+                bridge_len = 0;
+                let (last, prefix) = if end == chunk_start {
+                    (previous_chunk, spans[previous_chunk].content.len())
+                } else {
+                    (chunk, end - chunk_start)
+                };
+                if first != last {
+                    crossings.push((first, last, prefix));
+                }
+                first = chunk;
+                if end == chunk_start + spans[chunk].content.len() {
+                    first += 1;
+                    while first < spans.len() && spans[first].content.is_empty() {
+                        first += 1;
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(GraphemeIncomplete::NextChunk) => {
+                backward_context = None;
+                if bridge_len != 0 {
+                    bridge_len = 0;
+                } else {
+                    let previous = spans[chunk]
+                        .content
+                        .chars()
+                        .next_back()
+                        .expect("nonempty span");
+                    previous_chunk = chunk;
+                    chunk_start += spans[chunk].content.len();
+                    chunk += 1;
+                    while spans[chunk].content.is_empty() {
+                        chunk += 1;
+                    }
+                    let next = spans[chunk].content.chars().next().expect("nonempty span");
+                    // Overlap prevents chunk-start pre-context from recounting cached scalars.
+                    previous.encode_utf8(&mut bridge);
+                    next.encode_utf8(&mut bridge[previous.len_utf8()..]);
+                    bridge_len = previous.len_utf8() + next.len_utf8();
+                    bridge_start = chunk_start - previous.len_utf8();
+                }
+            }
+            Err(GraphemeIncomplete::PreContext(end)) => {
+                let (mut context, mut start) = backward_context
+                    .filter(|(_, start)| end <= *start)
+                    .unwrap_or((chunk, chunk_start));
+                while start >= end {
+                    context -= 1;
+                    start -= spans[context].content.len();
+                }
+                cursor.provide_context(&spans[context].content[..end - start], start);
+                backward_context = Some((context, start));
+            }
+            Err(error) => unreachable!("valid span cursor: {error:?}"),
+        }
+    }
+    if crossings.is_empty() {
+        return;
+    }
+    for (first, last, prefix) in crossings {
+        let extra = line.spans[first + 1..last]
+            .iter()
+            .map(|span| span.content.len())
+            .sum::<usize>()
+            + prefix;
+        let (before, after) = line.spans.split_at_mut(first + 1);
+        let target = &mut before[first].content;
+        match target {
+            Cow::Borrowed(text) => {
+                let mut joined = String::with_capacity(text.len() + extra);
+                joined.push_str(text);
+                *target = Cow::Owned(joined);
+            }
+            Cow::Owned(text) => text.reserve(extra),
+        }
+        let target = target.to_mut();
+        for span in &mut after[..last - first - 1] {
+            target.push_str(&std::mem::take(&mut span.content));
+        }
+        let tail = &mut after[last - first - 1].content;
+        match std::mem::take(tail) {
+            Cow::Borrowed(text) => {
+                target.push_str(&text[..prefix]);
+                *tail = Cow::Borrowed(&text[prefix..]);
+            }
+            Cow::Owned(mut text) => {
+                target.push_str(&text[..prefix]);
+                text.drain(..prefix);
+                *tail = Cow::Owned(text);
+            }
+        }
+    }
+    line.spans.retain(|span| !span.content.is_empty());
+}
+
 pub(super) fn wrap_line_into(mut line: Line<'static>, width: u16, out: &mut Vec<Line<'static>>) {
     use ratatui::buffer::CellWidth;
     use unicode_segmentation::UnicodeSegmentation;
+
+    join_split_graphemes(&mut line);
     let width = width.max(1) as usize;
-    if !line.spans.is_empty() {
-        let mut last = 0;
-        for next in 1..line.spans.len() {
-            if line.spans[last].style == line.spans[next].style {
-                let content = std::mem::take(&mut line.spans[next].content);
-                line.spans[last].content.to_mut().push_str(&content);
-            } else {
-                last += 1;
-                line.spans.swap(last, next);
-            }
-        }
-        line.spans.truncate(last + 1);
-    }
     let painted_width: usize = line
         .spans
         .iter()
@@ -1069,6 +1260,13 @@ fn render_status(
         spans.push(Span::styled(
             format!("· {mode} "),
             Style::default().fg(theme.title),
+        ));
+    }
+    for toggle in state.transcript.toggles() {
+        let on = toggle.current_value == "on";
+        spans.push(Span::styled(
+            format!("· {} {} ", toggle.name, if on { "on" } else { "off" }),
+            Style::default().fg(if on { theme.title } else { theme.hint }),
         ));
     }
     // Label only: the payload can carry the account email, which has no place
@@ -1388,14 +1586,14 @@ fn render_agent_message_lines(text: &str) -> Vec<Line<'static>> {
     body
 }
 
-/// Project the daemon's transcript rows to lines. Approvals are control state
-/// shown in the shelf, not here.
+/// Project visible transcript items; nested cards have their own line ranges.
 fn transcript_lines(
     transcript: &AcpTranscript,
     theme: &Theme,
     path_roots: Option<&SessionPathRoots>,
     tool_output: ToolOutputMode,
-) -> Vec<Line<'static>> {
+    fold: Option<ToolFold>,
+) -> (Vec<Line<'static>>, Vec<Range<usize>>) {
     let rows = &transcript.server_rows;
     // One card per tool call at its start row; the last terminal row wins.
     let mut completions: HashMap<&str, &TranscriptRow> = HashMap::new();
@@ -1407,9 +1605,37 @@ fn transcript_lines(
         }
     }
 
+    // Child tool calls nest under a parent card present in the window; others
+    // stay at top level.
+    let starts: HashSet<&str> = rows
+        .iter()
+        .filter(|row| row.kind == TranscriptRowKind::ToolStart)
+        .filter_map(|row| row.tool_call_id.as_deref())
+        .collect();
+    let mut children: HashMap<&str, Vec<&TranscriptRow>> = HashMap::new();
+    for row in rows
+        .iter()
+        .filter(|r| r.kind == TranscriptRowKind::ToolStart)
+    {
+        if let Some(parent) = in_window_parent(row, &starts) {
+            children.entry(parent).or_default().push(row);
+        }
+    }
+    let blocks = ToolBlocks {
+        completions: &completions,
+        children: &children,
+        subagents: &transcript.subagents,
+        theme,
+        path_roots,
+        tool_output,
+        fold,
+    };
+
     let mut out: Vec<Line<'static>> = Vec::new();
+    let mut items = Vec::new();
     let mut i = 0;
     while i < rows.len() {
+        let start = out.len();
         let row = &rows[i];
         match row.kind {
             TranscriptRowKind::Message => {
@@ -1425,6 +1651,7 @@ fn transcript_lines(
                 }
                 out.extend(agent_message_lines(&text, theme));
                 out.push(Line::default());
+                items.push(start..out.len());
                 continue;
             }
             TranscriptRowKind::Thinking => {
@@ -1439,6 +1666,7 @@ fn transcript_lines(
                 }
                 out.push(thinking_preview_line(&text));
                 out.push(Line::default());
+                items.push(start..out.len());
                 continue;
             }
             TranscriptRowKind::UserPrompt => {
@@ -1459,18 +1687,12 @@ fn transcript_lines(
                 out.push(Line::default());
             }
             TranscriptRowKind::ToolStart => {
-                if matches!(tool_output, ToolOutputMode::Retained(_)) {
-                    let completion = row
-                        .tool_call_id
-                        .as_deref()
-                        .and_then(|id| completions.get(id))
-                        .copied();
-                    out.extend(retained_tool_lines(row, completion, theme, path_roots));
-                } else {
-                    let card = tool_card_from_rows(row, &completions);
-                    out.extend(render_tool_lines(&card, theme, path_roots));
+                if in_window_parent(row, &starts).is_none() {
+                    blocks.append(row, 0, &mut out, &mut items);
+                    out.push(Line::default());
                 }
-                out.push(Line::default());
+                i += 1;
+                continue;
             }
             TranscriptRowKind::ToolComplete
             | TranscriptRowKind::ToolError
@@ -1517,10 +1739,14 @@ fn transcript_lines(
                 out.push(Line::default());
             }
         }
+        if out.len() > start {
+            items.push(start..out.len());
+        }
         i += 1;
     }
     if let ToolOutputMode::Retained(outputs) = tool_output {
         for output in outputs {
+            let start = out.len();
             out.push(Line::styled(
                 format!(
                     "Retained tool output · completion unavailable · {}",
@@ -1530,6 +1756,7 @@ fn transcript_lines(
             ));
             out.extend(styled_output_lines(&output.text));
             out.push(Line::default());
+            items.push(start..out.len());
         }
     }
     if out.is_empty() {
@@ -1538,7 +1765,108 @@ fn transcript_lines(
             Style::default().add_modifier(Modifier::DIM),
         )));
     }
-    out
+    (out, items)
+}
+
+/// The spawning tool call of `row`, when its card is in the window.
+fn in_window_parent<'a>(row: &'a TranscriptRow, starts: &HashSet<&str>) -> Option<&'a str> {
+    let parent = row.tool.as_ref()?.parent_tool_call_id.as_deref()?;
+    (starts.contains(parent) && row.tool_call_id.as_deref() != Some(parent)).then_some(parent)
+}
+
+/// What nested tool rendering needs, shared across the recursion.
+struct ToolBlocks<'a> {
+    completions: &'a HashMap<&'a str, &'a TranscriptRow>,
+    children: &'a HashMap<&'a str, Vec<&'a TranscriptRow>>,
+    subagents: &'a [SubagentRecord],
+    theme: &'a Theme,
+    path_roots: Option<&'a SessionPathRoots>,
+    tool_output: ToolOutputMode<'a>,
+    fold: Option<ToolFold>,
+}
+
+impl ToolBlocks<'_> {
+    /// Append each card's own range before its indented children.
+    fn append(
+        &self,
+        row: &TranscriptRow,
+        depth: usize,
+        out: &mut Vec<Line<'static>>,
+        items: &mut Vec<Range<usize>>,
+    ) {
+        let id = row.tool_call_id.as_deref();
+        let record = id.and_then(|id| {
+            self.subagents
+                .iter()
+                .find(|record| record.parent_tool_call_id.as_deref() == Some(id))
+        });
+        let mut lines = if matches!(self.tool_output, ToolOutputMode::Retained(_)) {
+            let completion = id.and_then(|id| self.completions.get(id)).copied();
+            retained_tool_lines(row, completion, self.theme, self.path_roots)
+        } else {
+            let mut card = tool_card_from_rows(row, self.completions);
+            // The roster, not the launch call, says whether the child is still
+            // active: a stop at turn end must not close a running child's card,
+            // and an idle child may never send a reply.
+            if let Some(record) = record {
+                let stopped = matches!(
+                    &card.completed,
+                    Some(c) if c.outcome == ToolOutcome::Stopped
+                );
+                match record.state {
+                    SubagentState::Running | SubagentState::RequiresAction if stopped => {
+                        card.completed = None;
+                    }
+                    SubagentState::Idle if card.completed.is_none() || stopped => {
+                        card.completed = Some(ToolCompletion {
+                            outcome: match record.stop_reason.as_deref() {
+                                Some("error") => ToolOutcome::Error,
+                                Some("cancelled") => ToolOutcome::Stopped,
+                                _ => ToolOutcome::Ok,
+                            },
+                            content: String::new(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(title) = record
+                .and_then(|r| r.title.as_ref())
+                .filter(|t| !t.is_empty())
+            {
+                card.name = title.clone();
+            }
+            render_tool_lines(&card, self.theme, self.path_roots, self.fold)
+        };
+        if let (Some(record), Some(header)) = (record, lines.first_mut()) {
+            header.spans.push(subagent_badge(record.state, self.theme));
+        }
+        let start = out.len();
+        for mut line in lines {
+            if depth > 0 {
+                line.spans.insert(0, Span::raw("  ".repeat(depth)));
+            }
+            out.push(line);
+        }
+        items.push(start..out.len());
+        for child in id
+            .and_then(|id| self.children.get(id))
+            .into_iter()
+            .flatten()
+        {
+            self.append(child, depth + 1, out, items);
+        }
+    }
+}
+
+fn subagent_badge(state: SubagentState, theme: &Theme) -> Span<'static> {
+    let (text, color) = match state {
+        SubagentState::Running => ("running", theme.running),
+        SubagentState::RequiresAction => ("waiting on you", theme.waiting),
+        SubagentState::Idle => ("idle", theme.hint),
+        SubagentState::Unknown => ("unknown", theme.hint),
+    };
+    Span::styled(format!(" · {text}"), Style::default().fg(color))
 }
 
 /// One dim preview per thought: the TUI has no expansion state to show it all.
@@ -1709,18 +2037,24 @@ const NEW_KEYS: &[&str] = &["new_string", "newString", "new_str", "content"];
 const TOOL_DIFF_MAX_LINES: usize = 20;
 const TOOL_PREVIEW_MAX_LINES: usize = 12;
 
-/// Successful tools collapse to one line; others get a per-kind body, or the
-/// generic fallback for unknown kinds and unparsable args.
+/// Successful tools collapse to one line unless `fold` says otherwise; others
+/// get a per-kind body, or the generic fallback for unknown kinds and
+/// unparsable args.
 fn render_tool_lines(
     tool: &ToolCallRow,
     theme: &Theme,
     path_roots: Option<&SessionPathRoots>,
+    fold: Option<ToolFold>,
 ) -> Vec<Line<'static>> {
-    if tool
-        .completed
-        .as_ref()
-        .is_some_and(|completion| completion.outcome == ToolOutcome::Ok)
-    {
+    let compact = match fold {
+        Some(ToolFold::Folded) => true,
+        Some(ToolFold::Expanded) => false,
+        None => tool
+            .completed
+            .as_ref()
+            .is_some_and(|completion| completion.outcome == ToolOutcome::Ok),
+    };
+    if compact {
         return vec![compact_tool_line(tool, theme, path_roots)];
     }
     let mut lines = Vec::new();
@@ -1770,8 +2104,14 @@ fn compact_tool_line(
     } else {
         display_tool_target(&tool.kind, args.as_ref(), path_roots)
     };
+    let (marker, color) = match tool.completed.as_ref().map(|c| c.outcome) {
+        None => ("▶ ", theme.title),
+        Some(ToolOutcome::Ok) => ("✓ ", theme.running),
+        Some(ToolOutcome::Stopped) => ("◼ ", theme.hint),
+        Some(ToolOutcome::Error) => ("✗ ", theme.error),
+    };
     let mut spans = vec![
-        Span::styled("✓ ", Style::default().fg(theme.running)),
+        Span::styled(marker, Style::default().fg(color)),
         Span::styled(
             tool.name.clone(),
             Style::default().add_modifier(Modifier::BOLD),
@@ -2049,8 +2389,8 @@ fn help_hint(focus: Focus, approval_is_choice: bool, has_notices: bool) -> &'sta
         Focus::Composer => " Enter to send · Ctrl+Q to exit ",
         // `render_status` drops the hint unless it has `len + 24` spare columns,
         // so keep these short.
-        Focus::Transcript if has_notices => " x dismiss · scroll · p pane · Ctrl+Q exit ",
-        Focus::Transcript => " scroll · p pane · Ctrl+Q exit ",
+        Focus::Transcript if has_notices => " x dismiss · z fold · p pane · Ctrl+Q exit ",
+        Focus::Transcript => " z fold · p pane · Ctrl+Q exit ",
         Focus::Approval if approval_is_choice => " a answer · d deny · Esc stop ",
         Focus::Approval => " a allow · A always · d deny · Esc stop ",
         Focus::Pane => " scroll to read · Esc to close ",
@@ -2220,6 +2560,7 @@ mod tests {
             name: name.to_string(),
             description: desc.to_string(),
             accepts_input: false,
+            input_hint: None,
         }
     }
 
@@ -2307,6 +2648,81 @@ mod tests {
         assert!(help_hint(Focus::Approval, true, false).contains("a answer"));
         assert!(!help_hint(Focus::Approval, true, false).contains("always"));
         assert!(help_hint(Focus::Approval, false, false).contains("A always"));
+    }
+
+    #[test]
+    fn wrapping_keeps_cross_style_ansi_graphemes_in_paint_and_copy() {
+        use crate::tui::components::text::line_columns;
+        use unicode_segmentation::UnicodeSegmentation;
+
+        for text in [
+            "Ae\u{301}XYZ",
+            "A♥\u{fe0f}x",
+            "A👩\u{200d}💻x",
+            "A👩\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{200d}💻x",
+            "A🇫🇷🇨🇦x",
+            "Aक्\u{200d}षx",
+            "Aｶﾞx",
+        ] {
+            for group in 1..=text.chars().count() {
+                let mut ansi = String::new();
+                for (index, ch) in text.chars().enumerate() {
+                    let color = if (index / group) % 2 == 0 { 31 } else { 34 };
+                    ansi.push_str(&format!("\x1b[{color}m{ch}"));
+                }
+                let expected: Vec<_> = text
+                    .grapheme_indices(true)
+                    .map(|(byte, glyph)| {
+                        let index = text[..byte].chars().count();
+                        let color = if (index / group) % 2 == 0 {
+                            Color::Red
+                        } else {
+                            Color::Blue
+                        };
+                        (glyph.to_string(), color)
+                    })
+                    .collect();
+                for width in [4, 7, 80] {
+                    let mut line = styled_output_lines(&ansi)
+                        .remove(0)
+                        .style(Style::default().bg(Color::Green));
+                    line.spans.insert(0, Span::raw(""));
+                    line.spans.push(Span::raw(""));
+                    let mut rows = Vec::new();
+                    wrap_line_into(line, width, &mut rows);
+                    let copied = rows
+                        .iter()
+                        .map(|row| line_columns(row, width).slice(0, width))
+                        .collect::<String>();
+                    assert_eq!(copied, text, "width={width}, group={group}");
+                    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+                        width,
+                        rows.len() as u16,
+                    ))
+                    .unwrap();
+                    terminal
+                        .draw(|frame| {
+                            frame.render_widget(Paragraph::new(Text::from(rows)), frame.area());
+                        })
+                        .unwrap();
+                    let painted: Vec<_> = terminal
+                        .backend()
+                        .buffer()
+                        .content()
+                        .iter()
+                        .filter(|cell| cell.symbol() != " ")
+                        .map(|cell| {
+                            assert_eq!(cell.bg, Color::Green);
+                            (cell.symbol().to_owned(), cell.fg)
+                        })
+                        .collect();
+                    assert_eq!(
+                        painted, expected,
+                        "text={text:?}, width={width}, group={group}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -2553,6 +2969,15 @@ mod tests {
         let dump = render_dump(&state, 80, 24);
         assert!(dump.contains("Commands") && dump.contains("/compact") && dump.contains('▶'));
 
+        let mut state = test_state();
+        state.focus = Focus::Composer;
+        let mut mcp = cmd("mcp", "MCP servers");
+        mcp.input_hint = Some("[reconnect|enable|disable]".into());
+        state.transcript.available_commands = vec![mcp];
+        state.composer.insert_str("/mc");
+        let dump = render_dump(&state, 80, 24);
+        assert!(dump.contains("/mcp [reconnect|enable|disable]"), "{dump:?}");
+
         // A short terminal must keep the selected last row on screen.
         let mut state = test_state();
         state.focus = Focus::Composer;
@@ -2614,12 +3039,8 @@ mod tests {
             chunk("Build", "m-c"),
             chunk("ing now", "m-c"),
         ]);
-        let out = joined(&transcript_lines(
-            &t,
-            &Theme::default(),
-            None,
-            ToolOutputMode::Compact,
-        ));
+        let out =
+            joined(&transcript_lines(&t, &Theme::default(), None, ToolOutputMode::Compact, None).0);
         assert!(!out.contains("#4656.The waiter"), "{out:?}");
         assert!(
             out.contains("for #4656.") && out.contains("The waiter has the lock."),
@@ -2643,7 +3064,8 @@ mod tests {
             thought(&long, "t-b"),
         ]);
         let lines: Vec<String> =
-            transcript_lines(&t, &Theme::default(), None, ToolOutputMode::Compact)
+            transcript_lines(&t, &Theme::default(), None, ToolOutputMode::Compact, None)
+                .0
                 .iter()
                 .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
                 .filter(|line: &String| !line.is_empty())
@@ -2696,12 +3118,8 @@ mod tests {
                 text: String::new(),
             },
         ]);
-        let out = joined(&transcript_lines(
-            &t,
-            &Theme::default(),
-            None,
-            ToolOutputMode::Compact,
-        ));
+        let out =
+            joined(&transcript_lines(&t, &Theme::default(), None, ToolOutputMode::Compact, None).0);
         assert_eq!(out.matches("Compaction summary").count(), 1, "{out:?}");
         for want in [
             "working on it",
@@ -2736,7 +3154,156 @@ mod tests {
     }
 
     fn tool_text(row: &ToolCallRow, roots: Option<&SessionPathRoots>) -> String {
-        joined(&render_tool_lines(row, &Theme::default(), roots))
+        joined(&render_tool_lines(row, &Theme::default(), roots, None))
+    }
+
+    fn tool_event(id: &str, name: &str, parent: Option<&str>) -> Event {
+        Event::ToolCallStarted {
+            tool_call: crate::acp::state::ToolCall {
+                id: id.into(),
+                name: name.into(),
+                kind: "other".into(),
+                args_preview: String::new(),
+                prompt: None,
+                started_at: chrono::Utc::now(),
+                parent_tool_call_id: parent.map(Into::into),
+                memory_recall: None,
+                diffs: Vec::new(),
+            },
+        }
+    }
+
+    fn tool_lines(t: &AcpTranscript) -> Vec<String> {
+        transcript_lines(t, &Theme::default(), None, ToolOutputMode::Compact, None)
+            .0
+            .iter()
+            .map(line_text)
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    /// Children indent under their parent card; orphans and unparented rows
+    /// stay at top level.
+    #[test]
+    fn child_tool_calls_nest_under_their_parent_with_orphan_fallback() {
+        let mut t = AcpTranscript::new("s-1");
+        t.server_rows = server_rows(&[
+            tool_event("p1", "Agent", None),
+            tool_event("c1", "Read", Some("p1")),
+            tool_event("c2", "Grep", Some("p1")),
+            tool_event("o1", "Orphan", Some("gone")),
+            tool_event("n1", "Plain", None),
+        ]);
+        assert_eq!(
+            tool_lines(&t),
+            [
+                "tool ▶ · Agent",
+                "  tool ▶ · Read",
+                "  tool ▶ · Grep",
+                "tool ▶ · Orphan",
+                "tool ▶ · Plain",
+            ]
+        );
+    }
+
+    /// The adapter's wire shape: the card is synthesized from the delegation
+    /// message id, so no background-agent record backs it. The child's tool
+    /// calls nest under it and the roster alone badges it.
+    #[test]
+    fn delegation_card_nests_children_and_badges_from_the_roster_alone() {
+        use crate::acp::state::SubagentState::*;
+        let cases = [
+            (Running, None, vec!["tool ▶ · Explore repo · running"]),
+            (
+                RequiresAction,
+                None,
+                vec!["tool ▶ · Explore repo · waiting on you"],
+            ),
+            (Idle, None, vec!["✓ Explore repo · idle"]),
+            (
+                Idle,
+                Some("error"),
+                vec![
+                    "tool ✗ · Explore repo · idle",
+                    "  (tool failed; press `o` for details)",
+                ],
+            ),
+            (
+                Idle,
+                Some("cancelled"),
+                vec![
+                    "tool ◼ · Explore repo · idle",
+                    "  (stopped when the turn ended)",
+                ],
+            ),
+            (Unknown, None, vec!["tool ▶ · Explore repo · unknown"]),
+        ];
+        for (state, stop_reason, head) in cases {
+            let mut t = AcpTranscript::new("s-1");
+            t.server_rows = server_rows(&[
+                tool_event("msg-1", "Explore repo", None),
+                tool_event("c1", "Read", Some("msg-1")),
+            ]);
+            t.subagents = vec![SubagentRecord {
+                session_id: "child".into(),
+                parent_session_id: "s-1".into(),
+                parent_tool_call_id: Some("msg-1".into()),
+                title: Some("Explore repo".into()),
+                description: None,
+                state,
+                stop_reason: stop_reason.map(Into::into),
+                error: None,
+                cancel_capable: true,
+                model: None,
+                background: false,
+            }];
+            let mut want: Vec<String> = head.into_iter().map(Into::into).collect();
+            want.push("  tool ▶ · Read".into());
+            assert_eq!(tool_lines(&t), want);
+            assert_eq!(
+                t.stoppable_subagent().map(|r| r.session_id.as_str()),
+                matches!(state, Running | RequiresAction).then_some("child")
+            );
+        }
+    }
+
+    /// A background child outlives the turn whose end stopped its launch call.
+    #[test]
+    fn turn_end_stop_does_not_close_a_card_whose_child_is_active() {
+        use crate::acp::state::SubagentState::*;
+        let cases = [
+            (Running, "tool ▶ · Explore repo · running"),
+            (RequiresAction, "tool ▶ · Explore repo · waiting on you"),
+            (Idle, "✓ Explore repo · idle"),
+            (Unknown, "tool ◼ · Explore repo · unknown"),
+        ];
+        for (state, head) in cases {
+            let mut t = AcpTranscript::new("s-1");
+            let mut events = vec![tool_event("msg-1", "Explore repo", None)];
+            events.push(Event::Stopped {
+                reason: "end_turn".into(),
+            });
+            t.server_rows = server_rows(&events);
+            t.subagents = vec![SubagentRecord {
+                session_id: "child".into(),
+                parent_session_id: "s-1".into(),
+                parent_tool_call_id: Some("msg-1".into()),
+                title: Some("Explore repo".into()),
+                description: None,
+                state,
+                stop_reason: None,
+                error: None,
+                cancel_capable: true,
+                model: None,
+                background: false,
+            }];
+            let lines = tool_lines(&t);
+            assert_eq!(lines[0], head);
+            assert!(
+                lines.iter().all(|l| !l.contains("stopped when the turn")) || state == Unknown,
+                "{lines:?}"
+            );
+        }
     }
 
     #[test]
@@ -2776,6 +3343,7 @@ mod tests {
         let lines = render_tool_lines(
             &tool_row("edit", &args.to_string(), None),
             &Theme::default(),
+            None,
             None,
         );
         let plus = lines
@@ -2913,12 +3481,256 @@ mod tests {
             r#"{"command":"cargo test"}"#,
             Some((false, "test result: \u{1b}[31mFAILED\u{1b}[0m. 1 failed")),
         );
-        let lines = render_tool_lines(&row, &Theme::default(), None);
+        let lines = render_tool_lines(&row, &Theme::default(), None, None);
         assert!(!joined(&lines).contains('\u{1b}'));
         assert!(lines.iter().flat_map(|l| &l.spans).any(|s| {
             s.content.contains("FAILED") && s.style.fg == Some(ratatui::style::Color::Red)
         }));
         assert_eq!(joined(&styled_output_lines("plain\ntext")), "plain\ntext");
+    }
+
+    /// CRA-1813: the fold toggle folds every card to one line, failed and
+    /// running calls included, then expands every card, successes included.
+    #[test]
+    fn tool_fold_toggle_overrides_the_per_outcome_default() {
+        use crate::acp::state::ToolCall;
+        let started = |id: &str, command: &str| Event::ToolCallStarted {
+            tool_call: ToolCall {
+                id: id.into(),
+                name: "Bash".into(),
+                kind: "execute".into(),
+                args_preview: serde_json::json!({ "command": command }).to_string(),
+                prompt: None,
+                started_at: chrono::Utc::now(),
+                parent_tool_call_id: None,
+                memory_recall: None,
+                diffs: Vec::new(),
+            },
+        };
+        let completed = |id: &str, is_error: bool, content: &str| Event::ToolCallCompleted {
+            tool_call_id: id.into(),
+            is_error,
+            content: content.into(),
+            output: Vec::new(),
+            completed_at: chrono::Utc::now(),
+            async_subagent: false,
+        };
+        let mut state = test_state();
+        state.transcript.server_rows = server_rows(&[
+            started("t-ok", "ls"),
+            completed("t-ok", false, "listing-output"),
+            started("t-err", "make"),
+            completed("t-err", true, "build-error"),
+            started("t-run", "sleep 9"),
+        ]);
+        let lines = |state: &StructuredViewState| -> Vec<String> {
+            wrapped_transcript(state, &Theme::default(), 200, ToolOutputMode::Compact)
+                .lines
+                .iter()
+                .map(line_text)
+                .filter(|line| !line.is_empty())
+                .collect()
+        };
+        let shows = |lines: &[String], text: &str| lines.iter().any(|l| l.contains(text));
+
+        let default = lines(&state);
+        assert!(shows(&default, "✓ Bash · ls"), "{default:?}");
+        assert!(!shows(&default, "listing-output"), "{default:?}");
+        assert!(shows(&default, "build-error"), "{default:?}");
+
+        state.toggle_tool_fold();
+        let folded = ["✓ Bash · ls", "✗ Bash · make", "▶ Bash · sleep 9"];
+        assert_eq!(lines(&state), folded);
+
+        state.toggle_tool_fold();
+        let expanded = lines(&state);
+        assert!(shows(&expanded, "tool ✓ · Bash"), "{expanded:?}");
+        assert!(shows(&expanded, "listing-output"), "{expanded:?}");
+        assert!(shows(&expanded, "build-error"), "{expanded:?}");
+
+        state.toggle_tool_fold();
+        assert_eq!(lines(&state), folded);
+    }
+
+    /// Many failed cards with multi-line bodies: expanded they span several
+    /// rows each, folded a single row each.
+    fn failed_cards_state(cards: usize) -> StructuredViewState {
+        use crate::acp::state::ToolCall;
+        let mut events = Vec::new();
+        for n in 0..cards {
+            let id = format!("t-{n}");
+            events.push(Event::ToolCallStarted {
+                tool_call: ToolCall {
+                    id: id.clone(),
+                    name: "Bash".into(),
+                    kind: "execute".into(),
+                    args_preview: serde_json::json!({ "command": format!("cmd-{n}") }).to_string(),
+                    prompt: None,
+                    started_at: chrono::Utc::now(),
+                    parent_tool_call_id: None,
+                    memory_recall: None,
+                    diffs: Vec::new(),
+                },
+            });
+            events.push(Event::ToolCallCompleted {
+                tool_call_id: id,
+                is_error: true,
+                content: format!("err-{n}\nsecond\nthird"),
+                output: Vec::new(),
+                completed_at: chrono::Utc::now(),
+                async_subagent: false,
+            });
+        }
+        let mut state = test_state();
+        state.transcript.server_rows = server_rows(&events);
+        state
+    }
+
+    /// The first two transcript rows of the viewport, as the last render painted
+    /// them: a card's header and command line, or its one folded line and the gap.
+    fn top_transcript_rows(state: &StructuredViewState) -> String {
+        let (width, _) = state.last_text_size.get();
+        let text = wrapped_transcript(state, &Theme::default(), width, ToolOutputMode::Compact);
+        let first = state.scroll_offset.min(state.last_scroll_max.get()) as usize;
+        joined(&text.lines[first..first + 2])
+    }
+
+    /// CRA-1813: folding changes line counts, so a scrolled-up view keeps the
+    /// card it showed at the top instead of jumping to unrelated content.
+    #[test]
+    fn tool_fold_toggle_keeps_the_top_card_when_scrolled_up() {
+        let mut state = failed_cards_state(12);
+        render_rows(&state, 100, 14, true);
+        let text = wrapped_transcript(&state, &Theme::default(), 100, ToolOutputMode::Compact);
+        let card = text
+            .lines
+            .iter()
+            .position(|l| line_text(l).contains("cmd-3"))
+            .expect("card 3");
+        // The header sits one row above the command line.
+        state.scroll_offset = card as u16 - 1;
+        render_rows(&state, 100, 14, true);
+        assert!(top_transcript_rows(&state).contains("cmd-3"));
+
+        state.toggle_tool_fold();
+        render_rows(&state, 100, 14, true);
+        assert_ne!(state.scroll_offset, u16::MAX);
+        assert!(top_transcript_rows(&state).contains("cmd-3"));
+
+        state.toggle_tool_fold();
+        render_rows(&state, 100, 14, true);
+        assert!(top_transcript_rows(&state).contains("cmd-3"));
+    }
+
+    #[test]
+    fn tool_fold_toggle_keeps_nested_card_identity() {
+        for width in [40, 100] {
+            for grandchild in [false, true] {
+                for row_offset in [0, 2] {
+                    let mut state = failed_cards_state(12);
+                    for row in &mut state.transcript.server_rows {
+                        match (row.kind, row.tool_call_id.as_deref()) {
+                            (TranscriptRowKind::ToolError, Some("t-0")) => {
+                                row.kind = TranscriptRowKind::ToolComplete;
+                            }
+                            (TranscriptRowKind::ToolStart, Some(id @ ("t-1" | "t-2" | "t-3"))) => {
+                                let tool = row.tool.as_mut().unwrap();
+                                tool.parent_tool_call_id = Some(
+                                    if grandchild && id == "t-2" {
+                                        "t-1"
+                                    } else {
+                                        "t-0"
+                                    }
+                                    .into(),
+                                );
+                                if id == "t-2" {
+                                    tool.args_preview = serde_json::json!({
+                                        "command": format!("cmd-2 {}", "日本語".repeat(30))
+                                    })
+                                    .to_string();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    render_rows(&state, width, 14, true);
+                    let (text_width, _) = state.last_text_size.get();
+                    let text = wrapped_transcript(
+                        &state,
+                        &Theme::default(),
+                        text_width,
+                        ToolOutputMode::Compact,
+                    );
+                    let header = text
+                        .lines
+                        .iter()
+                        .position(|line| line_text(line).contains("cmd-2"))
+                        .unwrap()
+                        - 1;
+                    state.scroll_offset = (header + row_offset) as u16;
+                    render_rows(&state, width, 14, true);
+
+                    state.toggle_tool_fold();
+                    render_rows(&state, width, 14, true);
+                    let folded = wrapped_transcript(
+                        &state,
+                        &Theme::default(),
+                        text_width,
+                        ToolOutputMode::Compact,
+                    );
+                    let folded_header = folded
+                        .lines
+                        .iter()
+                        .position(|line| line_text(line).contains("cmd-2"))
+                        .unwrap();
+                    let next_header = folded
+                        .lines
+                        .iter()
+                        .position(|line| line_text(line).contains("cmd-3"))
+                        .unwrap();
+                    let retained_row = row_offset.min(next_header - folded_header - 1);
+                    assert_eq!(
+                        state.scroll_offset as usize,
+                        folded_header + retained_row,
+                        "width={width} grandchild={grandchild} row={row_offset}"
+                    );
+
+                    state.toggle_tool_fold();
+                    render_rows(&state, width, 14, true);
+                    // Expanding also changes the successful parent's height.
+                    let expanded = wrapped_transcript(
+                        &state,
+                        &Theme::default(),
+                        text_width,
+                        ToolOutputMode::Compact,
+                    );
+                    let expanded_header = expanded
+                        .lines
+                        .iter()
+                        .position(|line| line_text(line).contains("cmd-2"))
+                        .unwrap()
+                        - 1;
+                    assert_eq!(
+                        state.scroll_offset as usize,
+                        expanded_header + retained_row,
+                        "unfold width={width} grandchild={grandchild} row={row_offset}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Folding past the visible end resumes follow mode.
+    #[test]
+    fn tool_fold_toggle_near_the_end_resumes_follow_mode() {
+        let mut state = failed_cards_state(12);
+        render_rows(&state, 100, 14, true);
+        state.scroll_offset = state.last_scroll_max.get() - 1;
+        assert!(render_dump(&state, 100, 14).contains("G latest"));
+
+        state.toggle_tool_fold();
+        assert_eq!(state.scroll_offset, u16::MAX);
+        assert!(!render_dump(&state, 100, 14).contains("G latest"));
     }
 
     #[test]
@@ -2995,6 +3807,33 @@ mod tests {
         assert!(render_dump(&state, 100, 24).contains("/compact"));
     }
 
+    #[test]
+    fn status_line_shows_toggle_state() {
+        use crate::acp::state::{ConfigOptionCategory, ConfigOptionChoice, ConfigOptionDescriptor};
+        let toggle = |id: &str, name: &str, current: &str| ConfigOptionDescriptor {
+            id: id.into(),
+            name: name.into(),
+            description: None,
+            category: ConfigOptionCategory::Other("model_config".into()),
+            current_value: current.into(),
+            options: ["on", "off"]
+                .map(|v| ConfigOptionChoice {
+                    value: v.into(),
+                    name: v.into(),
+                    description: None,
+                })
+                .to_vec(),
+        };
+        let mut state = test_state();
+        state.transcript.config_options = vec![
+            toggle("fast", "Fast mode", "on"),
+            toggle("ultracode", "Ultracode", "off"),
+        ];
+        let dump = render_dump(&state, 120, 24);
+        assert!(dump.contains("Fast mode on"), "{dump}");
+        assert!(dump.contains("Ultracode off"), "{dump}");
+    }
+
     /// #4001: the banner lights up for a background sub-agent even while the
     /// main turn is idle.
     #[test]
@@ -3033,6 +3872,7 @@ mod tests {
         });
         state.transcript.server_rows = server_rows(&[
             Event::UserPromptSent {
+                merged_prompt_ids: Vec::new(),
                 prompt_id: None,
                 text: "Hello.".into(),
                 attachments: Vec::new(),
@@ -3071,6 +3911,7 @@ mod tests {
 
         // A plugin-sent message names its sender; a typed one does not.
         state.transcript.server_rows = server_rows(&[Event::UserPromptSent {
+            merged_prompt_ids: Vec::new(),
             prompt_id: None,
             text: "PR merged".into(),
             attachments: Vec::new(),

@@ -15,6 +15,21 @@ impl HomeView {
         self.save_list_width();
     }
 
+    /// Whether the preview pane owns the keyboard right now: live-send is relaying keys, a
+    /// System Health takeover is showing, a Session's retained transcript is being read, or
+    /// the embedded structured view is interactive. `one_pane` gives this pane the whole
+    /// narrow screen; the list keeps it otherwise. A Structured view Session has no
+    /// live-send, so its transcript counts here only while it is interactive: the stack
+    /// would hide the list, and hiding the pane instead would leave no way into it.
+    pub(super) fn preview_pane_active(&self) -> bool {
+        self.live_send.is_some()
+            || self.system_health_open
+            || self.retained_reader_focused()
+            || self.structured_preview.as_ref().is_some_and(|view| {
+                view.is_active() && Some(view.session_id()) == self.selected_session.as_deref()
+            })
+    }
+
     pub fn toggle_sidebar_collapsed(&mut self) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         let collapsed = self.sidebar_collapsed;
@@ -93,6 +108,19 @@ impl HomeView {
         let known = self.known_group_paths(|inst| self.org_group_key(inst));
         let collapsed = Self::collapsed_known_paths(&self.org_group_collapsed, known);
         Self::persist_app_state("org group collapsed", |s| s.org_group_collapsed = collapsed);
+    }
+
+    pub(super) fn save_status_group_collapsed(&self) {
+        // Status groups are the fixed status set, so a bucket whose sessions all
+        // archived keeps its collapse state instead of reloading expanded.
+        let known = crate::session::Status::attention_order()
+            .into_iter()
+            .map(|status| status.wire_str().to_string())
+            .collect();
+        let collapsed = Self::collapsed_known_paths(&self.status_group_collapsed, known);
+        Self::persist_app_state("status group collapsed", |s| {
+            s.status_group_collapsed = collapsed
+        });
     }
 
     pub fn toggle_preview_info(&mut self) {

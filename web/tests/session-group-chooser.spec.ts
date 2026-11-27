@@ -1,5 +1,6 @@
 import { test, expect } from "./helpers/mockedTest";
 import { installSidebarMocks } from "./helpers/sidebarMocks";
+import { sessionResponse } from "./helpers/sessions";
 
 const choices = [
   { path: "Review/Done", label: '"Review/Done"' },
@@ -20,9 +21,21 @@ test("existing group paths stay distinct through selection, Save, and keyboard c
     route.fulfill({ json: choices.map(({ path }) => ({ path, session_count: 1 })) }),
   );
   const patches: unknown[] = [];
+  let revision = 1;
+  const session = sessionResponse({ id: "s1", title: "group-source", project_path: "/tmp/repo", group_path: "stale" });
+  const cursor = () => ({ "aoe-runtime-epoch": "mock-runtime", "aoe-runtime-revision": String(revision) });
+  await page.route(/\/api\/sessions(\?.*)?$/, (route) =>
+    route.fulfill({
+      headers: cursor(),
+      json: { sessions: [session], workspace_ordering: [] },
+    }),
+  );
   await page.route("**/api/sessions/s1/group", (route) => {
-    patches.push(route.request().postDataJSON());
-    return route.fulfill({ json: { id: "s1" } });
+    const patch = route.request().postDataJSON() as { group: string };
+    patches.push(patch);
+    session.group_path = patch.group;
+    revision += 1;
+    return route.fulfill({ headers: cursor(), json: session });
   });
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto("/");

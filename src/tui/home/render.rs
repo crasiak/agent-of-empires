@@ -16,7 +16,7 @@ use super::{
     ICON_TRASH_SECTION, ICON_UNKNOWN, ICON_UNREAD,
 };
 use crate::containers::image_update::ImageUpdate;
-use crate::session::config::{GroupByMode, RowTagMode, SidebarPosition, SortOrder};
+use crate::session::config::{GroupByMode, NarrowLayout, RowTagMode, SidebarPosition, SortOrder};
 use crate::session::{Item, Status};
 use crate::tui::components::preview::{self, CachedPreview};
 use crate::tui::components::{
@@ -47,6 +47,7 @@ fn compose_list_title(
     match group_by {
         GroupByMode::Project => suffix.push_str(" · project"),
         GroupByMode::Org => suffix.push_str(" · org"),
+        GroupByMode::Status => suffix.push_str(" · status"),
         GroupByMode::Manual => {}
     }
     if sort_order != SortOrder::default() {
@@ -65,12 +66,15 @@ fn compose_list_title(
 enum ListLayout {
     Horizontal(SidebarPosition),
     Stacked,
+    /// The list owns the whole content area, so it closes every border.
+    Full,
 }
 
 impl ListLayout {
     /// The preview owns the shared separator; omit the adjacent list border.
     fn list_borders(self) -> Borders {
         match self {
+            Self::Full => Borders::ALL,
             Self::Stacked => Borders::TOP | Borders::LEFT | Borders::RIGHT,
             Self::Horizontal(SidebarPosition::Left) => {
                 Borders::TOP | Borders::LEFT | Borders::BOTTOM
@@ -761,15 +765,21 @@ fn branch_row_tag(inst: &crate::session::Instance) -> Option<RowTag> {
     } else {
         inst.worktree_info
             .as_ref()
-            .and_then(|w| branch_tag_content(&w.branch, BRANCH_TAG_WIDTH))
-            .map(|content| RowTag {
-                content,
-                max_width: BRANCH_TAG_WIDTH,
-            })
+            .and_then(|w| plain_branch_row_tag(&w.branch))
     }
 }
 
+fn plain_branch_row_tag(branch: &str) -> Option<RowTag> {
+    branch_tag_content(branch, BRANCH_TAG_WIDTH).map(|content| RowTag {
+        content,
+        max_width: BRANCH_TAG_WIDTH,
+    })
+}
+
 fn workspace_branch_row_tag(branch: &str, repo_count: usize) -> Option<RowTag> {
+    if repo_count <= 1 {
+        return plain_branch_row_tag(branch);
+    }
     let suffix = format!("+{repo_count}");
     let suffix_width = rendered_width(&suffix);
     if suffix_width >= BRANCH_TAG_WIDTH {
@@ -1218,6 +1228,7 @@ impl HomeView {
             if self.sidebar_source == crate::tui::session_feed::SidebarSource::Disconnected {
                 frame.render_widget(Clear, area);
                 crate::tui::dialogs::ConnectionsView::offline(
+                    self.offline_attention,
                     self.runtime_failure_reason.as_deref(),
                     matches!(
                         self.dashboard_launch,
@@ -1227,8 +1238,9 @@ impl HomeView {
                 .render(frame, area, theme);
                 return;
             }
-            // A dashboard start hidden with Esc is still running behind this screen.
-            let message = if self.dashboard_launch.is_some() {
+            let message = if self.dashboard_stop.is_some() {
+                "Connecting to runtime…\n\nEnter: back to the Web dashboard stop   q: Quit"
+            } else if self.dashboard_launch.is_some() {
                 "Connecting to runtime…\n\nEnter: back to the Web dashboard start   q: Quit"
             } else {
                 "Connecting to runtime…\n\nq: Quit"
@@ -1331,8 +1343,13 @@ impl HomeView {
         let available_width = content_area.width;
         self.main_area_width = available_width;
         self.main_area_height = content_area.height;
+        // `one_pane` already gives the narrow screen to a single pane, so a collapsed
+        // sidebar there would only shrink it to a three-column strip plus preview.
+        let narrow_layout = self.narrow_layout;
+        let single_pane_narrow = available_width < responsive::STACKED_BREAKPOINT
+            && matches!(narrow_layout, NarrowLayout::OnePane);
         // A collapsed strip leaves enough preview space even on narrow terminals.
-        if self.sidebar_collapsed {
+        if self.sidebar_collapsed && !single_pane_narrow {
             self.divider_col = None;
             let strip_width = responsive::COLLAPSED_STRIP_WIDTH.min(available_width);
             let (strip_area, preview_area) =
@@ -1348,26 +1365,43 @@ impl HomeView {
             self.render_preview(frame, preview_area, theme);
             self.render_session_info(frame, theme);
         } else if available_width < responsive::STACKED_BREAKPOINT {
-            let main_height = content_area.height;
-            let list_height = responsive::stacked_list_height(main_height, self.list_height);
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(list_height),
-                    Constraint::Min(responsive::STACKED_PREVIEW_MIN),
-                ])
-                .split(content_area);
-
             self.divider_col = None;
-            self.divider_row =
-                (chunks[0].height > 0 && chunks[1].height > 0 && content_area.width > 0)
-                    .then_some(chunks[1].y);
+            match responsive::narrow_arrangement(
+                narrow_layout,
+                content_area.height,
+                self.list_height,
+                self.preview_pane_active(),
+            ) {
+                responsive::NarrowArrangement::ListOnly => {
+                    self.hide_preview();
+                    // The list owns the screen, so the strip docks under the full area.
+                    let list_rect = self.diagnostics_dock(frame, content_area, theme);
+                    self.render_list(frame, list_rect, theme, ListLayout::Full);
+                }
+                responsive::NarrowArrangement::PreviewOnly => {
+                    self.hide_list();
+                    self.render_preview(frame, content_area, theme);
+                }
+                responsive::NarrowArrangement::Split(list_height) => {
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(list_height),
+                            Constraint::Min(responsive::STACKED_PREVIEW_MIN),
+                        ])
+                        .split(content_area);
 
-            // Stacked: the list sits above the preview, so there is no column to dock
-            // under; the strip spans the list's width.
-            let list_rect = self.diagnostics_dock(frame, chunks[0], theme);
-            self.render_list(frame, list_rect, theme, ListLayout::Stacked);
-            self.render_preview(frame, chunks[1], theme);
+                    self.divider_row =
+                        (chunks[0].height > 0 && chunks[1].height > 0 && content_area.width > 0)
+                            .then_some(chunks[1].y);
+
+                    // Stacked: the list sits above the preview, so there is no column to
+                    // dock under; the strip spans the list's width.
+                    let list_rect = self.diagnostics_dock(frame, chunks[0], theme);
+                    self.render_list(frame, list_rect, theme, ListLayout::Stacked);
+                    self.render_preview(frame, chunks[1], theme);
+                }
+            }
             self.render_session_info(frame, theme);
         } else {
             // Side-by-side: cap list width so the preview pane keeps its
@@ -1488,6 +1522,10 @@ impl HomeView {
             }
         }
         render_dialogs!(connections_view);
+        // Under the info dialog: a refused resubmit reopens it beneath the refusal.
+        if let Some((dialog, _)) = &mut self.create_hook_failed {
+            dialog.render(frame, area, theme);
+        }
         if self.snooze_duration_dialog.is_none() {
             render_dialogs!(info_dialog);
         }
@@ -1519,6 +1557,26 @@ impl HomeView {
         if let Some(window) = &mut self.tailored_window {
             window.render(frame, area, theme);
         }
+    }
+
+    /// Clear the preview's rects and stop its capture, for a layout that draws only the
+    /// list. A stale rect would keep resolving clicks and wheel scrolls at a pane that is
+    /// no longer painted.
+    fn hide_preview(&mut self) {
+        self.preview_area = Rect::default();
+        self.preview_pane_area = Rect::default();
+        self.preview_outer_area = Rect::default();
+        self.sync_preview_capture_worker(None);
+        self.sync_split_capture_worker(None);
+    }
+
+    /// Clear the list's rects and diagnostics strip for a layout that draws only the
+    /// preview.
+    fn hide_list(&mut self) {
+        self.list_area = Rect::default();
+        self.list_inner_area = Rect::default();
+        self.shelf_inner_area = Rect::default();
+        self.diagnostics_area = Rect::default();
     }
 
     /// Dock the diagnostics strip under the session-list column: carve
@@ -1693,7 +1751,11 @@ impl HomeView {
         // Columns kept clear for the title that shares this top border row, so
         // the collapse affordance only draws when it won't collide with it.
         const COLLAPSE_LABEL_TITLE_RESERVE: u16 = 6;
-        if area.width > COLLAPSE_LABEL_WIDTH + COLLAPSE_LABEL_TITLE_RESERVE {
+        // The full-width narrow layout already shows one pane, so it has nothing to
+        // collapse to and draws no affordance.
+        if layout != ListLayout::Full
+            && area.width > COLLAPSE_LABEL_WIDTH + COLLAPSE_LABEL_TITLE_RESERVE
+        {
             let btn_rect = Rect {
                 x: area.right()
                     - COLLAPSE_LABEL_WIDTH
@@ -1957,6 +2019,7 @@ impl HomeView {
             || self.rename_dialog.is_some()
             || self.worktree_name_dialog.is_some()
             || self.repo_trust_dialog.is_some()
+            || self.create_hook_failed.is_some()
             || self.hooks_install_dialog.is_some()
             || self.volume_ignores_glob_dialog.is_some()
             || self.intro_dialog.is_some()
@@ -2334,15 +2397,14 @@ impl HomeView {
                 )
             });
 
+        let show_structured = inst.is_structured() && self.show_structured_badge;
         let badge_text: Option<&'static str> =
-            if inst.is_structured() && self.view_mode != ViewMode::Terminal {
-                Some(" [structured]")
-            } else if self.view_mode == ViewMode::Terminal && inst.is_sandboxed() {
+            if self.view_mode == ViewMode::Terminal && inst.is_sandboxed() {
                 Some(match self.get_terminal_mode(id) {
                     TerminalMode::Container => " [container]",
                     TerminalMode::Host => " [host]",
                 })
-            } else if inst.is_structured() {
+            } else if show_structured {
                 Some(" [structured]")
             } else {
                 None
@@ -2355,9 +2417,12 @@ impl HomeView {
         let update_badge = (!inst.is_structured()
             && crate::session::update_restart::binary_updated(inst))
         .then_some(" [update]");
+        // Its on_create hooks were skipped at creation, so their setup never ran.
+        let setup_badge = inst.created_without_setup.then_some(" [no setup]");
         let badge_width = badge_text.map_or(0, |s| s.len())
             + terminal_badge.as_ref().map_or(0, |s| s.len())
-            + update_badge.map_or(0, |s| s.len());
+            + update_badge.map_or(0, |s| s.len())
+            + setup_badge.map_or(0, |s| s.len());
         let age = if self.show_activity_age {
             row_age(inst, in_attention)
         } else {
@@ -2428,6 +2493,17 @@ impl HomeView {
         }
         if let Some(badge) = update_badge {
             let badge_style = Style::default().fg(theme.waiting);
+            line_spans.push(Span::styled(
+                badge,
+                if is_selected {
+                    selected_row_style(badge_style, theme)
+                } else {
+                    badge_style
+                },
+            ));
+        }
+        if let Some(badge) = setup_badge {
+            let badge_style = Style::default().fg(theme.dimmed);
             line_spans.push(Span::styled(
                 badge,
                 if is_selected {
@@ -2876,6 +2952,18 @@ impl HomeView {
         self.preview_worker_pulse = observation;
         stalled
     }
+    /// Whether the preview of `target` may read through the VT pipe. Shell terminals and
+    /// a pane another surface took over use capture-pane; the latter lets the new owner
+    /// arm the pipe, which this process's lease would otherwise hold.
+    pub(super) fn preview_vt_enabled(&self, target: Option<&str>) -> bool {
+        self.vt_live_enabled
+            && !matches!(self.view_mode, ViewMode::Terminal)
+            && self
+                .live_takeover
+                .as_ref()
+                .is_none_or(|taken| Some(taken.tmux_name.as_str()) != target)
+    }
+
     /// Point the capture worker at `desired` (the displayed pane's tmux session) and
     /// retune its cadence for live-send vs idle. One long-lived worker is spawned lazily
     /// and retargeted in place; an empty target idles it. Idempotent and cheap when the
@@ -2899,9 +2987,7 @@ impl HomeView {
             // Shell terminals use capture-pane's authoritative snapshot: their prompt
             // repaint can expose a PROMPT_EOL_MARK to a pipe-pane seed, producing a false
             // frame before the grid reconciles. Slower, but no seed handoff.
-            worker.set_vt_enabled(
-                self.vt_live_enabled && !matches!(self.view_mode, ViewMode::Terminal),
-            );
+            worker.set_vt_enabled(self.preview_vt_enabled(desired.as_deref()));
             worker.set_clipboard_capture_enabled(self.agent_clipboard_forward);
             self.preview_capture_worker = Some(worker);
         }
@@ -2959,7 +3045,7 @@ impl HomeView {
         if let Some(worker) = self.preview_capture_worker.as_ref() {
             worker.set_live(live);
             worker.set_forward_empty(forward_empty);
-            worker.set_vt_enabled(self.vt_live_enabled && !forward_empty);
+            worker.set_vt_enabled(self.preview_vt_enabled(self.preview_capture_target.as_deref()));
             worker.set_clipboard_capture_enabled(self.agent_clipboard_forward);
         }
     }
@@ -3454,22 +3540,9 @@ impl HomeView {
         let Some(instance) = self.get_instance(selected) else {
             return;
         };
-        let metadata_height = match self.view_mode {
-            ViewMode::Structured => preview::agent_info_height(instance),
-            _ => preview::terminal_info_height(instance),
-        };
-        let layout = preview::PreviewLayout::compute(
-            self.preview_area,
-            self.preview_outer_area.width < responsive::STACKED_BREAKPOINT,
-            self.show_preview_info,
-            metadata_height,
-        );
-        let Some(info) = layout.info else { return };
-        // Placeholder and health views do not render an info header.
-        if layout.output != self.preview_pane_area {
+        let Some(areas) = self.info_areas(instance) else {
             return;
-        }
-        let areas = preview::InfoAreas::compute(info, metadata_height);
+        };
         self.resource_history
             .render(frame, areas.resources, instance, theme);
         let now = chrono::Utc::now();
@@ -3497,6 +3570,76 @@ impl HomeView {
             }
         }
         usage_overlay::render_info_sections(frame, areas.badges, &sections);
+        self.render_arc_tooltip(frame, areas.arc, instance, theme);
+    }
+
+    /// The selected session's info header as the preview lays it out; None when no
+    /// header is drawn (hidden, compact, placeholder and health views).
+    pub(super) fn info_areas(
+        &self,
+        instance: &crate::session::Instance,
+    ) -> Option<preview::InfoAreas> {
+        let (metadata, arc) = match self.view_mode {
+            ViewMode::Structured => preview::agent_info_rows(instance),
+            _ => (preview::terminal_info_height(instance), 0),
+        };
+        let layout = preview::PreviewLayout::compute(
+            self.preview_area,
+            self.preview_outer_area.width < responsive::STACKED_BREAKPOINT,
+            self.show_preview_info,
+            metadata + arc,
+        );
+        let info = layout.info?;
+        (layout.output == self.preview_pane_area)
+            .then(|| preview::InfoAreas::compute(info, metadata, arc))
+    }
+
+    /// The hovered arc line's full text in a box under it, or above it near the bottom.
+    fn render_arc_tooltip(
+        &self,
+        frame: &mut Frame,
+        band: Rect,
+        instance: &crate::session::Instance,
+        theme: &Theme,
+    ) {
+        let Some((id, index)) = self.arc_hover.as_ref() else {
+            return;
+        };
+        let (_, Some(lines)) = preview::arc_view(instance) else {
+            return;
+        };
+        if *id != instance.id || band.height == 0 {
+            return;
+        }
+        let (label, text) = lines[*index];
+        let screen = frame.area();
+        let width = band.width.min(100);
+        let wrapped = preview::wrap_rows(text, width.saturating_sub(4), 12);
+        let height = (wrapped.len() as u16 + 2).min(screen.height);
+        let row = band.y + 1 + 2 * (*index as u16);
+        let y = if row + 2 + height <= screen.bottom() {
+            row + 2
+        } else {
+            row.saturating_sub(height)
+        };
+        let area = Rect::new(band.x, y, width, height).intersection(screen);
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(
+                wrapped
+                    .into_iter()
+                    .map(|line| Line::styled(line, Style::default().fg(theme.text)))
+                    .collect::<Vec<_>>(),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.accent))
+                    .title(format!(" {label} "))
+                    .padding(Padding::horizontal(1)),
+            ),
+            area,
+        );
     }
 
     /// Paint the preview and refresh geometry used by selection and live-send.
@@ -4562,6 +4705,8 @@ impl HomeView {
     }
 
     fn render_status_bar(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        // The bar is on screen from here, so a queued flash can start counting.
+        self.arm_status_flash();
         // Action feedback takes precedence over a hovered link target.
         let hovered = (!self.live_send_pending_leader)
             .then(|| self.hovered_link())
@@ -4847,12 +4992,40 @@ impl HomeView {
                 }
                 None => (None, None),
             };
+            // After another window took live control: its status, then the key that takes
+            // control back. Only live entry claims the size lock; a full-screen attach doesn't.
+            let takeover = self
+                .live_takeover
+                .as_ref()
+                .filter(|taken| self.selected_session.as_deref() == Some(taken.session_id.as_str()))
+                .map(|taken| taken.taker);
+            let live_key = takeover.and_then(|taker| {
+                groups.push((
+                    0,
+                    None,
+                    vec![Span::styled(
+                        taker.label(),
+                        Style::default().fg(theme.text).bold(),
+                    )],
+                ));
+                // No key hint where neither key enters live mode; the row's hints stay.
+                let (click, key) = match self.live_key(self.selected_session.as_deref()?)? {
+                    live_send::LiveKey::Tab => (ktab, "Tab"),
+                    live_send::LiveKey::Enter => (kenter, "↵"),
+                };
+                groups.push((0, click, mk(key, "take control")));
+                Some(click)
+            });
             if let Some(enter_action_text) = enter_action_text {
                 // U+21B5 keeps Enter to one display cell without shortening its action label.
-                groups.push((0, kenter, mk("↵", enter_action_text)));
+                if live_key != Some(kenter) {
+                    groups.push((0, kenter, mk("↵", enter_action_text)));
+                }
             }
             if let Some(tab_action_text) = tab_action_text {
-                groups.push((2, ktab, mk("⇥ ", tab_action_text)));
+                if live_key != Some(ktab) {
+                    groups.push((2, ktab, mk("⇥ ", tab_action_text)));
+                }
             }
 
             let (click, key) = bound(ActionId::ToggleView);
@@ -6051,7 +6224,11 @@ mod tests {
     /// The repository count is what the workspace tag exists to carry, so the branch is
     /// cut in cells to leave room rather than filling the cap and pushing it off.
     #[test]
-    fn workspace_branch_row_tag_keeps_the_repository_count() {
+    fn workspace_branch_row_tag_counts_only_multiple_repositories() {
+        let one = workspace_branch_row_tag("feat/solo", 1)
+            .expect("branch tag")
+            .rendered();
+        assert!(one.starts_with("[solo") && !one.contains('+'), "{one:?}");
         let rendered = workspace_branch_row_tag(&"界".repeat(10), 2)
             .expect("a wide branch still yields a tag")
             .rendered();

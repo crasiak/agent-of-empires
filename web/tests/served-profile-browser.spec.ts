@@ -42,7 +42,12 @@ const settings = {
 test("focus refresh retains the acknowledged registry on failure and closes writes on served-profile change", async ({
   page,
 }) => {
-  await mockWizardApis(page, { servedProfile: "Alpha", profiles, sessions: [] });
+  await mockWizardApis(page, {
+    servedProfile: "Alpha",
+    profiles,
+    sessions: [],
+    settings: { session: { hide_empty_groups: false } },
+  });
   let served = "Alpha";
   let hold = false;
   const reads: Route[] = [];

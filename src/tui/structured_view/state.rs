@@ -122,10 +122,22 @@ pub struct StructuredViewState {
     /// resolve the `u16::MAX` "stick to bottom" sentinel to a concrete position.
     /// Interior-mutable: the render borrows the state immutably. See `apply_scroll`.
     pub last_scroll_max: std::cell::Cell<u16>,
+    /// Width and height of the transcript text area from the last render.
+    pub last_text_size: std::cell::Cell<(u16, u16)>,
     /// Context-window percentage at which the status line nudges toward `/compact`,
     /// or `None` when off or the fetch failed. Read from the daemon's `/api/about`,
     /// not local config, so a remote-attached view honours that daemon (#3253).
     pub compaction_reminder_percent: Option<u8>,
+    /// Transcript-wide tool-card fold from `z`; `None` keeps the per-outcome default.
+    pub tool_fold: Option<ToolFold>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolFold {
+    /// Every tool card on one line, failed and running ones included.
+    Folded,
+    /// Every tool card with its body, successful ones included.
+    Expanded,
 }
 
 /// One open choice-picker: a titled option list plus what accepting means.
@@ -141,6 +153,9 @@ pub struct ChoicePicker {
 pub enum ChoicePurpose {
     /// Accepting POSTs `session/set_mode` with the chosen mode id.
     Mode,
+    /// Accepting POSTs `session/set_config_option` with the row's
+    /// `<config_id>=<value>`, flipping a Fast mode / Ultracode toggle.
+    Toggle,
     /// A numbered plugin-link picker: the option `value` is the URL to open.
     /// Shown when an `open-ui-link` chord resolves to more than one link.
     OpenLink,
@@ -346,7 +361,23 @@ impl StructuredViewState {
             choice: None,
             auto_presented_elicitation: None,
             last_scroll_max: std::cell::Cell::new(0),
+            last_text_size: std::cell::Cell::new((0, 0)),
             compaction_reminder_percent: None,
+            tool_fold: None,
+        }
+    }
+
+    /// The default already mixes folded and expanded cards, so the first press
+    /// folds. Scrolled up, the item at the top stays there; if that lands at the
+    /// end, follow mode resumes.
+    pub fn toggle_tool_fold(&mut self) {
+        let anchor = super::render::scroll_anchor(self);
+        self.tool_fold = Some(match self.tool_fold {
+            Some(ToolFold::Folded) => ToolFold::Expanded,
+            _ => ToolFold::Folded,
+        });
+        if let Some(anchor) = anchor {
+            self.scroll_offset = super::render::restore_scroll(self, &anchor);
         }
     }
 
@@ -731,6 +762,7 @@ mod tests {
             name: name.to_string(),
             description: String::new(),
             accepts_input: false,
+            input_hint: None,
         }
     }
 

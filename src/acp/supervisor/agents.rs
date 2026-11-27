@@ -141,6 +141,91 @@ impl<S: BroadcastSink> Supervisor<S> {
     }
 }
 
+/// The agent a session's prompts are classified as: its worker's registry key, or for a session
+/// with no worker, the agent its next spawn picks.
+#[derive(Debug, Clone)]
+pub(crate) enum SessionAgent {
+    Worker(String),
+    Next {
+        tool: String,
+        explicit: Option<String>,
+    },
+}
+
+/// The agent a turn was classified for and the profile that classified it.
+#[derive(Debug, Clone)]
+pub(crate) struct Classified {
+    pub(crate) agent: String,
+    pub(crate) profile: &'static crate::acp::agent_profiles::AgentProfile,
+}
+
+impl SessionAgent {
+    /// The agent's profile under resolved configuration, with any declared reset alias.
+    pub(crate) fn profile_with(
+        &self,
+        registry: &AgentRegistry,
+        session_config: &crate::session::config::SessionConfig,
+        default_agent: &str,
+    ) -> &'static crate::acp::agent_profiles::AgentProfile {
+        self.classify_with(registry, session_config, default_agent)
+            .profile
+    }
+
+    fn classify_with(
+        &self,
+        registry: &AgentRegistry,
+        session_config: &crate::session::config::SessionConfig,
+        default_agent: &str,
+    ) -> Classified {
+        let agent = match self {
+            Self::Worker(key) => key.clone(),
+            Self::Next { tool, explicit } => {
+                crate::acp::agent_registry::pick_acp_agent_name_with_default(
+                    registry,
+                    session_config,
+                    default_agent,
+                    tool,
+                    explicit.as_deref(),
+                )
+            }
+        };
+        let profile = crate::acp::agent_profiles::resolve_with_config(&agent, session_config);
+        Classified { agent, profile }
+    }
+
+    /// [`Self::profile_with`], naming the agent, for a session whose configuration resolves
+    /// from `profile` and `project_path`. A built-in worker skips the configuration read.
+    pub(crate) async fn classify(self, profile: &str, project_path: &Path) -> Classified {
+        use crate::acp::agent_profiles::{is_builtin, resolve};
+        let fallback = match &self {
+            Self::Worker(key) if is_builtin(key) => {
+                return Classified {
+                    agent: key.clone(),
+                    profile: resolve(key),
+                }
+            }
+            Self::Worker(key) => Classified {
+                agent: key.clone(),
+                profile: resolve(key),
+            },
+            Self::Next { .. } => self.classify_with(
+                &AgentRegistry::with_defaults(),
+                &crate::session::config::SessionConfig::default(),
+                crate::session::config::AcpConfig::default().resolved_default_agent(),
+            ),
+        };
+        with_resolved_config(profile, project_path, move |cfg| {
+            self.classify_with(
+                &AgentRegistry::with_defaults(),
+                &cfg.session,
+                cfg.acp.resolved_default_agent(),
+            )
+        })
+        .await
+        .unwrap_or(fallback)
+    }
+}
+
 /// Resolve the profile + repo config off the async runtime; `None` if the task panics.
 async fn with_resolved_config<T: Send + 'static>(
     profile: &str,
@@ -189,7 +274,9 @@ pub(crate) fn apply_agent_command_override(
     if !spec_from_registry || selected_agent != ovr.logical_tool {
         return Ok(());
     }
-    let Some(agent_def) = crate::agents::get_agent(&ovr.logical_tool) else {
+    // The tool's own contract names the adapter, so a takeover that hides it
+    // from listings must not drop a persisted command.
+    let Some(agent_def) = crate::agents::native_definition(&ovr.logical_tool) else {
         return Ok(());
     };
     if !command_matches_binary(&spec.command, agent_def.binary) {
@@ -348,6 +435,58 @@ mod tests {
                 "{agent} {ovr:?}"
             );
         }
+    }
+
+    /// A takeover hides the fallback from listings, but a structured session
+    /// keeps the command it persisted over the host adapter that command names.
+    #[test]
+    #[serial_test::serial]
+    fn a_takeover_keeps_a_structured_omp_command_over_the_host_adapter() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let _reload = crate::plugin::ReloadRegistryOnDrop;
+        let _app = crate::session::test_support::isolate_app_dir_at(temporary.path());
+        let overlay = || {
+            let mut s = spec("omp", &["acp"]);
+            let ovr = AgentCommandOverride {
+                logical_tool: "omp".into(),
+                command: "/opt/omp/bin/omp --verbose".into(),
+            };
+            apply_agent_command_override("omp", true, &ovr, &mut s).unwrap();
+            (s.command, s.args)
+        };
+        let persisted = (
+            "/opt/omp/bin/omp".to_string(),
+            vec!["--verbose".to_string(), "acp".to_string()],
+        );
+        assert_eq!(overlay(), persisted, "the host adapter takes the command");
+
+        crate::session::test_support::install_omp_takeover("omp-next");
+        assert!(crate::agents::get_agent("omp").is_none());
+        assert_eq!(
+            overlay(),
+            persisted,
+            "a takeover must not drop a persisted command"
+        );
+
+        revoke_omp_takeover();
+        assert!(crate::agents::get_agent("omp").is_some());
+        assert_eq!(
+            overlay(),
+            persisted,
+            "a revocation must keep the same overlay"
+        );
+    }
+
+    fn revoke_omp_takeover() {
+        let plugin = crate::plugin::plugins_dir()
+            .unwrap()
+            .join("acme.omp-cutover");
+        std::fs::remove_dir_all(&plugin).unwrap();
+        crate::session::update_config(|config| {
+            config.plugins.remove("acme.omp-cutover");
+        })
+        .unwrap();
+        crate::plugin::reload_registry();
     }
 
     #[tokio::test]

@@ -3,25 +3,22 @@
 use tracing::info;
 
 use super::{
-    publish_with_next_seq, BroadcastSink, PromptDisposition, PublishedPrompt, SeqMap, Supervisor,
-    WorkerKind,
+    publish_next_persisted, publish_with_next_seq, BroadcastSink, PromptDisposition,
+    PublishedPrompt, SeqMap, Supervisor, WorkerKind,
 };
 use crate::acp::approvals::ApprovalDecision;
 use crate::acp::elicitations::ElicitationOutcome;
 use crate::acp::event_store::{AttachmentBlob, UnresolvedBackgroundAgentLaunch};
-use crate::acp::state::{BackgroundAgentStatus, Event};
+use crate::acp::state::{BackgroundAgentStatus, Event, SubagentState};
 
 impl<S: BroadcastSink> Supervisor<S> {
     pub(super) fn publish_next(&self, session_id: &str, event: &Event) -> u64 {
-        publish_with_next_seq(&self.next_seqs, session_id, |seq| {
-            self.sink.publish(session_id, seq, event);
-            seq
-        })
+        publish_next_persisted(self.sink.as_ref(), &self.next_seqs, session_id, event).0
     }
 
     /// Publish an `AgentStartupError` for a session whose worker never came online.
     pub fn publish_startup_error(&self, session_id: &str, message: String) {
-        self.publish_next(session_id, &Event::AgentStartupError { message });
+        self.publish_next(session_id, &Event::startup_error(message));
     }
 
     /// Publish `Stopped { reason }` only if `expected_seq` is still the
@@ -34,21 +31,26 @@ impl<S: BroadcastSink> Supervisor<S> {
         expected_seq: u64,
     ) -> bool {
         let counter = super::session_seq(&self.next_seqs, session_id);
-        super::sink::blocking_io(|| {
+        let persisted = super::sink::blocking_io(|| {
             let mut last = super::lock_recover(&counter);
             if *last != expected_seq {
-                return false;
+                return None;
             }
             *last = last.saturating_add(1);
-            self.sink.publish(
+            Some(self.sink.queue_persisted(
                 session_id,
                 *last,
                 &Event::Stopped {
                     reason: reason.to_string(),
                 },
-            );
-            true
-        })
+            ))
+        });
+        let Some(persisted) = persisted else {
+            return false;
+        };
+        // A failed save is already broadcast as an AgentStartupError.
+        persisted.wait();
+        true
     }
 
     pub fn publish_agent_switched(
@@ -107,28 +109,43 @@ impl<S: BroadcastSink> Supervisor<S> {
     }
 
     pub async fn publish_user_prompt(&self, session_id: &str, text: String) -> PromptDisposition {
-        self.publish_user_prompt_with_attachments(session_id, text, &[], None, false, None)
-            .await
-            .disposition
+        self.publish_user_prompt_with_attachments(
+            session_id,
+            text,
+            &[],
+            Vec::new(),
+            false,
+            None,
+            None,
+        )
+        .await
+        .disposition
     }
 
     /// Record a `UserPromptSent` (attachments stored as blobs keyed to its seq)
     /// and decide how the caller routes the text. `synthesized` marks a
     /// daemon-queued rate-limit continuation rather than text the user just
-    /// typed, which the transcript renders no row for (#4040).
+    /// typed, which the transcript renders no row for (#4040). `classified_as`
+    /// is the profile a caller already cut the turn with; `None` looks it up.
+    // Each argument is a separate field of the recorded event or of how it is routed, and the
+    // callers pass them positionally from different sources; a struct would only rename them.
+    #[allow(clippy::too_many_arguments)]
     pub async fn publish_user_prompt_with_attachments(
         &self,
         session_id: &str,
         text: String,
         attachments: &[AttachmentBlob],
-        prompt_id: Option<String>,
+        prompt_ids: Vec<String>,
         synthesized: bool,
         origin_plugin: Option<String>,
+        classified_as: Option<&'static crate::acp::agent_profiles::AgentProfile>,
     ) -> PublishedPrompt {
         // Before any await or store, so an idle stop cannot claim the worker in between.
         super::lock_recover(&self.lifecycle).note_admission(session_id);
-        let agent_key = self.agent_key_for_session(session_id).await;
-        let profile = crate::acp::agent_profiles::resolve(&agent_key);
+        let profile = match classified_as {
+            Some(profile) => profile,
+            None => self.profile_for_session(session_id, &text).await,
+        };
         let is_clear = profile.is_clear_command(&text);
         let disposition = if is_clear && profile.clear_requires_driven_reset {
             PromptDisposition::ResetContext
@@ -138,45 +155,54 @@ impl<S: BroadcastSink> Supervisor<S> {
         let unrecorded = PublishedPrompt {
             disposition,
             seq: None,
+            last_seq: None,
         };
-        let published = publish_with_next_seq(&self.next_seqs, session_id, |seq| {
-            let mut refs = Vec::with_capacity(attachments.len());
-            for blob in attachments {
-                if !self.sink.record_attachment(session_id, seq, blob) {
-                    self.sink.delete_attachments_for_seq(session_id, seq);
-                    return None;
-                }
-                refs.push(crate::daemon::PromptAttachmentRef {
+        // The first id names the transcript row; the rest were folded into it by a queue drain or send-now.
+        let mut prompt_ids = prompt_ids.into_iter();
+        let event = Event::UserPromptSent {
+            text,
+            attachments: attachments
+                .iter()
+                .map(|blob| crate::daemon::PromptAttachmentRef {
                     id: blob.id.clone(),
                     kind: blob.kind,
                     mime_type: blob.mime_type.clone(),
                     name: blob.name.clone(),
                     size: blob.data.len() as u64,
-                });
-            }
-            let event = Event::UserPromptSent {
-                text,
-                attachments: refs,
-                prompt_id,
-                synthesized,
-                origin_plugin,
-            };
-            if !self.sink.publish_persisted(session_id, seq, &event) {
-                // Roll back so refs never point at blobs that were not published.
-                self.sink.delete_attachments_for_seq(session_id, seq);
-                return None;
-            }
-            Some(seq)
-        });
-        let Some(seq) = published else {
-            return unrecorded;
+                })
+                .collect(),
+            prompt_id: prompt_ids.next(),
+            merged_prompt_ids: prompt_ids.collect(),
+            synthesized,
+            origin_plugin,
         };
-        if is_clear && disposition == PromptDisposition::Forward {
-            self.publish_next(session_id, &Event::SessionCleared);
+        let (seq, persisted) = publish_with_next_seq(&self.next_seqs, session_id, |seq| {
+            (
+                seq,
+                self.sink.queue_prompt(session_id, seq, attachments, &event),
+            )
+        });
+        if !persisted.wait() {
+            // Roll back so refs never point at blobs that were not published.
+            self.sink.delete_attachments_for_seq(session_id, seq);
+            return unrecorded;
+        }
+        let last_seq = if is_clear && disposition == PromptDisposition::Forward {
+            self.publish_next(session_id, &Event::SessionCleared)
+        } else {
+            seq
+        };
+        #[cfg(test)]
+        let gate = self.prompt_publish_gate.lock().unwrap().take();
+        #[cfg(test)]
+        if let Some(gate) = gate {
+            gate.wait().await;
+            gate.wait().await;
         }
         PublishedPrompt {
             disposition,
             seq: Some(seq),
+            last_seq: Some(last_seq),
         }
     }
 
@@ -203,18 +229,134 @@ impl<S: BroadcastSink> Supervisor<S> {
         );
     }
 
-    /// The session's agent registry key: from the live runner, else its
-    /// registry record, else `claude` for records that predate the key.
-    pub(super) async fn agent_key_for_session(&self, session_id: &str) -> String {
+    /// The session's agent profile, read from its worker or registry record. A session with
+    /// neither predates the key and runs `claude`.
+    async fn profile_for_session(
+        &self,
+        session_id: &str,
+        text: &str,
+    ) -> &'static crate::acp::agent_profiles::AgentProfile {
+        use crate::acp::agent_profiles::resolve;
+        let Some((agent_key, source_profile, cwd)) = self.worker_agent(session_id).await else {
+            return resolve("claude");
+        };
+        // Only a `/clear` or `/new` can match a declared alias, so other prompts skip the
+        // configuration read.
+        if !crate::acp::agent_profiles::could_be_declared_alias(text) {
+            return resolve(&agent_key);
+        }
+        super::SessionAgent::Worker(agent_key)
+            .classify(&source_profile.unwrap_or_default(), &cwd)
+            .await
+            .profile
+    }
+
+    /// The registry key, source profile and cwd of the session's live runner, else of its
+    /// registry record while that record's runner is alive. A dead runner's record says
+    /// nothing about the agent the next spawn runs.
+    async fn worker_agent(
+        &self,
+        session_id: &str,
+    ) -> Option<(String, Option<String>, std::path::PathBuf)> {
         if let Some(handle) = self.workers.lock().await.get(session_id) {
             if let WorkerKind::Runner { spawn_config } = &handle.kind {
-                return spawn_config.agent_key.clone();
+                return Some((
+                    spawn_config.agent_key.clone(),
+                    spawn_config.source_profile.clone(),
+                    spawn_config.cwd.clone(),
+                ));
             }
         }
-        match crate::process::worker_registry::load(session_id) {
-            Ok(Some(record)) if !record.agent_key.is_empty() => record.agent_key,
-            _ => "claude".to_string(),
+        let session_id = session_id.to_string();
+        tokio::task::spawn_blocking(move || live_record_agent(&session_id))
+            .await
+            .ok()
+            .flatten()
+            .map(|record| (record.agent_key, record.source_profile, record.cwd))
+    }
+
+    /// The session's worker agent key; see [`Self::worker_agent`].
+    pub(crate) async fn worker_agent_key(&self, session_id: &str) -> Option<String> {
+        #[cfg(test)]
+        let gate = self.agent_key_gate.lock().unwrap().take();
+        #[cfg(test)]
+        if let Some(gate) = &gate {
+            gate.before_read.wait().await;
+            gate.before_read.wait().await;
         }
+        let key = self.worker_agent(session_id).await.map(|(key, ..)| key);
+        #[cfg(test)]
+        if let Some(gate) = gate {
+            gate.after_read.wait().await;
+            gate.after_read.wait().await;
+        }
+        key
+    }
+
+    /// Bind identity validation to the client that will receive the classified turn.
+    pub(crate) async fn classified_receiver(
+        &self,
+        session_id: &str,
+    ) -> Option<(
+        std::sync::Arc<crate::acp::acp_client::AcpClient>,
+        String,
+        u64,
+    )> {
+        let (client, epoch) = {
+            let workers = self.workers.lock().await;
+            let handle = workers.get(session_id)?;
+            (std::sync::Arc::clone(&handle.client), handle.launch_epoch)
+        };
+        let agent = self.worker_agent_key(session_id).await?;
+        self.classified_receiver_is_ready(session_id, epoch)
+            .await
+            .then_some((client, agent, epoch))
+    }
+
+    pub(crate) async fn classified_receiver_is_ready(&self, session_id: &str, epoch: u64) -> bool {
+        let context_pending =
+            super::lock_recover(&self.pending_context_resets).contains(session_id);
+        !crate::process::worker_registry::stop_requested(session_id)
+            && !context_pending
+            && self.is_current_launch(session_id, epoch).await
+    }
+
+    /// [`Self::worker_agent_key`] for each of `session_ids` that has one, under one workers lock,
+    /// reading registry records off the runtime.
+    pub(crate) async fn worker_agent_keys(
+        &self,
+        session_ids: Vec<String>,
+    ) -> std::collections::HashMap<String, String> {
+        let mut keys = std::collections::HashMap::new();
+        let mut unresolved = Vec::new();
+        {
+            let workers = self.workers.lock().await;
+            for id in session_ids {
+                match workers.get(&id).map(|handle| &handle.kind) {
+                    Some(WorkerKind::Runner { spawn_config }) => {
+                        keys.insert(id, spawn_config.agent_key.clone());
+                    }
+                    _ => unresolved.push(id),
+                }
+            }
+        }
+        let recorded = tokio::task::spawn_blocking(move || {
+            unresolved
+                .into_iter()
+                .filter_map(|id| live_record_agent(&id).map(|record| (id, record.agent_key)))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        keys.extend(recorded);
+        keys
+    }
+
+    /// The session's agent registry key, else `claude` for records that predate the key.
+    pub(super) async fn agent_key_for_session(&self, session_id: &str) -> String {
+        self.worker_agent_key(session_id)
+            .await
+            .unwrap_or_else(|| "claude".to_string())
     }
 
     pub(super) fn cancel_orphaned_requests(&self, session_id: &str) {
@@ -250,16 +392,18 @@ pub(super) fn detach_orphaned_background_agents_on<S: BroadcastSink>(
     warning: &str,
 ) {
     for task_id in sink.unresolved_background_task_ids(session_id) {
-        publish_with_next_seq(next_seqs, session_id, |seq| {
-            sink.publish(
-                session_id,
-                seq,
-                &Event::BackgroundTaskFinished {
-                    task_id,
-                    ended_at: Some(chrono::Utc::now()),
-                },
-            )
-        });
+        publish_next_persisted(
+            sink,
+            next_seqs,
+            session_id,
+            &Event::BackgroundTaskFinished {
+                task_id,
+                ended_at: Some(chrono::Utc::now()),
+            },
+        );
+    }
+    for event in cancelled_open_subagents(sink, session_id) {
+        publish_next_persisted(sink, next_seqs, session_id, &event);
     }
     let stale_ids = sink.unresolved_background_agent_ids(session_id);
     if stale_ids.is_empty() {
@@ -276,6 +420,22 @@ pub(super) fn detach_orphaned_background_agents_on<S: BroadcastSink>(
     }
 }
 
+/// A dead worker's working subagents will never report their idle, so each
+/// closes as cancelled.
+pub(super) fn cancelled_open_subagents<S: BroadcastSink>(sink: &S, session_id: &str) -> Vec<Event> {
+    sink.open_subagents(session_id)
+        .into_iter()
+        .map(|mut subagent| {
+            subagent.state = SubagentState::Idle;
+            subagent.stop_reason = Some("cancelled".into());
+            Event::SubagentUpdated {
+                subagent,
+                at: chrono::Utc::now(),
+            }
+        })
+        .collect()
+}
+
 fn publish_background_agent_detached<S: BroadcastSink>(
     sink: &S,
     next_seqs: &SeqMap,
@@ -283,20 +443,19 @@ fn publish_background_agent_detached<S: BroadcastSink>(
     agent_id: String,
     warning: &str,
 ) {
-    publish_with_next_seq(next_seqs, session_id, |seq| {
-        sink.publish(
-            session_id,
-            seq,
-            &Event::BackgroundAgentCompleted {
-                agent_id,
-                status: BackgroundAgentStatus::Detached,
-                tools: Vec::new(),
-                result: None,
-                warning: Some(warning.to_string()),
-                ended_at: chrono::Utc::now(),
-            },
-        )
-    });
+    publish_next_persisted(
+        sink,
+        next_seqs,
+        session_id,
+        &Event::BackgroundAgentCompleted {
+            agent_id,
+            status: BackgroundAgentStatus::Detached,
+            tools: Vec::new(),
+            result: None,
+            warning: Some(warning.to_string()),
+            ended_at: chrono::Utc::now(),
+        },
+    );
 }
 
 /// The attach-path counterpart of [`detach_orphaned_background_agents_on`]:
@@ -334,9 +493,7 @@ pub(super) fn cancel_orphaned_requests_on<S: BroadcastSink>(
     session_id: &str,
 ) {
     let publish = |event: Event| {
-        publish_with_next_seq(next_seqs, session_id, |seq| {
-            sink.publish(session_id, seq, &event)
-        })
+        publish_next_persisted(sink, next_seqs, session_id, &event);
     };
     let approvals = sink.unresolved_approval_nonces(session_id);
     if !approvals.is_empty() {
@@ -372,6 +529,21 @@ pub(super) fn cancel_orphaned_requests_on<S: BroadcastSink>(
             });
         }
     }
+}
+
+/// The session's registry record while its runner is alive. A record that predates
+/// `agent_key` ran `claude`.
+fn live_record_agent(session_id: &str) -> Option<crate::process::worker_registry::WorkerRecord> {
+    crate::process::worker_registry::load(session_id)
+        .ok()
+        .flatten()
+        .filter(crate::process::worker_registry::is_record_live)
+        .map(|mut record| {
+            if record.agent_key.is_empty() {
+                record.agent_key = "claude".into();
+            }
+            record
+        })
 }
 
 #[cfg(test)]
@@ -506,9 +678,17 @@ mod tests {
         for (session_id, agent, text, disposition, cleared) in cases {
             let dir = worker_registry::workers_dir().unwrap();
             let socket = dir.join(format!("{session_id}.sock"));
+            // A record counts only while its runner's control socket exists.
+            let mut _live = None;
             match agent {
                 Some(("", "")) => {}
                 Some((name, key)) => {
+                    _live = Some(
+                        std::os::unix::net::UnixListener::bind(
+                            crate::process::worker::control_socket_sibling(&socket),
+                        )
+                        .unwrap(),
+                    );
                     let mut record = worker_record(session_id, std::process::id(), socket);
                     record.agent_name = name.into();
                     record.agent_key = key.into();
@@ -558,6 +738,73 @@ mod tests {
                 assert_eq!(frames.len(), 1, "{session_id}: {frames:?}");
             }
             worker_registry::delete(session_id).ok();
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_custom_agents_declared_alias_drives_a_reset_and_nothing_else_does() {
+        let (_home, _tmp) = isolate_home();
+        let config = crate::session::get_app_dir().unwrap().join("config.toml");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            r#"
+[session.agent_clear_alias]
+bridge-clear = "/clear"
+bridge-new = "/new"
+claude = "/new"
+inherits-claude = "/new"
+
+[session.agent_acp_cmd]
+bridge-clear = "bridge-clear acp"
+bridge-new = "bridge-new acp"
+
+[session.agent_detect_as]
+inherits-claude = "claude"
+"#,
+        )
+        .unwrap();
+        // (agent key, text, disposition, SessionCleared published)
+        let cases = [
+            (
+                "bridge-clear",
+                "/clear",
+                PromptDisposition::ResetContext,
+                false,
+            ),
+            ("bridge-clear", "/new", PromptDisposition::Forward, false),
+            (
+                "bridge-clear",
+                "clear the cache",
+                PromptDisposition::Forward,
+                false,
+            ),
+            ("bridge-new", "/new", PromptDisposition::ResetContext, false),
+            ("bridge-new", "/clear", PromptDisposition::Forward, false),
+            // No alias declared: the text is an ordinary prompt, as before this setting.
+            ("bridge-none", "/clear", PromptDisposition::Forward, false),
+            // An agent that inherits a built-in adapter has no acp command of its own, so a
+            // declared alias is ignored for it rather than advertised and then forwarded as text.
+            ("inherits-claude", "/new", PromptDisposition::Forward, false),
+            // A built-in agent keeps its own alias whatever the map declares for it.
+            ("claude", "/clear", PromptDisposition::ResetContext, false),
+            ("claude", "/new", PromptDisposition::Forward, false),
+        ];
+        for (n, (key, text, disposition, cleared)) in cases.into_iter().enumerate() {
+            let session_id = format!("alias-{n}");
+            let _live = save_agent_record(&session_id, key, true);
+
+            let sink = VecSink::new();
+            let sup = Supervisor::new(sink.clone());
+            assert_eq!(
+                sup.publish_user_prompt(&session_id, text.into()).await,
+                disposition,
+                "{key} {text:?}"
+            );
+            let frames = sink.frames.lock().unwrap().clone();
+            assert_eq!(frames.len(), if cleared { 2 } else { 1 }, "{key} {text:?}");
+            worker_registry::delete(&session_id).ok();
         }
     }
 
@@ -616,8 +863,9 @@ mod tests {
             "s-1",
             "resent after rate limit".into(),
             &[],
-            None,
+            Vec::new(),
             true,
+            None,
             None,
         )
         .await;
@@ -633,6 +881,51 @@ mod tests {
             })
             .collect();
         assert_eq!(flags, [false, true]);
+    }
+
+    /// A queue drain folds several rows into one turn: the first id names the
+    /// event and the rest ride in `merged_prompt_ids` so a client settles all of them (#5401).
+    #[tokio::test]
+    async fn publish_user_prompt_splits_leading_id_from_merged_ids() {
+        let sink = VecSink::new();
+        let sup = Supervisor::new(sink.clone());
+        for ids in [vec![], vec!["a"], vec!["a", "b", "c"]] {
+            let ids: Vec<String> = ids.into_iter().map(String::from).collect();
+            sup.publish_user_prompt_with_attachments(
+                "s-1",
+                "t".into(),
+                &[],
+                ids,
+                false,
+                None,
+                None,
+            )
+            .await;
+        }
+
+        let got: Vec<(Option<String>, Vec<String>)> = sink
+            .frames
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, _, event)| match event {
+                Event::UserPromptSent {
+                    prompt_id,
+                    merged_prompt_ids,
+                    ..
+                } => (prompt_id.clone(), merged_prompt_ids.clone()),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            [
+                (None, vec![]),
+                (Some("a".into()), vec![]),
+                (Some("a".into()), s(&["b", "c"])),
+            ]
+        );
     }
 
     /// The published seq is the `UserPromptSent` event's, and there is none when the
@@ -651,7 +944,15 @@ mod tests {
         let sup = Supervisor::new(sink.clone());
         sup.publish_user_prompt("s-1", "first".into()).await;
         let published = sup
-            .publish_user_prompt_with_attachments("s-1", "second".into(), &[], None, false, None)
+            .publish_user_prompt_with_attachments(
+                "s-1",
+                "second".into(),
+                &[],
+                Vec::new(),
+                false,
+                None,
+                None,
+            )
             .await;
         let recorded = sink.frames.lock().unwrap().last().unwrap().1;
         assert_eq!(
@@ -659,18 +960,28 @@ mod tests {
             PublishedPrompt {
                 disposition: PromptDisposition::Forward,
                 seq: Some(recorded),
+                last_seq: Some(recorded),
             }
         );
 
         let sup = Supervisor::new(std::sync::Arc::new(RefusesToPersist));
         let published = sup
-            .publish_user_prompt_with_attachments("s-1", "lost".into(), &[], None, false, None)
+            .publish_user_prompt_with_attachments(
+                "s-1",
+                "lost".into(),
+                &[],
+                Vec::new(),
+                false,
+                None,
+                None,
+            )
             .await;
         assert_eq!(
             published,
             PublishedPrompt {
                 disposition: PromptDisposition::Forward,
                 seq: None,
+                last_seq: None,
             }
         );
     }

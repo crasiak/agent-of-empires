@@ -19,6 +19,7 @@ mod command_palette;
 mod confirm;
 mod connections;
 mod context_menu;
+mod create_hook_failed;
 mod custom_instruction;
 mod delete_options;
 mod group_delete_options;
@@ -56,6 +57,7 @@ pub use command_palette::{
 pub use confirm::ConfirmDialog;
 pub use connections::{ConnectionsView, DaemonAttention, WebState};
 pub use context_menu::{ContextMenuAction, ContextMenuDialog, HighlightOps, Submenu};
+pub use create_hook_failed::{CreateHookFailedAction, CreateHookFailedDialog};
 pub use custom_instruction::CustomInstructionDialog;
 pub use delete_options::{DeleteDialogConfig, DeleteOptions, UnifiedDeleteDialog};
 pub use group_delete_options::{GroupDeleteAction, GroupDeleteOptions, GroupDeleteOptionsDialog};
@@ -75,7 +77,10 @@ pub use rename::{RenameData, RenameDialog, RenameMode};
 pub use repo_trust::{RepoTrustAction, RepoTrustDialog};
 pub use restart::{RestartData, RestartDialog};
 pub use send_message::SendMessageDialog;
-pub use serve::{served_via, DashboardLaunch, ServeAction, ServeLaunchRequest, ServeView};
+pub use serve::{
+    served_via, DashboardLaunch, ServeAction, ServeLaunchRequest, ServeStopRequest, ServeView,
+};
+pub(crate) use serve::{DashboardStop, ServeJobs, ServeLaunchFailure};
 pub use session_search::{SearchOutcome, SessionSearchDialog};
 pub use skills_manager::SkillsManagerDialog;
 pub use snooze_duration::SnoozeDurationDialog;

@@ -16,9 +16,9 @@ import {
   type Status,
   type ToolCardProps,
 } from "./ToolCardChrome";
-import { useToolDisplayMode } from "./ToolDisplayMode";
+import { expansionMode, useToolDisplay } from "./ToolDisplayMode";
 import { ToolErrorBody } from "./ToolErrorBody";
-import { ToolIdProvider, useToolExpansionStore } from "./ToolExpansion";
+import { ToolIdProvider, useToolExpansionStore, type ExpansionOverride } from "./ToolExpansion";
 
 type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
 
@@ -154,9 +154,16 @@ export function TodoGroupCard({ items }: { items: ToolCardProps[] }) {
   const profile = useAgentProfile();
   // Updates open by default (small lists) are not the reader's choice, and the
   // latest list shows in the preview anyway, so only an explicit toggle seeds the group open.
+  // A density flip keeps the reader's choice; a fold-all press overrides it.
   const store = useToolExpansionStore();
-  const density = useToolDisplayMode();
-  const [open, setOpen] = useState(() => items.some((i) => store?.isOpen(i.tool.id, density, false)));
+  const display = useToolDisplay();
+  const mode = expansionMode(display);
+  const [toggled, setToggled] = useState<ExpansionOverride | null>(() =>
+    items.some((i) => store?.isOpen(i.tool.id, mode, false)) ? { mode, open: true } : null,
+  );
+  // Like a card, a toggle made under a fold press dies with it.
+  const keepToggle = toggled && (toggled.mode === mode || (!display.fold && !toggled.mode.startsWith("fold-")));
+  const open = keepToggle ? toggled.open : (display.fold?.open ?? false);
   const snapshots = useMemo(
     () =>
       items.flatMap((it) => {
@@ -189,7 +196,7 @@ export function TodoGroupCard({ items }: { items: ToolCardProps[] }) {
         </>
       }
       expanded={open}
-      onToggle={() => setOpen((v) => !v)}
+      onToggle={() => setToggled({ mode, open: !open })}
       {...spanTimes(snapshots)}
       subBody={preview.result?.kind === "tool_error" ? undefined : <TodoList todos={preview.todos} />}
       body={

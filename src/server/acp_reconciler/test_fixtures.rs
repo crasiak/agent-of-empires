@@ -61,6 +61,7 @@ pub(super) struct Tick {
     pub(super) respawn_history: HashMap<String, Vec<Instant>>,
     pub(super) parked: HashSet<String>,
     pub(super) capacity_deferred: HashSet<String>,
+    pub(super) stop_notified: HashSet<String>,
 }
 
 impl Tick {
@@ -79,6 +80,7 @@ impl Tick {
             &mut self.respawn_history,
             &mut self.parked,
             &mut self.capacity_deferred,
+            &mut self.stop_notified,
         )
         .await;
     }
@@ -89,7 +91,7 @@ fn count_startup_errors(state: &AppState, id: &str, filter: impl Fn(&str) -> boo
         .acp_event_store
         .replay_from(id, 0)
         .into_iter()
-        .filter(|(_, e)| matches!(e, Event::AgentStartupError { message } if filter(message)))
+        .filter(|(_, e)| matches!(e, Event::AgentStartupError { message, .. } if filter(message)))
         .count()
 }
 

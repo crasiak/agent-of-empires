@@ -180,7 +180,10 @@ const ATTENTION_SINK_RANK = 99;
 /** Plugin attention ranks with Error: behind Waiting, which needs input right now. */
 const PLUGIN_ATTENTION_RANK = 1;
 
-function statusAttentionRank(status: SessionStatus): number {
+/** Sidebar attention order for a bare status: Waiting, Error, Idle, Unknown, Running,
+ *  Stopped, then the transients. The Attention sort and the status grouping axis both
+ *  read it, and it matches the Board's within-column card order. */
+export function statusAttentionRank(status: SessionStatus): number {
   switch (status) {
     case "Waiting":
       return 0;
@@ -245,6 +248,20 @@ export function workspaceAttentionCount(ws: Workspace, pluginAttention?: Readonl
     if (sessionNeedsAttention(s, pluginAttention)) n += 1;
   }
   return n;
+}
+
+/** The Error Sessions among those `workspaceAttentionCount` counts. */
+export function workspaceErrorCount(ws: Workspace): number {
+  return ws.sessions.filter((s) => s.status === "Error" && sessionNeedsAttention(s)).length;
+}
+
+/** A Group attention badge's tooltip, naming errors apart from other attention. */
+export function attentionBadgeText(attention: number, errors: number): string {
+  const sessions = (n: number) => `${n} Session${n === 1 ? "" : "s"}`;
+  const haveErrors = (n: number) => (n === 1 ? "has an error" : "have errors");
+  if (errors > 0 && errors === attention) return `${sessions(errors)} ${haveErrors(errors)}`;
+  const needs = `${sessions(attention)} need${attention === 1 ? "s" : ""} attention`;
+  return errors > 0 ? `${needs} · ${errors} ${haveErrors(errors)}` : needs;
 }
 
 /** Next attention session after `activeId` in display order, wrapping; returns `activeId` when it is the only one. */

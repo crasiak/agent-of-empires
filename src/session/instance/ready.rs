@@ -62,7 +62,14 @@ impl std::fmt::Display for EnsureReadyError {
     }
 }
 
-impl std::error::Error for EnsureReadyError {}
+impl std::error::Error for EnsureReadyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Tmux(error) => error.source(),
+            _ => None,
+        }
+    }
+}
 
 /// A peer purged the stored row while a caller still held its cached copy.
 #[derive(Debug, thiserror::Error)]
@@ -224,6 +231,19 @@ impl Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_ready_errors_preserve_qualification_causes() {
+        let error = EnsureReadyError::from(
+            anyhow::anyhow!("Ledger Pi arguments are not supported by the guarded launch contract")
+                .context("Ledger Pi native qualification failed"),
+        );
+        let report = format!("{:#}", anyhow::Error::new(error));
+        assert_eq!(
+            report,
+            "Ledger Pi native qualification failed: Ledger Pi arguments are not supported by the guarded launch contract"
+        );
+    }
 
     #[test]
     fn test_ensure_pane_ready_bails_on_creating() {

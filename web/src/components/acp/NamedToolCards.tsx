@@ -14,6 +14,7 @@ import {
   Clock,
   Plug,
   Search,
+  Send,
   Sparkles,
   Square,
   Workflow,
@@ -162,7 +163,15 @@ export function SkillToolCard({ tool, result, skillName }: ToolCardProps & { ski
 
 export function classifyWorkflow(tool: ToolCall, profile: AgentProfile): boolean {
   if (tool.kind !== "other") return false;
-  const title = (pickStr(parseJsonObject(tool.args_preview), "_aoe_title") ?? tool.name ?? "").trim();
+  const args = parseJsonObject(tool.args_preview);
+  // A permission start can retitle the call; the wire name survives.
+  const title = (
+    pickStr(args, "_aoe_raw_tool_name") ??
+    tool.raw_name ??
+    pickStr(args, "_aoe_title") ??
+    tool.name ??
+    ""
+  ).trim();
   return profile.specialTitles.workflowNames.includes(title);
 }
 
@@ -193,7 +202,7 @@ export function WorkflowToolCard({ tool, result }: ToolCardProps) {
       endedAt={live ? undefined : (run?.endedAt ?? lastEnd(agents) ?? result?.at)}
       icon={<Workflow className={ICON} />}
       label="workflow"
-      primary={run?.name ?? agents[0]?.workflow?.name ?? "Workflow"}
+      primary={run?.name ?? agents[0]?.workflow?.name ?? (result ? "Workflow" : "Preparing workflow script")}
       meta={
         agents.length > 0 && (
           <span className={TABULAR_META}>
@@ -223,8 +232,8 @@ export function WorkflowToolCard({ tool, result }: ToolCardProps) {
                 );
               })}
               {openPane && (
-                <button type="button" onClick={openPane} className="mt-1.5 text-accent-500 hover:underline">
-                  Open Sub agents
+                <button type="button" onClick={() => openPane()} className="mt-1.5 text-accent-500 hover:underline">
+                  Open Background
                 </button>
               )}
             </div>
@@ -469,12 +478,17 @@ const SPECIAL_TOOLS = {
     label: "task stop",
     primary: mono(pickStr(args, "task_id", "shell_id"), "stop task"),
   }),
+  SendMessage: (_tool: ToolCall, args: Args): SpecialHeader => ({
+    icon: <Send className={ICON} />,
+    label: "send message",
+    primary: withReason(mono(pickStr(args, "to"), "agent"), pickStr(args, "summary")),
+  }),
 };
 
 export type SpecialToolName = keyof typeof SPECIAL_TOOLS;
 
 export const SCHEDULE_TOOLS: readonly SpecialToolName[] = ["ScheduleWakeup", "CronCreate", "CronList", "CronDelete"];
-export const HARNESS_TOOLS: readonly SpecialToolName[] = ["ToolSearch", "Monitor", "TaskStop"];
+export const HARNESS_TOOLS: readonly SpecialToolName[] = ["ToolSearch", "Monitor", "TaskStop", "SendMessage"];
 
 /** The `family` tool this call is, when its title is also in the profile's `allowed` list. */
 export function classifySpecialTool(

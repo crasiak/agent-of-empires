@@ -224,11 +224,12 @@ impl HomeView {
         }
     }
 
-    pub(super) fn create_session(&mut self, data: NewSessionData) -> anyhow::Result<String> {
+    pub(super) fn create_session_with_reveal(
+        &mut self,
+        data: NewSessionData,
+        reveal: bool,
+    ) -> anyhow::Result<String> {
         let target_profile = data.profile.clone();
-
-        // In unified mode, all instances are loaded, so use them for title dedup.
-        // For the target profile, filter to that profile's instances.
         let existing_titles: Vec<&str> = self
             .instances()
             .filter(|i| i.source_profile == target_profile)
@@ -240,8 +241,6 @@ impl HomeView {
             .filter_map(|i| i.worktree_info.as_ref().map(|w| w.branch.as_str()))
             .collect();
 
-        // `structured` is applied post-build (mirrors the web create
-        // handler); read it off before the params conversion consumes data.
         let structured = data.structured;
         let params = InstanceParams::from(data);
 
@@ -251,7 +250,7 @@ impl HomeView {
             &existing_branches,
             &target_profile,
         )?;
-        self.accept_built_session(build_result, target_profile, structured)
+        self.accept_built_session_with_reveal(build_result, target_profile, structured, reveal)
     }
 
     pub(super) fn accept_built_session(
@@ -260,17 +259,33 @@ impl HomeView {
         target_profile: String,
         structured: bool,
     ) -> anyhow::Result<String> {
+        self.accept_built_session_with_reveal(build_result, target_profile, structured, true)
+    }
+
+    fn accept_built_session_with_reveal(
+        &mut self,
+        build_result: builder::BuildResult,
+        target_profile: String,
+        structured: bool,
+        reveal: bool,
+    ) -> anyhow::Result<String> {
         let mut instance = build_result.instance;
-        instance.source_profile = target_profile.clone();
+        instance.source_profile = target_profile;
         if structured {
             builder::structured::apply_structured_choice(&mut instance);
         }
-        self.insert_new_session(instance)
+        self.insert_new_session_with_reveal(instance, reveal)
     }
 
-    /// Persist a built instance the way `aoe session import` does; the daemon
-    /// publishes the row from storage, and the display mirror shows it until then.
     pub(super) fn insert_new_session(&mut self, instance: Instance) -> anyhow::Result<String> {
+        self.insert_new_session_with_reveal(instance, true)
+    }
+
+    fn insert_new_session_with_reveal(
+        &mut self,
+        instance: Instance,
+        reveal: bool,
+    ) -> anyhow::Result<String> {
         let session_id = instance.id.clone();
         // A new profile has no directory yet, so create rather than open it.
         Storage::new_unwatched(&instance.source_profile)?.update(|rows, groups| {
@@ -286,9 +301,11 @@ impl HomeView {
         crate::usage::record_lifecycle(&instance, crate::usage::UsageKind::InstanceCreated);
         crate::tips::record_session_creations(1);
         self.instances.insert(session_id.clone(), instance);
-        self.rebuild_group_trees();
-        self.rebuild_flat_items();
-        self.select_and_reveal_session(&session_id);
+        if reveal {
+            self.rebuild_group_trees();
+            self.rebuild_flat_items();
+            self.select_and_reveal_session(&session_id);
+        }
         Ok(session_id)
     }
 
@@ -969,13 +986,16 @@ impl HomeView {
         });
         Ok(())
     }
-    /// Move a session to the trash and set `trashed_at`. Durable artifacts are
-    /// kept so it can be restored. The Trash section's collapse state is left
-    /// untouched: like single-row archive, the section header's count is the
-    /// feedback, so a user who collapsed it stays collapsed (#2489).
-    ///
-    /// The daemon commits the trash reservation, teardown and relocation; UI follows its receipt fence.
+    /// Preserve the shelf's collapsed state; teardown and relocation remain daemon-owned.
     pub(super) fn trash_session_by_id(&mut self, id: &str) {
+        let Some(epoch) = self.session_feed.applied_epoch().map(str::to_owned) else {
+            self.flash_status("Runtime unavailable; reopen Trash controls");
+            return;
+        };
+        self.trash_session_by_id_at_epoch(id, epoch);
+    }
+
+    pub(super) fn trash_session_by_id_at_epoch(&mut self, id: &str, expected_epoch: String) {
         let Some(instance) = self
             .get_instance(id)
             .filter(|instance| !instance.is_trashed())
@@ -983,12 +1003,17 @@ impl HomeView {
             return;
         };
         let generation = instance.lifecycle_generation;
+        let profile = instance.source_profile.clone();
         if let Err(error) = self.session_feed.submit_request(
             id.to_owned(),
-            crate::tui::session_feed::SessionRequest::Trash(crate::daemon::TrashSessionBody {
-                kill_pane: true,
-                expected_generation: Some(generation),
-            }),
+            crate::tui::session_feed::SessionRequest::Trash {
+                body: crate::daemon::TrashSessionBody {
+                    kill_pane: true,
+                    expected_generation: Some(generation),
+                    expected_profile: Some(profile),
+                },
+                expected_epoch,
+            },
         ) {
             self.info_dialog = Some(InfoDialog::new(
                 "Could Not Trash Session",
@@ -997,6 +1022,36 @@ impl HomeView {
             return;
         }
         self.close_breakout_of(id);
+    }
+
+    pub(super) fn retry_selected_trash(&mut self) {
+        let Some(instance) = self
+            .selected_session
+            .as_deref()
+            .and_then(|id| self.get_instance(id))
+            .filter(|instance| instance.has_pending_trash())
+        else {
+            return;
+        };
+        let id = instance.id.clone();
+        let Some(expected_epoch) = self.session_feed.applied_epoch().map(str::to_owned) else {
+            self.flash_status("Runtime unavailable; reopen Trash controls");
+            return;
+        };
+        let body = crate::daemon::TrashSessionBody {
+            kill_pane: true,
+            expected_generation: Some(instance.lifecycle_generation),
+            expected_profile: Some(instance.source_profile.clone()),
+        };
+        if let Err(error) = self.session_feed.submit_request(
+            id,
+            crate::tui::session_feed::SessionRequest::Trash {
+                body,
+                expected_epoch,
+            },
+        ) {
+            self.info_dialog = Some(InfoDialog::new("Could Not Retry Trash", &error.to_string()));
+        }
     }
 
     /// Restore the selected trashed session, clearing `trashed_at` so it
@@ -1171,6 +1226,20 @@ impl HomeView {
                 .filter(|i| self.org_group_key(i) == group_path)
                 .map(|i| i.id.clone())
                 .collect(),
+            // Status headers key on the status's API spelling, the same key
+            // `build_flat_items_by_status` rewrites `group_path` to.
+            crate::session::config::GroupByMode::Status => self
+                .instances
+                .values()
+                .filter(|i| !i.is_archived() && !i.is_trashed())
+                .filter(|i| {
+                    self.active_profile
+                        .as_ref()
+                        .is_none_or(|p| &i.source_profile == p)
+                })
+                .filter(|i| super::rows::status_group_key(i) == group_path)
+                .map(|i| i.id.clone())
+                .collect(),
             // Manual groups nest, so a session belongs when its path matches exactly or
             // sits beneath the group; scoped to the owning profile the same way
             // `delete_selected_group` does.
@@ -1188,13 +1257,21 @@ impl HomeView {
         }
     }
 
-    /// Queue the whole group's archive before submitting any row. The daemon
-    /// tears down each pane and publishes its committed state.
+    /// Queue the group's archive before submitting any row.
     pub(super) fn archive_selected_group(&mut self) -> anyhow::Result<()> {
         if self.require_manual_group_profile() {
             return Ok(());
         }
-        let ids = self.active_sessions_in_selected_group();
+        // Preserve the membership counted by the prompt.
+        let ids = match self.pending_archive_group_ids.take() {
+            Some(ids) => ids,
+            None => self.active_sessions_in_selected_group(),
+        };
+        // Removed and trashed sessions are no longer eligible.
+        let ids: Vec<String> = ids
+            .into_iter()
+            .filter(|id| self.instances.get(id).is_some_and(|i| !i.is_trashed()))
+            .collect();
         if ids.is_empty() {
             return Ok(());
         }

@@ -46,9 +46,13 @@ impl ProfileConfig {
 /// (which the dashboard fires on mount before profiles resolve) does
 /// not pollute `profiles/` with a stub directory.
 pub fn load_profile_config(profile: &str) -> Result<ProfileConfig> {
+    load_profile_config_via(profile, &super::read_file)
+}
+
+fn load_profile_config_via(profile: &str, read: super::ReadFile) -> Result<ProfileConfig> {
     let path = crate::session::get_profile_dir_path(profile)?.join("config.toml");
     let result = (|| {
-        let Some(content) = super::read_optional_config(&path)? else {
+        let Some(content) = super::read_optional_config(&path, read)? else {
             return Ok(ProfileConfig::default());
         };
         if content.trim().is_empty() {
@@ -174,10 +178,21 @@ pub fn apply_cityhall_overrides(config: &mut Config) {
     config.worktree.enabled = true;
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static RESOLVES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Load effective config for a profile (global + profile overrides merged)
 pub fn resolve_config(profile: &str) -> Result<Config> {
-    let global = Config::load()?;
-    let profile_config = load_profile_config(profile)?;
+    resolve_config_via(profile, &super::read_file)
+}
+
+fn resolve_config_via(profile: &str, read: super::ReadFile) -> Result<Config> {
+    #[cfg(test)]
+    RESOLVES.with(|n| n.set(n.get() + 1));
+    let global = Config::load_via(read)?;
+    let profile_config = load_profile_config_via(profile, read)?;
     let mut config = merge_configs(global, &profile_config);
     apply_cityhall_overrides(&mut config);
     // (Re)install the declarative status-rule registry from the effective
@@ -192,14 +207,18 @@ pub fn resolve_config(profile: &str) -> Result<Config> {
 /// propagating the error. A broken profile file falls back to the global
 /// config; only a broken global config falls back to defaults.
 pub fn resolve_config_or_warn(profile: &str) -> Config {
-    match resolve_config(profile) {
+    resolve_config_or_warn_via(profile, &super::read_file)
+}
+
+pub(crate) fn resolve_config_or_warn_via(profile: &str, read: super::ReadFile) -> Config {
+    match resolve_config_via(profile, read) {
         Ok(config) => config,
         Err(e) => {
             tracing::warn!(target: "session.profile",
                 "Failed to load config for profile '{}', using defaults: {e}",
                 profile
             );
-            let mut fallback = match Config::load() {
+            let mut fallback = match Config::load_via(read) {
                 Ok(global) => merge_configs(global, &ProfileConfig::default()),
                 Err(_) => Config::default(),
             };
@@ -914,18 +933,26 @@ mod tests {
 
         let profile = profile_from(json!({"acp": {
             "default_agent": "claude-code",
-            "max_concurrent_workers": 9,
             "replay_events": 1024,
             "node_path": "/opt/node",
         }}));
 
         let merged = merge_configs(global, &profile);
         assert_eq!(merged.acp.default_agent, "claude-code");
-        assert_eq!(merged.acp.max_concurrent_workers, 9);
         assert_eq!(merged.acp.replay_events, 1024);
         assert_eq!(merged.acp.node_path, "/opt/node");
         // Not overridden: inherits global default.
         assert!(merged.acp.show_tool_durations);
+    }
+
+    #[test]
+    fn profile_cannot_override_the_daemon_wide_worker_cap() {
+        let mut global = Config::default();
+        global.acp.max_concurrent_workers = 7;
+
+        let profile = profile_from(json!({"acp": {"max_concurrent_workers": 1}}));
+        let merged = merge_configs(global, &profile);
+        assert_eq!(merged.acp.max_concurrent_workers, 7);
     }
 
     #[test]

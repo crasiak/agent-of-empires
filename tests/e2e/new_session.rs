@@ -359,7 +359,6 @@ async fn test_quit_creation_waits_for_cancellation_admission_before_exit() {
 
 /// Write a global config that keeps existing-session activation at its
 /// historical tmux default while opening newly-created sessions in live mode.
-/// No hooks; the sync create path applies.
 fn write_config_new_session_mode_live_send(h: &TuiTestHarness) {
     let config_path = app_dir_in(h.home_path()).join("config.toml");
     let config_content = std::fs::read_to_string(&config_path).expect("read harness config");
@@ -371,11 +370,13 @@ fn write_config_new_session_mode_live_send(h: &TuiTestHarness) {
         ),
     )
     .expect("write state with harness flags and hook acknowledgment");
-    std::fs::write(
-        config_path,
-        format!("{config_content}\n[session]\nnew_session_mode = \"live_send\"\n"),
-    )
-    .expect("write config with new session mode");
+    let mut config: toml::Value = toml::from_str(&config_content).expect("parse harness config");
+    config["session"].as_table_mut().unwrap().insert(
+        "new_session_mode".into(),
+        toml::Value::String("live_send".into()),
+    );
+    std::fs::write(config_path, toml::to_string(&config).unwrap())
+        .expect("write config with new session mode");
 }
 
 /// New-session mode must remain independent from the setting that controls
@@ -536,4 +537,44 @@ fn test_new_from_selection_starts_on_the_selected_sessions_agent() {
     new_from_selection_shows("group", "claude");
     h.send_keys("j");
     new_from_selection_shows("session", "codex");
+}
+
+/// A failing on_create hook no longer costs the form: the TUI offers Retry, Create without
+/// setup and Cancel, and Create without setup lands the session tagged `[no setup]`.
+#[test]
+#[parallel]
+fn test_a_failing_on_create_hook_offers_create_without_setup() {
+    require_tmux!();
+    let mut h = TuiTestHarness::new("create_hook_failed");
+    let bin = h.install_path_command("claude");
+    std::fs::write(
+        bin.join("claude"),
+        "#!/bin/sh\ncase \"$1\" in --help) exit 0;; esac\nexec sleep 300\n",
+    )
+    .expect("write claude stub");
+    write_config_with_hooks(&h, "exit 3");
+    // Live mode keeps the home view, and so the new row, on screen after the create.
+    h.append_config("[session]\nnew_session_mode = \"live_send\"");
+    let project = h.project_path();
+    h.spawn_tui();
+    h.wait_for(" aoe ");
+    h.wait_for_runtime_ready();
+
+    let title = "setup-skipped";
+    h.send_keys("n");
+    h.wait_for(" New Session ");
+    h.send_keys("C-u");
+    h.type_text(project.to_str().unwrap());
+    h.send_keys("Tab");
+    h.type_text(title);
+    h.wait_for(&format!("Title: {title}"));
+    submit_new_session_dialog(&h);
+
+    h.wait_for_timeout("Session setup failed", Duration::from_secs(20));
+    h.assert_screen_contains("on_create hook failed");
+    h.assert_screen_contains("[Create without setup (s)]");
+    h.send_keys("s");
+    h.wait_for_absent("Session setup failed", Duration::from_secs(5));
+    h.wait_for_timeout("[no setup]", Duration::from_secs(20));
+    h.assert_screen_contains(title);
 }

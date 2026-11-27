@@ -243,6 +243,7 @@ impl DocumentWindow {
                     create_new_branch: false,
                     base_branch: None,
                     extra_repo_paths: Vec::new(),
+                    workspace: false,
                     sandbox: false,
                     sandbox_image: String::new(),
                     yolo_mode: false,
@@ -253,6 +254,7 @@ impl DocumentWindow {
                     scratch: true,
                     fork_seed: None,
                     structured: false,
+                    intake: false,
                 });
                 let built = crate::session::tailored::document::build(
                     params,
@@ -331,7 +333,7 @@ impl DocumentWindow {
             Paragraph::new(if self.busy() {
                 "Preparing source; no model started…"
             } else {
-                "[ Start ] · Tab to Start, Enter to confirm · F2 history"
+                "[ Start ] · Tab to Start, Enter · Ctrl+Enter · F2 history"
             })
             .style(Style::default().fg(if self.focus == 3 {
                 theme.accent
@@ -346,6 +348,99 @@ impl DocumentWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[serial_test::serial]
+    fn valid_document_submit_keys_check_once_and_surface_missing_prerequisites() {
+        use super::super::{history::HistoryAction, TailoredWindow};
+        use crossterm::event::KeyEventKind;
+        use std::time::Duration;
+
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+        let calls = root.path().join("calls");
+        let _ledger = crate::session::test_support::install_login_shell_path_command(
+            root.path(),
+            "ledger",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 99\n",
+                shell_words::quote(calls.to_str().unwrap())
+            ),
+        );
+        let mut expected_checks = 0;
+        for account in [CaptureAccount::Personal, CaptureAccount::Work] {
+            for (code, modifiers) in [
+                (KeyCode::Enter, KeyModifiers::CONTROL),
+                (KeyCode::Enter, KeyModifiers::NONE),
+            ] {
+                for focus in 0..4 {
+                    let mut overlay = TailoredWindow::new(account);
+                    overlay.picker_action(HistoryAction::Document);
+                    let form = overlay.document.as_mut().unwrap();
+                    form.paste("https://example.org/source.md");
+                    form.focus = focus;
+                    for kind in [
+                        KeyEventKind::Press,
+                        KeyEventKind::Repeat,
+                        KeyEventKind::Release,
+                    ] {
+                        overlay.handle_key(KeyEvent::new_with_kind(
+                            KeyCode::F(4),
+                            KeyModifiers::NONE,
+                            kind,
+                        ));
+                        let form = overlay.document.as_ref().unwrap();
+                        assert!(!form.busy());
+                        assert!(form.error.is_none());
+                        assert_eq!(form.focus, focus);
+                    }
+                    if modifiers.is_empty() {
+                        for _ in focus..3 {
+                            overlay.handle_key(KeyEvent::from(KeyCode::Tab));
+                        }
+                    }
+                    let submit_focus = overlay.document.as_ref().unwrap().focus;
+                    for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+                        overlay.handle_key(KeyEvent::new_with_kind(code, modifiers, kind));
+                        assert!(!overlay.document.as_ref().unwrap().busy());
+                    }
+                    overlay.handle_key(KeyEvent::new(code, modifiers));
+                    assert!(overlay.document.as_ref().unwrap().busy());
+                    for kind in [
+                        KeyEventKind::Press,
+                        KeyEventKind::Repeat,
+                        KeyEventKind::Release,
+                    ] {
+                        overlay.handle_key(KeyEvent::new_with_kind(code, modifiers, kind));
+                    }
+                    overlay.handle_paste("not accepted");
+                    let form = overlay.document.as_mut().unwrap();
+                    assert_eq!(form.account, account);
+                    assert_eq!(form.focus, submit_focus);
+                    assert_eq!(form.url.lines().join("\n"), "https://example.org/source.md");
+                    let error = form
+                        .pending
+                        .take()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap()
+                        .err()
+                        .expect("missing Ledger profile blocks preparation");
+                    form.error(error);
+                    assert!(form
+                        .error
+                        .as_ref()
+                        .unwrap()
+                        .contains("Dedicated document profile is not ready"));
+                    expected_checks += 1;
+                    assert_eq!(
+                        std::fs::read_to_string(&calls).unwrap().lines().count(),
+                        expected_checks
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn queued_document_result_drop_cleans_only_uncommitted_preparation() {
         for accept in [false, true] {

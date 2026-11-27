@@ -4,8 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen } from "@testing-library/react";
 
 import type { SessionResponse } from "../../lib/types";
-import { EMPTY_OPTIMISTIC } from "../../lib/sidebarOptimistic";
-import { resolveActionTargets } from "../sidebar/sessionActionTargets";
+import { EMPTY_OPTIMISTIC, optimisticForRow, optimisticKey, withOverride } from "../../lib/sidebarOptimistic";
+import {
+  recreateContainerBlock,
+  recreateContainerTitle,
+  resolveActionTargets,
+  type RecreateContainerBlock,
+} from "../sidebar/sessionActionTargets";
 import { makeSession, makeWorkspace, openRowMenu, stubFetch } from "./fixtures";
 
 const sibling = (id: string, over: Partial<SessionResponse> = {}) => makeSession({ id, title: `title ${id}`, ...over });
@@ -37,6 +42,7 @@ describe("resolveActionTargets", () => {
       sibling("boxed", { status: "Running", is_sandboxed: true }),
       sibling("boxed-archived", { status: "Stopped", is_sandboxed: true, archived_at: "2026-01-01T00:00:00Z" }),
       sibling("boxed-creating", { status: "Creating", is_sandboxed: true }),
+      sibling("boxed-trashed", { status: "Stopped", is_sandboxed: true, trashed_at: "2026-01-01T00:00:00Z" }),
     ];
     const t = resolveActionTargets(sessions, EMPTY_OPTIMISTIC);
     expect(ids(t.stop)).toEqual(["running", "acp", "fork", "capable", "stale", "hidden", "boxed"]);
@@ -48,17 +54,46 @@ describe("resolveActionTargets", () => {
     expect(ids(t.switchView)).toEqual(["acp", "fork", "capable"]);
   });
 
+  it("says why a container can't be recreated, and titles only a Session the menu could recreate", () => {
+    const boxed = { status: "Running", is_sandboxed: true } as const;
+    const rows: [Partial<SessionResponse>, RecreateContainerBlock | null][] = [
+      [boxed, null],
+      [{ status: "Running" }, "not_sandboxed"],
+      [{ ...boxed, archived_at: "x" }, "archived"],
+      [{ ...boxed, trashed_at: "x" }, "trashed"],
+      // Trash wins, as in the stopped banners: restoring is the first step.
+      [{ ...boxed, trashed_at: "x", archived_at: "x" }, "trashed"],
+      [{ ...boxed, status: "Creating" }, "creating"],
+      [{ ...boxed, status: "Deleting" }, "deleting"],
+    ];
+    const got = rows.map(([over]) => {
+      const s = sibling("s", over);
+      return [recreateContainerBlock(s, !!s.archived_at), recreateContainerTitle(s) ?? null];
+    });
+    expect(got).toEqual(rows.map(([, block]) => [block, block === null ? "title s" : null]));
+  });
+
   it("hides Start while an archive is pending, and allows it once unarchiving", () => {
     const stopped = [sibling("a", { status: "Stopped" }), sibling("b", { status: "Stopped", archived_at: "x" })];
-    const pending = (archived: boolean, archivedSessionId: string) => ({
+    const pending = (archived: boolean, sessionId: string) => ({
       ...EMPTY_OPTIMISTIC,
       archived,
-      archivedSessionId,
+      sessionId,
     });
     expect(ids(resolveActionTargets(stopped, pending(true, "a")).start)).toEqual([]);
     expect(ids(resolveActionTargets(stopped, pending(false, "b")).start)).toEqual(["a", "b"]);
     // Unarchiving a leaves b, still archived, without Start.
     expect(ids(resolveActionTargets(stopped, pending(false, "a")).start)).toEqual(["a"]);
+  });
+
+  it("keeps Start off the session with its own pending archive when the row recombines", () => {
+    const sessions = [sibling("a", { status: "Idle" }), sibling("b", { status: "Stopped" })];
+    const overlay = new Map([
+      [optimisticKey("w", "a"), withOverride(EMPTY_OPTIMISTIC, { unread: true, sessionId: "a" })],
+      [optimisticKey("w", "b"), withOverride(EMPTY_OPTIMISTIC, { archived: true, sessionId: "b" })],
+    ]);
+    const row = optimisticForRow(overlay, makeWorkspace("w", sessions));
+    expect(ids(resolveActionTargets(sessions, row).start)).toEqual([]);
   });
 });
 

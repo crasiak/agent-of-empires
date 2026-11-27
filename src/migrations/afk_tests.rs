@@ -201,6 +201,10 @@ fn work_arc_upgrade_from_review_preserves_authority_and_registry() {
         serde_json::to_vec(&vec![row]).unwrap(),
     )
     .unwrap();
+    drop(
+        crate::session::acquire_storage_flock(&app, crate::session::config::CONFIG_LOCK_FILENAME)
+            .unwrap(),
+    );
     let mut before = tree(&app);
     before.remove(&app.join(VERSION_FILE));
     let (report, started) = reporter();

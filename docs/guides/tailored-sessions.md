@@ -1,11 +1,35 @@
 # Tailored Sessions
 
-Press **Ctrl+Y** in the TUI or Web dashboard to open the Tailored Sessions picker,
-including while a Session owns keyboard input. Choose **Capture an idea**, select
+Press **Ctrl+1** or **Ctrl+Y** in the TUI to open the Tailored Sessions picker,
+including while a Session owns keyboard input. The web dashboard uses **Ctrl+Y**. Choose **Capture an idea**, select
 Personal or Work, and enter the idea. Enter and Shift+Enter insert newlines in text
 editors. Select the capture button or press **Ctrl+Enter** (**Meta+Enter** also works
 on web) to submit deliberately. Composition and held submit keys do not submit.
+If Ctrl+Enter inserts a newline, Tab to the Capture/Start button and press Enter,
+or click the button. F4 remains the Home highlighting shortcut; it does not submit
+Capture or Document. AoE cannot recover a modifier discarded by the terminal
+or a tmux server with `extended-keys off`. Its terminal decoder supports Kitty/CSI-u,
+not tmux's legacy xterm extended-key format. AoE does not change tmux configuration.
+Research and Workshop use the separate reviewed actions described below;
+Ctrl+Enter never authorizes their effects.
 Long text and unbroken URLs soft-wrap in the TUI without adding saved newlines.
+
+The TUI picker separates **Workflows**, **Quick Pi sessions**, and **Previous
+Sessions**. Compact rows show the choice and its kind; only the selected choice
+shows full details, beside the list on wide terminals or below it on narrower
+ones. **PgUp/PgDn** scroll longer selected details. Account and Agent are separate
+labels, not interchangeable roles or personas. **AoE Profile** identifies the
+Quick destination or a previous Session's storage namespace. Selecting a row does
+not start it; Enter or a click opens the existing workflow or Session.
+
+**Work Quick** uses the existing `work-headroom-ledger` AoE profile;
+**Personal Quick** uses `personal-sub-headroom-ledger`. Choosing Quick switches
+the current view to that profile and opens a blank Pi conversation at `~/knowledge`,
+using its configured Pi launcher and existing Ledger policy. AoE does not create
+or reconfigure Ledger profiles, choose a different model, or change Claude settings.
+The destination AoE profile and workspace must already exist. Original drafts stay
+in their original profile bank; a pending launch completing after navigation does
+not switch the current view or take focus.
 
 Unsent editors remain in memory for the current Home/dashboard lifetime, including
 cursor and undo history, across close/reopen, F2/history and preset navigation.
@@ -27,6 +51,62 @@ Capture opens a new scratch Session in an overlay above the sidebar and current
 Session. Ctrl+Y closes the overlay outside form editors without stopping capture or
 changing the current Session. Inside editors, Ctrl+Y remains an editor command. Escape closes the picker/form; inside the capture terminal it goes to the
 agent. The TUI also accepts Ctrl+Q to close the overlay.
+
+## Intake a task
+
+In the TUI, open the full launcher with **Ctrl+1** or **Ctrl+Y**, then choose
+**Intake**. Ctrl+1 is reserved even when quick-launch slot 1 is configured; move
+that preset to Ctrl+2 through Ctrl+9. **Intake task brief** in the command palette
+opens fresh intake input directly. If your terminal cannot send a distinct
+Ctrl+1, use Ctrl+Y. The web dashboard does not yet offer intake.
+
+Describe the task, then choose **Prepare brief**. Review the original task and
+prepared brief/initial prompt, then choose **Configure Session**. Both buttons
+work with Tab followed by Enter, mouse click, or Ctrl+Enter. Enter in the task
+editor inserts a newline; held confirmation keys do not advance. Esc from the
+brief returns to editing. There is no model call during preparation.
+
+The existing New Session form reviews the destination AoE profile, Pi command,
+repository/worktree, group and permissions. The current profile supplies the
+account and command; intake does not provision or select new Ledger profiles.
+A selected non-scratch Session in that same profile suggests its repository and
+group. A selected ordinary group can also suggest placement. These are editable
+suggestions, not task-based guesses across account boundaries. In all-profiles
+mode, the default profile is the destination; a different profile's selected
+Session does not lend its repository or group. Review unresolved setup explicitly.
+
+Confirm **Create** only after reviewing that form. It creates one task Session,
+not a separate concierge. Its opening prompt asks Pi to refine the brief, clarify
+consequential unknowns, and perform the task using the reviewed permissions. It
+includes guidance for supported AoE CLI interfaces without authorizing another
+Session, profile changes or orchestration. Intake currently requires host terminal
+Pi; sandbox, structured view and resume/noninteractive arguments are refused.
+Task input is limited to 32 KiB and retained in launch arguments like capture input.
+The brief is a deterministic starting scaffold, not a model-generated analysis.
+
+Creation uses the normal keyed daemon flow and reports setup/start failures.
+A confirmed native resume omits the opening task; an already-started intake whose
+native conversation cannot be found refuses replay. Inspect the original Session
+on an uncertain outcome instead of submitting a replacement. The ordinary
+highlight policy keeps a new Session visible under session-color filtering: use
+the first selected color when uncolored rows are excluded, otherwise no highlight
+is needed. Project filters remain independent. Highlight persistence failures are
+reported by the normal creation path.
+
+After creation, intake stays on the dashboard and offers the existing **Enable
+work arc** consent. Accept it to enable Arc; cancel leaves it off. Existing setup
+warnings take priority, so use the Session menu to enable Arc after resolving
+those warnings. Route unavailability remains visible through Arc's normal status;
+intake does not change its model route or waive consent. Attach to the new Session
+through the normal controls when ready.
+
+Unsent input and prepared briefs stay in the current profile's in-memory Tailored
+window across close/reopen and F2 navigation. Opening **Intake** from the picker
+resumes that draft. Ctrl+1 returns to the launcher without clearing drafts;
+**Intake task brief** in the command palette explicitly starts fresh intake input.
+Capture, Research, Document and Workshop retain their own drafts. Closing the TUI
+does not save an unsent draft. Sandboxing, new Ledger integration and Fable/Astra
+handoff are outside this workflow.
 
 ## Check previous captures
 

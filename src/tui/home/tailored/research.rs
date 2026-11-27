@@ -179,6 +179,12 @@ impl ResearchWindow {
         if self.checking.is_some() {
             return;
         }
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.error.get_or_insert_with(|| {
+                "Research uses Ctrl+Alt+S to save, Ctrl+Alt+D to develop, then review and Ctrl+Alt+R to run; Ctrl+Enter never runs research".into()
+            });
+            return;
+        }
         if key.code == KeyCode::F(12) {
             if let Some(draft) = self
                 .draft
@@ -578,7 +584,10 @@ mod tests {
         assert_eq!(window.fields[0].lines().join("\n"), exact);
         window.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
         assert!(window.fields[0].lines().join("\n").ends_with("IGHT"));
+        let before = window.fields[0].lines().join("\n");
         window.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(window.fields[0].lines().join("\n"), before);
+        assert!(window.error.as_deref().unwrap().contains("Ctrl+Alt+S"));
         assert!(window.checking.is_none());
     }
 

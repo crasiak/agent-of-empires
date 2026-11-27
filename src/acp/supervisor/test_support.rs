@@ -17,7 +17,20 @@ use crate::acp::runner_lifecycle::{Lease, ProcessControl, RunnerIdentity, Settle
 use crate::acp::state::{AcpSessionId, Event};
 use crate::process::worker_registry::{self, WorkerRecord};
 
+pub(crate) struct AgentKeyGate {
+    pub(crate) before_read: Arc<tokio::sync::Barrier>,
+    pub(crate) after_read: Arc<tokio::sync::Barrier>,
+}
+
 impl<S: BroadcastSink> Supervisor<S> {
+    pub(crate) fn test_gate_prompt_publish(&self, gate: Arc<tokio::sync::Barrier>) {
+        *self.prompt_publish_gate.lock().unwrap() = Some(gate);
+    }
+
+    pub(crate) fn test_gate_agent_key(&self, gate: AgentKeyGate) {
+        *self.agent_key_gate.lock().unwrap() = Some(gate);
+    }
+
     pub(crate) fn with_process_control(mut self, control: Arc<dyn ProcessControl>) -> Self {
         self.process_control = control;
         self
@@ -56,6 +69,35 @@ impl<S: BroadcastSink> Supervisor<S> {
         lock_recover(&self.lifecycle)
             .install(lease, None)
             .expect("install");
+    }
+
+    /// Land a command-recording worker on a start `test_hold_starting` left open, as a resume
+    /// does once its worker is ready, waking anyone waiting for it.
+    pub(crate) async fn test_land_worker_cmd_recording(
+        &self,
+        session_id: &str,
+        lease: &Lease,
+    ) -> Arc<std::sync::Mutex<Vec<&'static str>>> {
+        let (client, _tx, cmds) =
+            AcpClient::fake_for_test_cmd_recording(AcpSessionId(format!("acp-{session_id}")));
+        let mut workers = self.workers.lock().await;
+        lease.record_prime(crate::acp::runner_lifecycle::PrimeOwnership::NotPrime);
+        self.test_finish_starting(lease);
+        workers.insert(
+            session_id.to_string(),
+            WorkerHandle {
+                client: Arc::new(client),
+                native_session_id: None,
+                drain_task: tokio::spawn(async {}),
+                restart_history: vec![],
+                kind: WorkerKind::Attached,
+                launch_epoch: lease.epoch(),
+                lease: lease.clone(),
+            },
+        );
+        drop(workers);
+        self.worker_notify.notify_waiters();
+        cmds
     }
 
     /// End a teardown `test_hold_stopping` left open.
@@ -128,6 +170,32 @@ impl<S: BroadcastSink> Supervisor<S> {
         respawn.epoch()
     }
 
+    /// Leave a running fixture part-way through a respawn, so it reports `Resuming`.
+    pub(crate) async fn test_begin_respawn(&self, session_id: &str) {
+        let mut workers = self.workers.lock().await;
+        let handle = workers.get_mut(session_id).expect("test worker");
+        let (respawn, _) = lock_recover(&self.lifecycle)
+            .begin_respawn(&handle.lease)
+            .expect("fixture is running");
+        handle.lease = respawn;
+    }
+
+    /// Parks an approval on the session's installed worker; see
+    /// [`AcpClient::test_park_approval`].
+    pub(crate) async fn test_park_approval(
+        &self,
+        session_id: &str,
+        nonce: &str,
+    ) -> tokio::sync::oneshot::Receiver<
+        Option<(crate::acp::approvals::ApprovalDecision, Option<String>)>,
+    > {
+        let client = self
+            .client_for_session(session_id)
+            .await
+            .expect("test worker");
+        client.test_park_approval(Nonce(nonce.to_string())).await
+    }
+
     /// A fake worker whose command loop records every command it receives.
     pub(crate) async fn test_insert_worker_cmd_recording(
         &self,
@@ -138,6 +206,16 @@ impl<S: BroadcastSink> Supervisor<S> {
         self.test_install_handle(session_id, client, WorkerKind::Stdio, None)
             .await;
         cmds
+    }
+
+    /// The event a fresh worker publishes once attached; it clears a startup error.
+    pub(crate) fn test_publish_worker_attached(&self, session_id: &str) {
+        self.publish_next(
+            session_id,
+            &Event::AcpSessionAssigned {
+                acp_session_id: format!("acp-{session_id}"),
+            },
+        );
     }
 
     pub(crate) async fn test_install_attached(&self, session_id: &str, identity: RunnerIdentity) {
@@ -276,11 +354,11 @@ pub(super) fn channel_sink() -> (
     let tmp = tempfile::TempDir::new().unwrap();
     let event_store = Arc::new(EventStore::open(&tmp.path().join("acp.db"), 1000).unwrap());
     let (tx, rx) = broadcast::channel(16);
-    let sink = Arc::new(ChannelSink {
+    let sink = Arc::new(ChannelSink::new(
         tx,
-        event_store: event_store.clone(),
-        control_cache: Arc::new(crate::acp::control_cache::ControlStateCache::new()),
-    });
+        event_store.clone(),
+        Arc::new(crate::acp::control_cache::ControlStateCache::new()),
+    ));
     (sink, event_store, rx, tmp)
 }
 
@@ -348,11 +426,13 @@ pub(crate) fn spawn_request(session_id: &str) -> SpawnRequest {
         agent: "claude-code".into(),
         tool: "claude-code".into(),
         cwd: std::env::temp_dir(),
+        config_path: std::env::temp_dir(),
         additional_dirs: vec![],
         provider_env: vec![],
         model: None,
         effort: None,
         effort_explicit: false,
+        model_config: Default::default(),
         stored_acp_session_id: None,
         fork_from: None,
         sandbox_continuation: super::SandboxContinuation::Persisted,
@@ -381,11 +461,13 @@ pub(super) fn runner_config(socket_path: PathBuf) -> SpawnConfig {
             env_allowlist: None,
         },
         cwd: std::env::temp_dir(),
+        config_path: std::env::temp_dir(),
         additional_dirs: vec![],
         provider_env: vec![],
         host_environment: vec![],
         default_effort: None,
         default_effort_explicit: false,
+        default_model_config: Default::default(),
         default_mode: None,
         default_model: None,
         socket_path: Some(socket_path),
@@ -417,6 +499,26 @@ pub(super) fn worker_record(session_id: &str, pid: u32, socket: PathBuf) -> Work
         None,
         None,
     )
+}
+
+/// Record `agent` as the session's runner. A live record keeps its control socket bound for as
+/// long as the returned listener lives; a dead one has no socket, as after an unclean death.
+pub(crate) fn save_agent_record(
+    session_id: &str,
+    agent: &str,
+    live: bool,
+) -> Option<std::os::unix::net::UnixListener> {
+    let socket = worker_registry::socket_path_for(session_id).unwrap();
+    let mut record = worker_record(session_id, std::process::id(), socket.clone());
+    record.agent_name = agent.into();
+    record.agent_key = agent.into();
+    worker_registry::save(&record).unwrap();
+    live.then(|| {
+        std::os::unix::net::UnixListener::bind(crate::process::worker::control_socket_sibling(
+            &socket,
+        ))
+        .unwrap()
+    })
 }
 
 pub(crate) fn save_record(session_id: &str, pid: u32, generation: u64) {
@@ -609,6 +711,7 @@ pub(crate) struct HeldAttachRunner {
     entered: Option<tokio::sync::oneshot::Receiver<()>>,
     disconnected: Option<tokio::sync::oneshot::Receiver<()>>,
     completion: Option<tokio::sync::oneshot::Sender<()>>,
+    trailer: Arc<std::sync::atomic::AtomicBool>,
     peer: tokio::task::JoinHandle<()>,
     child: std::process::Child,
     _socket_dir: tempfile::TempDir,
@@ -658,6 +761,8 @@ impl HeldAttachRunner {
         let (entered_tx, entered) = tokio::sync::oneshot::channel();
         let (disconnected_tx, disconnected) = tokio::sync::oneshot::channel();
         let (completion, completion_rx) = tokio::sync::oneshot::channel();
+        let trailer = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let peer_trailer = trailer.clone();
         let id = session_id.to_owned();
         let peer = tokio::spawn(async move {
             let mut entered_tx = Some(entered_tx);
@@ -748,6 +853,26 @@ impl HeldAttachRunner {
                             )
                             .await
                             .unwrap();
+                            if peer_trailer.load(std::sync::atomic::Ordering::SeqCst) {
+                                control_protocol::write_frame(
+                                    &mut stream,
+                                    &ControlBody::Notify {
+                                        method: "session/update".into(),
+                                        params: serde_json::json!({
+                                            "sessionId": native_id,
+                                            "update": {
+                                                "sessionUpdate": "agent_message_chunk",
+                                                "content": {
+                                                    "type": "text",
+                                                    "text": "after the retained completion"
+                                                }
+                                            }
+                                        }),
+                                    },
+                                )
+                                .await
+                                .unwrap();
+                            }
                         }
                         frame => panic!("unexpected attach request: {frame:?}"),
                     }
@@ -760,10 +885,19 @@ impl HeldAttachRunner {
             entered: Some(entered),
             disconnected: Some(disconnected),
             completion: Some(completion),
+            trailer,
             peer,
             child,
             _socket_dir: socket_dir,
         }
+    }
+
+    /// Sends one more chunk after the completion, so a test can wait on the frames
+    /// being processed in order before asserting that the completion did nothing.
+    pub(crate) fn with_trailing_chunk(self) -> Self {
+        self.trailer
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self
     }
 
     pub(crate) async fn entered(&mut self) {

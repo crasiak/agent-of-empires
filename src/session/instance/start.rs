@@ -231,7 +231,7 @@ impl Instance {
         drop(lifecycle_lock);
         drop(title_lock);
         let hook_result =
-            self.run_pre_launch_hooks(skip_on_launch, storage, None, Some(generation));
+            self.run_agent_launch_hooks(skip_on_launch, storage, None, Some(generation));
         let (_title_lock, _lifecycle_lock) =
             self.reacquire_launch_locks_after_hooks(storage, generation, hook_result)?;
         if let Some((key, _)) = handoff {
@@ -940,6 +940,10 @@ impl Instance {
             .as_ref()
             .filter(|execution| execution.inputs.container.is_none())
             .map(|execution| execution.program.clone());
+        self.launch_resolved_executable = self
+            .launch_executable
+            .as_deref()
+            .and_then(|program| std::fs::canonicalize(program).ok());
         if let Some(execution) = prepared.execution.take() {
             let attested = self.attested_claude_store_route(&execution);
             self.active_execution = Some(ActiveExecution {
@@ -1387,6 +1391,148 @@ mod tests {
             );
             assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), expected);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn ledger_pi_spawn_uses_the_qualified_physical_working_directory() {
+        use crate::session::test_support::{isolate_app_dir_at, EnvGuard};
+        use crate::tmux::test_helpers::{pane_field, tmux_available, TmuxTestSession};
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        if !tmux_available() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let _home = isolate_app_dir_at(temp.path());
+        let root = temp.path().canonicalize().unwrap();
+        let _environment = EnvGuard::unset(&[
+            "TMUX",
+            "TMUX_PANE",
+            "AOE_DAEMON_URL",
+            "PI_CODING_AGENT_DIR",
+            "PI_CODING_AGENT_SESSION_DIR",
+        ])
+        .and_set("AOE_TMUX_SOCKET", root.join("tmux.sock"));
+        crate::session::afk::authority::migration::initialize_test(
+            &crate::session::get_app_dir().unwrap(),
+        );
+        crate::session::config::update_config(|config| {
+            config.systemd.enabled = false;
+            config.session.smart_rename = false;
+        })
+        .unwrap();
+        crate::session::config::update_app_state(|state| state.has_acknowledged_agent_hooks = true)
+            .unwrap();
+        let cwd = root.join("physical scratch");
+        let logical = root.join("logical 'scratch'");
+        let store_root = root.join("immutable");
+        let core = store_root.join("pi-core");
+        let runtime = root.join("profile/runtime");
+        for directory in [&cwd, &core.join("bin"), &runtime.join("sessions")] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        symlink(&cwd, &logical).unwrap();
+        std::fs::write(core.join("entry.js"), "").unwrap();
+        symlink(core.join("entry.js"), core.join("bin/pi")).unwrap();
+        std::fs::write(core.join("bin/node"), "#!/bin/sh\nprintf '%s\\n' '--session-id --session --session-dir --extension --no-extensions --no-tools --no-mcp --no-context-files --no-skills --no-prompt-templates'\n").unwrap();
+        std::fs::set_permissions(
+            core.join("bin/node"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let lock = serde_json::json!({"schema":"ledger-profile-lock-v4","hash":"a".repeat(64),"profile":{"name":"aoe-capture-personal"},"binding":{"harness":"pi","account_class":"pi-home","launcher":"direct","launch":{"share":["conversation"]},"core":{"mode":"immutable","path":core}}});
+        let description = serde_json::json!({"profile":"aoe-capture-personal","harness":"pi","target":"direct","cwd":cwd,"ready":true,"state":"current","executable":core.join("bin/node"),"arguments":[core.join("entry.js")],"environment":{"PI_CODING_AGENT_DIR":runtime,"PI_CODING_AGENT_SESSION_DIR":"","NODE_OPTIONS":"","PI_SKIP_VERSION_CHECK":"1"},"run_guard":{"contract":"ledger.run-guard/v1","digest":"b".repeat(64),"expected_lock":"a".repeat(64),"conversation_namespace":runtime.join("sessions")}});
+        std::fs::write(root.join("lock.json"), serde_json::to_vec(&lock).unwrap()).unwrap();
+        std::fs::write(
+            root.join("description.json"),
+            serde_json::to_vec(&description).unwrap(),
+        )
+        .unwrap();
+        let quote =
+            |p: &std::path::Path| crate::session::environment::shell_escape(p.to_str().unwrap());
+        let ledger = root.join("ledger");
+        let observed = root.join("run-cwd");
+        let script = format!(
+            r#"#!/bin/sh
+if [ "$1" = run ]; then
+    printf '%s\n' "$PWD" > {}
+    [ "$PWD" = {} ] || exit 23
+    exec /bin/sleep 60
+fi
+printf '%s\0' "$@" > {}
+AOE_LEDGER_FIXTURE_ROOT={} {} --exact session::instance::execution::tests::ledger_pi_metadata_helper --ignored > {} 2>&1 || exit 94
+/bin/cat {}
+"#,
+            quote(&observed),
+            quote(&cwd),
+            quote(&root.join("argv")),
+            quote(&root),
+            quote(&std::env::current_exe().unwrap()),
+            quote(&root.join("helper.log")),
+            quote(&root.join("response.json"))
+        );
+        std::fs::write(&ledger, script).unwrap();
+        std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _core =
+            crate::session::ledger_pi::test_support::CoreRootFixture::new(&cwd, &store_root);
+        let keeper = TmuxTestSession::new("ledger-cwd-fixture");
+        assert!(crate::tmux::tmux_command()
+            .args([
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-s",
+                keeper.name(),
+                "exec /bin/sleep 60"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let mut instance =
+            crate::session::instance::test_helpers::tool_instance("pi", logical.to_str().unwrap());
+        instance.source_profile = "ledger-cwd-fixture".into();
+        instance.command = format!(
+            "{} run pi --profile aoe-capture-personal --",
+            quote(&ledger)
+        );
+        super::super::test_helpers::set_pi_integration(&instance, "identity");
+        let storage = crate::session::Storage::new_unwatched(&instance.source_profile).unwrap();
+        storage
+            .update(|rows, _| {
+                rows.push(instance.clone());
+                Ok(())
+            })
+            .unwrap();
+        let session = instance.tmux_session().unwrap();
+        let _pane = TmuxTestSession::from_name(session.name());
+        let started = instance.start_with_size_opts(None, true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let actual = loop {
+            if let Ok(value) = std::fs::read_to_string(&observed) {
+                if value.ends_with('\n') {
+                    break value;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture Ledger did not receive the launch"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(
+            actual.trim_end(),
+            cwd.to_str().unwrap(),
+            "guarded run must use the same CWD spelling as Describe"
+        );
+        assert!(started.is_ok(), "{started:?}");
+        assert_eq!(
+            pane_field(session.name(), "#{pane_start_path}"),
+            logical.to_str().unwrap()
+        );
+        assert_eq!(instance.project_path, logical.to_str().unwrap());
     }
 
     #[cfg(unix)]
@@ -2127,7 +2273,9 @@ else:
             shadow_mounts: Vec::new(),
         };
         let launch = |inputs_container: Option<ContainerExecutionSnapshot>| NativeExecution {
-            agent: crate::agents::get_agent("claude").expect("claude is a known agent"),
+            agent: crate::session::instance::execution::NativeAgent::Builtin(
+                crate::agents::get_agent("claude").expect("claude is a known agent"),
+            ),
             binding: ExecutionBinding {
                 agent: "claude".into(),
                 stores: vec![store.clone()],

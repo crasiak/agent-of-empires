@@ -23,6 +23,8 @@ use crate::plugin::ui_state::UiSnapshot;
 
 /// The daemon revives, waits for readiness and delivers before it answers a terminal send.
 const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const PLUGIN_PREVIEW_TIMEOUT: std::time::Duration =
+    crate::plugin::EXECUTION_BUDGET.saturating_add(std::time::Duration::from_secs(10 * 60));
 
 /// One active plugin command as the daemon reports it (`GET
 /// /api/plugins/commands`), the source of truth the structured view resolves
@@ -55,8 +57,8 @@ pub(crate) struct RetainedReplay {
     /// Inclusive ranges of successfully folded sequence numbers.
     pub coverage: Vec<(u64, u64)>,
     pub incomplete: bool,
+    pub history_identity: String,
 }
-
 #[derive(serde::Deserialize)]
 struct PluginCommandsEnvelope {
     commands: Vec<PluginCommandView>,
@@ -114,6 +116,16 @@ pub enum HttpError {
     ApprovalGone,
     #[error("daemon is read-only (started with --read-only); request refused")]
     ReadOnly,
+    #[error("local plugin directories and --dev require a verified local Daemon Unix socket peer; remote endpoints cannot read Client paths")]
+    LocalPluginSourceRequired,
+    #[error("plugin preview failed; check the source, manifest, host compatibility and GitHub access on the Daemon host")]
+    PluginPreviewFailed,
+    #[error("another plugin operation is running; wait for its outcome and inspect the plugin state before submitting again")]
+    PluginJobActive,
+    #[error("plugin is already installed; run `aoe plugin update <id>` or `aoe plugin uninstall <id>` on the same Daemon endpoint")]
+    PluginAlreadyInstalled,
+    #[error("subagent cannot be cancelled")]
+    SubagentNotCancellable,
     #[error("reviving the session is required to accept this prompt; retry without --no-revive")]
     RevivalRequired,
     #[error("Auto-name skipped: the session changed or no title could be applied")]
@@ -187,6 +199,26 @@ impl HttpClient {
         decode_replay(res).await
     }
 
+    pub(crate) async fn replay_retained_page(
+        &self,
+        session_id: &str,
+        since: u64,
+        limit: u64,
+        identity: Option<&str>,
+    ) -> Result<ReplayResponse, HttpError> {
+        let url = format!(
+            "{}/api/sessions/{}/acp/replay?since={since}&limit={limit}&view=retained",
+            self.endpoint.base_url,
+            path_segment(session_id)?,
+        );
+        let mut request = self.http.get(&url);
+        if let Some(identity) = identity {
+            request = request.query(&[("history_identity", identity)]);
+        }
+        let res = check_status(self.execute(request).await?, session_id)?;
+        decode_replay(res).await
+    }
+
     /// Live replay stops for reset after loss; retained replay keeps reading.
     async fn replay_pages(
         &self,
@@ -199,12 +231,39 @@ impl HttpClient {
         let mut cursor = since;
         let mut target = None;
         let mut any_lost = false;
+        let mut expected_identity: Option<String> = None;
         loop {
             let page = if matches!(kind, ReplayKind::Rows) {
                 self.replay_rows_page(session_id, cursor, page_size).await?
+            } else if matches!(kind, ReplayKind::Retained) {
+                self.replay_retained_page(
+                    session_id,
+                    cursor,
+                    page_size,
+                    expected_identity.as_deref(),
+                )
+                .await?
             } else {
                 self.replay_page(session_id, cursor, page_size).await?
             };
+            if matches!(kind, ReplayKind::Retained) {
+                let identity = page
+                    .history_identity
+                    .as_deref()
+                    .ok_or(HttpError::Transport)?;
+                if expected_identity
+                    .as_deref()
+                    .is_some_and(|expected| expected != identity)
+                {
+                    return Err(HttpError::Server {
+                        status: StatusCode::CONFLICT,
+                        body: "retained history changed during read".into(),
+                    });
+                }
+                if expected_identity.is_none() {
+                    expected_identity = Some(identity.to_owned());
+                }
+            }
             let cap = *target.get_or_insert(page.highest_seq);
             let (highest_seq, lowest_seq, lost) = (page.highest_seq, page.lowest_seq, page.lost);
             any_lost |= lost;
@@ -246,6 +305,7 @@ impl HttpClient {
             next_cursor: None,
             has_more: false,
             rows: None,
+            history_identity: None,
         })
     }
 
@@ -301,13 +361,17 @@ impl HttpClient {
         let mut snapshot_highest = 0;
         let mut incomplete = false;
         let mut coverage: Vec<(u64, u64)> = Vec::new();
+        let mut history_identity = None;
         let (_, _, reported_lost) = self
             .replay_pages(
                 session_id,
                 0,
                 page_size,
                 ReplayKind::Retained,
-                |page, cap| {
+                |mut page, cap| {
+                    if history_identity.is_none() {
+                        history_identity = page.history_identity.take();
+                    }
                     snapshot_highest = cap;
                     for frame in page.frames {
                         if frame.seq <= last_seen || frame.seq > cap {
@@ -332,6 +396,7 @@ impl HttpClient {
             highest_seq: snapshot_highest,
             coverage,
             incomplete,
+            history_identity: history_identity.ok_or(HttpError::Transport)?,
         })
     }
 
@@ -381,12 +446,27 @@ impl HttpClient {
         message: &str,
         no_revive: bool,
     ) -> Result<(), HttpError> {
+        self.send_message_with_idle_guard(session_id, message, no_revive, false)
+            .await
+    }
+
+    /// Opt-in terminal safety guard; structured prompts use the typed prompt route.
+    pub async fn send_message_with_idle_guard(
+        &self,
+        session_id: &str,
+        message: &str,
+        no_revive: bool,
+        require_idle: bool,
+    ) -> Result<(), HttpError> {
         let url = format!(
             "{}/api/sessions/{}/send",
             self.endpoint.base_url,
             path_segment(session_id)?
         );
-        let body = serde_json::json!({ "message": message, "revive": !no_revive });
+        let mut body = serde_json::json!({ "message": message, "revive": !no_revive });
+        if require_idle {
+            body["require_idle"] = serde_json::Value::Bool(true);
+        }
         let res = self
             .execute(self.http.post(&url).json(&body).timeout(SEND_TIMEOUT))
             .await?;
@@ -523,6 +603,23 @@ impl HttpClient {
             path_segment(session_id)?
         );
         let res = self.execute(self.http.post(&url)).await?;
+        check_status(res, session_id)?;
+        Ok(())
+    }
+
+    /// `POST /api/sessions/{id}/acp/subagents/{child_id}/cancel`; the parent
+    /// turn keeps running. A 409 means the child cannot be cancelled.
+    pub async fn cancel_subagent(&self, session_id: &str, child_id: &str) -> Result<(), HttpError> {
+        let url = format!(
+            "{}/api/sessions/{}/acp/subagents/{}/cancel",
+            self.endpoint.base_url,
+            path_segment(session_id)?,
+            path_segment(child_id)?
+        );
+        let res = self.execute(self.http.post(&url)).await?;
+        if res.status() == StatusCode::CONFLICT {
+            return Err(HttpError::SubagentNotCancellable);
+        }
         check_status(res, session_id)?;
         Ok(())
     }
@@ -873,6 +970,94 @@ impl HttpClient {
         })
     }
 
+    pub async fn preview_plugin_install(
+        &self,
+        body: &crate::daemon::InstallPreviewBody,
+    ) -> Result<crate::plugin::install::InstallConsent, HttpError> {
+        let url = format!("{}/api/plugins/install/preview", self.endpoint.base_url);
+        let response = check_global_status(
+            self.execute(
+                self.http
+                    .post(url)
+                    .json(body)
+                    .timeout(PLUGIN_PREVIEW_TIMEOUT),
+            )
+            .await?,
+        )?;
+        Ok(crate::daemon::decode_json(response).await?)
+    }
+
+    pub async fn install_plugin(
+        &self,
+        body: &crate::daemon::StartInstallBody,
+    ) -> Result<crate::daemon::PluginJobAccepted, HttpError> {
+        let url = format!("{}/api/plugins/install", self.endpoint.base_url);
+        let response = check_global_status(
+            self.execute_elevated(|| self.http.post(&url).json(body))
+                .await?,
+        )?;
+        Ok(crate::daemon::decode_json(response).await?)
+    }
+
+    pub async fn preview_plugin_update(
+        &self,
+        id: &str,
+    ) -> Result<crate::plugin::install::UpdatePreview, HttpError> {
+        let url = format!(
+            "{}/api/plugins/{}/update/preview",
+            self.endpoint.base_url,
+            path_segment(id)?,
+        );
+        let response = check_global_status(
+            self.execute(self.http.get(url).timeout(PLUGIN_PREVIEW_TIMEOUT))
+                .await?,
+        )?;
+        Ok(crate::daemon::decode_json(response).await?)
+    }
+
+    pub async fn update_plugin(
+        &self,
+        id: &str,
+        body: &crate::daemon::ApplyUpdateBody,
+    ) -> Result<crate::daemon::PluginJobAccepted, HttpError> {
+        let url = format!(
+            "{}/api/plugins/{}/update/apply",
+            self.endpoint.base_url,
+            path_segment(id)?,
+        );
+        let response = check_global_status(
+            self.execute_elevated(|| self.http.post(&url).json(body))
+                .await?,
+        )?;
+        Ok(crate::daemon::decode_json(response).await?)
+    }
+
+    pub async fn uninstall_plugin(
+        &self,
+        id: &str,
+    ) -> Result<crate::daemon::PluginJobAccepted, HttpError> {
+        let url = format!(
+            "{}/api/plugins/{}/uninstall",
+            self.endpoint.base_url,
+            path_segment(id)?,
+        );
+        let response = check_global_status(self.execute_elevated(|| self.http.post(&url)).await?)?;
+        Ok(crate::daemon::decode_json(response).await?)
+    }
+
+    pub async fn plugin_job(
+        &self,
+        id: &str,
+    ) -> Result<crate::daemon::PluginJobResponse, HttpError> {
+        let url = format!(
+            "{}/api/plugins/jobs/{}",
+            self.endpoint.base_url,
+            path_segment(id)?,
+        );
+        let response = check_global_status(self.execute(self.http.get(url)).await?)?;
+        Ok(crate::daemon::decode_json(response).await?)
+    }
+
     /// `GET /api/log-level`, or `PATCH` it first when `patch` is given.
     pub async fn log_level(
         &self,
@@ -1147,6 +1332,10 @@ fn classify_code(
     match (status, code) {
         (StatusCode::UNAUTHORIZED, _) => HttpError::Unauthorized,
         (_, Some(ApiErrorCode::ReadOnly)) => HttpError::ReadOnly,
+        (_, Some(ApiErrorCode::LocalPluginSourceRequired)) => HttpError::LocalPluginSourceRequired,
+        (_, Some(ApiErrorCode::PluginPreviewFailed)) => HttpError::PluginPreviewFailed,
+        (_, Some(ApiErrorCode::PluginJobActive)) => HttpError::PluginJobActive,
+        (_, Some(ApiErrorCode::PluginAlreadyInstalled)) => HttpError::PluginAlreadyInstalled,
         (_, Some(ApiErrorCode::NoRevive)) => HttpError::RevivalRequired,
         (_, Some(ApiErrorCode::PendingTargetGone)) => HttpError::ApprovalGone,
         (_, Some(ApiErrorCode::SmartRenameSkipped)) => HttpError::SmartRenameSkipped,
@@ -1387,7 +1576,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = HttpClient::new(endpoint(&base, None)).unwrap();
+        let client = HttpClient::new(endpoint(&base, Some("replay-fixture-token"))).unwrap();
         let (rows, lost) = client.replay_rows_paged(&id, 0, 2).await.unwrap();
         assert!(lost);
         assert_eq!(
@@ -1445,6 +1634,7 @@ mod tests {
                     name: "Ask".into(),
                     kind: "execute".into(),
                     args_preview: "{}".into(),
+                    prompt: None,
                     started_at: at,
                     parent_tool_call_id: None,
                     memory_recall: None,
@@ -1488,7 +1678,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = HttpClient::new(endpoint(
             &format!("http://{}", listener.local_addr().unwrap()),
-            None,
+            Some("replay-fixture-token"),
         ))
         .unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1535,7 +1725,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retained_replay_caches_only_the_folded_snapshot_cap() {
+    async fn retained_endpoint_returns_raw_conflict_for_stale_identity() {
+        use crate::acp::state::Event;
+        use axum::{routing::get, Router};
+        let instance = crate::session::Instance::new("stale retained identity", "/tmp");
+        let id = instance.id.clone();
+        let state = crate::server::test_support::build_test_app_state(vec![instance]);
+        state
+            .acp_event_store
+            .record(&id, 1, &Event::ThinkingStarted)
+            .unwrap();
+        let app = Router::new()
+            .route(
+                "/api/sessions/{id}/acp/replay",
+                get(crate::server::api::acp_replay),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/api/sessions/{id}/acp/replay",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = reqwest::Client::new();
+        let initial: serde_json::Value = http
+            .get(&url)
+            .query(&[("view", "retained")])
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        state
+            .acp_event_store
+            .record(&id, 2, &Event::ThinkingEnded)
+            .unwrap();
+        let response = http
+            .get(&url)
+            .query(&[
+                ("view", "retained"),
+                (
+                    "history_identity",
+                    initial["history_identity"].as_str().unwrap(),
+                ),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn retained_client_rejects_two_successful_pages_with_distinct_identities() {
+        use axum::{routing::get, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route("/api/sessions/{id}/acp/replay", get({
+            let calls = Arc::clone(&calls);
+            move || {
+                let page = calls.fetch_add(1, Ordering::SeqCst);
+                async move { axum::Json(serde_json::json!({
+                    "frames": [{"session_id": "fixture", "seq": page + 1, "event": {"AgentMessageChunk": {"text": "readable", "message_id": null}}}],
+                    "lost": false, "highest_seq": 2, "lowest_seq": 1,
+                    "next_cursor": page + 1, "has_more": page == 0,
+                    "history_identity": if page == 0 { "first-snapshot" } else { "different-snapshot" }
+                })) }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = HttpClient::new(endpoint(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            Some("replay-fixture-token"),
+        ))
+        .unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let error = client
+            .replay_retained_paged("fixture", 1)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            matches!(error, HttpError::Server { status, .. } if status == StatusCode::CONFLICT)
+        );
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn retained_replay_rejects_content_changes_during_pagination() {
         use crate::acp::{protocol::ReplayQuery, state::Event};
         use axum::{
             extract::{Path, Query, State},
@@ -1595,25 +1881,15 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = HttpClient::new(endpoint(
             &format!("http://{}", listener.local_addr().unwrap()),
-            None,
+            Some("replay-fixture-token"),
         ))
         .unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let first = client.replay_retained_paged(&id, 2).await.unwrap();
+        let error = client.replay_retained_paged(&id, 2).await.unwrap_err();
         assert!(appended.load(Ordering::SeqCst));
-        assert_eq!(first.highest_seq, 3);
-        assert!(!first.incomplete);
-        assert!(first
-            .transcript
-            .rows
-            .iter()
-            .any(|row| row.text.contains("retained-3")));
-        assert!(!first
-            .transcript
-            .rows
-            .iter()
-            .any(|row| row.text.contains("retained-4")));
-        assert_eq!(client.replay(&id, u64::MAX).await.unwrap().highest_seq, 4);
+        assert!(
+            matches!(error, HttpError::Server { status, .. } if status == StatusCode::CONFLICT)
+        );
         let next = client.replay_retained_paged(&id, 2).await.unwrap();
         assert_eq!(next.highest_seq, 4);
         assert!(next
@@ -1681,7 +1957,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = HttpClient::new(endpoint(
             &format!("http://{}", listener.local_addr().unwrap()),
-            None,
+            Some("replay-fixture-token"),
         ))
         .unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1965,6 +2241,153 @@ mod tests {
                     | (504, HttpError::SmartRenameTimeout)
             ));
             assert!(!error.to_string().contains("secret-provider-credential"));
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_previews_outlive_an_elapsed_general_http_budget() {
+        use axum::{body::Bytes, routing::get, Router};
+        use std::sync::Arc;
+        use tokio::sync::{oneshot, Mutex, Notify};
+
+        for install in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (started, accepted) = oneshot::channel();
+            let (release, resume) = oneshot::channel();
+            let preview = Arc::new(Mutex::new(Some((started, resume))));
+            let health = Arc::new(Notify::new());
+            let health_handler = health.clone();
+            let app = Router::new()
+                .route(
+                    "/api/sessions",
+                    get(move || {
+                        let health = health_handler.clone();
+                        async move {
+                            health.notified().await;
+                            StatusCode::OK
+                        }
+                    }),
+                )
+                .fallback(move |_: Bytes| {
+                    let preview = preview.clone();
+                    async move {
+                        let (started, resume) = preview.lock().await.take().unwrap();
+                        started.send(()).unwrap();
+                        let _ = resume.await;
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            [("AoE-Error-Code", "preview_failed")],
+                        )
+                    }
+                });
+            let (shutdown, stopped) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = stopped.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+            let mut client =
+                HttpClient::new(endpoint(&format!("http://{address}"), Some("token"))).unwrap();
+            client.http = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_millis(200))
+                .build()
+                .unwrap();
+            let request_client = client.clone();
+            let request = tokio::spawn(async move {
+                if install {
+                    request_client
+                        .preview_plugin_install(&crate::daemon::InstallPreviewBody {
+                            source: "gh:acme/fixture".into(),
+                            dev: false,
+                        })
+                        .await
+                        .map(|_| ())
+                } else {
+                    request_client
+                        .preview_plugin_update("acme.fixture")
+                        .await
+                        .map(|_| ())
+                }
+            });
+            accepted.await.unwrap();
+            let ordinary = client.health_check().await;
+            health.notify_one();
+            let _ = release.send(());
+            let preview = request.await.unwrap();
+            let _ = shutdown.send(());
+            server.await.unwrap();
+            assert!(
+                matches!(
+                    ordinary,
+                    Err(HttpError::Daemon(crate::daemon::DaemonClientError::Timeout))
+                ),
+                "{ordinary:?}"
+            );
+            assert!(
+                matches!(preview, Err(HttpError::PluginPreviewFailed)),
+                "{preview:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_failures_use_fixed_headers_without_waiting_for_sensitive_bodies() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (status, code) in [
+            (502, "preview_failed"),
+            (409, "plugin_job_active"),
+            (409, "plugin_already_installed"),
+            (502, "plugin_already_installed"),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                stream
+                    .write_all(format!(
+                        "HTTP/1.1 {status} Error\r\nAoE-Error-Code: {code}\r\nContent-Length: 999999999\r\n\r\nsecret-daemon-credential"
+                    ).as_bytes())
+                    .await
+                    .unwrap();
+                std::future::pending::<()>().await;
+            });
+            let client =
+                HttpClient::new(endpoint(&format!("http://{address}"), Some("token"))).unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(2), async {
+                if code == "plugin_job_active" {
+                    client.uninstall_plugin("acme.fixture").await.err().unwrap()
+                } else {
+                    client
+                        .preview_plugin_install(&crate::daemon::InstallPreviewBody {
+                            source: "gh:acme/fixture".into(),
+                            dev: false,
+                        })
+                        .await
+                        .err()
+                        .unwrap()
+                }
+            })
+            .await;
+            server.abort();
+            let _ = server.await;
+            let error = error.unwrap();
+            match (status, code, &error) {
+                (502, "preview_failed", HttpError::PluginPreviewFailed)
+                | (409, "plugin_job_active", HttpError::PluginJobActive)
+                | (409, "plugin_already_installed", HttpError::PluginAlreadyInstalled) => {}
+                (502, "plugin_already_installed", HttpError::Server { body, .. }) => {
+                    assert!(body.is_empty());
+                }
+                other => panic!("unexpected refusal classification: {other:?}"),
+            }
+            assert!(!error.to_string().contains("secret-daemon-credential"));
         }
     }
 

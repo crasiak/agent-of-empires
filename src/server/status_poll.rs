@@ -312,7 +312,7 @@ async fn refresh_sandbox_stores(state: &Arc<AppState>) {
             let config = store.configuration(Some(store.storage().profile()))?;
             let container = crate::containers::DockerContainer::from_session_id(&id);
             let command = row.get_tool_command();
-            if row.predates_shared_credential(&container, command, &config.session)? {
+            if row.predates_shared_credential(&container, &command, &config.session)? {
                 return Ok(());
             }
             store.check_available()?;
@@ -323,7 +323,7 @@ async fn refresh_sandbox_stores(state: &Arc<AppState>) {
                 &config,
                 &id,
                 &row.tool,
-                Some(command),
+                Some(&command),
                 CredentialFold::SeedOnly,
                 auto_propagate,
             );
@@ -360,13 +360,21 @@ pub(super) async fn maintenance_loop(
     let mut acp_parked: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut acp_capacity_deferred: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    let mut acp_stop_notified = std::collections::HashSet::new();
     let mut last_container_check: Option<std::time::Instant> = None;
     let mut last_credential_refresh = std::time::Instant::now();
     let mut last_purge_recovery = std::time::Instant::now() - std::time::Duration::from_secs(30);
     loop {
+        let mut rate_limit_parked = false;
         tokio::select! {
             _ = state.shutdown.cancelled() => return,
             _ = interval.tick() => {}
+            _ = state.acp_supervisor.rate_limit_parked() => rate_limit_parked = true,
+        }
+        // A fresh park is registered by this pass's resume step, so the reaper acts on it from
+        // the next one; both run now instead of waiting out the reaper cadence.
+        if rate_limit_parked {
+            acp_reap_cadence.rate_limit = None;
         }
         {
             let rows = state.instances.read().await;
@@ -401,8 +409,12 @@ pub(super) async fn maintenance_loop(
             &mut acp_respawn_history,
             &mut acp_parked,
             &mut acp_capacity_deferred,
+            &mut acp_stop_notified,
         )
         .await;
+        if rate_limit_parked {
+            acp_reap_cadence.rate_limit = None;
+        }
         reap_idle_sessions(&state, &mut last_session_idle_reap).await;
         update_sleep_inhibit(
             &state,
@@ -419,7 +431,34 @@ pub(super) async fn status_poll_loop(
         Arc<std::collections::HashMap<String, super::reload::SandboxHealth>>,
     >,
 ) {
+    status_poll_loop_observed(
+        state,
+        health,
+        #[cfg(test)]
+        None,
+    )
+    .await;
+}
+
+pub(super) async fn status_poll_loop_observed(
+    state: Arc<AppState>,
+    health: tokio::sync::watch::Receiver<
+        Arc<std::collections::HashMap<String, super::reload::SandboxHealth>>,
+    >,
+    #[cfg(test)] completed: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+) {
+    #[cfg(test)]
+    struct TickCompleted(Option<tokio::sync::mpsc::UnboundedSender<()>>);
+    #[cfg(test)]
+    impl Drop for TickCompleted {
+        fn drop(&mut self) {
+            if let Some(sender) = &self.0 {
+                let _ = sender.send(());
+            }
+        }
+    }
     let mut first = true;
+    let mut sessions_cache = super::reload::ProfileSessionsCache::default();
     loop {
         if !first {
             let period = if state.runtime.has_subscribers() {
@@ -434,6 +473,8 @@ pub(super) async fn status_poll_loop(
             }
         }
         first = false;
+        #[cfg(test)]
+        let _completed = TickCompleted(completed.clone());
         let namespace = state.profile_namespace.read().await;
         let reload_lane = state.reload_lane.lock().await;
         let snapshot_guard = state.session_service.disk_reload_guard().await;
@@ -467,8 +508,7 @@ pub(super) async fn status_poll_loop(
         let file_watch_for_poll = state.file_watch.clone();
         let sandbox_health = health.borrow().clone();
         let updated = tokio::task::spawn_blocking(move || {
-            let (mut loaded, mut metadata) =
-                super::reload::load_profiles_for_reload(&file_watch_for_poll);
+            let (mut loaded, mut metadata) = sessions_cache.load(&file_watch_for_poll);
             drop(snapshot_guard);
             seed_tick_tracking(&mut loaded.instances, &prev_tracking);
             crate::tmux::refresh_session_cache();
@@ -531,7 +571,7 @@ pub(super) async fn status_poll_loop(
                 &supplementary_prev,
                 pane_metadata.as_ref().ok(),
             );
-            (loaded, metadata, live_structured_worker_records(), prev)
+            (loaded, metadata, live_structured_worker_records(), prev, sessions_cache)
         })
         .await;
 
@@ -545,11 +585,13 @@ pub(super) async fn status_poll_loop(
                         profiles: Vec::new(),
                     })
                     .await;
+                sessions_cache = super::reload::ProfileSessionsCache::default();
                 continue;
             }
         };
         {
-            let (mut loaded, metadata, live_worker_records, prev) = updated;
+            let (mut loaded, metadata, live_worker_records, prev, returned_cache) = updated;
+            sessions_cache = returned_cache;
             let instances = &mut loaded.instances;
             let unread_enabled = crate::session::unread_enabled();
             let mut bundles: std::collections::HashMap<String, PassiveTransitionWrites> =

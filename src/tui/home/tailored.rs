@@ -1,5 +1,6 @@
 mod document;
 mod history;
+mod intake;
 mod research;
 mod workshop;
 
@@ -13,11 +14,16 @@ use ratatui::{prelude::*, widgets::*};
 use ratatui_textarea::{TextArea, WrapMode};
 
 use super::{live_send, HomeView};
-use crate::session::tailored::{CaptureAccount, TailoredRequest};
+use crate::session::tailored::{
+    quick::{QuickPlan, QuickPreset},
+    CaptureAccount, TailoredRequest,
+};
 use crate::tui::styles::Theme;
 
 pub(in crate::tui) struct TailoredWindow {
     picker: HistoryPicker,
+    intake: Option<intake::IntakeWindow>,
+    intake_draft: Option<intake::IntakeWindow>,
     research: Option<research::ResearchWindow>,
     workshop: Option<workshop::WorkshopWindow>,
     document: Option<document::DocumentWindow>,
@@ -50,6 +56,10 @@ pub(in crate::tui) struct TailoredWindow {
     focus: usize,
     error: Option<String>,
     checking: Option<mpsc::Receiver<Result<TailoredRequest, String>>>,
+    checking_quick: Option<mpsc::Receiver<Result<QuickPlan, String>>>,
+    starting_quick: Option<QuickStart>,
+    #[cfg(test)]
+    quick_starter: Option<Box<dyn Fn(crate::session::Instance) -> document::StartWorker + Send>>,
     terminal: Option<CaptureTerminal>,
     account_rect: Rect,
     immediately_rect: Rect,
@@ -60,7 +70,67 @@ pub(super) enum WindowAction {
     Continue,
     Close,
     Open(String),
+    Quick(QuickPreset),
+    Intake,
+    ConfigureIntake(crate::session::tailored::intake::IntakeBrief),
     Visibility { id: String, hidden: bool },
+}
+
+struct QuickStart {
+    id: String,
+    worker: document::StartWorker,
+    foreground: bool,
+}
+
+enum TailoredStart {
+    Capture(TailoredRequest),
+    Quick(QuickPlan),
+}
+
+impl TailoredStart {
+    fn data(self, profile: String) -> anyhow::Result<crate::tui::dialogs::NewSessionData> {
+        let (profile, title, path, scratch, launch) = match self {
+            Self::Capture(request) => (
+                profile,
+                "Capture an idea",
+                String::new(),
+                true,
+                request.launch()?,
+            ),
+            Self::Quick(plan) => (
+                plan.preset.aoe_profile().into(),
+                plan.preset.title(),
+                plan.cwd.to_string_lossy().into_owned(),
+                false,
+                plan.launch,
+            ),
+        };
+        Ok(crate::tui::dialogs::NewSessionData {
+            profile,
+            title: title.into(),
+            title_typed: false,
+            path,
+            group: "Tailored".into(),
+            tool: "pi".into(),
+            worktree_enabled: false,
+            worktree_branch: None,
+            create_new_branch: false,
+            base_branch: None,
+            extra_repo_paths: Vec::new(),
+            workspace: false,
+            sandbox: false,
+            sandbox_image: String::new(),
+            yolo_mode: false,
+            extra_env: Vec::new(),
+            hook_env: Vec::new(),
+            extra_args: launch.extra_args,
+            command_override: launch.command,
+            scratch,
+            fork_seed: None,
+            structured: false,
+            intake: false,
+        })
+    }
 }
 
 struct CaptureTerminal {
@@ -95,10 +165,24 @@ fn idea_textarea() -> TextArea<'static> {
     textarea
 }
 
+fn is_capture_newline(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Enter => {
+            key.modifiers.is_empty()
+                || key.modifiers == KeyModifiers::SHIFT
+                || key.modifiers == KeyModifiers::ALT
+        }
+        KeyCode::Char('j') => key.modifiers == KeyModifiers::CONTROL,
+        _ => false,
+    }
+}
+
 impl TailoredWindow {
     pub(super) fn new(account: CaptureAccount) -> Self {
         Self {
             picker: HistoryPicker::default(),
+            intake: None,
+            intake_draft: None,
             research: None,
             workshop: None,
             document: None,
@@ -128,6 +212,10 @@ impl TailoredWindow {
             focus: 0,
             error: None,
             checking: None,
+            checking_quick: None,
+            starting_quick: None,
+            #[cfg(test)]
+            quick_starter: None,
             terminal: None,
             account_rect: Rect::default(),
             immediately_rect: Rect::default(),
@@ -146,15 +234,55 @@ impl TailoredWindow {
         self.history_refreshed = Some(Instant::now());
     }
 
+    fn pi_launch_pending(&self) -> bool {
+        self.checking_quick.is_some()
+            || self.starting_quick.is_some()
+            || self.checking.is_some()
+            || self.starting_document.is_some()
+    }
+
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> WindowAction {
         if key.kind == KeyEventKind::Release || self.hidden {
             return WindowAction::Continue;
         }
-        let editing = self.terminal.is_none()
-            && (self.document.is_some()
-                || self.workshop.is_some()
-                || self.research.is_some()
-                || self.composing && self.focus == 0);
+        if self.checking_quick.is_some() || self.starting_quick.is_some() {
+            return if key.code == KeyCode::Esc
+                || super::bindings::is_tailored_shortcut(&key)
+                || (key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::CONTROL)
+            {
+                WindowAction::Close
+            } else {
+                WindowAction::Continue
+            };
+        }
+        if self.intake.is_some() {
+            if key.kind == KeyEventKind::Press {
+                if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::CONTROL {
+                    return WindowAction::Close;
+                }
+                if key.code == KeyCode::F(2) {
+                    self.park_forms();
+                    self.composing = false;
+                    self.picker.recent();
+                    return WindowAction::Continue;
+                }
+            }
+            return self.intake.as_mut().unwrap().key(key);
+        }
+        let capture_editing = self.composing
+            && self.focus == 0
+            && self.terminal.is_none()
+            && self.document.is_none()
+            && self.workshop.is_none()
+            && self.research.is_none();
+        let editing = capture_editing
+            || self.terminal.is_none()
+                && (self.document.is_some() || self.workshop.is_some() || self.research.is_some());
+        // Normalize terminal newline aliases before repeat events reach the textarea.
+        if capture_editing && self.checking.is_none() && is_capture_newline(key) {
+            self.idea.insert_newline();
+            return WindowAction::Continue;
+        }
         if key.kind == KeyEventKind::Repeat {
             if let Some(terminal) = &self.terminal {
                 if let live_send::LiveDispatch::Send(key) = live_send::translate(key) {
@@ -165,6 +293,7 @@ impl TailoredWindow {
                 return WindowAction::Continue;
             }
             if editing
+                && !(key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL))
                 && key.code != KeyCode::Tab
                 && key.code != KeyCode::BackTab
                 && !matches!(key.code, KeyCode::F(_) | KeyCode::Esc)
@@ -190,13 +319,7 @@ impl TailoredWindow {
             return WindowAction::Close;
         }
         if key.code == KeyCode::F(2) && self.checking.is_none() {
-            self.terminal = None;
-            self.starting_document_foreground = false;
-            self.park_forms();
-            self.composing = false;
-            self.picker.recent();
-            self.history_refreshed = None;
-            self.error = None;
+            self.show_picker();
             return WindowAction::Continue;
         }
         if key.modifiers.is_empty()
@@ -279,12 +402,6 @@ impl TailoredWindow {
             KeyCode::Tab => self.focus = (self.focus + 1) % 4,
             KeyCode::BackTab => self.focus = (self.focus + 3) % 4,
             KeyCode::Enter if key.modifiers == KeyModifiers::CONTROL => self.submit(),
-            KeyCode::Enter
-                if self.focus == 0
-                    && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
-            {
-                self.idea.insert_newline();
-            }
             KeyCode::Enter if self.focus == 3 && key.modifiers.is_empty() => self.submit(),
             KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right | KeyCode::Enter
                 if self.focus == 1 =>
@@ -305,6 +422,8 @@ impl TailoredWindow {
     fn picker_action(&mut self, action: HistoryAction) -> WindowAction {
         match action {
             HistoryAction::None => WindowAction::Continue,
+            HistoryAction::Quick(preset) => WindowAction::Quick(preset),
+            HistoryAction::Intake => WindowAction::Intake,
             HistoryAction::Document => {
                 self.open_document(self.document_account);
                 WindowAction::Continue
@@ -334,7 +453,11 @@ impl TailoredWindow {
     }
 
     pub(super) fn handle_paste(&mut self, text: &str) {
-        if self.hidden {
+        if self.hidden || self.checking_quick.is_some() || self.starting_quick.is_some() {
+            return;
+        }
+        if let Some(intake) = &mut self.intake {
+            intake.paste(text);
             return;
         }
         if let Some(workshop) = &mut self.workshop {
@@ -365,8 +488,11 @@ impl TailoredWindow {
     }
 
     pub(super) fn handle_click(&mut self, col: u16, row: u16) -> WindowAction {
-        if self.hidden {
+        if self.hidden || self.checking_quick.is_some() || self.starting_quick.is_some() {
             return WindowAction::Continue;
+        }
+        if let Some(intake) = &mut self.intake {
+            return intake.click(col, row);
         }
         if self
             .document
@@ -422,7 +548,20 @@ impl TailoredWindow {
         self.error = None;
     }
 
+    fn show_picker(&mut self) {
+        self.terminal = None;
+        self.starting_document_foreground = false;
+        self.park_forms();
+        self.composing = false;
+        self.picker.recent();
+        self.history_refreshed = None;
+        self.error = None;
+    }
+
     fn park_forms(&mut self) {
+        if let Some(form) = self.intake.take() {
+            self.intake_draft = Some(form);
+        }
         if let Some(form) = self.research.take() {
             self.research_drafts.push(form);
         }
@@ -492,6 +631,8 @@ impl TailoredWindow {
         let width = area.width.saturating_sub(4).min(
             if self.terminal.is_some() || self.research.is_some() || self.workshop.is_some() {
                 140
+            } else if self.intake.is_none() && self.document.is_none() && !self.composing {
+                112
             } else {
                 84
             },
@@ -499,6 +640,8 @@ impl TailoredWindow {
         let height = area.height.saturating_sub(4).min(
             if self.terminal.is_some() || self.research.is_some() || self.workshop.is_some() {
                 48
+            } else if self.intake.is_some() {
+                36
             } else if self.composing || self.document.is_some() {
                 20
             } else {
@@ -523,6 +666,10 @@ impl TailoredWindow {
         self.account_rect = Rect::default();
         self.immediately_rect = Rect::default();
         self.submit_rect = Rect::default();
+        if let Some(intake) = &mut self.intake {
+            intake.render(frame, inner, theme);
+            return;
+        }
         if let Some(document) = &mut self.document {
             document.render(frame, inner, theme);
             return;
@@ -647,7 +794,7 @@ impl TailoredWindow {
             Paragraph::new(if self.checking.is_some() {
                 "Checking minimal Ledger profile…"
             } else {
-                "Enter newline · Ctrl+Enter capture · Tab controls · F2 history · Esc/Ctrl+Q close"
+                "Enter newline · Tab to Capture, Enter · Ctrl+Enter capture · F2 history · Esc close"
             })
             .style(style(self.focus == 3)),
             rows[5],
@@ -674,6 +821,10 @@ impl HomeView {
     }
 
     pub(super) fn open_tailored(&mut self) {
+        self.open_tailored_window(true);
+    }
+
+    fn open_tailored_window(&mut self, resume_terminal: bool) {
         if self.tailored_window.is_some() {
             return;
         }
@@ -688,10 +839,44 @@ impl HomeView {
         window.profile = profile;
         let terminal = window.suspended_terminal.take();
         self.tailored_window = Some(window);
-        if let Some(id) = terminal {
+        if let Some(id) = terminal.filter(|_| resume_terminal) {
             self.apply_tailored_action(WindowAction::Open(id));
         }
         self.refresh_tailored_history();
+    }
+
+    pub(super) fn open_tailored_picker(&mut self) {
+        self.open_tailored_window(false);
+        if let Some(window) = &mut self.tailored_window {
+            if window.checking.is_some()
+                || window.checking_quick.is_some()
+                || window.starting_quick.is_some()
+            {
+                window.error =
+                    Some("Wait for the pending Tailored launch before changing forms".into());
+                return;
+            }
+            window.show_picker();
+        }
+    }
+
+    pub(super) fn open_intake(&mut self) {
+        self.open_tailored_window(false);
+        if let Some(window) = &mut self.tailored_window {
+            if window.checking.is_some()
+                || window.checking_quick.is_some()
+                || window.starting_quick.is_some()
+            {
+                window.error =
+                    Some("Wait for the accepted Tailored launch before opening intake".into());
+                return;
+            }
+            window.terminal = None;
+            window.starting_document_foreground = false;
+            window.park_forms();
+            window.intake = Some(intake::IntakeWindow::default());
+            window.composing = false;
+        }
     }
 
     pub(super) fn handle_tailored_key(&mut self, key: KeyEvent) {
@@ -715,6 +900,14 @@ impl HomeView {
     fn apply_tailored_action(&mut self, action: WindowAction) {
         match action {
             WindowAction::Continue => {}
+            WindowAction::Quick(preset) => self.prepare_quick(preset),
+            WindowAction::Intake => {
+                if let Some(window) = &mut self.tailored_window {
+                    window.park_forms();
+                    window.intake = Some(window.intake_draft.take().unwrap_or_default());
+                }
+            }
+            WindowAction::ConfigureIntake(brief) => self.configure_intake(brief),
             WindowAction::Close => {
                 if let Some(mut window) = self.tailored_window.take() {
                     window.hidden = true;
@@ -751,6 +944,16 @@ impl HomeView {
                             draft.inputs.account,
                             Some(draft),
                         ));
+                    }
+                    return;
+                }
+                if self.get_instance(&id).is_some_and(|instance| {
+                    crate::session::tailored::quick::preset(instance).is_some()
+                }) {
+                    if let Err(error) = self.start_quick_terminal(&id, true) {
+                        if let Some(window) = &mut self.tailored_window {
+                            window.error = Some(format!("{error:#}"));
+                        }
                     }
                     return;
                 }
@@ -836,6 +1039,55 @@ impl HomeView {
                 self.refresh_tailored_history();
             }
         }
+    }
+
+    fn prepare_quick(&mut self, preset: QuickPreset) {
+        if self
+            .tailored_window
+            .as_ref()
+            .is_none_or(TailoredWindow::pi_launch_pending)
+        {
+            return;
+        }
+        let selected = (|| -> anyhow::Result<()> {
+            preset.verify_profile()?;
+            if self.active_profile.as_deref() != Some(preset.aoe_profile()) {
+                self.switch_profile(Some(preset.aoe_profile().into()))?;
+                self.open_tailored_window(false);
+            }
+            Ok(())
+        })();
+        if let Err(error) = selected {
+            self.open_tailored_window(false);
+            if let Some(window) = &mut self.tailored_window {
+                window.error = Some(format!("Quick profile selection failed: {error:#}"));
+            }
+            return;
+        }
+        let window = self.tailored_window.as_mut().expect("Quick owner");
+        if window.pi_launch_pending() {
+            return;
+        }
+        window.show_picker();
+        let (tx, rx) = mpsc::channel();
+        window.checking_quick = Some(rx);
+        window.error = Some(format!("Checking {} AoE profile…", preset.title()));
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<QuickPlan> {
+                let home = dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Home directory unavailable"))?;
+                let plan = preset.plan(&home)?;
+                anyhow::ensure!(
+                    plan.cwd.is_dir(),
+                    "Quick workspace does not exist: {}",
+                    plan.cwd.display()
+                );
+                preset.verify_profile()?;
+                Ok(plan)
+            })()
+            .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(result);
+        });
     }
 
     fn refresh_tailored_history(&mut self) -> bool {
@@ -956,6 +1208,48 @@ impl HomeView {
                     .is_none_or(|last| last.elapsed() >= Duration::from_secs(2))
         });
         let mut refreshed = (refresh && self.refresh_tailored_history()) || workshop_changed;
+        let quick_started = self
+            .tailored_window
+            .as_ref()
+            .and_then(|window| window.starting_quick.as_ref())
+            .and_then(|start| {
+                start
+                    .worker
+                    .take_result()
+                    .map(|(id, outcome)| (start.id.clone(), id, start.foreground, outcome))
+            });
+        if let Some((id, returned_id, requested_foreground, outcome)) = quick_started {
+            let window = self.tailored_window.as_ref().expect("Quick owner");
+            let foreground = requested_foreground && !window.hidden;
+            let profile = window.profile.clone();
+            let result = (|| -> anyhow::Result<Option<CaptureTerminal>> {
+                anyhow::ensure!(returned_id == id, "Quick start identity was not confirmed");
+                if !self.storages.contains_key(&profile) {
+                    let storage = crate::session::Storage::new(&profile, self.file_watch.clone())?;
+                    self.storages.insert(profile, storage);
+                }
+                self.reload()?;
+                outcome.map_err(anyhow::Error::msg)?;
+                if foreground {
+                    self.ready_capture_terminal(&id).map(Some)
+                } else {
+                    Ok(None)
+                }
+            })();
+            if let Some(window) = &mut self.tailored_window {
+                window.starting_quick = None;
+                window.history_refreshed = None;
+                match result {
+                    Ok(terminal) => {
+                        window.terminal = terminal;
+                        window.error = None;
+                        if window.hidden && requested_foreground { window.suspended_terminal = Some(id); }
+                    }
+                    Err(error) => window.error = Some(format!("Quick start not confirmed for {id}: {error:#}. The existing Session is preserved; inspect history before retrying.")),
+                }
+            }
+            return true;
+        }
         let started = self
             .tailored_window
             .as_ref()
@@ -1091,6 +1385,44 @@ impl HomeView {
             }
             return true;
         }
+        let quick = self
+            .tailored_window
+            .as_ref()
+            .and_then(|window| window.checking_quick.as_ref())
+            .map(|rx| rx.try_recv());
+        if let Some(result) = quick {
+            match result {
+                Err(mpsc::TryRecvError::Empty) => return refreshed,
+                ready => {
+                    let previous = self
+                        .tailored_window
+                        .as_ref()
+                        .filter(|window| !window.hidden)
+                        .and_then(|_| self.selected_session.clone());
+                    let result = ready
+                        .unwrap_or_else(|_| Err("Quick profile check stopped unexpectedly".into()))
+                        .map_err(anyhow::Error::msg)
+                        .and_then(|plan| {
+                            let id = self.create_tailored_pi(TailoredStart::Quick(plan))?;
+                            self.start_quick_terminal(&id, true)
+                        });
+                    if let Some(id) = previous {
+                        self.select_and_reveal_session(&id);
+                    }
+                    if let Some(window) = &mut self.tailored_window {
+                        window.checking_quick = None;
+                        window.history_refreshed = None;
+                        match result {
+                            Ok(()) => {
+                                window.composing = false;
+                            }
+                            Err(error) => window.error = Some(format!("Quick create/start not confirmed: {error:#}. Inspect history before creating another copy.")),
+                        }
+                    }
+                    return true;
+                }
+            }
+        }
         let result = self
             .tailored_window
             .as_ref()
@@ -1147,39 +1479,58 @@ impl HomeView {
     }
 
     fn launch_capture(&mut self, request: TailoredRequest) -> anyhow::Result<String> {
-        let launch = request.launch()?;
-        let id = self.create_session(crate::tui::dialogs::NewSessionData {
-            profile: self
-                .tailored_window
-                .as_ref()
-                .expect("capture owner")
-                .profile
-                .clone(),
-            title: "Capture an idea".into(),
-            title_typed: false,
-            path: String::new(),
-            group: "Tailored".into(),
-            tool: "pi".into(),
-            worktree_enabled: false,
-            worktree_branch: None,
-            create_new_branch: false,
-            base_branch: None,
-            extra_repo_paths: Vec::new(),
-            sandbox: false,
-            sandbox_image: String::new(),
-            yolo_mode: false,
-            extra_env: Vec::new(),
-            hook_env: Vec::new(),
-            extra_args: launch.extra_args,
-            command_override: launch.command,
-            scratch: true,
-            fork_seed: None,
-            structured: false,
-        })?;
+        let id = self.create_tailored_pi(TailoredStart::Capture(request))?;
         self.try_mutate_instance_writeback_on_err(&id, |instance| {
             instance.ensure_pane_ready().map_err(Into::into)
         })?;
         Ok(id)
+    }
+
+    fn create_tailored_pi(&mut self, start: TailoredStart) -> anyhow::Result<String> {
+        if let TailoredStart::Quick(plan) = &start {
+            plan.preset.verify_profile()?;
+        }
+        let window = self.tailored_window.as_ref().expect("Tailored owner");
+        let profile = window.profile.clone();
+        let reveal = !window.hidden || matches!(&start, TailoredStart::Capture(_));
+        self.create_session_with_reveal(start.data(profile)?, reveal)
+    }
+
+    fn start_quick_terminal(&mut self, id: &str, foreground: bool) -> anyhow::Result<()> {
+        let instance = self
+            .get_instance(id)
+            .filter(|instance| crate::session::tailored::quick::preset(instance).is_some())
+            .ok_or_else(|| anyhow::anyhow!("Quick Session disappeared"))?
+            .clone();
+        let window = self
+            .tailored_window
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Quick window closed"))?;
+        anyhow::ensure!(
+            window.starting_quick.is_none(),
+            "A Quick start is already in progress"
+        );
+        if foreground {
+            window.terminal = None;
+            window.composing = false;
+            window.error = Some(
+                "Starting Quick conversation with the profile's configured Pi launcher…".into(),
+            );
+        }
+        #[cfg(test)]
+        let worker = if let Some(start) = &window.quick_starter {
+            start(instance)
+        } else {
+            document::StartWorker::spawn(instance)
+        };
+        #[cfg(not(test))]
+        let worker = document::StartWorker::spawn(instance);
+        window.starting_quick = Some(QuickStart {
+            id: id.to_owned(),
+            worker,
+            foreground,
+        });
+        Ok(())
     }
 
     fn start_document_terminal(&mut self, id: &str, foreground: bool) -> anyhow::Result<()> {
@@ -1271,6 +1622,659 @@ mod tests {
     }
 
     #[test]
+    fn quick_start_uses_knowledge_and_the_existing_account_profile_not_the_picker_owner() {
+        for (preset, expected_profile) in [
+            (QuickPreset::Work, "work-headroom-ledger"),
+            (QuickPreset::Personal, "personal-sub-headroom-ledger"),
+        ] {
+            let data =
+                TailoredStart::Quick(preset.plan(std::path::Path::new("/home/test")).unwrap())
+                    .data("aoe-storage-owner".into())
+                    .unwrap();
+            assert_eq!(data.profile, expected_profile);
+            assert_eq!(data.path, "/home/test/knowledge");
+            assert_eq!(data.title, preset.title());
+            assert!(!data.scratch && !data.workspace && !data.worktree_enabled && !data.sandbox);
+            assert!(data.extra_repo_paths.is_empty());
+            assert!(
+                data.command_override.is_empty(),
+                "Quick bypassed the account profile's configured Pi launcher"
+            );
+        }
+        let data = TailoredStart::Capture(TailoredRequest {
+            preset: "capture-idea".into(),
+            account: CaptureAccount::Personal,
+            idea: "an idea".into(),
+            immediately: false,
+            document: None,
+        })
+        .data("aoe-storage-owner".into())
+        .unwrap();
+        assert_eq!(data.profile, "aoe-storage-owner");
+        assert!(data.scratch);
+        assert!(data.path.is_empty());
+        assert!(data.command_override.contains("aoe-capture-personal"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn quick_creation_switches_to_existing_owner_without_background_focus_or_draft_transfer() {
+        use crate::session::{Instance, Storage};
+        for (preset, owner, launcher) in [
+            (
+                QuickPreset::Work,
+                "work-headroom-ledger",
+                "configured-work-pi",
+            ),
+            (
+                QuickPreset::Personal,
+                "personal-sub-headroom-ledger",
+                "configured-personal-pi",
+            ),
+        ] {
+            for (background, selected_foreground) in [(false, false), (true, false), (true, true)] {
+                let root = tempfile::tempdir().unwrap();
+                let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+                let knowledge = root.path().join("knowledge");
+                std::fs::create_dir(&knowledge).unwrap();
+                let _ledger = crate::session::test_support::install_login_shell_path_command(
+                    root.path(),
+                    "ledger",
+                    "#!/bin/sh\nexit 99\n",
+                );
+                let path = crate::session::get_profile_dir_path(owner).unwrap();
+                std::fs::create_dir_all(&path).unwrap();
+                let config = format!("[session.agent_command_override]\npi = \"{launcher}\"\n");
+                std::fs::write(path.join("config.toml"), &config).unwrap();
+                let mut view = HomeView::new_for_test(
+                    Some("picker-owner".into()),
+                    crate::tmux::AvailableTools::with_tools(&["pi"]),
+                    crate::file_watch::FileWatchService::noop(),
+                )
+                .unwrap();
+                view.open_tailored();
+                view.tailored_window
+                    .as_mut()
+                    .unwrap()
+                    .idea
+                    .insert_str("original draft");
+                view.prepare_quick(preset);
+                let prepared = view
+                    .tailored_window
+                    .as_mut()
+                    .unwrap()
+                    .checking_quick
+                    .take()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                assert_eq!(view.active_profile.as_deref(), Some(owner));
+                let plan = prepared.unwrap();
+                let (release, pending) = mpsc::channel();
+                let (started, arrivals) = mpsc::channel();
+                let window = view.tailored_window.as_mut().unwrap();
+                assert_eq!(window.profile, owner);
+                assert!(window.idea.lines().join("\n").is_empty());
+                window.checking_quick = Some(pending);
+                window.quick_starter = Some(Box::new(move |instance| {
+                    let (finish, pending) = mpsc::channel();
+                    started.send((instance.id, finish)).unwrap();
+                    document::StartWorker::from_receiver_for_test(pending)
+                }));
+                if background {
+                    let storage = Storage::new_unwatched("other-profile").unwrap();
+                    let mut foreground = Instance::new("Foreground", knowledge.to_str().unwrap());
+                    foreground.source_profile = "other-profile".into();
+                    foreground.tool = "pi".into();
+                    foreground.command = "configured-foreground-pi".into();
+                    foreground.group_path = "foreground-group".into();
+                    let rows = if selected_foreground {
+                        storage
+                            .update(|rows, _| {
+                                rows.push(foreground.clone());
+                                Ok(())
+                            })
+                            .unwrap();
+                        vec![
+                            crate::server::api::sessions::session_response_from_instance(
+                                &foreground,
+                                false,
+                            ),
+                        ]
+                    } else {
+                        Vec::new()
+                    };
+                    let snapshot = super::super::tests::fixture_snapshot(rows, owner, "test", 1);
+                    view.session_feed.publish_for_test(
+                        crate::tui::session_feed::SessionFeedResult::Snapshot(std::sync::Arc::new(
+                            snapshot,
+                        )),
+                    );
+                    view.apply_session_feed();
+                    view.switch_profile(Some("other-profile".into())).unwrap();
+                    if selected_foreground {
+                        view.select_session_by_id(&foreground.id);
+                        assert_eq!(
+                            view.selected_session.as_deref(),
+                            Some(foreground.id.as_str())
+                        );
+                    }
+                    view.open_tailored();
+                    view.tailored_window
+                        .as_mut()
+                        .unwrap()
+                        .idea
+                        .insert_str("other profile draft");
+                }
+                assert!(
+                    view.info_dialog.is_none(),
+                    "fixture already has a foreground modal"
+                );
+                let foreground_state = |view: &HomeView| {
+                    (
+                        view.cursor,
+                        view.selected_session.clone(),
+                        view.selected_group.clone(),
+                        view.selected_group_profile.clone(),
+                        view.preview_scroll_offset,
+                        view.retained_scroll_offset,
+                        format!("{:?}", view.flat_items),
+                    )
+                };
+                let before = foreground_state(&view);
+                release.send(Ok(plan)).unwrap();
+                view.tick_tailored();
+                let (id, finish) = arrivals.recv_timeout(Duration::from_secs(5)).unwrap();
+                let storage = Storage::new_unwatched(owner).unwrap();
+                let stored = storage.load().unwrap();
+                assert_eq!(stored.len(), 1);
+                assert_eq!(stored[0].id, id);
+                assert_eq!(stored[0].effective_profile(), owner);
+                assert_eq!(stored[0].command, launcher);
+                assert_eq!(
+                    crate::session::tailored::quick::preset(&stored[0]),
+                    Some(preset)
+                );
+                assert_eq!(
+                    stored[0].project_path,
+                    knowledge.canonicalize().unwrap().to_string_lossy()
+                );
+                if background {
+                    assert!(
+                        view.info_dialog.is_none(),
+                        "background Quick opened a global modal"
+                    );
+                    assert_eq!(
+                        foreground_state(&view),
+                        before,
+                        "background Quick changed the foreground model or selection"
+                    );
+                }
+                finish
+                    .send((id.clone(), Err("injected native start refusal".into())))
+                    .unwrap();
+                view.tick_tailored();
+                if background {
+                    assert!(
+                        view.info_dialog.is_none(),
+                        "background Quick completion opened a global modal"
+                    );
+                    assert_eq!(
+                        foreground_state(&view),
+                        before,
+                        "background native completion changed the foreground"
+                    );
+                }
+                assert_eq!(
+                    view.active_profile.as_deref(),
+                    Some(if background { "other-profile" } else { owner })
+                );
+                let origin = view
+                    .retained_tailored_windows
+                    .iter()
+                    .find(|window| window.profile == "picker-owner")
+                    .unwrap();
+                assert_eq!(origin.idea.lines().join("\n"), "original draft");
+                if background {
+                    assert_eq!(
+                        view.tailored_window
+                            .as_ref()
+                            .unwrap()
+                            .idea
+                            .lines()
+                            .join("\n"),
+                        "other profile draft"
+                    );
+                }
+                let owner_window = view
+                    .tailored_window
+                    .iter()
+                    .chain(&view.retained_tailored_windows)
+                    .find(|window| window.profile == owner)
+                    .unwrap();
+                assert!(owner_window.starting_quick.is_none());
+                assert!(owner_window.error.as_ref().unwrap().contains(&id));
+                assert_eq!(
+                    storage.load().unwrap().len(),
+                    1,
+                    "Quick created a replacement"
+                );
+                assert!(Storage::new_unwatched("picker-owner")
+                    .unwrap()
+                    .load()
+                    .unwrap()
+                    .is_empty());
+                assert_eq!(
+                    std::fs::read_to_string(path.join("config.toml")).unwrap(),
+                    config
+                );
+                for window in view
+                    .tailored_window
+                    .iter_mut()
+                    .chain(&mut view.retained_tailored_windows)
+                {
+                    if let Some((_, pending)) = window.workshop_history.take() {
+                        let _ = pending.recv_timeout(Duration::from_secs(5)).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn quick_selection_parks_the_restored_destination_form_without_discarding_its_draft() {
+        for preset in [QuickPreset::Work, QuickPreset::Personal] {
+            let root = tempfile::tempdir().unwrap();
+            let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+            std::fs::create_dir(root.path().join("knowledge")).unwrap();
+            std::fs::create_dir_all(
+                crate::session::get_profile_dir_path(preset.aoe_profile()).unwrap(),
+            )
+            .unwrap();
+            let mut view = HomeView::new_for_test(
+                Some("picker-owner".into()),
+                crate::tmux::AvailableTools::with_tools(&["pi"]),
+                crate::file_watch::FileWatchService::noop(),
+            )
+            .unwrap();
+            view.open_tailored();
+            let mut destination = TailoredWindow::new(preset.account());
+            destination.profile = preset.aoe_profile().into();
+            destination.hidden = true;
+            destination.open_document(preset.account());
+            destination
+                .document
+                .as_mut()
+                .unwrap()
+                .paste("https://example.org/retained.md");
+            view.retained_tailored_windows.push(destination);
+            view.prepare_quick(preset);
+            view.tailored_window
+                .as_mut()
+                .unwrap()
+                .checking_quick
+                .take()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            for window in view
+                .tailored_window
+                .iter_mut()
+                .chain(&mut view.retained_tailored_windows)
+            {
+                if let Some((_, pending)) = window.workshop_history.take() {
+                    let _ = pending.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            }
+            let destination = view.tailored_window.as_ref().unwrap();
+            assert!(
+                destination.document.is_none(),
+                "restored Document form hides Quick"
+            );
+            assert_eq!(destination.document_drafts.len(), 1);
+            assert_eq!(
+                destination.document_drafts[0].url_text_for_test(),
+                "https://example.org/retained.md"
+            );
+            assert!(!destination.composing);
+            assert!(destination.error.as_ref().unwrap().contains("Checking"));
+        }
+    }
+
+    #[test]
+    fn quick_selection_preserves_capture_draft_and_defers_preflight() {
+        let mut window = TailoredWindow::new(CaptureAccount::Personal);
+        window.idea.insert_str("capture draft");
+        window.immediately = true;
+        for preset in [QuickPreset::Work, QuickPreset::Personal] {
+            assert!(
+                matches!(window.picker_action(HistoryAction::Quick(preset)), WindowAction::Quick(selected) if selected == preset)
+            );
+            assert_eq!(window.idea.lines().join("\n"), "capture draft");
+            assert_eq!(window.account, CaptureAccount::Personal);
+            assert!(window.immediately);
+            assert!(window.checking.is_none() && window.checking_quick.is_none());
+        }
+    }
+
+    #[test]
+    fn quick_preflight_blocks_duplicate_input_without_consuming_capture_draft() {
+        let mut window = TailoredWindow::new(CaptureAccount::Work);
+        window.idea.insert_str("capture draft");
+        let (_sender, receiver) = mpsc::channel();
+        window.checking_quick = Some(receiver);
+        for key in [key(KeyCode::Enter), key(KeyCode::F(2)), key(KeyCode::Tab)] {
+            assert!(matches!(window.handle_key(key), WindowAction::Continue));
+        }
+        window.handle_paste("extra");
+        assert!(matches!(window.handle_click(1, 1), WindowAction::Continue));
+        assert_eq!(window.idea.lines().join("\n"), "capture draft");
+        assert!(window.checking_quick.is_some());
+        assert!(matches!(
+            window.handle_key(key(KeyCode::Esc)),
+            WindowAction::Close
+        ));
+    }
+
+    #[test]
+    fn picker_details_distinguish_same_title_sessions_at_eighty_by_twenty_four() {
+        let mut window = TailoredWindow::new(CaptureAccount::Personal);
+        let first = crate::session::tailored::history::HistoryEntry {
+            id: "first".into(),
+            profile: "personal-profile".into(),
+            title: "Saved capture".into(),
+            account: CaptureAccount::Personal,
+            input_preview: "First task preview".into(),
+            status: "idle".into(),
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            hidden: false,
+            research: false,
+            workshop: false,
+        };
+        let mut second = first.clone();
+        second.id = "second".into();
+        second.input_preview = "Second task preview".into();
+        let history_template = first.clone();
+        window.picker.replace_rows(vec![first, second]);
+        window.picker.handle_paste("Saved capture");
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut draw = |window: &mut TailoredWindow| {
+            terminal
+                .draw(|frame| window.render(frame, frame.area(), &Theme::default()))
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .chunks(80)
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let first = draw(&mut window);
+        assert!(first.contains("First task preview"));
+        assert!(first.contains("Created:"));
+        assert!(first.contains("AoE Profile: personal-profile"));
+        assert!(!first.contains("Second task preview"));
+        window.handle_key(key(KeyCode::Down));
+        let second = draw(&mut window);
+        assert!(second.contains("Second task preview"));
+        assert!(!second.contains("First task preview"));
+        assert!(
+            matches!(window.handle_key(key(KeyCode::Enter)), WindowAction::Open(id) if id == "second")
+        );
+        window.picker = HistoryPicker::default();
+        window.picker.handle_paste(QuickPreset::Work.title());
+        let quick = draw(&mut window);
+        assert!(quick.contains("Blank conversation at ~/knowledge."));
+        assert!(quick.contains("Uses this profile's configured Pi launcher."));
+        assert!(quick.contains("AoE Profile: work-headroom-ledger"));
+        let mut first = history_template;
+        first.id = "long-first".into();
+        first.input_preview = format!("{}FIRST-END", "界".repeat(150));
+        let mut second = first.clone();
+        second.id = "long-second".into();
+        second.input_preview = format!("{}SECOND-END", "界".repeat(150));
+        window.picker = HistoryPicker::default();
+        window.picker.replace_rows(vec![first, second]);
+        window.picker.handle_paste("Saved capture");
+        assert!(!draw(&mut window).contains("FIRST-END"));
+        window.handle_key(key(KeyCode::PageDown));
+        assert!(draw(&mut window).contains("FIRST-END"));
+        for _ in 0..8 {
+            window.handle_key(key(KeyCode::PageDown));
+        }
+        assert!(draw(&mut window).contains("FIRST-END"));
+        window.handle_key(key(KeyCode::PageUp));
+        assert!(!draw(&mut window).contains("FIRST-END"));
+        window.handle_key(key(KeyCode::PageDown));
+        window.handle_key(key(KeyCode::Down));
+        let reset = draw(&mut window);
+        assert!(!reset.contains("FIRST-END") && !reset.contains("SECOND-END"));
+        window.handle_key(key(KeyCode::PageDown));
+        assert!(draw(&mut window).contains("SECOND-END"));
+        assert!(
+            matches!(window.handle_key(key(KeyCode::Enter)), WindowAction::Open(id) if id == "long-second")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn rendered_capture_home_events_preserve_multiline_until_explicit_confirm() {
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+        let _ledger = crate::session::test_support::install_login_shell_path_command(
+            root.path(),
+            "ledger",
+            r#"#!/bin/sh
+case "$*" in
+  'lock show --profile aoe-capture-personal --harness pi')
+    printf '%s\n' '{"schema":"ledger-profile-lock-v4","profile":{"name":"aoe-capture-personal"},"binding":{"harness":"pi"},"resources":[{"key":"skill/capture-idea"}]}' ;;
+  *) exit 99 ;;
+esac
+"#,
+        );
+        let mut view = HomeView::new_for_test(
+            Some("test".into()),
+            crate::tmux::AvailableTools::with_tools(&["pi"]),
+            crate::file_watch::FileWatchService::noop(),
+        )
+        .unwrap();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        let mut render = |view: &mut HomeView| {
+            terminal
+                .draw(|frame| {
+                    view.tailored_window.as_mut().unwrap().render(
+                        frame,
+                        frame.area(),
+                        &Theme::default(),
+                    );
+                })
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let shortcut = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
+        assert!(view.routes_tailored_key(&shortcut));
+        assert!(view.handle_key(shortcut, None).is_none());
+        let picker = render(&mut view);
+        let preset = picker
+            .content()
+            .chunks(picker.area.width as usize)
+            .enumerate()
+            .find(|(_, cells)| {
+                cells
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("+ Capture an idea")
+            })
+            .map(|(row, cells)| {
+                let col = cells.iter().position(|cell| cell.symbol() == "+").unwrap();
+                (col as u16, row as u16)
+            })
+            .unwrap();
+        assert!(view.handle_dialog_click(preset.0, preset.1));
+        let form = render(&mut view);
+        let rendered: String = form.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(rendered.contains("Tailored Sessions"));
+        assert!(rendered.contains("Tab to Capture, Enter · Ctrl+Enter capture"));
+        assert!(!rendered.contains("Verify idea"));
+        let idea_border = form
+            .content()
+            .chunks(form.area.width as usize)
+            .enumerate()
+            .find(|(_, cells)| {
+                cells
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains(" Idea ")
+            })
+            .map(|(row, _)| row as u16)
+            .unwrap();
+        let editor_click = (50, idea_border + 1);
+        assert!(view.tailored_window.as_ref().unwrap().composing);
+        view.handle_paste("leftRIGHT");
+        for code in [
+            KeyCode::Home,
+            KeyCode::Right,
+            KeyCode::Right,
+            KeyCode::Right,
+            KeyCode::Right,
+        ] {
+            assert!(view.handle_key(key(code), None).is_none());
+        }
+        view.handle_paste("🌱日本語\n\nmiddle\n");
+        view.handle_key(key(KeyCode::Enter), None);
+        view.handle_key(
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat),
+            None,
+        );
+        view.handle_key(key(KeyCode::Delete), None);
+        view.handle_key(key(KeyCode::Backspace), None);
+        let expected = "left🌱日本語\n\nmiddle\n\nIGHT";
+        let window = view.tailored_window.as_ref().unwrap();
+        assert_eq!(window.idea.lines().join("\n"), expected);
+        assert!(window.checking.is_none());
+        assert!(!window.immediately);
+        let cursor = window.idea.cursor();
+
+        let account_rect = window.account_rect;
+        assert!(view.handle_dialog_click(account_rect.x, account_rect.y));
+        assert_eq!(
+            view.tailored_window.as_ref().unwrap().account,
+            CaptureAccount::Work
+        );
+        view.handle_paste("must not enter the account control");
+        assert!(view.handle_dialog_click(editor_click.0, editor_click.1));
+        view.handle_paste("work only");
+        assert!(view.handle_dialog_click(account_rect.x, account_rect.y));
+        let window = view.tailored_window.as_ref().unwrap();
+        assert_eq!(window.account, CaptureAccount::Personal);
+        assert_eq!(window.idea.lines().join("\n"), expected);
+        assert_eq!(window.idea.cursor(), cursor);
+        assert!(!window.immediately);
+        assert!(view.handle_dialog_click(editor_click.0, editor_click.1));
+        for _ in 0..3 {
+            view.handle_key(key(KeyCode::Tab), None);
+        }
+        assert_eq!(view.tailored_window.as_ref().unwrap().focus, 3);
+        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+            view.handle_key(
+                KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::CONTROL, kind),
+                None,
+            );
+        }
+        assert!(view.tailored_window.as_ref().unwrap().checking.is_none());
+        assert!(view.handle_dialog_click(editor_click.0, editor_click.1));
+        assert_eq!(view.tailored_window.as_ref().unwrap().focus, 0);
+        view.handle_key(key(KeyCode::Enter), None);
+        let expected = "left🌱日本語\n\nmiddle\n\n\nIGHT";
+        assert_eq!(
+            view.tailored_window
+                .as_ref()
+                .unwrap()
+                .idea
+                .lines()
+                .join("\n"),
+            expected
+        );
+        assert!(view.tailored_window.as_ref().unwrap().checking.is_none());
+
+        for cancel in [
+            key(KeyCode::Esc),
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+        ] {
+            view.handle_key(cancel, None);
+            assert!(view.tailored_window.is_none());
+            let retained = view.retained_tailored_windows.first().unwrap();
+            assert!(retained.checking.is_none());
+            assert!(retained.terminal.is_none());
+            assert_eq!(retained.idea.lines().join("\n"), expected);
+            view.handle_key(shortcut, None);
+            assert!(!view.tailored_window.as_ref().unwrap().composing);
+            view.handle_key(key(KeyCode::Enter), None);
+            let window = view.tailored_window.as_ref().unwrap();
+            assert!(window.composing);
+            assert_eq!(window.idea.lines().join("\n"), expected);
+            assert!(window.checking.is_none());
+        }
+
+        for confirm in 0..3 {
+            render(&mut view);
+            match confirm {
+                0 => {
+                    view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), None);
+                }
+                1 => {
+                    for _ in 0..3 {
+                        view.handle_key(key(KeyCode::Tab), None);
+                    }
+                    view.handle_key(key(KeyCode::Enter), None);
+                }
+                _ => {
+                    let rect = view.tailored_window.as_ref().unwrap().submit_rect;
+                    assert!(view.handle_dialog_click(rect.x, rect.y));
+                }
+            }
+            let window = view.tailored_window.as_mut().unwrap();
+            let request = window
+                .checking
+                .take()
+                .expect("explicit confirmation starts profile check")
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.idea, expected);
+            assert_eq!(request.account, CaptureAccount::Personal);
+            assert!(!request.immediately);
+            let launch = request.launch().unwrap();
+            let prompt = shell_words::split(&launch.extra_args).unwrap();
+            assert_eq!(prompt.len(), 1);
+            assert!(prompt[0].contains(&format!("<idea>\n{expected}\n</idea>")));
+            assert!(prompt[0].contains("Immediately is OFF"));
+            assert!(launch.command.contains("aoe-capture-personal"));
+            assert_eq!(window.idea.lines().join("\n"), expected);
+            assert!(view.handle_dialog_click(editor_click.0, editor_click.1));
+        }
+        assert_eq!(view.instances().len(), 0);
+        if let Some((_, worker)) = view
+            .tailored_window
+            .as_mut()
+            .unwrap()
+            .workshop_history
+            .take()
+        {
+            worker
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn capture_enter_edits_and_editor_redo_does_not_close() {
         let mut window = TailoredWindow::new(CaptureAccount::Personal);
         window.picker_action(HistoryAction::New);
@@ -1282,6 +2286,120 @@ mod tests {
             window.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)),
             WindowAction::Continue
         ));
+    }
+
+    #[test]
+    fn capture_newline_aliases_edit_on_press_and_repeat_but_ignore_release() {
+        for (code, modifiers) in [
+            (KeyCode::Enter, KeyModifiers::NONE),
+            (KeyCode::Enter, KeyModifiers::SHIFT),
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL),
+        ] {
+            for kind in [
+                KeyEventKind::Press,
+                KeyEventKind::Repeat,
+                KeyEventKind::Release,
+            ] {
+                let mut window = TailoredWindow::new(CaptureAccount::Personal);
+                window.picker_action(HistoryAction::New);
+                // NUL fences accidental submission before any Ledger worker can start.
+                window.handle_paste("first\0");
+                assert!(matches!(
+                    window.handle_key(KeyEvent::new_with_kind(code, modifiers, kind)),
+                    WindowAction::Continue
+                ));
+                window.handle_paste("second");
+                let expected = if kind == KeyEventKind::Release {
+                    "first\0second"
+                } else {
+                    "first\0\nsecond"
+                };
+                assert_eq!(
+                    window.idea.lines().join("\n"),
+                    expected,
+                    "{code:?} {modifiers:?} {kind:?}"
+                );
+                assert!(window.checking.is_none());
+                assert!(window.error.is_none());
+                assert_eq!(window.focus, 0);
+                assert_eq!(window.account, CaptureAccount::Personal);
+                assert!(!window.immediately);
+            }
+        }
+    }
+
+    #[test]
+    fn capture_ignores_highlight_key_and_only_submits_on_control_enter_press() {
+        for (code, modifiers, submits) in [
+            (KeyCode::Enter, KeyModifiers::CONTROL, true),
+            (KeyCode::F(4), KeyModifiers::NONE, false),
+        ] {
+            for focus in 0..4 {
+                for kind in [
+                    KeyEventKind::Press,
+                    KeyEventKind::Repeat,
+                    KeyEventKind::Release,
+                ] {
+                    let mut window = TailoredWindow::new(CaptureAccount::Personal);
+                    window.picker_action(HistoryAction::New);
+                    window.handle_paste("invalid\0idea");
+                    window.focus = focus;
+                    window.handle_key(KeyEvent::new_with_kind(code, modifiers, kind));
+                    assert_eq!(window.idea.lines().join("\n"), "invalid\0idea");
+                    assert!(window.checking.is_none());
+                    assert_eq!(window.focus, focus);
+                    assert_eq!(window.account, CaptureAccount::Personal);
+                    assert!(!window.immediately);
+                    assert_eq!(
+                        window.error.as_deref(),
+                        if submits && kind == KeyEventKind::Press {
+                            Some("Enter an idea between 1 and 16384 bytes, without NUL characters")
+                        } else {
+                            None
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn capture_keyboard_controls_and_history_preserve_account_drafts() {
+        let mut window = TailoredWindow::new(CaptureAccount::Personal);
+        window.handle_key(key(KeyCode::Enter));
+        assert!(window.composing);
+        window.handle_paste("personal\0idea");
+        window.handle_key(key(KeyCode::Tab));
+        assert_eq!(window.focus, 1);
+        window.handle_key(key(KeyCode::Enter));
+        assert_eq!(window.account, CaptureAccount::Work);
+        assert_eq!(window.idea.lines().join("\n"), "");
+        window.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        window.handle_paste("work\0idea");
+        window.handle_key(key(KeyCode::Tab));
+        window.handle_key(key(KeyCode::Left));
+        assert_eq!(window.account, CaptureAccount::Personal);
+        assert_eq!(window.idea.lines().join("\n"), "personal\0idea");
+        window.handle_key(key(KeyCode::Tab));
+        assert_eq!(window.focus, 2);
+        window.handle_key(key(KeyCode::Enter));
+        assert!(window.immediately);
+        window.handle_key(key(KeyCode::Tab));
+        assert_eq!(window.focus, 3);
+        window.handle_key(key(KeyCode::Enter));
+        assert!(window.error.is_some());
+        assert!(window.checking.is_none());
+        window.handle_key(key(KeyCode::F(2)));
+        assert!(!window.composing);
+        window.handle_key(key(KeyCode::Enter));
+        assert!(window.composing);
+        assert_eq!(window.focus, 0);
+        assert_eq!(window.account, CaptureAccount::Personal);
+        assert!(window.immediately);
+        assert_eq!(window.idea.lines().join("\n"), "personal\0idea");
+        assert!(window.checking.is_none());
+        assert!(window.error.is_none());
     }
 
     #[test]
@@ -1307,13 +2425,22 @@ mod tests {
         for (code, modifiers) in [
             (KeyCode::Char('x'), KeyModifiers::NONE),
             (KeyCode::Enter, KeyModifiers::NONE),
+            (KeyCode::Enter, KeyModifiers::SHIFT),
+            (KeyCode::Enter, KeyModifiers::ALT),
+            (KeyCode::Char('j'), KeyModifiers::CONTROL),
+            (KeyCode::Enter, KeyModifiers::CONTROL),
+            (KeyCode::F(4), KeyModifiers::NONE),
             (KeyCode::Backspace, KeyModifiers::NONE),
             (KeyCode::Delete, KeyModifiers::NONE),
             (KeyCode::Left, KeyModifiers::NONE),
             (KeyCode::Char('u'), KeyModifiers::CONTROL),
             (KeyCode::Char('r'), KeyModifiers::CONTROL),
         ] {
-            for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
+            for kind in [
+                KeyEventKind::Press,
+                KeyEventKind::Repeat,
+                KeyEventKind::Release,
+            ] {
                 window.handle_key(KeyEvent::new_with_kind(code, modifiers, kind));
                 assert_eq!(window.idea.lines(), expected.lines(), "{code:?} {kind:?}");
                 assert_eq!(window.idea.cursor(), expected.cursor(), "{code:?} {kind:?}");
@@ -1557,6 +2684,93 @@ mod tests {
             window.handle_paste(&fresh);
             assert!(assert_visible(&window, 33, 7, "TAIL") > 1);
             assert_eq!(window.idea.lines(), &[fresh]);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn quick_start_and_reopen_keep_pending_result_with_original_profile_and_session() {
+        use crate::session::{Instance, Storage};
+        let root = tempfile::tempdir().unwrap();
+        let _home = crate::session::test_support::isolate_app_dir_at(root.path());
+        let knowledge = root.path().join("knowledge");
+        std::fs::create_dir(&knowledge).unwrap();
+        for reopen in [false, true] {
+            let mut instance = Instance::new("Work Quick", knowledge.to_str().unwrap());
+            instance.source_profile = "test".into();
+            instance.tool = "pi".into();
+            instance.command = "ledger run pi --profile aoe-quick-work --".into();
+            instance.agent_session_id = reopen.then(|| "original-conversation".into());
+            let id = instance.id.clone();
+            let storage = Storage::new_unwatched("test").unwrap();
+            storage
+                .update(|rows, _| {
+                    *rows = vec![instance.clone()];
+                    Ok(())
+                })
+                .unwrap();
+            let mut view = HomeView::new_for_test(
+                Some("test".into()),
+                crate::tmux::AvailableTools::with_tools(&["pi"]),
+                crate::file_watch::FileWatchService::noop(),
+            )
+            .unwrap();
+            view.open_tailored();
+            let (started, arrivals) = mpsc::channel();
+            view.tailored_window.as_mut().unwrap().quick_starter =
+                Some(Box::new(move |instance| {
+                    let (done, pending) = mpsc::channel();
+                    started.send((instance.id, done)).unwrap();
+                    document::StartWorker::from_receiver_for_test(pending)
+                }));
+            if reopen {
+                view.apply_tailored_action(WindowAction::Open(id.clone()));
+            } else {
+                view.start_quick_terminal(&id, true).unwrap();
+            }
+            let (started_id, finish) = arrivals.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(started_id, id);
+            view.tick_tailored();
+            assert!(view
+                .tailored_window
+                .as_ref()
+                .unwrap()
+                .starting_quick
+                .is_some());
+            view.close_tailored();
+            assert!(view.tailored_window.is_none());
+            view.switch_profile(Some("second".into())).unwrap();
+            view.open_tailored();
+            let active = view.tailored_window.as_mut().unwrap();
+            active.picker_action(HistoryAction::New);
+            active.handle_paste("second profile draft");
+            let cursor = active.idea.cursor();
+            finish
+                .send((id.clone(), Err("injected native guard refusal".into())))
+                .unwrap();
+            view.tick_tailored();
+            let active = view.tailored_window.as_ref().unwrap();
+            assert_eq!(active.profile, "second");
+            assert_eq!(active.idea.lines().join("\n"), "second profile draft");
+            assert_eq!(active.idea.cursor(), cursor);
+            assert!(active.error.is_none() && active.terminal.is_none());
+            let owner = view
+                .retained_tailored_windows
+                .iter()
+                .find(|w| w.profile == "test")
+                .unwrap();
+            assert!(owner.starting_quick.is_none());
+            assert!(owner.error.as_ref().unwrap().contains(&id));
+            let rows = storage.load().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, id);
+            assert_eq!(rows[0].agent_session_id, instance.agent_session_id);
+            assert!(Storage::new_unwatched("second")
+                .unwrap()
+                .load()
+                .unwrap()
+                .is_empty());
+            assert!(arrivals.try_recv().is_err(), "start was duplicated");
         }
     }
 

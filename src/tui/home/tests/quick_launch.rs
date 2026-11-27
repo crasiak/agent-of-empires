@@ -150,9 +150,77 @@ fn quick_launch_refuses_bad_assignments_and_respects_overlay_and_search_routing(
 }
 
 #[test]
+#[serial]
+fn launcher_reserves_slot_one_and_intake_reviews_context_without_crossing_profiles() {
+    use crate::session::tailored::intake::IntakeBrief;
+    let (temp, _guard) = test_home();
+    let directory = temp.path().join("repo");
+    std::fs::create_dir(&directory).unwrap();
+    let mut source = Instance::new("source", directory.to_str().unwrap());
+    source.group_path = "aoe".into();
+    seed_profile("personal", &[source.clone()]);
+    seed_profile("work", &[]);
+    assign("1", "work", Some("claude"), None);
+    for (strict, digit) in [(false, '1'), (true, '1'), (false, 'y'), (true, 'y')] {
+        let shortcut = KeyEvent::new(KeyCode::Char(digit), KeyModifiers::CONTROL);
+        let mut view = test_view(Some("personal"));
+        view.available_tools = AvailableTools::with_tools(&["claude", "pi"]);
+        view.strict_hotkeys = strict;
+        view.selected_session = Some(source.id.clone());
+        let before = view.instances.len();
+        assert!(view.routes_tailored_key(&shortcut));
+        view.handle_key(shortcut, None);
+        assert!(view.tailored_window.is_some());
+        assert!(view.new_dialog.is_none(), "configured slot 1 must not win");
+        let launcher = render_home_to_string(&mut view, 100, 45);
+        assert!(launcher.contains("Workflows"));
+        assert!(launcher.contains("Quick Pi sessions"));
+        view.handle_key(key(KeyCode::Down), None);
+        view.handle_key(key(KeyCode::Enter), None);
+        assert!(render_home_to_string(&mut view, 100, 45).contains("Prepare brief"));
+        view.handle_paste("Fix this task");
+        view.handle_key(
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL),
+            None,
+        );
+        assert!(render_home_to_string(&mut view, 100, 45).contains("Workflows"));
+        view.handle_key(key(KeyCode::Down), None);
+        view.handle_key(key(KeyCode::Enter), None);
+        assert!(render_home_to_string(&mut view, 100, 45).contains("Fix this task"));
+        view.handle_key(key(KeyCode::Enter), None);
+        assert!(view.new_dialog.is_none(), "plain Enter edits text");
+        view.handle_paste("second line");
+        view.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), None);
+        view.handle_key(key(KeyCode::Enter), None);
+        assert!(
+            view.new_dialog.is_none(),
+            "first confirmation only prepares brief"
+        );
+        view.handle_key(key(KeyCode::Enter), None);
+        let dialog = view.new_dialog.as_ref().expect("review form, not creation");
+        assert_eq!(dialog.path_value(), directory.to_str().unwrap());
+        assert_eq!(dialog.group_value(), "aoe");
+        assert_eq!(dialog.selected_tool(), "pi");
+        assert_eq!(view.active_profile_display(), Some("personal"));
+        assert_eq!(view.instances.len(), before);
+        assert!(view.pending_creation.is_none());
+    }
+    let mut view = test_view(Some("work"));
+    view.available_tools = AvailableTools::with_tools(&["pi"]);
+    view.selected_session = Some(source.id.clone());
+    view.configure_intake(IntakeBrief::new("Another task".into()).unwrap());
+    assert_ne!(
+        view.new_dialog.as_ref().unwrap().path_value(),
+        directory.to_str().unwrap(),
+        "other-account selection does not lend its repo"
+    );
+    assert_ne!(view.new_dialog.as_ref().unwrap().group_value(), "aoe");
+}
+
+#[test]
 fn quick_launch_chords_require_control_digits_and_a_press() {
     use crate::tui::home::quick_launch::shortcut_slot;
-    for digit in '1'..='9' {
+    for digit in '2'..='9' {
         assert_eq!(
             shortcut_slot(&KeyEvent::new(KeyCode::Char(digit), KeyModifiers::CONTROL)),
             Some(digit)
@@ -160,6 +228,7 @@ fn quick_launch_chords_require_control_digits_and_a_press() {
     }
     for event in [
         key(KeyCode::Char('5')),
+        KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL),
         KeyEvent::new(KeyCode::Char('0'), KeyModifiers::CONTROL),
         KeyEvent::new(
             KeyCode::Char('5'),
