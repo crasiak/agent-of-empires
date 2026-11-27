@@ -455,7 +455,7 @@ impl Instance {
             row.terminal_handoff
                 .as_mut()
                 .expect("validated handoff")
-                .terminal = Some(target.clone());
+                .set_terminal(Some(target.clone()));
             Ok(())
         })?;
         self.adopt_conversation_state(target);
@@ -499,7 +499,7 @@ impl Instance {
             row.lifecycle_reservation = Some(LifecycleReservation {
                 op: LifecycleOperation::Launch,
                 generation,
-                at: Utc::now(),
+                at: Timestamp::now(),
             });
             row.status = Status::Starting;
             row.idle_entered_at = None;
@@ -1154,7 +1154,7 @@ impl Instance {
 
         self.status = Status::Starting;
         self.last_start_time = Some(std::time::Instant::now());
-        self.started_at = Some(Utc::now());
+        self.started_at = Some(Timestamp::now());
 
         // Apply status bar options in a background thread to avoid blocking
         // the TUI on the multiple tmux subprocess calls they require.

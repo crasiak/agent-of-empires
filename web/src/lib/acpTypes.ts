@@ -311,6 +311,7 @@ export type IntegrationLostReason =
 // One variant per Event::* in src/acp/state.rs, externally tagged.
 export type AcpEvent =
   | { PlanUpdated: { plan: Plan } }
+  | { PlanRemoved: { plan_id: string } }
   | {
       TodoListUpdated: {
         todos: Array<{ id: string; text: string; completed: boolean }>;
@@ -445,6 +446,8 @@ export type AcpEvent =
         prompt_id?: string | null;
         /** Other queued rows folded into this turn (queue drain or send-now); each one's optimistic row is retired too. */
         merged_prompt_ids?: string[];
+        /** Where the prompt entered AoE; absent or "unknown" must be treated as untrusted. */
+        origin?: PromptOrigin;
       };
     }
   | {
@@ -479,7 +482,7 @@ export type AcpEvent =
       };
     }
   | { BackgroundTaskFinished: { task_id: string; ended_at?: string | null } }
-  | { PromptRejected: { reason: string; text: string } }
+  | { PromptRejected: { reason: string; text: string; attachments?: PromptAttachmentRefWire[] } }
   | { AgentSwitched: { from: string; to: string; reason: string } }
   | { ConversationSummary: { text: string; summarized_until_seq: number } };
 
@@ -823,6 +826,8 @@ export interface RejectedPrompt {
   text: string;
   reason: string;
   rejectedAt: string;
+  /** Stored with the sent prompt; Retry reloads and resends them. */
+  attachments?: AcpAttachment[];
 }
 
 export interface QueuedPrompt {
@@ -878,6 +883,8 @@ export interface ActivityRow {
   at: string; // ISO-8601
 }
 
+export type PromptOrigin = "dashboard" | "tui" | "cli" | "mcp" | "plugin" | "aoe" | "unknown";
+
 /** Wire mirror of the Rust `TranscriptRow` (src/acp/transcript.rs). */
 export interface TranscriptRow {
   id: string;
@@ -917,20 +924,25 @@ export function webRendersServerRow(row: TranscriptRow): boolean {
   return row.kind !== "notice";
 }
 
+/** A sent prompt's attachment, served from the daemon's store. */
+export function storedAttachment(a: PromptAttachmentRefWire, sessionId: string): AcpAttachment {
+  return {
+    id: a.id,
+    kind: a.kind,
+    mimeType: a.mime_type,
+    name: a.name,
+    size: a.size,
+    url: `/api/sessions/${encodeURIComponent(sessionId)}/acp/attachments/${encodeURIComponent(a.id)}`,
+  };
+}
+
 export function transcriptRowToActivity(row: TranscriptRow, sessionId: string): ActivityRow {
   const tool: ToolCall | undefined = row.tool
     ? { ...row.tool, raw_name: row.tool.raw_name ?? row.tool.name }
     : undefined;
-  const attachments: AcpAttachment[] | undefined =
+  const attachments =
     row.attachments && row.attachments.length > 0
-      ? row.attachments.map((a) => ({
-          id: a.id,
-          kind: a.kind,
-          mimeType: a.mime_type,
-          name: a.name,
-          size: a.size,
-          url: `/api/sessions/${encodeURIComponent(sessionId)}/acp/attachments/${encodeURIComponent(a.id)}`,
-        }))
+      ? row.attachments.map((a) => storedAttachment(a, sessionId))
       : undefined;
   return {
     id: row.id,
@@ -1440,11 +1452,13 @@ export function applyEvent(state: AcpState, frame: AcpFrame): AcpState {
     return next;
   }
   if ("PromptRejected" in event) {
+    const attachments = event.PromptRejected.attachments?.map((a) => storedAttachment(a, frame.session_id));
     const entry: RejectedPrompt = {
       id: `rejected-${frame.seq}`,
       text: event.PromptRejected.text,
       reason: event.PromptRejected.reason,
       rejectedAt: new Date().toISOString(),
+      ...(attachments?.length ? { attachments } : {}),
     };
     const REJECTED_PROMPTS_CAP = 5;
     next.rejectedPrompts = [...next.rejectedPrompts, entry].slice(-REJECTED_PROMPTS_CAP);

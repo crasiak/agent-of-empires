@@ -58,7 +58,12 @@ pub async fn run(profile: &str, args: SendArgs) -> Result<()> {
 
     let result = if session.view == View::Structured {
         client
-            .prompt(&session.id, &message, args.no_revive)
+            .prompt(
+                &session.id,
+                &message,
+                args.no_revive,
+                crate::daemon::PromptOrigin::Cli,
+            )
             .await
             .map(|dispatch| match dispatch.disposition {
                 PromptDispositionWire::Sent => "Sent",

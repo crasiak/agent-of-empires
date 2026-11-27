@@ -26,7 +26,7 @@ import type {
   ImportableSession,
   SettingsFieldDescriptor,
 } from "./types";
-import type { ConfigOptionDescriptor } from "./acpTypes";
+import type { AcpAttachment, ConfigOptionDescriptor, PromptAttachmentInput } from "./acpTypes";
 import type { UsageSummary } from "./usage";
 import type { LedgerRunView } from "./ledgerRun";
 import { clearDeviceBindingSecret, getOrCreateDeviceBindingSecret } from "./deviceBinding";
@@ -387,7 +387,7 @@ export async function ensureTerminal(
   }
 }
 
-function fileToBase64(file: File): Promise<string> {
+function fileToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(reader.error ?? new Error("read failed"));
@@ -397,8 +397,20 @@ function fileToBase64(file: File): Promise<string> {
       const comma = result.indexOf(",");
       resolve(comma >= 0 ? result.slice(comma + 1) : result);
     };
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
   });
+}
+
+/** Reads a sent prompt's stored attachment back as an upload, or null when it is gone. */
+export async function loadStoredAttachment(a: AcpAttachment): Promise<PromptAttachmentInput | null> {
+  try {
+    const res = await fetch(a.url);
+    if (!res.ok) return null;
+    const dataB64 = await fileToBase64(await res.blob());
+    return { kind: a.kind, mimeType: a.mimeType, ...(a.name ? { name: a.name } : {}), dataB64 };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1108,6 +1120,7 @@ export type PluginUiSlot =
   | "pane"
   | "composer-action"
   | "detail-badge"
+  | "composer-status"
   | "home-pane"
   | "page"
   | "notification";
@@ -1257,6 +1270,44 @@ export async function invokePluginCommand(fqid: string, sessionId: string): Prom
 export function updateSettings(updates: Record<string, unknown>, profile?: string): Promise<SaveOutcome> {
   const params = profile ? `?profile=${encodeURIComponent(profile)}` : "";
   return announceOutcome(sendSave(`/api/settings${params}`, jsonInit("PATCH", updates)));
+}
+
+/** An Agent's default model for new Structured view Sessions in a profile, as the Daemon resolves it. */
+export interface AgentModelDefault {
+  profile: string;
+  /** The `acp_defaults` key it reads from: `claude` for a legacy `claude-code` Session. */
+  agent_key: string;
+  /** Null when the Agent picks its own. */
+  model: string | null;
+  pinned: boolean;
+}
+
+const agentModelUrl = (profile: string, agent: string) =>
+  `/api/profiles/${encodeURIComponent(profile)}/acp-defaults/${encodeURIComponent(agent)}/model`;
+
+/** The default a Session's next Structured view spawn reads, under the profile and Agent key the Daemon resolves for it. */
+export function fetchSessionModelDefault(sessionId: string): Promise<AgentModelDefault | null> {
+  return fetchJson<AgentModelDefault>(`/api/sessions/${encodeURIComponent(sessionId)}/acp-default-model`);
+}
+
+/** Chains the PUTs so an earlier save still in flight can't land after, and overwrite, a later one. */
+let agentModelSaves: Promise<unknown> = Promise.resolve();
+
+/** Sets only `agent`'s default model in `profile`. `pinned`: the profile's resolved settings pin it, so nothing changed. */
+export async function putAgentModelDefault(
+  profile: string,
+  agent: string,
+  model: string,
+): Promise<SaveOutcome | "pinned"> {
+  const request = agentModelSaves.then(() =>
+    send(agentModelUrl(profile, agent), jsonInit("PUT", { model })).catch(() => null),
+  );
+  agentModelSaves = request;
+  const reply = await request;
+  if (reply?.status === 409 && stringField(reply.payload, "error") === "model_pinned") return "pinned";
+  const outcome = reply ? saveOutcome(reply) : "uncertain";
+  if (outcome !== "rejected") notifySettingsChanged();
+  return outcome;
 }
 
 /** Set the machine-wide value of every field in `updates`, for editors that
@@ -1663,8 +1714,8 @@ export interface UpdateStatus {
   update_command?: string;
 }
 
-export function fetchUpdateStatus(): Promise<UpdateStatus | null> {
-  return fetchJson<UpdateStatus>("/api/system/update-status");
+export function fetchUpdateStatus(init?: RequestInit): Promise<UpdateStatus | null> {
+  return fetchJson<UpdateStatus>("/api/system/update-status", init);
 }
 
 /** Persist that the update banner was dismissed for `version`, server-side, so
@@ -1707,10 +1758,11 @@ export type SandboxImageStatus = SandboxImageState & {
  *  offline. `fresh` skips the Daemon's cache. */
 export async function fetchSandboxImageStatus(
   image?: string,
-  opts: { fresh?: boolean } = {},
+  opts: { fresh?: boolean; profile?: string } = {},
 ): Promise<SandboxImageStatus | { error: string } | null> {
   const query = new URLSearchParams();
   if (image) query.set("image", image);
+  if (opts.profile) query.set("profile", opts.profile);
   if (opts.fresh) query.set("fresh", "true");
   const qs = query.toString();
   const reply = await send(`/api/sandbox/image-status${qs ? `?${qs}` : ""}`).catch(() => null);
@@ -1969,7 +2021,8 @@ const stringList = (value: unknown) => (Array.isArray(value) ? value : []);
 /** Enqueue a prompt server-side (POST /queue). `id` is the client-minted stable
  *  id so an optimistic row reconciles against the returned entry; re-posting the
  *  same id updates it in place rather than duplicating. Returns the stored entry
- *  (with its assigned `seq`) or null on non-2xx. */
+ *  (with its assigned `seq`), `{ id, delivered: true }` when the daemon already
+ *  delivered that id (nothing is queued), or null on non-2xx. */
 export async function enqueueServerPrompt(
   sessionId: string,
   prompt: {
@@ -1978,20 +2031,24 @@ export async function enqueueServerPrompt(
     originDevice?: string;
     attachments?: QueueAttachmentUpload[];
   },
-): Promise<ServerQueuedPrompt | null> {
-  return fetchJson<ServerQueuedPrompt>(
+): Promise<ServerQueuedPrompt | { id: string; delivered: true } | null> {
+  return fetchJson<ServerQueuedPrompt | { id: string; delivered: true }>(
     queuePath(sessionId),
-    jsonInit("POST", {
-      id: prompt.id,
-      text: prompt.text,
-      origin_device: prompt.originDevice,
-      attachments: (prompt.attachments ?? []).map((a) => ({
-        kind: a.kind,
-        mime_type: a.mimeType,
-        data: a.dataB64,
-        name: a.name,
-      })),
-    }),
+    jsonInit(
+      "POST",
+      {
+        id: prompt.id,
+        text: prompt.text,
+        origin_device: prompt.originDevice,
+        attachments: (prompt.attachments ?? []).map((a) => ({
+          kind: a.kind,
+          mime_type: a.mimeType,
+          data: a.dataB64,
+          name: a.name,
+        })),
+      },
+      { "X-Aoe-Prompt-Origin": "dashboard" },
+    ),
   );
 }
 
@@ -3190,6 +3247,24 @@ export async function startSession(id: string): Promise<StartSessionResult> {
 export async function setSessionSnooze(id: string, minutes: number | null): Promise<SessionResponse | null> {
   try {
     return await sessionUpdate(id, "snooze", jsonInit("PATCH", { minutes }));
+  } catch {
+    return null;
+  }
+}
+
+/** Ignore or unignore a session managed by another session. The row stays present and live. */
+export async function setSessionIgnored(id: string, ignored: boolean): Promise<SessionResponse | null> {
+  try {
+    return await sessionUpdate(id, "ignored", jsonInit("PATCH", { ignored }));
+  } catch {
+    return null;
+  }
+}
+
+/** Take ownership back from a managing session: clears its manager link and ignore marker. */
+export async function reclaimSessionOwnership(id: string): Promise<SessionResponse | null> {
+  try {
+    return await sessionUpdate(id, "reclaim-ownership", jsonInit("POST", { reclaim: true }));
   } catch {
     return null;
   }

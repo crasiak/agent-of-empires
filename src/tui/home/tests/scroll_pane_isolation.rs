@@ -319,8 +319,9 @@ fn hover_never_reaches_a_stale_preview_before_repaint() {
         assert!(env.view.forward_hover_to_preview(50, 10));
         match change {
             "trash" => {
-                env.view
-                    .mutate_instance(&id, |row| row.trashed_at = Some(chrono::Utc::now()));
+                env.view.mutate_instance(&id, |row| {
+                    row.trashed_at = Some(crate::time::Timestamp::now())
+                });
                 env.view.enforce_trash_read_only();
             }
             "selection" => {
@@ -774,7 +775,7 @@ fn collapsed_sidebar_gives_preview_full_width() {
         terminal
             .draw(|f| {
                 let area = f.area();
-                env.view.render(f, area, &theme, None, None, None);
+                env.view.render(f, area, &theme, None);
             })
             .unwrap();
         env.view.preview_pane_area.width
@@ -820,7 +821,7 @@ fn sidebar_collapse_button_and_strip_toggle() {
         terminal
             .draw(|f| {
                 let area = f.area();
-                env.view.render(f, area, &theme, None, None, None);
+                env.view.render(f, area, &theme, None);
             })
             .unwrap();
     };

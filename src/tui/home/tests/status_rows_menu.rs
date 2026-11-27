@@ -1,6 +1,7 @@
 //! Status updates, row decoration, and the context menu.
 
 use super::*;
+use crate::tui::home::update_bar::UpdateBar;
 
 #[test]
 #[serial]
@@ -61,7 +62,7 @@ fn archived_running_session_renders_stopped_icon_not_spinner() {
     // spinner branch would fire in the absence of the override.
     env.view.mutate_instance(&id, |inst| {
         inst.status = Status::Running;
-        inst.archived_at = Some(chrono::Utc::now());
+        inst.archived_at = Some(crate::time::Timestamp::now());
     });
 
     let inst = env.view.get_instance(&id).expect("session present");
@@ -77,7 +78,8 @@ fn archived_running_session_renders_stopped_icon_not_spinner() {
     env.view.mutate_instance(&id, |inst| {
         inst.status = Status::Running;
         inst.archived_at = None;
-        inst.snoozed_until = Some(chrono::Utc::now() + chrono::Duration::minutes(15));
+        inst.snoozed_until =
+            Some(crate::time::Timestamp::now() + crate::time::Duration::minutes(15));
     });
     let inst = env.view.get_instance(&id).expect("session present");
     assert_eq!(
@@ -162,7 +164,8 @@ fn update_bar_renders_status_toast_without_update_info() {
     terminal
         .draw(|f| {
             let area = f.area();
-            env.view.render(f, area, &theme, None, Some(toast), None);
+            env.view
+                .render(f, area, &theme, Some(UpdateBar::Status(toast)));
         })
         .unwrap();
 
@@ -192,14 +195,15 @@ fn update_bar_renders_status_toast_without_update_info() {
 #[test]
 #[serial]
 fn update_bar_renders_sandbox_image_banner() {
-    // Image banner alone.
-    {
+    // Image banner alone; its pull key is the registry's Update chord.
+    for (strict, pull) in [(false, "[u] pull"), (true, "[Ctrl+U] pull")] {
         use crate::containers::image_update::ImageUpdate;
         use crate::tui::styles::load_theme;
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
         let mut env = create_test_env_empty();
+        env.view.strict_hotkeys = strict;
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = load_theme("empire");
@@ -213,7 +217,7 @@ fn update_bar_renders_sandbox_image_banner() {
             .draw(|f| {
                 let area = f.area();
                 env.view
-                    .render(f, area, &theme, None, None, Some(&image_update));
+                    .render(f, area, &theme, Some(UpdateBar::ImageUpdate(&image_update)));
             })
             .unwrap();
 
@@ -231,7 +235,7 @@ fn update_bar_renders_sandbox_image_banner() {
             "expected the sandbox image banner to render.\nFull buffer:\n{out}"
         );
         assert!(
-            out.contains("[u] pull") && out.contains("[Ctrl+X] dismiss"),
+            out.contains(pull) && out.contains("[Ctrl+X] dismiss"),
             "expected the pull/dismiss hints alongside the image banner.\nFull buffer:\n{out}"
         );
     }
@@ -261,14 +265,9 @@ fn update_bar_renders_sandbox_image_banner() {
         terminal
             .draw(|f| {
                 let area = f.area();
-                env.view.render(
-                    f,
-                    area,
-                    &theme,
-                    Some(&update_info),
-                    None,
-                    Some(&image_update),
-                );
+                let bar =
+                    UpdateBar::pick(None, None, Some(&update_info), Some(&image_update), false);
+                env.view.render(f, area, &theme, bar);
             })
             .unwrap();
 
@@ -386,8 +385,9 @@ fn system_health_survives_refresh_but_closes_on_selection_change() {
 fn trash_system_health_releases_reader_keyboard() {
     let mut env = create_test_env_with_sessions(2);
     let id = env.view.instance_at(0).id.clone();
-    env.view
-        .mutate_instance(&id, |inst| inst.trashed_at = Some(chrono::Utc::now()));
+    env.view.mutate_instance(&id, |inst| {
+        inst.trashed_at = Some(crate::time::Timestamp::now())
+    });
     env.view.trashed_section_collapsed = false;
     env.view.rebuild_flat_items();
     env.view.select_session_by_id(&id);
@@ -429,7 +429,7 @@ fn footer_hides_attention_workflow_hints_outside_attention_sort() {
         terminal
             .draw(|f| {
                 let area = f.area();
-                env.view.render(f, area, &theme, None, None, None);
+                env.view.render(f, area, &theme, None);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -775,7 +775,7 @@ fn right_click_trash_header_shows_bulk_menu() {
         terminal
             .draw(|f| {
                 let area = f.area();
-                env.view.render(f, area, &theme, None, None, None);
+                env.view.render(f, area, &theme, None);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -871,7 +871,7 @@ async fn empty_trash_escalates_a_row_that_keeps_failing() {
                     branch: "gone".into(),
                     main_repo_path: "/nonexistent/aoe-test-repo".into(),
                     managed_by_aoe: true,
-                    created_at: chrono::Utc::now(),
+                    created_at: crate::time::Timestamp::now(),
                     base_branch: None,
                 });
                 row.trash();
@@ -898,9 +898,8 @@ async fn empty_trash_escalates_a_row_that_keeps_failing() {
             let body = DeleteSessionBody {
                 expected_trash: true,
                 expected_trashed_at: Some(
-                    chrono::DateTime::parse_from_rfc3339(row.trashed_at.as_ref().unwrap())
-                        .unwrap()
-                        .with_timezone(&chrono::Utc),
+                    crate::time::Timestamp::parse_rfc3339(row.trashed_at.as_ref().unwrap())
+                        .unwrap(),
                 ),
                 expected_generation: Some(row.lifecycle_generation),
                 expected_trash_lifecycle_id: row.trash_lifecycle_id.clone(),
@@ -1280,7 +1279,7 @@ async fn empty_trash_confirm_purges_every_trashed_row() {
                         expected_trash: true,
                         use_cleanup_defaults: true,
                         expected_trashed_at: Some(
-                            chrono::DateTime::parse_from_rfc3339(
+                            crate::time::Timestamp::parse_rfc3339(
                                 view.session_feed
                                     .applied_session(id)
                                     .unwrap()
@@ -1288,8 +1287,7 @@ async fn empty_trash_confirm_purges_every_trashed_row() {
                                     .as_ref()
                                     .unwrap(),
                             )
-                            .unwrap()
-                            .with_timezone(&chrono::Utc),
+                            .unwrap(),
                         ),
                         expected_generation: Some(
                             view.session_feed
@@ -1426,7 +1424,8 @@ fn trashed_preview_surfaces_delete_failure() {
 
     env.view.mutate_instance(&id, |inst| {
         inst.status = Status::Error;
-        inst.last_error = Some("worktree removal failed: directory locked".to_string());
+        inst.last_error
+            .set("worktree removal failed: directory locked".to_string());
     });
 
     let screen = render_home_to_string(&mut env.view, 120, 40);
@@ -1479,7 +1478,7 @@ fn archived_preview_surfaces_delete_failure() {
     env.view.select_session_by_id(&id);
     env.view.mutate_instance(&id, |inst| {
         inst.status = Status::Error;
-        inst.last_error = Some("container teardown failed".to_string());
+        inst.last_error.set("container teardown failed".to_string());
     });
 
     let screen = render_home_to_string(&mut env.view, 120, 40);
@@ -2149,4 +2148,36 @@ fn due_serve_probe_is_requested_after_a_queued_result_is_applied() {
         env.view.serve_probe_in_flight,
         "the due probe must be requested in the same tick"
     );
+}
+
+/// The live sandbox line has nothing to dismiss, so the bar must not advertise Ctrl+X there.
+#[test]
+#[serial]
+fn update_bar_live_line_shows_no_dismiss_hint() {
+    use crate::tui::styles::load_theme;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut env = create_test_env_empty();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let theme = load_theme("empire");
+    terminal
+        .draw(|f| {
+            let area = f.area();
+            env.view.render(
+                f,
+                area,
+                &theme,
+                Some(UpdateBar::Live("moving the sandbox store")),
+            );
+        })
+        .unwrap();
+
+    let buf = terminal.backend().buffer();
+    let out: String = (0..buf.area.height)
+        .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+        .map(|(x, y)| buf[(x, y)].symbol().to_string())
+        .collect();
+    assert!(out.contains("moving the sandbox store"), "{out}");
+    assert!(!out.contains("dismiss"), "{out}");
 }

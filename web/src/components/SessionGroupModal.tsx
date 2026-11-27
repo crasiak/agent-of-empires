@@ -11,12 +11,14 @@ const groupLabel = (path: string) =>
 interface Props {
   sessionTitle: string;
   currentGroup: string;
+  /** Profile whose groups are offered; the served profile when omitted. */
+  profile?: string;
   /** Resolves false on failure so the modal stays open with an error. */
   onSave: (group: string) => Promise<boolean>;
   onClose: () => void;
 }
 
-export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose }: Props) {
+export function SessionGroupModal({ sessionTitle, currentGroup, profile, onSave, onClose }: Props) {
   const [value, setValue] = useState(currentGroup);
   const [manual, setManual] = useState(false);
   const [groups, setGroups] = useState<string[]>([]);
@@ -72,10 +74,22 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
       id={DIALOG_ID}
       title="Edit group"
       describedBy={PROMPT_ID}
-      bodyClassName="px-5 py-4 space-y-3"
+      bodyClassName="px-5 py-4 space-y-3 max-h-[calc(100vh-13rem)] overflow-y-auto"
       onDismiss={() => !saving && onClose()}
       footer={
-        <>
+        // Keeps input focus on press, so blur can't collapse the inline list and shift the buttons before the click.
+        <div className="contents" onMouseDown={(e) => e.preventDefault()}>
+          {currentGroup && (
+            <button
+              type="button"
+              onClick={() => void save("")}
+              disabled={saving}
+              data-testid="session-group-modal-remove"
+              className="mr-auto text-[13px] text-text-secondary hover:text-text-primary disabled:opacity-50"
+            >
+              Remove from group
+            </button>
+          )}
           <CancelButton onClick={onClose} disabled={saving} />
           <ConfirmButton
             onClick={handleSave}
@@ -85,7 +99,7 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
           >
             {saving ? "Saving..." : "Save"}
           </ConfirmButton>
-        </>
+        </div>
       }
     >
       <p id={PROMPT_ID} className="text-[13px] text-text-secondary">
@@ -139,15 +153,32 @@ export function SessionGroupModal({ sessionTitle, currentGroup, onSave, onClose 
           setError(null);
         }}
         onKeyDown={(e) => {
-          if (e.key === "Enter") {
+          if (e.key === "Enter" && !e.defaultPrevented && !isImeComposing(e)) {
             e.preventDefault();
             if (!saving) void handleSave();
           }
         }}
-        placeholder="Group (blank to ungroup)"
-        data-testid="session-group-modal-input"
-        className="w-full bg-surface-900 border border-surface-700 rounded px-2 py-1.5 text-[13px] font-mono text-text-primary focus:outline-none focus:border-brand-600"
-      />
+        className="bg-surface-900 border border-surface-700 rounded px-2 focus-within:border-brand-600"
+      >
+        <label htmlFor="session-group-modal-field" className="sr-only">
+          Group
+        </label>
+        <GroupCombobox
+          id="session-group-modal-field"
+          testId="session-group-modal-input"
+          autoFocus
+          inline
+          showAllUntilEdited
+          disabled={saving}
+          openOnFocus={!refocusing}
+          value={value}
+          onChange={(v) => {
+            setValue(v);
+            setError(null);
+          }}
+          groups={groups}
+        />
+      </div>
       <p className="text-[12px] text-text-dim">
         Leave blank to ungroup. Use <span className="font-mono">/</span> for hierarchy, for example{" "}
         <span className="font-mono">work/projects</span>. Repeated spaces in choices appear as{" "}

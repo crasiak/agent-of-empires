@@ -290,14 +290,32 @@ pub fn validate_env_format(entry: &str) -> Result<(), String> {
     }
 }
 
-/// Validate a `host:container` port mapping (digits only on both sides).
+/// Validate a `host:container` port mapping (digits only on both sides, each a valid port).
 pub fn validate_port_mapping_format(mapping: &str) -> Result<(), String> {
     let re = regex::Regex::new(r"^\d+:\d+$").unwrap();
-    if re.is_match(mapping) {
+    let in_range = mapping.split(':').all(|port| port.parse::<u16>().is_ok());
+    if re.is_match(mapping) && in_range {
         Ok(())
     } else {
-        Err("Must be port:port (e.g. 3000:3000)".to_string())
+        Err("Must be port:port, ports up to 65535 (e.g. 3000:3000)".to_string())
     }
+}
+
+/// Validate a `sandbox.volume_ignores` entry: a relative path (or glob) under
+/// the workspace. `:` would turn the mount into a host bind spec; an absolute
+/// path or a `..` component would escape the workspace.
+pub fn validate_volume_ignore_format(entry: &str) -> Result<(), String> {
+    if entry.is_empty()
+        || entry.starts_with('/')
+        || entry.contains([':', '\0', '\\'])
+        || entry.split('/').any(|part| part == "..")
+    {
+        return Err(
+            "Must be a relative path inside the project, with no ':' or '..' (e.g. node_modules)"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Validate a Linux capability name (`sandbox.cap_add` / `sandbox.cap_drop`).
@@ -750,8 +768,13 @@ mod tests {
         let mut global = Config::default();
         global.theme.name = "catppuccin-latte".to_string();
         global.session.sidebar_position = SidebarPosition::Right;
+        global.session.plugin_staging_sandbox = true;
         let profile = profile_from(json!({
-            "session": {"sidebar_position": "left", "snooze_duration_minutes": 12},
+            "session": {
+                "sidebar_position": "left",
+                "snooze_duration_minutes": 12,
+                "plugin_staging_sandbox": false
+            },
             "theme": {"name": "tokyo-night", "idle_decay_minutes": 20}
         }));
 
@@ -759,6 +782,7 @@ mod tests {
 
         assert_eq!(merged.theme.name, "catppuccin-latte");
         assert_eq!(merged.session.sidebar_position, SidebarPosition::Right);
+        assert!(merged.session.plugin_staging_sandbox);
         assert_eq!(merged.session.snooze_duration_minutes, 12);
         assert_eq!(merged.theme.idle_decay_minutes, 20);
     }

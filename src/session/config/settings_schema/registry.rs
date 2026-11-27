@@ -353,7 +353,14 @@ mod tests {
             "web.notify_on_wake_fire",
         ];
         assert_eq!(paths_where(|d| d.restart), restart);
-        assert!(paths_where(|d| d.web_only).is_empty());
+        assert_eq!(
+            paths_where(|d| d.web_only),
+            [
+                "web.auto_open_diff_pane",
+                "web.auto_open_plugin_panes",
+                "web.auto_open_terminal_pane",
+            ]
+        );
         assert!(paths_where(|d| d.web_only && d.tui_only).is_empty());
         for d in schema_ref() {
             assert!(

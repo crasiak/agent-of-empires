@@ -185,9 +185,9 @@ describe("BackgroundAgentsPanel shell dialog", () => {
     const buttons = stops;
     const last = buttons[buttons.length - 1]!;
     last.focus();
-    fireEvent.keyDown(window, { key: "Tab" });
+    fireEvent.keyDown(document.activeElement!, { key: "Tab" });
     expect(document.activeElement).toBe(buttons[0]);
-    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
     expect(document.activeElement).toBe(last);
   });
 
@@ -673,8 +673,8 @@ describe("BackgroundAgentsPanel", () => {
         agentId: "a1",
         toolCallId: "t1",
         status: "completed",
-        startedAt: "2020-01-02T00:00:00.000Z",
-        endedAt: "2020-01-02T00:00:05.000Z",
+        startedAt: "2026-01-01T00:00:10Z",
+        endedAt: new Date().toISOString(),
         prompt: "a very long prompt that the narrow panel would clamp",
         result: "the complete final result text",
         tools: [{ name: "Bash", title: "ls", ok: true }],
@@ -684,8 +684,8 @@ describe("BackgroundAgentsPanel", () => {
         toolCallId: "t2",
         description: "Second one",
         status: "completed",
-        startedAt: "2020-01-01T00:00:00.000Z",
-        endedAt: "2020-01-01T00:00:05.000Z",
+        startedAt: "2026-01-01T00:00:00Z",
+        endedAt: "2020-01-01",
       }),
     ]);
     const { getByRole, container } = render(<BackgroundAgentsPanel sessionId="s-1" />);

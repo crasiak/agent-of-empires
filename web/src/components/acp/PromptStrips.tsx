@@ -8,6 +8,7 @@ import { isClearAlias } from "../../lib/agentProfiles";
 import { isQueuedPromptLong, queuedStripLayout } from "./queuedPromptsLayout";
 import type { QueuedAction, QueuedReason } from "./queuedReason";
 import { Tooltip } from "../Tooltip";
+import { isImeComposing } from "../../lib/ime";
 
 const AMBER_STRIP = "border-amber-900/40 bg-amber-950/20";
 const AMBER_ROW = "flex items-start gap-2 rounded-lg border border-amber-700/30 bg-amber-950/15 px-2.5 py-1.5";
@@ -23,7 +24,7 @@ function Strip({ tone, testId, children }: { tone: string; testId?: string; chil
   );
 }
 
-/** Prompts the daemon refused while another turn was in flight. */
+/** Prompts that did not run: the daemon refused them mid-turn, or the agent answered with an error. */
 export function RejectedPromptsStrip({
   rejected,
   onRetry,
@@ -31,13 +32,27 @@ export function RejectedPromptsStrip({
   disabled,
 }: {
   rejected: RejectedPrompt[];
-  onRetry: (text: string) => void;
+  onRetry: (prompt: RejectedPrompt) => Promise<void> | void;
   onDismiss: (id: string) => void;
   /** Retry is gated while the worker restarts: sending would clear the restart
    *  state before the respawn has actually reconnected. */
   disabled: boolean;
 }) {
+  // Retry reloads attachments first, so a second click would send it twice.
+  const [retrying, setRetrying] = useState<ReadonlySet<string>>(() => new Set());
   if (rejected.length === 0) return null;
+  const retry = async (prompt: RejectedPrompt) => {
+    setRetrying((ids) => new Set(ids).add(prompt.id));
+    try {
+      await onRetry(prompt);
+    } finally {
+      setRetrying((ids) => {
+        const next = new Set(ids);
+        next.delete(prompt.id);
+        return next;
+      });
+    }
+  };
   return (
     <Strip tone={AMBER_STRIP}>
       <div className="pb-1.5 text-[11px] uppercase tracking-wider text-amber-300">
@@ -57,12 +72,21 @@ export function RejectedPromptsStrip({
               <p className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-xs text-amber-100">
                 {r.text}
               </p>
-              <p className="mt-0.5 text-[10px] text-amber-400/80">Agent was busy; prompt was not sent.</p>
+              {r.attachments?.length ? (
+                <p className="mt-0.5 truncate text-[10px] text-amber-300/90">
+                  {r.attachments.map((a) => a.name ?? a.kind).join(", ")}
+                </p>
+              ) : null}
+              <p className="mt-0.5 text-[10px] text-amber-400/80">
+                {r.reason === "prompt_failed"
+                  ? "The agent rejected the prompt."
+                  : "Agent was busy; prompt was not sent."}
+              </p>
             </div>
             <button
               type="button"
-              onClick={() => onRetry(r.text)}
-              disabled={disabled}
+              onClick={() => void retry(r)}
+              disabled={disabled || retrying.has(r.id)}
               className="inline-flex shrink-0 items-center gap-1 rounded-md border border-amber-700/60 bg-amber-900/30 px-2 py-1 text-[10px] font-mono uppercase tracking-wide text-amber-100 hover:bg-amber-900/60 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-amber-900/30"
               aria-label="Retry rejected prompt"
             >
@@ -585,7 +609,7 @@ function QueuedPromptEditor({
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => onSave(draft)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
+          if (e.key === "Enter" && !isImeComposing(e) && !e.shiftKey) {
             e.preventDefault();
             onSave(draft);
           } else if (e.key === "Escape") {

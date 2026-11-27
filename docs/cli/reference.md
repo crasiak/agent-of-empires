@@ -198,7 +198,7 @@ Run without arguments to launch the TUI dashboard.
 * `plugin` — Manage plugins (list, info, enable, disable, install, update, uninstall)
 * `profile` — Manage profiles (separate workspaces)
 * `project` — Manage the project registry used by multi-repo session pickers
-* `sandbox` — Reclaim per-session sandbox agent stores and log agent sandboxes in
+* `sandbox` — Clean up sandbox agent stores and log in sandboxed agents
 * `worktree` — Manage git worktrees for parallel development
 * `tmux` — tmux integration utilities
 * `sounds` — Manage sound effects for agent state transitions
@@ -270,6 +270,8 @@ Add a new session
 * `--extra-args <EXTRA_ARGS>` — Extra arguments to append after the agent binary
 * `--cmd-override <CMD_OVERRIDE>` — Override the agent binary command
 * `--structured-view` — Render this session in the structured view (ACP-based native rendering) instead of the default terminal view. `aoe add` defaults to the terminal (raw tmux/PTY) so the CLI matches the TUI; pass this (or `--agent`) to opt into the structured rendering. Ignored for tools with no ACP adapter
+* `--prompt <PROMPT>` — First turn sent to the agent once it is ready. Needs --structured-view or --agent; delivered when `aoe serve` starts the worker. If the session falls back to the terminal view, the prompt is typed only into an agent with a ready marker; otherwise nothing is typed and the session row carries `initial_prompt_error`
+* `--prompt-file <PATH>` — Read the first turn from a file. Same rules as `--prompt`
 * `--agent <AGENT>` — Pick a specific ACP agent for the structured view (e.g., claude-code, codex)
 * `--model <MODEL>` — Override the model used by the ACP agent (e.g., claude-opus-4-7, gpt-5, gemini-2.5-pro). Forwarded to the agent at session start
 * `--effort <EFFORT>` — Reasoning effort for the ACP agent (e.g., low, medium, high). Checked against the agent's known thought-level choices when cached. Structured view only
@@ -1615,7 +1617,7 @@ Remove a project from the registry
 
 ## `aoe sandbox`
 
-Reclaim per-session sandbox agent stores and log agent sandboxes in
+Clean up sandbox agent stores and log in sandboxed agents
 
 **Usage:** `aoe sandbox <COMMAND>`
 
@@ -1803,7 +1805,7 @@ Export a built-in theme as a TOML file for customization
 
 ###### **Options:**
 
-* `-o`, `--output <OUTPUT>` — Output file path (defaults to `<name>.toml` in the themes directory)
+* `-o`, `--output <OUTPUT>` — Output file path (defaults to `custom-<name>.toml` for a built-in theme, `<name>.toml` otherwise, in the themes directory)
 
 
 
@@ -2188,11 +2190,11 @@ Start the aoe daemon: REST/WebSocket API, plus the web dashboard in builds that 
 * `--host <HOST>` — Host/IP to bind to (use 0.0.0.0 for LAN/VPN access)
 
   Default value: `127.0.0.1`
-* `--auth <AUTH>` — Authentication mode: `token` (default, random URL token), `passphrase` (no token URL, passphrase login wall only), or `none` (no auth at all, loopback-only unless --behind-proxy). Mutually exclusive with --no-auth (which aliases --auth=none)
+* `--auth <AUTH>` — Authentication mode: `token` (default, random URL token), `passphrase` (no token URL, passphrase login wall only), or `none` (no auth at all, requires --behind-proxy). Mutually exclusive with --no-auth (which aliases --auth=none)
 
   Possible values: `token`, `passphrase`, `none`
 
-* `--no-auth` — Disable authentication (only allowed with localhost binding). Alias for --auth=none
+* `--no-auth` — Disable authentication (requires --behind-proxy). Alias for --auth=none
 * `--behind-proxy` — Mark this server as sitting behind a reverse proxy that terminates TLS upstream. Sets cookies as `; Secure` and trusts the `X-Forwarded-For` header from loopback peers. Does NOT auto-spawn a tunnel (unlike --remote). Required when --auth=passphrase or --auth=none is combined with a non-loopback bind
 * `--dangerously-allow-plaintext-remote` — Accept plain HTTP from non-loopback peers. By default the server answers those with 426 before authentication: bearer tokens and passphrases would cross the network in the clear. A TLS proxy or tunnel in front of a loopback listener (`--behind-proxy`, `--remote`) needs no opt-out. This applies to this bind only, is never inferred from the address, and is logged at every start
 * `--allowed-host <HOST>` — Extra `Host` header value to accept (repeatable). The DNS-rebinding gate trusts loopback, any routable IP-literal `Host` (LAN/tailnet IPs can't be rebound), and a non-wildcard `--host` by default. A browser `Origin` is accepted without `--allowed-origin` only when it is allowlisted or has the exact same authority as `Host`; add a HOSTNAME or mDNS name here when serving behind a reverse proxy, a custom tunnel, or by name when binding `0.0.0.0` (access by IP needs no flag). Auto-injected tunnel hosts (`--remote`) need no flag
@@ -2302,7 +2304,7 @@ Manage the ACP structured-view workers (doctor, ps, logs, prompt, approve, ...)
 * `recover` — Retire unprovable worker ownership after external shutdown confirmation
 * `kill` — SIGKILL the runner, then settle its native workers
 * `logs` — Tail the runner's log file for an agent session
-* `restart` — Restart a wedged worker after its runner and native workers have stopped
+* `restart` — Restart a worker, or start a stopped one through `aoe serve`
 * `history` — Print the persisted transcript for an agent session
 * `status` — Print live status for an agent session: highest/lowest seq, and whether the on-disk retention window has truncated history
 * `prompt` — Send a prompt to an agent session's agent
@@ -2423,7 +2425,7 @@ Tail the runner's log file for an agent session
 
 ## `aoe acp restart`
 
-Restart a wedged worker after its runner and native workers have stopped
+Restart a worker, or start a stopped one through `aoe serve`
 
 **Usage:** `aoe acp restart <SESSION>`
 
@@ -2435,7 +2437,9 @@ Restart a wedged worker after its runner and native workers have stopped
 
 ## `aoe acp history`
 
-Print the persisted transcript for an agent session
+Print the persisted transcript for an agent session.
+
+By default prints a readable transcript: streamed agent chunks joined into whole messages, user prompts, and one line per tool call.
 
 **Usage:** `aoe acp history [OPTIONS] <SESSION>`
 
@@ -2449,6 +2453,16 @@ Print the persisted transcript for an agent session
 
   Default value: `0`
 * `--json` — Emit raw frames as JSON (one frame per line)
+* `--last <N>` — Only the last N transcript entries (after `--role` filtering)
+* `--role <ROLE>` — Only entries from these roles (comma-separated)
+
+  Possible values:
+  - `user`
+  - `agent`
+  - `tool`
+  - `notice`:
+    Errors and lifecycle notices
+
 
 
 

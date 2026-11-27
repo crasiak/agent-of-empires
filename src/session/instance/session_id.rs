@@ -444,7 +444,7 @@ impl Instance {
                     .try_acquire_lifecycle_reservation(
                         LifecycleOperation::Capture,
                         Self::LIFECYCLE_RESERVATION_TTL,
-                        Utc::now(),
+                        Timestamp::now(),
                     )
                     .map_err(|error| anyhow::anyhow!("capture blocked: {error}"))
             })?;
@@ -772,6 +772,19 @@ impl Instance {
         }
     }
 
+    /// Whether every Terminal launch refuses this row (`apply_session_flags_in`): its command or
+    /// arguments pick a conversation with the agent's own session flag while AoE holds one.
+    pub(crate) fn command_selector_refuses_launch(&self) -> bool {
+        self.conversation_state().resumes() && self.command_session_selector().is_some()
+    }
+
+    /// Why such a launch is refused and both ways out, for a Session named by `session_id`.
+    pub(crate) fn command_selector_remedy(session_id: &str) -> String {
+        format!(
+            "its command picks a conversation with its own session flag, and AoE holds one for it too. Restart the Session with the session flag removed from its command or arguments, or run `aoe session set-session-id {session_id} \"\"` and restart it to run its command as written."
+        )
+    }
+
     fn existing_session_selector(
         &self,
         words: &[String],
@@ -878,15 +891,15 @@ impl Instance {
             .then(|| self.existing_session_selector(&parsed_command.words, agent))
             .flatten()
         {
-            let aoe_has_state = self.agent_session_id.is_some()
-                || matches!(
-                    self.resume_intent,
-                    ResumeIntent::Use(_) | ResumeIntent::Fork { .. }
-                );
-            if aoe_has_state {
+            if self.conversation_state().resumes() {
                 anyhow::bail!(
                     "{context} command already contains native session selector {selector}; remove it or clear the AoE-managed resume state before launching"
                 );
+            }
+            // The early return skips acquisition, which applies a clear.
+            if matches!(self.resume_intent, ResumeIntent::Cleared) {
+                self.set_agent_conversation(None, None, None);
+                self.resume_probe_failed_sid = None;
             }
             tracing::info!(target: "session.store", %context, %selector,
                 "command supplies its own native session selector; skipping AoE session injection");
@@ -1812,7 +1825,7 @@ work-opencode = "opencode"
         let mut creating = base.clone();
         creating.status = Status::Creating;
         let mut archived = base.clone();
-        archived.archived_at = Some(Utc::now());
+        archived.archived_at = Some(Timestamp::now());
 
         for (reason, instance) in [
             ("stored identity", with_id),
@@ -2346,6 +2359,29 @@ work-opencode = "opencode"
                 );
                 assert!(error.contains("clear the AoE-managed resume state"));
             }
+            // A cleared id isn't AoE's conversation: the command runs as written and the clear
+            // still applies, since the selector skips acquisition.
+            let mut cleared = tool_instance("claude", "/tmp/x");
+            cleared.agent_session_id = Some(sid.to_string());
+            cleared.resume_intent = ResumeIntent::Cleared;
+            let mut actual = command.to_string();
+            assert!(!cleared
+                .apply_session_flags(
+                    &mut actual,
+                    None,
+                    None,
+                    &super::execution::AgentLaunchContext::host(
+                        cleared.default_selector_agent(),
+                        cleared
+                            .default_selector_agent()
+                            .and_then(|agent| cleared.host_agent_command(agent, None))
+                            .as_ref()
+                    ),
+                    &mut cleared.conversation_state()
+                )
+                .unwrap());
+            assert_eq!(actual, command);
+            assert!(cleared.agent_session_id.is_none(), "{command}");
         }
     }
 
