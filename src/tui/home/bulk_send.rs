@@ -78,7 +78,12 @@ async fn deliver(request: BulkSendRequest) -> BulkSendResult {
         // `no_revive`: a dead agent fails here instead of being started.
         let outcome = if target.structured {
             client
-                .prompt(&target.id, &request.message, true)
+                .prompt(
+                    &target.id,
+                    &request.message,
+                    true,
+                    crate::daemon::PromptOrigin::Tui,
+                )
                 .await
                 .map(|_| ())
         } else {

@@ -1563,6 +1563,7 @@ mod tests {
                 profile: profile.into(),
                 created_by_plugin: None,
                 plugin_create_idempotency: None,
+                document: None,
                 pending_initial_turn: None,
                 parent_session_id: None,
                 acp_mode_id: None,

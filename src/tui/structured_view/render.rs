@@ -4133,13 +4133,19 @@ mod tests {
         );
 
         // Expanded, the same thoughts render whole: every line, no elision.
-        let expanded: Vec<String> =
-            transcript_lines(&t, &Theme::default(), None, true, ToolOutputMode::Compact)
-                .lines
-                .iter()
-                .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
-                .filter(|line: &String| !line.trim().is_empty())
-                .collect();
+        let expanded: Vec<String> = transcript_lines(
+            &t,
+            &Theme::default(),
+            None,
+            true,
+            ToolOutputMode::Compact,
+            None,
+        )
+        .lines
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .filter(|line: &String| !line.trim().is_empty())
+        .collect();
         let body = expanded.join("\n");
         assert!(body.contains("Weighing options"), "{body:?}");
         assert!(body.contains("second line"), "{body:?}");

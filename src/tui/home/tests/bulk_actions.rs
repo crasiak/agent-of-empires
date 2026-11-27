@@ -1354,7 +1354,7 @@ fn the_preview_header_says_a_session_is_in_a_breakout_window() {
         terminal
             .draw(|f| {
                 let area = f.area();
-                view.render(f, area, &theme, None, None, None);
+                view.render(f, area, &theme, None);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();

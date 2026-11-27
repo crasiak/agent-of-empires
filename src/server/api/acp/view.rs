@@ -5730,6 +5730,7 @@ mod tests {
             let response = crate::server::api::restart_session(
                 State(state.clone()),
                 Path(row.id.clone()),
+                None,
                 Ok(Some(axum::Json(crate::daemon::RestartSessionBody {
                     command_override,
                     ..Default::default()

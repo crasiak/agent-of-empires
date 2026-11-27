@@ -288,7 +288,6 @@ impl HomeView {
             }
             Ok(())
         })?;
-        crate::tui::app::record_session_create();
         crate::usage::record_lifecycle(&instance, crate::usage::UsageKind::InstanceCreated);
         crate::tips::record_session_creations(1);
         self.instances.insert(session_id.clone(), instance);

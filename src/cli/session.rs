@@ -1684,7 +1684,7 @@ async fn restart_session(profile: &str, args: SessionIdArgs) -> Result<()> {
         if tool != "pi" {
             crate::tmux::Session::new(&session_id, &title)?.wait_until_ready(
                 std::time::Duration::from_secs(5),
-                crate::agents::ready_marker(&tool),
+                crate::agents::ready_markers(&tool),
             );
         }
         match send_restart_wake(&working, &wake_msg) {

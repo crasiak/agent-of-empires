@@ -1167,6 +1167,7 @@ mod send_output_tests {
                 "literal;".into(),
                 false,
                 true,
+                false,
                 &mut None,
             )
             .await;
